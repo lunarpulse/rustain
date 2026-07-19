@@ -42,4 +42,17 @@ pub enum A2aError {
     BodyTooLarge { max_bytes: usize },
     #[error("AgentCard response is not UTF-8")]
     InvalidUtf8,
+    #[error("A2A card exposes no reachable JSON-RPC endpoint: {reason}")]
+    NoJsonRpcEndpoint { reason: String },
+    #[error(
+        "unrecognized A2A task-state spelling {raw:?} — the JSON-RPC binding is \
+         lowercase-hyphen; refuse never mis-parse"
+    )]
+    UnknownTaskState { raw: String },
+    #[error("A2A JSON-RPC error {code}: {message}")]
+    JsonRpc { code: i64, message: String },
+    #[error("malformed A2A JSON-RPC response: {reason}")]
+    MalformedResponse { reason: String },
+    #[error("A2A JSON-RPC response id {actual:?} does not correlate with request id {expected}")]
+    CorrelationMismatch { expected: u64, actual: String },
 }

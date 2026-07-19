@@ -80,7 +80,7 @@ impl CapabilityProvider for CachedA2a {
 }
 
 #[tokio::test]
-async fn a2a_provider_registers_inventory_without_llm_tool_exposure() {
+async fn a2a_inventory_enters_the_llm_surface_under_namespaced_wire_names() {
     let composite = CompositeToolsetAdapter::new(
         Arc::new(EmptyBuiltin),
         Vec::new(),
@@ -100,9 +100,19 @@ async fn a2a_provider_registers_inventory_without_llm_tool_exposure() {
     assert_eq!(snapshot.len(), 1);
     assert_eq!(snapshot[0].id.to_string(), "a2a::peer::scan");
     assert_eq!(snapshot[0].trust, TrustTier::Unverified);
+    let tools = composite.available_tools();
+    assert_eq!(
+        tools.len(),
+        1,
+        "17.4b: A2A skills now enter the LLM-facing surface (delegation is an action)"
+    );
+    assert_eq!(
+        tools[0].name, "a2a__peer__scan",
+        "R-D: the namespaced wire name reaches the LLM, built from the CapabilityId"
+    );
     assert!(
-        composite.available_tools().is_empty(),
-        "17.4a inventory must not enter the LLM-facing @ dropdown"
+        !tools.iter().any(|tool| tool.name == "Scan"),
+        "R-D security boundary: the raw peer-chosen skill name must never reach the LLM"
     );
 }
 
@@ -157,7 +167,10 @@ async fn real_fetch_event_handler_and_composition_register_tiered_inventory() {
     assert_eq!(snapshot[0].id.to_string(), "a2a::wire-peer::scan");
     assert_eq!(snapshot[0].trust, TrustTier::Unverified);
     assert!(state.needs_redraw);
-    assert!(composite.available_tools().is_empty());
+    let tools = composite.available_tools();
+    assert_eq!(tools.len(), 1, "17.4b: peer skill is LLM-exposed");
+    assert_eq!(tools[0].name, "a2a__wire-peer__scan");
+    assert!(!tools.iter().any(|tool| tool.name == "Scan"));
 }
 
 #[tokio::test]

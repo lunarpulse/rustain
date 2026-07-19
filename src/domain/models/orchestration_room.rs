@@ -207,6 +207,16 @@ pub struct ApprovalView {
     pub outcome: Option<ApprovalOutcome>,
 }
 
+/// A durable record of a refused remote envelope (Story 17.4b, Ruling 6). Kept
+/// so a rejection is inspectable in the room, not just durable-but-invisible.
+/// `RemoteEnvelopeRejected` carries no node, so this is room-scoped rather than
+/// projected onto a `NodeView`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteRejectionView {
+    pub peer: PeerId,
+    pub reason: RejectReason,
+}
+
 /// Immutable read model reconstructed from the canonical event stream.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OrchestrationRoom {
@@ -215,6 +225,7 @@ pub struct OrchestrationRoom {
     waves: Vec<WaveView>,
     artifacts: BTreeMap<ArtifactId, ArtifactRef>,
     approvals: Vec<ApprovalView>,
+    remote_rejections: Vec<RemoteRejectionView>,
 }
 
 impl OrchestrationRoom {
@@ -269,6 +280,11 @@ impl OrchestrationRoom {
 
     pub fn approvals(&self) -> &[ApprovalView] {
         &self.approvals
+    }
+
+    /// Refused remote envelopes, in arrival order (Story 17.4b).
+    pub fn remote_rejections(&self) -> &[RemoteRejectionView] {
+        &self.remote_rejections
     }
 
     fn apply(&mut self, event: RoomEvent) {
@@ -357,7 +373,10 @@ impl OrchestrationRoom {
                     view.last_remote_content = Some(content_hash);
                 }
             }
-            RoomEvent::RemoteEnvelopeRejected { .. } => {}
+            RoomEvent::RemoteEnvelopeRejected { peer, reason } => {
+                self.remote_rejections
+                    .push(RemoteRejectionView { peer, reason });
+            }
             RoomEvent::HostBoundUnavailable { node, host } => {
                 if let Some(view) = self.nodes.get_mut(&node) {
                     view.host = host;

@@ -531,7 +531,10 @@ fn test_import_site_count_pinned() {
     /// holds only `Arc<dyn SupervisedNodes>`). The REAL boundary — domain/
     /// executor import NO concrete `NodeTree` — is proven by
     /// `test_domain_no_adapter_or_infra_imports` + `test_no_cross_adapter_imports`.
-    const EXPECTED: usize = 17;
+    /// Story 17.4b adds the A2A delegation driver (`adapters/a2a/driver.rs`),
+    /// which materializes `RemotePeer` nodes through `NodeTree::register_peer` and
+    /// projects the remote task lifecycle via `try_set_state` — one new consumer.
+    const EXPECTED: usize = 18;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

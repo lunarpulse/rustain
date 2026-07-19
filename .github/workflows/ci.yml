@@ -47,6 +47,10 @@ jobs:
         continue-on-error: true
         run: cargo clippy --all-targets --features "telegram cron" -- -D warnings
 
+      - name: Clippy (advisory — a2a)
+        continue-on-error: true
+        run: cargo clippy --all-targets --features a2a -- -D warnings
+
       - name: Format
         run: cargo fmt --check
 
@@ -69,6 +73,50 @@ jobs:
 
       - name: Test with skills-validation feature (lib only)
         run: cargo test --lib --features skills-validation
+
+  a2a:
+    name: A2A Feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Story 17.4b standing ruling. Before this lane, all nine tests/a2a_*.rs files
+      # compiled but NEVER executed: the Check job runs `cargo test --lib` only, so the
+      # feature-gated files were cfg'd away and the ungated ones simply were not in the
+      # lib target. Nine test files that were a false green.
+      #
+      # Targets are named explicitly rather than via a blanket `cargo test --features
+      # a2a` so this lane stays fast and cannot be destabilised by unrelated integration
+      # suites. The list is kept honest by the lib guard
+      # `every_a2a_integration_test_is_wired_into_the_ci_a2a_lane`
+      # (src/domain/ports/capability_provider.rs) — adding a tests/*a2a*.rs file without
+      # adding it here fails the DEFAULT lane.
+      - name: Test with a2a feature (lib + every A2A integration target)
+        run: |
+          cargo test --lib --features a2a
+          cargo test --features a2a \
+            --test a2a_card \
+            --test a2a_client \
+            --test a2a_composition \
+            --test a2a_config \
+            --test a2a_fixtures \
+            --test a2a_lifecycle \
+            --test a2a_jws \
+            --test a2a_provider \
+            --test a2a_trust_registry \
+            --test conformance_a2a_architecture
+
+      # The other half of the contract: the ungated guards assert that A2A is OFF by
+      # default and that only config parsing compiles without the feature. Those claims
+      # are only meaningful in a build that does NOT enable `a2a`.
+      - name: Test A2A off-by-default guards (no feature)
+        run: |
+          cargo test \
+            --test a2a_config \
+            --test a2a_trust_registry \
+            --test conformance_a2a_architecture
 
   vector-search:
     name: Vector Search Feature

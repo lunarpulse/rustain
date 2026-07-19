@@ -246,6 +246,19 @@ pub enum CascadeKillError {
     Durability(String),
 }
 
+/// Story 17.4b (R-E): the typed failure surface of [`NodeTree::try_set_state`].
+/// `set_state` swallows this so pre-17.4b callers are unchanged; the A2A path
+/// must use `try_set_state` and surface every illegal edge loudly.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SetStateError {
+    #[error("node not found in tree: {0:?}")]
+    NotFound(AgentId),
+    #[error("illegal node state transition: {from:?} -> {to:?}")]
+    InvalidTransition { from: NodeState, to: NodeState },
+    #[error("node state checkpoint durability failed: {0}")]
+    Durability(String),
+}
+
 /// Story 17.2c: the narrow lifecycle seam the `Supervisor` reaches through
 /// (see `domain/ports/supervised_nodes.rs` + ADR-17-2c-01). A thin forward
 /// onto the existing `cascade_kill` — NO second cascade path.
@@ -1032,6 +1045,14 @@ impl NodeTree {
     }
 
     /// Emit a CapabilityEvent::Updated for a subagent status change (AC-10-2-4).
+    ///
+    /// Story 17.4b (R-F): the `"subagent"` protocol below is emitted for EVERY
+    /// node, including A2A `Peer` nodes. This is deliberate — the TUI panel
+    /// refresh in `event_loop.rs` is gated on `protocol == "subagent"`, and A2A
+    /// peer nodes ride this same capability-event channel so every outbound
+    /// delegation is surfaced live in the agents panel. Do NOT split this into a
+    /// per-protocol arm without also teaching the panel-refresh gate about `a2a`,
+    /// or peer delegations would become invisible (the FR92 failure).
     pub async fn emit_status_updated(&self, agent_id: &AgentId) {
         if let Some(tx) = &self.event_tx {
             let guard = self.inner.read().await;
@@ -1396,7 +1417,11 @@ impl NodeTree {
     /// diverging on a transition the FSM rejected (e.g. an illegal
     /// `Suspended → Waiting` re-emission). Transitions go through
     /// `transition_or_err` → `can_transition_to` only (no ad-hoc predicate).
-    pub async fn set_state(&self, agent_id: &AgentId, target: NodeState) {
+    pub async fn try_set_state(
+        &self,
+        agent_id: &AgentId,
+        target: NodeState,
+    ) -> Result<(), SetStateError> {
         let mut guard = self.inner.write().await;
         let idempotent_sender = guard.status_senders.get(agent_id).cloned();
         let current;
@@ -1405,14 +1430,14 @@ impl NodeTree {
         let durable;
         {
             let Some(node) = guard.nodes.get_mut(agent_id) else {
-                return;
+                return Err(SetStateError::NotFound(agent_id.clone()));
             };
             current = node.state;
             if current == target {
                 if let Some(sender) = idempotent_sender {
                     let _ = sender.send(target);
                 }
-                return;
+                return Ok(());
             }
             if let Err(error) = node.state.transition_or_err(target) {
                 tracing::warn!(
@@ -1422,7 +1447,10 @@ impl NodeTree {
                     %error,
                     "Ignoring invalid node state transition"
                 );
-                return;
+                return Err(SetStateError::InvalidTransition {
+                    from: current,
+                    to: target,
+                });
             }
             prev_waiting_since = node.waiting_since;
             // Persist the wall-clock instant this node entered `Waiting` so
@@ -1477,7 +1505,7 @@ impl NodeTree {
                 %error,
                 "Rejecting node state transition because checkpoint durability failed"
             );
-            return;
+            return Err(SetStateError::Durability(error.to_string()));
         }
 
         if durable && self.journal.is_some() && !terminal_violations.is_empty() {
@@ -1492,6 +1520,13 @@ impl NodeTree {
         if durable && self.journal.is_some() {
             self.emit_room_event(room_event);
         }
+        Ok(())
+    }
+
+    /// Legacy fire-and-forget lifecycle shim. Prefer [`Self::try_set_state`];
+    /// this swallows the FSM/durability error for pre-17.4b callers (R-E).
+    pub async fn set_state(&self, agent_id: &AgentId, target: NodeState) {
+        let _ = self.try_set_state(agent_id, target).await;
     }
 
     /// Advance the node's live inspector metrics (AC11).
@@ -2828,6 +2863,99 @@ mod tests {
             "registration under a tombstoned cascade root must be refused"
         );
         cascade.abort();
+    }
+
+    #[tokio::test]
+    async fn try_set_state_surfaces_the_three_silently_dropped_a2a_edges() {
+        // Story 17.4b (R-E, Task 6): the edges the A2A projection could hit that
+        // `set_state` silently drops must be a loud `Err` on `try_set_state`.
+        // `Created -> Failed`, `Waiting -> Completed`, `Suspended -> Completed`.
+        let tree = NodeTree::new();
+
+        // Created -> Failed (a peer that rejects an un-started task).
+        let created = AgentId::from_validated("edge-created");
+        tree.register_peer(created.clone(), dummy_handle(created.clone(), 1))
+            .await
+            .unwrap();
+        let error = tree
+            .try_set_state(&created, NodeState::Failed)
+            .await
+            .expect_err("Created -> Failed is illegal and must not be swallowed");
+        assert!(matches!(
+            error,
+            SetStateError::InvalidTransition {
+                from: NodeState::Created,
+                to: NodeState::Failed
+            }
+        ));
+        // The node state is unchanged after a refused edge.
+        let status = tree
+            .list()
+            .await
+            .into_iter()
+            .find(|entry| entry.agent_id == created)
+            .map(|entry| entry.current_status);
+        assert_eq!(status, Some(NodeState::Created));
+
+        // Waiting -> Completed (a task completing out of input-required).
+        let waiting = AgentId::from_validated("edge-waiting");
+        tree.register_peer(waiting.clone(), dummy_handle(waiting.clone(), 1))
+            .await
+            .unwrap();
+        tree.try_set_state(&waiting, NodeState::Running)
+            .await
+            .unwrap();
+        tree.try_set_state(&waiting, NodeState::Waiting)
+            .await
+            .unwrap();
+        let error = tree
+            .try_set_state(&waiting, NodeState::Completed)
+            .await
+            .expect_err("Waiting -> Completed is illegal");
+        assert!(matches!(error, SetStateError::InvalidTransition { .. }));
+
+        // Suspended -> Completed (a task completing after a restart) — the nasty one.
+        let suspended = AgentId::from_validated("edge-suspended");
+        tree.register_peer(suspended.clone(), dummy_handle(suspended.clone(), 1))
+            .await
+            .unwrap();
+        tree.try_set_state(&suspended, NodeState::Running)
+            .await
+            .unwrap();
+        tree.try_set_state(&suspended, NodeState::Suspended)
+            .await
+            .unwrap();
+        let error = tree
+            .try_set_state(&suspended, NodeState::Completed)
+            .await
+            .expect_err("Suspended -> Completed is illegal");
+        assert!(matches!(error, SetStateError::InvalidTransition { .. }));
+    }
+
+    #[tokio::test]
+    async fn try_set_state_drives_the_legal_a2a_terminal_route() {
+        // The mandated route for a post-restart completion: Suspended -> Running
+        // -> Completed, every hop legal.
+        let tree = NodeTree::new();
+        let node = AgentId::from_validated("legal-route");
+        tree.register_peer(node.clone(), dummy_handle(node.clone(), 1))
+            .await
+            .unwrap();
+        tree.try_set_state(&node, NodeState::Running).await.unwrap();
+        tree.try_set_state(&node, NodeState::Suspended)
+            .await
+            .unwrap();
+        tree.try_set_state(&node, NodeState::Running).await.unwrap();
+        tree.try_set_state(&node, NodeState::Completed)
+            .await
+            .unwrap();
+        let status = tree
+            .list()
+            .await
+            .into_iter()
+            .find(|entry| entry.agent_id == node)
+            .map(|entry| entry.current_status);
+        assert_eq!(status, Some(NodeState::Completed));
     }
 
     // t4 (release-on-turn-dispatch) and t6 (consent-receipt correlation)

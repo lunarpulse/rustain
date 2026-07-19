@@ -15,11 +15,22 @@ use super::client::A2aClientAdapter;
 
 pub struct A2aProvider {
     peers: Vec<(A2aPeerSpec, Arc<A2aClientAdapter>)>,
+    delegation: std::sync::OnceLock<Arc<super::driver::A2aDelegationRuntime>>,
 }
 
 impl A2aProvider {
     pub fn new(peers: Vec<(A2aPeerSpec, Arc<A2aClientAdapter>)>) -> Self {
-        Self { peers }
+        Self {
+            peers,
+            delegation: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Inject the delegation runtime (node tree + journal + event sink) after
+    /// the composition root has opened them. Until this is set, `invoke()`
+    /// returns the Story 17.4b refusal — discovery/inventory still work.
+    pub fn set_delegation_runtime(&self, runtime: Arc<super::driver::A2aDelegationRuntime>) {
+        let _ = self.delegation.set(runtime);
     }
 }
 
@@ -85,12 +96,58 @@ impl CapabilityProvider for A2aProvider {
     async fn invoke(
         &self,
         capability_id: &CapabilityId,
-        _input: serde_json::Value,
-        _cancel: CancellationToken,
+        input: serde_json::Value,
+        cancel: CancellationToken,
     ) -> Result<ToolResult, CapabilityError> {
-        Err(CapabilityError::InvocationFailed(
-            capability_id.to_string(),
-            "A2A task delegation is intentionally unavailable until Story 17.4b".to_owned(),
-        ))
+        // Until the composition root injects the delegation runtime, delegation
+        // is intentionally unavailable (Story 17.4b) — discovery still works.
+        let Some(runtime) = self.delegation.get() else {
+            return Err(CapabilityError::InvocationFailed(
+                capability_id.to_string(),
+                "A2A task delegation is intentionally unavailable until Story 17.4b".to_owned(),
+            ));
+        };
+
+        let (spec, client) = self
+            .peers
+            .iter()
+            .find(|(spec, _)| spec.id == capability_id.server)
+            .ok_or_else(|| {
+                CapabilityError::InvocationFailed(
+                    capability_id.to_string(),
+                    format!("unknown A2A peer {:?}", capability_id.server),
+                )
+            })?;
+
+        let (card, trust) = client.cached_card().await.ok_or_else(|| {
+            CapabilityError::InvocationFailed(
+                capability_id.to_string(),
+                "A2A peer AgentCard is not cached; refresh discovery first".to_owned(),
+            )
+        })?;
+        let endpoint = super::endpoint::resolve_jsonrpc_endpoint(&card).map_err(|error| {
+            CapabilityError::InvocationFailed(capability_id.to_string(), error.to_string())
+        })?;
+
+        let transport = Arc::new(super::driver::TaskClient::new(
+            client.clone(),
+            endpoint.url().to_owned(),
+        ));
+        let message = super::driver::build_message(&input);
+        match runtime
+            .delegate(spec, trust, &capability_id.tool, transport, message, cancel)
+            .await
+        {
+            Ok(result) => Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| result.to_string()),
+                is_error: false,
+            }),
+            Err(error) => Err(CapabilityError::InvocationFailed(
+                capability_id.to_string(),
+                error.to_string(),
+            )),
+        }
     }
 }

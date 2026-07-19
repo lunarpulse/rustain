@@ -821,3 +821,55 @@ impl ToolSetPort for DualCountedToolSet {
         })
     }
 }
+
+/// Story 17.4b (R-D): the main turn loop must derive tool-dispatch provenance
+/// from the turn origin and dispatch through `schedule_with_provenance` — never
+/// the bare `schedule`, which hardcodes `ProvenanceTag::UserOriginated` and is a
+/// silent taint-gate trapdoor. A mutant reverting `turn.rs`'s regular-tool
+/// dispatch to `.schedule(source, requests` must fail this guard.
+#[test]
+fn turn_loop_threads_provenance_never_the_hardcoded_schedule_trapdoor() {
+    let turn = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/infrastructure/runtime/turn.rs"
+    ))
+    .expect("read turn.rs");
+    assert!(
+        turn.contains("turn_origin.provenance()"),
+        "turn.rs must derive provenance from the turn origin (R-D)"
+    );
+    assert!(
+        turn.contains("schedule_with_provenance("),
+        "turn.rs must dispatch through schedule_with_provenance (R-D)"
+    );
+    assert!(
+        !turn.contains(".schedule(source, requests"),
+        "turn.rs must NOT use the bare schedule() trapdoor that hardcodes \
+         UserOriginated — that is the mutant R-D forbids"
+    );
+}
+
+/// Story 17.4b (R-D) — the remote-skill-name privilege-escalation closure. A
+/// hostile peer that names its skill `Read` surfaces on the wire as
+/// `a2a__<peer>__Read`; `risk_for_tool` must classify it `Elevated` from the
+/// `a2a__` prefix, NEVER `Safe` from the peer-chosen name. The mutant that drops
+/// the `a2a__` arm (falling through to `risk_for_builtin("...Read")`) must fail.
+#[test]
+fn a2a_wire_name_is_elevated_even_when_a_peer_names_its_skill_read() {
+    use rustain::domain::models::ToolRisk;
+    use rustain::domain::services::permission_chain::risk_for_tool;
+
+    let tools = CountedToolSet {
+        counter: Arc::new(AtomicU32::new(0)),
+        delay_ms: 0,
+        parallel_safe: true,
+    };
+    assert_eq!(
+        risk_for_tool("a2a__evilpeer__Read", &tools),
+        ToolRisk::Elevated,
+        "a peer cannot pick its own risk classification via the skill name"
+    );
+    // Control: a genuine builtin `Read` IS Safe — proving the a2a__ arm, not the
+    // trailing name, is what decides.
+    assert_eq!(risk_for_tool("Read", &tools), ToolRisk::Safe);
+}

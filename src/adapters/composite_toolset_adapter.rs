@@ -506,6 +506,23 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 });
             }
         }
+        // Story 17.4b (R-D) — expose A2A peer skills under the namespaced wire
+        // name `a2a__<peer>__<skill>`, built from the CapabilityId, NEVER the raw
+        // peer-chosen `cap.name` (a hostile peer naming its skill `Read` must not
+        // reach the LLM surface as `Read`). The `a2a__` prefix also guarantees
+        // `risk_for_tool`'s fail-safe arm fires.
+        for cap in self.capability_registry.snapshot() {
+            if cap.protocol == "a2a"
+                && let Some(wire_name) = cap.id.to_a2a_wire_name()
+            {
+                out.push(ToolDefinition {
+                    name: wire_name,
+                    description: cap.description.clone(),
+                    input_schema: cap.input_schema.clone(),
+                    parallel_safe: cap.parallel_safe,
+                });
+            }
+        }
 
         out
     }
@@ -658,6 +675,18 @@ impl ToolSetPort for CompositeToolsetAdapter {
             }
         }
 
+        // Story 17.4b (R-D) — route a2a__<peer>__<skill> wire names to the A2A
+        // provider, which drives the remote task lifecycle to terminal.
+        #[cfg(feature = "a2a")]
+        if let Some(a2a_provider) = self.a2a_provider.get()
+            && let Some(id) = crate::domain::models::CapabilityId::from_a2a_wire_name(tool_name)
+        {
+            return a2a_provider
+                .invoke(&id, input, cancel)
+                .await
+                .map_err(|error| ToolError::ExecutionFailed(error.to_string()));
+        }
+
         self.builtin.execute(tool_name, input, cancel).await
     }
 
@@ -720,6 +749,19 @@ impl ToolSetPort for CompositeToolsetAdapter {
                         .map_err(|e| ToolError::ExecutionFailed(e.to_string()));
                 }
             }
+        }
+
+        // Story 17.4b (R-D) — route a2a__<peer>__<skill> wire names to the A2A
+        // provider. Remote delegation does not stream local progress.
+        #[cfg(feature = "a2a")]
+        if let Some(a2a_provider) = self.a2a_provider.get()
+            && let Some(id) = crate::domain::models::CapabilityId::from_a2a_wire_name(tool_name)
+        {
+            let _ = (tool_use_id, progress_tx);
+            return a2a_provider
+                .invoke(&id, input, cancel)
+                .await
+                .map_err(|error| ToolError::ExecutionFailed(error.to_string()));
         }
 
         self.builtin

@@ -13,8 +13,38 @@ pub struct AgentCardView {
     pub default_input_modes: Option<Vec<String>>,
     pub default_output_modes: Option<Vec<String>>,
     pub skills: Vec<AgentSkillView>,
+    /// Top-level v0.3 endpoint (`url`). Kept raw; resolution validates it.
+    pub url: Option<String>,
+    /// v0.3 `preferredTransport`. Open string per ADR-17-4a-01 R11.
+    pub preferred_transport: Option<String>,
+    /// v1.0 `supportedInterfaces[]` block.
+    pub supported_interfaces: Option<Vec<SupportedInterface>>,
+    /// v0.3 `additionalInterfaces[]` block.
+    pub additional_interfaces: Option<Vec<AdditionalInterface>>,
     missing_name: bool,
     missing_skills: bool,
+}
+
+/// A v1.0 `supportedInterfaces[]` entry. `protocolBinding` is an open string.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportedInterface {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub protocol_binding: Option<String>,
+    #[serde(default)]
+    pub protocol_version: Option<String>,
+}
+
+/// A v0.3 `additionalInterfaces[]` entry. `transport` is an open string.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdditionalInterface {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub transport: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +68,10 @@ struct AgentCardInput {
     default_input_modes: Option<Vec<String>>,
     default_output_modes: Option<Vec<String>>,
     skills: Option<Vec<AgentSkillInput>>,
+    url: Option<String>,
+    preferred_transport: Option<String>,
+    supported_interfaces: Option<Vec<SupportedInterface>>,
+    additional_interfaces: Option<Vec<AdditionalInterface>>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +107,10 @@ impl<'de> Deserialize<'de> for AgentCardView {
             default_input_modes: input.default_input_modes,
             default_output_modes: input.default_output_modes,
             skills,
+            url: input.url,
+            preferred_transport: input.preferred_transport,
+            supported_interfaces: input.supported_interfaces,
+            additional_interfaces: input.additional_interfaces,
             missing_name,
             missing_skills,
         })

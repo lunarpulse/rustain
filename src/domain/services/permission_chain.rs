@@ -397,6 +397,15 @@ pub fn risk_for_tool(tool_name: &str, tools_port: &dyn ToolSetPort) -> ToolRisk 
         // Unknown MCP tool — fail-safe to Elevated
         return ToolRisk::Elevated;
     }
+    // Story 17.4b (R-D) — A2A delegations are remote, attacker-influenceable, and
+    // the wire name embeds a peer-CHOSEN skill id. Risk MUST NOT be derived from
+    // that name (a hostile peer naming its skill `Read` would otherwise resolve to
+    // `ToolRisk::Safe` and skip the taint gate). Fail safe to Elevated for every
+    // `a2a__` tool — mirrors the `mcp__` unknown-tool precedent, placed BEFORE the
+    // builtin fallthrough so a peer can never pick its own classification.
+    if tool_name.starts_with("a2a__") {
+        return ToolRisk::Elevated;
+    }
     risk_for_builtin(tool_name)
 }
 

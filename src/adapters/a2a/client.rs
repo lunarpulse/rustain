@@ -65,6 +65,40 @@ impl A2aClientAdapter {
         self.cached_card.read().await.clone()
     }
 
+    /// POST a JSON-RPC 2.0 request to a resolved A2A endpoint and demux the
+    /// response against the request id. This is the transport seam Story 17.4b's
+    /// task lifecycle drives through.
+    ///
+    /// Hard rules (Task 0b spike): **no `A2A-Version` header** (sending one is the
+    /// one way to break an agent that would otherwise answer), and the caller MUST
+    /// pass the resolved `url` — never the origin, which returns a plain 404. The
+    /// https-or-loopback safety policy is enforced here via `parse_and_validate_url`,
+    /// so a plain-HTTP non-loopback endpoint (6/141 in the corpus) is refused at
+    /// POST time even though endpoint resolution accepted it.
+    pub(crate) async fn post_jsonrpc(
+        &self,
+        endpoint_url: &str,
+        request: &super::jsonrpc::JsonRpcRequest,
+    ) -> Result<serde_json::Value, A2aError> {
+        let url = parse_and_validate_url(endpoint_url)?;
+        let response = self
+            .client
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| A2aError::Request(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(A2aError::HttpStatus {
+                status: response.status().as_u16(),
+            });
+        }
+        let body = read_capped_body(response, MAX_CARD_BYTES).await?;
+        let raw = std::str::from_utf8(&body).map_err(|_| A2aError::InvalidUtf8)?;
+        super::jsonrpc::parse_response(raw, request.id)
+    }
+
     async fn fetch_agent_card(
         &self,
         spec: &A2aPeerSpec,
@@ -147,7 +181,7 @@ fn agent_card_url(base: &str) -> Result<url::Url, A2aError> {
     Ok(url)
 }
 
-fn parse_and_validate_url(raw: &str) -> Result<url::Url, A2aError> {
+pub(crate) fn parse_and_validate_url(raw: &str) -> Result<url::Url, A2aError> {
     let url = url::Url::parse(raw).map_err(|error| A2aError::UnsafeUrl {
         reason: error.to_string(),
     })?;

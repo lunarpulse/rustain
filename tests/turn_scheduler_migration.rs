@@ -12,7 +12,7 @@ use rustain::domain::events::AppEvent;
 use rustain::domain::models::router::{EscalationReason, ModelTier};
 use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason, StreamChunk,
-    ToolDefinition, ToolResult, generate_conversation_id,
+    ToolCall, ToolDefinition, ToolResult, generate_conversation_id,
 };
 use rustain::domain::ports::{SecurityPort, StreamingProvider, ToolSetPort, UsageLedgerPort};
 use rustain::domain::services::model_router::ResolvedModel;
@@ -87,6 +87,73 @@ impl StreamingProvider for MockProvider {
         })
     }
 }
+struct TaintProvider {
+    call_count: AtomicUsize,
+}
+
+#[async_trait]
+impl StreamingProvider for TaintProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        _options: CompletionOptions,
+    ) -> Result<
+        std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>>,
+        rustain::domain::errors::ProviderError,
+    > {
+        let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+        let chunks = match count {
+            0 => vec![
+                StreamChunk::ToolUse {
+                    id: "remote".into(),
+                    name: "a2a__peer__skill".into(),
+                    input: serde_json::json!({"message": "delegate"}),
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            1 => vec![
+                StreamChunk::ToolUse {
+                    id: "sink".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({"command": "echo destructive"}),
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            _ => vec![StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            }],
+        };
+        Ok(Box::pin(futures::stream::iter(chunks)))
+    }
+
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    fn provider_id(&self) -> String {
+        "taint-test".to_string()
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: Duration::ZERO,
+        })
+    }
+}
 
 struct MockSecurity;
 
@@ -134,6 +201,40 @@ impl ToolSetPort for MockToolSet {
         Ok(ToolResult {
             tool_use_id: String::new(),
             content: "file contents".to_string(),
+            is_error: false,
+        })
+    }
+}
+struct RemoteThenBashTools;
+
+#[async_trait]
+impl ToolSetPort for RemoteThenBashTools {
+    fn available_tools(&self) -> Vec<ToolDefinition> {
+        ["a2a__peer__skill", "Bash"]
+            .into_iter()
+            .map(|name| ToolDefinition {
+                name: name.to_owned(),
+                description: name.to_owned(),
+                input_schema: serde_json::json!({}),
+                parallel_safe: false,
+            })
+            .collect()
+    }
+
+    async fn execute(
+        &self,
+        tool_name: &str,
+        _input: serde_json::Value,
+        _cancel: CancellationToken,
+    ) -> Result<ToolResult, rustain::domain::errors::ToolError> {
+        Ok(ToolResult {
+            tool_use_id: String::new(),
+            content: if tool_name.starts_with("a2a__") {
+                "remote-controlled content"
+            } else {
+                "local result"
+            }
+            .to_owned(),
             is_error: false,
         })
     }
@@ -294,4 +395,81 @@ async fn turn_scheduler_migration() {
             .any(|r| { format!("{:?}", r.kind).contains("Tool") }),
         "expected at least one RawEventKind::Tool on raw_rx"
     );
+}
+#[tokio::test]
+async fn successful_a2a_result_taints_next_main_turn_dispatch() {
+    let provider: Arc<dyn StreamingProvider> = Arc::new(TaintProvider {
+        call_count: AtomicUsize::new(0),
+    });
+    let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity);
+    let tools: Arc<dyn ToolSetPort> = Arc::new(RemoteThenBashTools);
+    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
+    let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval_runtime, 16);
+    let mut transitions = scheduler.subscribe();
+    let turn_cancel = CancellationToken::new();
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    let turn = tokio::spawn(run_turn(
+        provider,
+        vec![Message {
+            role: MessageRole::User,
+            content: "delegate then act".into(),
+            images: vec![],
+            tool_results: vec![],
+            tool_uses: vec![],
+            context_prefix: None,
+            reasoning_content: None,
+        }],
+        CompletionOptions {
+            model: "test".into(),
+            max_tokens: 100,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: vec![],
+        },
+        tx,
+        security,
+        tools,
+        scheduler,
+        "conv-taint".into(),
+        Arc::new(rustain::adapters::noop::NoOpStorage),
+        make_conversation(),
+        None,
+        turn_cancel.clone(),
+        Arc::new(rustain::adapters::noop::NoOpUsageLedger) as Arc<dyn UsageLedgerPort>,
+        ResolvedModel {
+            model: "test".into(),
+            tier: ModelTier::CheapAgentic,
+            escalation_reason: EscalationReason::None,
+        },
+        None,
+        0,
+        None,
+        "sess-taint".into(),
+        rustain::domain::models::TurnOrigin::Interactive,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let transition = transitions.recv().await.expect("scheduler transition");
+            if matches!(
+                transition.call,
+                ToolCall::AwaitingApproval { ref request, .. }
+                    if request.tool_name == "Bash"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("remote output must gate the next destructive dispatch");
+
+    turn_cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(1), turn)
+        .await
+        .expect("turn exits after cancellation")
+        .expect("turn task joins");
 }

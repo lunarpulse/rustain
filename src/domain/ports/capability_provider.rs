@@ -110,9 +110,10 @@ mod a2a_conformance {
 
     #[test]
     fn a2a_wire_types_absent_from_entire_src_domain() {
-        // AC4 [K], CI-enforced. The full-domain grep guard in tests/conformance.rs
-        // does NOT run under `cargo test --lib` (.github/workflows/ci.yml runs only
-        // the lib target), so replicate the whole-`src/domain` scan here. Scans
+        // AC4 [K], CI-enforced. The full-domain grep guard in tests/conformance.rs still
+        // never executes in CI — the Check job runs `cargo test --lib`, and the `a2a`
+        // lane (Story 17.4b) runs only the A2A integration targets, not the general
+        // conformance suite. So replicate the whole-`src/domain` scan here. Scans
         // `use`/`extern` lines only — comments and doc mentions (e.g. the `reqwest`
         // reference in errors.rs) are fine. ed25519_dalek and base64 are deliberately
         // NOT forbidden: pure crypto is allowed in domain (capability_token.rs,
@@ -166,6 +167,106 @@ mod a2a_conformance {
         assert!(
             violations.is_empty(),
             "A2A wire types must not appear in src/domain:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    #[test]
+    fn every_a2a_integration_test_is_wired_into_the_ci_a2a_lane() {
+        // Story 17.4b standing ruling. Before the `a2a` lane existed, all nine
+        // tests/a2a_*.rs files compiled but NEVER executed in CI (the Check job runs
+        // `cargo test --lib` only) — nine test files that were a false green.
+        //
+        // The lane names its targets explicitly (`--test <name>`), which is precise but
+        // would silently rot the moment someone adds a tenth file. This guard makes that
+        // rot impossible: it runs under `cargo test --lib`, so it fails in the DEFAULT
+        // lane even for a contributor who never builds `--features a2a`.
+        //
+        // Adding a new A2A integration test? Add `--test <name>` to the `a2a` job in
+        // .github/workflows/ci.yml. That is the whole contract.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let mut targets = Vec::new();
+        for entry in std::fs::read_dir(root.join("tests"))
+            .expect("tests/ must be readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "rs")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && stem.contains("a2a")
+            {
+                targets.push(stem.to_owned());
+            }
+        }
+        targets.sort();
+        assert!(
+            !targets.is_empty(),
+            "expected A2A integration tests under tests/"
+        );
+
+        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+            .expect(".github/workflows/ci.yml must be readable");
+
+        let missing: Vec<&String> = targets
+            .iter()
+            .filter(|stem| !ci.contains(&format!("--test {stem}")))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "A2A integration tests exist that the CI `a2a` lane never runs — a test that \
+             never executes is a false green. Add `--test <name>` to the `a2a` job in \
+             .github/workflows/ci.yml for: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn a2a_adapter_never_calls_the_silent_set_state_shim() {
+        // Story 17.4b (R-E), CI-enforced in the DEFAULT lane (runs under
+        // `cargo test --lib`). The node tree's `set_state` returns `()` and silently
+        // swallows illegal FSM edges (`Suspended -> Completed` stays `Suspended`
+        // forever with only a `tracing::warn!`). The A2A path MUST use
+        // `try_set_state -> Result` exclusively so every illegal edge fails loudly.
+        // A convention is a false-green with a nice haircut; this is the guard.
+        fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let a2a = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapters/a2a");
+        let mut files = Vec::new();
+        collect_rs(&a2a, &mut files);
+        assert!(
+            !files.is_empty(),
+            "no .rs files found under src/adapters/a2a"
+        );
+
+        let mut violations = Vec::new();
+        for file in &files {
+            let content = std::fs::read_to_string(file).unwrap_or_default();
+            for (idx, line) in content.lines().enumerate() {
+                // Match the method call `.set_state(` but not `.try_set_state(`.
+                if let Some(pos) = line.find(".set_state(") {
+                    let is_try = pos >= 4 && line[..pos].ends_with(".try");
+                    if !is_try {
+                        violations.push(format!("{}:{}: {}", file.display(), idx + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "the A2A path must use try_set_state, never the silent set_state shim:\n{}",
             violations.join("\n")
         );
     }

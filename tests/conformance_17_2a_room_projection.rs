@@ -103,3 +103,48 @@ fn host_bound_marker_clears_when_node_returns_home() {
         "a genuinely foreign host stays unavailable"
     );
 }
+
+/// Story 17.4b (Ruling 6): a refused remote envelope must be *inspectable* in
+/// the room, not durable-but-invisible. Before 17.4b the apply arm was a literal
+/// no-op (`=> {}`), so a rejection projected to nothing.
+#[test]
+fn remote_envelope_rejection_is_observable_and_idempotent() {
+    use rustain::domain::models::{PeerId, RejectReason};
+
+    let room_id = OrchestrationRoomId::parse("room-reject").expect("valid room id");
+    let peer = PeerId::from_public_key(&[9u8; 32]).expect("peer id");
+    let events = [
+        RoomEvent::RemoteEnvelopeRejected {
+            peer: peer.clone(),
+            reason: RejectReason::Policy {
+                detail: "multi-turn not supported".to_owned(),
+            },
+        },
+        RoomEvent::RemoteEnvelopeRejected {
+            peer: peer.clone(),
+            reason: RejectReason::Malformed,
+        },
+    ];
+    let encoded = events
+        .iter()
+        .map(|event| serde_json::to_string(event).expect("serialize"))
+        .collect::<Vec<_>>();
+    let decoded = encoded
+        .iter()
+        .map(|line| serde_json::from_str::<RoomEvent>(line).expect("deserialize"))
+        .collect::<Vec<_>>();
+
+    let first = OrchestrationRoom::project(room_id.clone(), decoded.clone());
+    let second = OrchestrationRoom::project(room_id, decoded);
+    assert_eq!(first, second, "rejection projection must be idempotent");
+    assert_eq!(
+        first.remote_rejections().len(),
+        2,
+        "both rejections must be observable"
+    );
+    assert_eq!(first.remote_rejections()[0].peer, peer);
+    assert!(matches!(
+        first.remote_rejections()[1].reason,
+        RejectReason::Malformed
+    ));
+}

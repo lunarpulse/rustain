@@ -1467,7 +1467,9 @@ pub async fn run() -> Result<()> {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
         if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
             #[cfg(feature = "a2a")]
-            {
+            let a2a_provider_concrete: Option<
+                Arc<crate::adapters::a2a::provider::A2aProvider>,
+            > = {
                 let mut bindings = Vec::with_capacity(resolved.a2a_peers.len());
                 for spec in resolved.a2a_peers.iter().cloned() {
                     let client = Arc::new(
@@ -1484,9 +1486,11 @@ pub async fn run() -> Result<()> {
                 }
 
                 let refresh_bindings = bindings.clone();
-                let provider = Arc::new(crate::adapters::a2a::provider::A2aProvider::new(bindings))
-                    as Arc<dyn crate::domain::ports::CapabilityProvider>;
-                composite.set_a2a_provider(provider);
+                let a2a_provider =
+                    Arc::new(crate::adapters::a2a::provider::A2aProvider::new(bindings));
+                composite.set_a2a_provider(
+                    a2a_provider.clone() as Arc<dyn crate::domain::ports::CapabilityProvider>
+                );
 
                 for (spec, client) in refresh_bindings {
                     let event_tx = domain_tx.clone();
@@ -1513,7 +1517,8 @@ pub async fn run() -> Result<()> {
                         }
                     });
                 }
-            }
+                Some(a2a_provider)
+            };
 
             // Eager agent discovery (needed for SubagentProvider::discover)
             let agent_registry = Arc::new(tokio::sync::RwLock::new(
@@ -1576,6 +1581,19 @@ pub async fn run() -> Result<()> {
                         })
                     }),
             );
+            // Story 17.4b: now that the node tree and durable journal exist,
+            // inject the A2A delegation runtime so `A2aProvider::invoke` can
+            // materialize peer nodes and journal room events (durable-first).
+            #[cfg(feature = "a2a")]
+            if let Some(provider) = a2a_provider_concrete.as_ref() {
+                provider.set_delegation_runtime(Arc::new(
+                    crate::adapters::a2a::driver::A2aDelegationRuntime::new(
+                        subagent_registry.as_ref().clone(),
+                        Some(node_journal.clone()),
+                        domain_tx.clone(),
+                    ),
+                ));
+            }
             let authority_provider: Arc<dyn crate::domain::ports::AuthorityProvider> = Arc::new(
                 crate::adapters::authority::InProcessAuthorityProvider::new(
                     authority_ledger.clone(),

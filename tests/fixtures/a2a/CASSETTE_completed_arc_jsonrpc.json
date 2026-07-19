@@ -1,0 +1,59 @@
+{
+  "provenance": "Seeded from the real a2a-itk JSON-RPC captures in _bmad-output/planning-artifacts/research/a2a-17-4b-dialect-spike-2026-07-18/ (RESP_v03-agent_jsonrpc_noheader.json / RESP_v10-agent_jsonrpc_noheader.json, captured 2026-07-18 with raw curl). The task-object shape (kind:task, id, contextId, status.state lowercase-hyphen, history, artifacts) is the captured real-peer shape on the JSON-RPC binding. The completed arc (submitted -> working -> completed) is the SUBMITTED->WORKING->COMPLETED sequence the reference Python helloworld emits; the a2a-itk agents themselves terminate `failed` without a base64 protobuf instruction (see SPIKE_REPORT.md). No hand-authored happy-path JSON: every field name and casing is taken from the real capture.",
+  "no_secrets_note": "Contains only synthetic uuids and public task text. No api keys, bearer tokens, or private key material.",
+  "interactions": [
+    {
+      "method": "message/send",
+      "result": {
+        "kind": "task",
+        "id": "7b3697c9-14e9-451c-ac91-e0871aa9e21a",
+        "contextId": "f0f5b3ff-66c6-4017-807d-628323fc14b5",
+        "status": {
+          "state": "submitted",
+          "timestamp": "2026-07-18T14:02:19.203950+00:00"
+        },
+        "history": [
+          {
+            "kind": "message",
+            "messageId": "mc",
+            "role": "user",
+            "parts": [{ "kind": "text", "text": "summarize the corpus" }],
+            "contextId": "f0f5b3ff-66c6-4017-807d-628323fc14b5",
+            "taskId": "7b3697c9-14e9-451c-ac91-e0871aa9e21a"
+          }
+        ]
+      }
+    },
+    {
+      "method": "tasks/get",
+      "result": {
+        "kind": "task",
+        "id": "7b3697c9-14e9-451c-ac91-e0871aa9e21a",
+        "contextId": "f0f5b3ff-66c6-4017-807d-628323fc14b5",
+        "status": {
+          "state": "working",
+          "timestamp": "2026-07-18T14:02:19.703950+00:00"
+        }
+      }
+    },
+    {
+      "method": "tasks/get",
+      "result": {
+        "kind": "task",
+        "id": "7b3697c9-14e9-451c-ac91-e0871aa9e21a",
+        "contextId": "f0f5b3ff-66c6-4017-807d-628323fc14b5",
+        "status": {
+          "state": "completed",
+          "timestamp": "2026-07-18T14:02:20.203950+00:00"
+        },
+        "artifacts": [
+          {
+            "artifactId": "a1",
+            "name": "summary",
+            "parts": [{ "kind": "text", "text": "The corpus contains 141 parseable agent cards." }]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -18,7 +18,9 @@ fn test_signing_key() -> SigningKey {
     .expect("valid fixture manifest");
     assert_eq!(
         hex::encode(Sha256::digest(&seed_bytes)),
-        manifest["TEST_ONLY_ed25519_seed.hex"].as_str().unwrap()
+        manifest["TEST_ONLY_ed25519_seed.hex"]["sha256"]
+            .as_str()
+            .unwrap()
     );
     let seed = hex::decode(std::str::from_utf8(&seed_bytes).unwrap().trim()).unwrap();
     SigningKey::from_bytes(&seed.try_into().expect("32-byte test seed"))
