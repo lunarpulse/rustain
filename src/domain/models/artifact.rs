@@ -135,6 +135,9 @@ pub enum ArtifactKind {
     TestResult,
     Decision,
     Review,
+    /// 17.5b — an MCP task's elicitation request, filed to the scarce human
+    /// as a ticket (FR152). The first artifact kind produced by an adapter.
+    InputRequest,
 }
 
 #[non_exhaustive]

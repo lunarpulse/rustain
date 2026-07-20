@@ -9,7 +9,9 @@ pub mod registry;
 pub mod spool;
 
 pub use node_handle::{NodeHandle, NodeHandleError};
-pub use node_journal::{JournalError, NodeJournal, NodeRoomJournal, RecoveryError};
+pub use node_journal::{
+    JournalArtifactSink, JournalError, NodeJournal, NodeRoomJournal, RecoveryError,
+};
 pub use node_recovery::{
     DaemonSingletonLock, NodeRecovery, RecoveryReport, current_host_binding, current_host_id,
 };

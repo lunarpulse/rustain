@@ -271,6 +271,7 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             turns: 0,
+            wait_reason: None,
         }
     }
 

@@ -272,11 +272,28 @@ impl NodeRecovery {
                         node: node.clone(),
                         host,
                     });
-                if checkpoint.state == NodeState::Running {
+                if checkpoint.state == NodeState::Running || checkpoint.state == NodeState::Waiting
+                {
+                    // 17.5b (AC4): a `Waiting` node is a phantom across
+                    // restart — recover to exactly `Suspended`. C3: capture
+                    // the hazard against the pre-fold `Waiting` checkpoint
+                    // BEFORE rewriting the state, or restart-time escalation
+                    // is silently lost (`waiting_hazard()` gates on `Waiting`).
+                    if checkpoint.state == NodeState::Waiting
+                        && tree
+                            .raise_hazard_for_checkpoint(
+                                &checkpoint,
+                                crate::domain::models::WAITING_HAZARD_THRESHOLD_MS,
+                            )
+                            .await
+                    {
+                        report.hazards.push(node.clone());
+                    }
+                    let folded_from = checkpoint.state;
                     checkpoint.state = NodeState::Suspended;
                     let state_event = RoomEvent::NodeStateChanged {
                         node: node.clone(),
-                        from: NodeState::Running,
+                        from: folded_from,
                         to: NodeState::Suspended,
                     };
                     let mut records = vec![
@@ -301,11 +318,25 @@ impl NodeRecovery {
                 continue;
             }
 
-            if checkpoint.state == NodeState::Running {
+            if checkpoint.state == NodeState::Running || checkpoint.state == NodeState::Waiting {
+                // 17.5b (AC4): fold a phantom `Waiting` node to `Suspended`
+                // alongside `Running`. C3: capture the hazard against the
+                // pre-fold checkpoint first.
+                if checkpoint.state == NodeState::Waiting
+                    && tree
+                        .raise_hazard_for_checkpoint(
+                            &checkpoint,
+                            crate::domain::models::WAITING_HAZARD_THRESHOLD_MS,
+                        )
+                        .await
+                {
+                    report.hazards.push(node.clone());
+                }
+                let folded_from = checkpoint.state;
                 checkpoint.state = NodeState::Suspended;
                 let event = RoomEvent::NodeStateChanged {
                     node: node.clone(),
-                    from: NodeState::Running,
+                    from: folded_from,
                     to: NodeState::Suspended,
                 };
                 journal
@@ -375,12 +406,20 @@ impl NodeRecovery {
             tree.restore_pending_obligations(node, pending).await;
         }
 
-        // A node that was `Waiting` across the crash keeps its persisted
-        // `waiting_since`; evaluate dwell against the injected wall clock now so
-        // a long-waiting node escalates immediately on restart (R5).
-        report.hazards = tree
+        // 17.5b (C3): `Waiting` hazards were captured against the pre-fold
+        // checkpoint above (folding to `Suspended` first would make
+        // `waiting_hazard()` return `None` and silently delete restart-time
+        // escalation). This residual pass catches any non-folded `Waiting`
+        // node restored to the tree and merges — it does NOT replace the
+        // captured set.
+        let residual = tree
             .raise_due_hazards(crate::domain::models::WAITING_HAZARD_THRESHOLD_MS)
             .await;
+        for id in residual {
+            if !report.hazards.contains(&id) {
+                report.hazards.push(id);
+            }
+        }
 
         Ok(report)
     }

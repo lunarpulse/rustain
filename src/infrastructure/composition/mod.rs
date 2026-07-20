@@ -1287,7 +1287,9 @@ pub fn build_daemon_core(
                 // daemon's lazy provider/tool construction while connecting
                 // every live MCP client to the shared durable node tree.
                 #[cfg(feature = "mcp")]
-                if let Some(composite) = tools.as_any().downcast_ref::<
+                let mcp_task_runtimes: Vec<
+                    Arc<crate::adapters::mcp::task_driver::McpTaskRuntime>,
+                > = if let Some(composite) = tools.as_any().downcast_ref::<
                     crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
                 >() {
                     let task_nodes: Arc<dyn crate::domain::ports::TaskNodes> =
@@ -1305,14 +1307,40 @@ pub fn build_daemon_core(
                         crate::adapters::mcp::task_driver::McpTaskRuntime::new(
                             task_nodes,
                             supervised,
-                            room,
+                            room.clone(),
                             task_clock,
                         ),
                     );
+                    // 17.5b (Task 6): wire the input-request artifact sink so
+                    // a `Waiting` MCP task files a visible ticket (AC3).
+                    let artifact_store: Arc<dyn crate::domain::ports::ArtifactStore> = Arc::new(
+                        crate::adapters::artifact::FileSystemArtifactStore::new(
+                            &ctx.workspace_path,
+                        ),
+                    );
+                    let artifact_host = crate::domain::models::HostBinding::new(
+                        "local",
+                        format!("workspace:{}", ctx.workspace_path.display()),
+                    );
+                    let coordinator_authority = crate::domain::models::CapabilityToken::r1_root(
+                        crate::domain::models::AgentId::root(),
+                    );
+                    let sink: Arc<dyn crate::domain::ports::ArtifactSink> = Arc::new(
+                        crate::infrastructure::subagent::JournalArtifactSink::new(
+                            artifact_store,
+                            room,
+                            coordinator_authority.id,
+                            artifact_host,
+                        ),
+                    );
+                    task_runtime.set_artifact_sink(sink);
                     for client in composite.mcp_clients() {
                         client.set_task_runtime(Arc::clone(&task_runtime));
                     }
-                }
+                    vec![task_runtime]
+                } else {
+                    Vec::new()
+                };
                 let context_assembler = build_context_assembler(&ctx)?;
                 // Deny-by-default approval (AC6): NoOp persistence so no stale
                 // "always-allow" rule can undermine the unattended deny policy.
@@ -1352,6 +1380,8 @@ pub fn build_daemon_core(
                     ),
                     approval,
                     workspace: workspace.clone(),
+                    #[cfg(feature = "mcp")]
+                    mcp_task_runtimes,
                 }))
             },
         )

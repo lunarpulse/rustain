@@ -232,6 +232,15 @@ pub enum ClientFrame {
         request_id: RequestId,
         outcome: ApprovalOutcome,
     },
+    /// Answer a `Waiting` MCP-task node's elicitation ticket (17.5b / AC1, D2).
+    /// `node` is the task node id (from the room's `TicketAssigned` / node view);
+    /// `responses` is the raw `inputResponses` map (`{key: {action, content?}}`),
+    /// carried as JSON so the non-`mcp` daemon protocol never depends on the
+    /// `mcp`-gated `InputResponse` type. Gated on `AttachMode::ReadWrite`.
+    InputResponse {
+        node: String,
+        responses: serde_json::Value,
+    },
     /// Resolve a pending consolidation card — daemon-authoritative (Story 12.2d AC4).
     /// `accept: true` = promote all retained proposals; `false` = decline all.
     /// The token must match the daemon's retained entry (confused-deputy guard).

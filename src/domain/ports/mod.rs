@@ -7,8 +7,9 @@ mod agent_transport;
 #[allow(unused_imports)]
 mod approval_persistence;
 #[allow(unused_imports)]
-mod artifact_store;
+mod artifact_sink;
 #[allow(unused_imports)]
+mod artifact_store;
 mod auth_store;
 #[allow(unused_imports)]
 mod authority_provider;
@@ -87,6 +88,7 @@ pub use agent_message_bus::{
 };
 pub use agent_transport::{AgentTransport, AgentTransportError};
 pub use approval_persistence::ApprovalPersistencePort;
+pub use artifact_sink::{ArtifactSink, ArtifactSinkError};
 pub use artifact_store::{ArtifactError, ArtifactStore};
 pub use auth_store::AuthStorePort;
 pub use authority_provider::{AuthorityError, AuthorityProvider};

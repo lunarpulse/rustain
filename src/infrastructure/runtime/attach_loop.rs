@@ -1156,6 +1156,7 @@ mod tests {
             | ClientFrame::UserMessage { .. }
             | ClientFrame::HistoryRequest { .. }
             | ClientFrame::ApprovalResponse { .. }
+            | ClientFrame::InputResponse { .. }
             | ClientFrame::ConsolidationResolve { .. }
             | ClientFrame::PeerEnvelope(_)
             | ClientFrame::Detach => {}

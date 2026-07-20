@@ -6336,6 +6336,22 @@ mod tests {
                         "journal McpTaskBound node={n} server={server:?} task={task:?}"
                     ));
                 }
+                RoomEvent::TicketAssigned { node, artifact } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal TicketAssigned node={n} artifact={artifact}"
+                    ));
+                }
+                RoomEvent::TicketResolved {
+                    node,
+                    artifact,
+                    outcome,
+                } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal TicketResolved node={n} artifact={artifact} outcome={outcome:?}"
+                    ));
+                }
             }
         }
         for ev in &trace.app_events {

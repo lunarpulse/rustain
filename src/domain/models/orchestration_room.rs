@@ -98,6 +98,21 @@ pub enum ReviewVerdict {
     Rejected,
 }
 
+/// Durable outcome of an operator ticket. This is projected on the producing
+/// node so a terminal task retains the human-visible reason that closed its
+/// ticket (AC7), rather than collapsing every outcome into a generic node
+/// state.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+pub enum TicketResolution {
+    Answered,
+    Cancelled,
+    CancelUnconfirmed { reason: String },
+    ExpiredUnanswered { reason: String },
+    Failed { reason: String },
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reason")]
@@ -188,6 +203,25 @@ pub enum RoomEvent {
         server: String,
         task: String,
     },
+    /// 17.5b — an MCP task filed a blocking input-request ticket to the
+    /// operator (FR152's shape, adopted early per R-14). Carries the artifact
+    /// handle produced for the elicitation. Ships WITHOUT a `to:` field (there
+    /// is exactly one operator today; 18.3a adds `to: AgentPath`).
+    ///
+    /// **Replay contract (NFR70(d)):** when 18.3a adds `to:`, that field MUST
+    /// be `#[serde(default)]` so a ticket journaled by 17.5b replays unchanged.
+    TicketAssigned {
+        node: AgentId,
+        artifact: ArtifactId,
+    },
+    /// Resolve a previously assigned ticket. The artifact id is the stable
+    /// idempotency key: duplicate replay must neither reopen the ticket nor
+    /// overwrite its first durable outcome.
+    TicketResolved {
+        node: AgentId,
+        artifact: ArtifactId,
+        outcome: TicketResolution,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,6 +234,13 @@ pub struct NodeView {
     pub last_remote_content: Option<ContentHash>,
     /// `(server, taskId)` when this node is a bound MCP task (17.5a).
     pub mcp_task: Option<(String, String)>,
+    /// 17.5b — open input-request ticket(s) filed by this node to the
+    /// operator. A `Waiting` MCP-task node carries at least one.
+    pub open_tickets: Vec<ArtifactId>,
+    /// Durable terminal outcomes keyed by the ticket artifact. Keeping the
+    /// outcome on the node makes expiry and cancellation failures visible
+    /// after replay and across restarts.
+    pub resolved_tickets: BTreeMap<ArtifactId, TicketResolution>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -311,6 +352,8 @@ impl OrchestrationRoom {
                         host_bound_unavailable: false,
                         last_remote_content: None,
                         mcp_task: None,
+                        open_tickets: Vec::new(),
+                        resolved_tickets: BTreeMap::new(),
                     },
                 );
             }
@@ -400,6 +443,24 @@ impl OrchestrationRoom {
                     view.mcp_task = Some((server, task));
                 }
             }
+            RoomEvent::TicketAssigned { node, artifact } => {
+                if let Some(view) = self.nodes.get_mut(&node)
+                    && !view.open_tickets.contains(&artifact)
+                    && !view.resolved_tickets.contains_key(&artifact)
+                {
+                    view.open_tickets.push(artifact);
+                }
+            }
+            RoomEvent::TicketResolved {
+                node,
+                artifact,
+                outcome,
+            } => {
+                if let Some(view) = self.nodes.get_mut(&node) {
+                    view.open_tickets.retain(|open| open != &artifact);
+                    view.resolved_tickets.entry(artifact).or_insert(outcome);
+                }
+            }
         }
     }
 }
@@ -412,4 +473,105 @@ fn validate_id(value: &str) -> Result<(), RoomIdError> {
         return Err(RoomIdError::EmbeddedSeparator);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{ArtifactId, ContentHash};
+
+    fn sample_artifact_id() -> ArtifactId {
+        ArtifactId::from(ContentHash::from_bytes([0x11; 32]))
+    }
+
+    /// NFR70(d) / AC3: replaying the journal twice yields the identical room,
+    /// including the ticket. A `TicketAssigned` folded twice must not duplicate
+    /// the artifact handle on the node's `open_tickets`.
+    #[test]
+    fn ticket_assigned_replays_idempotently() {
+        let node = AgentId::from_validated("mcp/s-srv/t-task");
+        let artifact = sample_artifact_id();
+        let room_id = OrchestrationRoomId::new();
+        let assigned = RoomEvent::TicketAssigned {
+            node: node.clone(),
+            artifact: artifact.clone(),
+        };
+        let events = vec![
+            RoomEvent::NodeRegistered {
+                node: node.clone(),
+                origin: NodeOrigin::Remote,
+                host: HostBinding::new("local", "h"),
+            },
+            assigned.clone(),
+            assigned,
+        ];
+        let room = OrchestrationRoom::project(room_id, events);
+        let view = room.nodes().get(&node).expect("node projected");
+        assert_eq!(view.open_tickets, vec![artifact]);
+    }
+
+    #[test]
+    fn ticket_resolution_closes_once_and_duplicate_assignment_cannot_reopen_it() {
+        let node = AgentId::from_validated("mcp/s-srv/t-task");
+        let artifact = sample_artifact_id();
+        let assigned = RoomEvent::TicketAssigned {
+            node: node.clone(),
+            artifact: artifact.clone(),
+        };
+        let resolved = RoomEvent::TicketResolved {
+            node: node.clone(),
+            artifact: artifact.clone(),
+            outcome: TicketResolution::ExpiredUnanswered {
+                reason: "remote task TTL expired".into(),
+            },
+        };
+        let room = OrchestrationRoom::project(
+            OrchestrationRoomId::new(),
+            vec![
+                RoomEvent::NodeRegistered {
+                    node: node.clone(),
+                    origin: NodeOrigin::Remote,
+                    host: HostBinding::new("local", "h"),
+                },
+                assigned.clone(),
+                resolved.clone(),
+                resolved,
+                assigned,
+            ],
+        );
+        let view = room.nodes().get(&node).expect("node projected");
+        assert!(view.open_tickets.is_empty());
+        assert_eq!(
+            view.resolved_tickets.get(&artifact),
+            Some(&TicketResolution::ExpiredUnanswered {
+                reason: "remote task TTL expired".into(),
+            })
+        );
+    }
+
+    /// NFR70(d): a `TicketAssigned` journaled by 17.5b (no `to:` field) must
+    /// round-trip through serde unchanged. When 18.3a adds `to: AgentPath`
+    /// `#[serde(default)]`, this byte-identical event must still deserialize.
+    #[test]
+    fn ticket_assigned_serializes_without_a_to_field() {
+        let node = AgentId::from_validated("mcp/s-srv/t-task");
+        let artifact = sample_artifact_id();
+        let event = RoomEvent::TicketAssigned {
+            node: node.clone(),
+            artifact: artifact.clone(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        // The 17.5b wire shape carries `node` + `artifact` + the `event` tag,
+        // and NO `to:` field. A future defaulted `to:` must not break this.
+        assert!(
+            json.contains("\"event\":\"ticket_assigned\""),
+            "json: {json}"
+        );
+        assert!(
+            !json.contains("\"to\""),
+            "17.5b tickets carry no `to:`: {json}"
+        );
+        let back: RoomEvent = serde_json::from_str(&json).expect("deserialize round-trip");
+        assert_eq!(event, back);
+    }
 }

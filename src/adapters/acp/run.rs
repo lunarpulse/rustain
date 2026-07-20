@@ -114,6 +114,7 @@ fn with_mcp_task_runtime(
     core_factory: AcpCoreFactory,
     node_tree: NodeTree,
     node_journal: Arc<NodeJournal>,
+    workspace: std::path::PathBuf,
     domain_tx: mpsc::UnboundedSender<AppEvent>,
 ) -> AcpCoreFactory {
     Rc::new(move |cwd, mcp_servers| {
@@ -134,8 +135,30 @@ fn with_mcp_task_runtime(
             let task_clock: Arc<dyn crate::domain::clock::Clock> =
                 Arc::new(crate::domain::clock::SystemClock::default());
             let task_runtime = Arc::new(crate::adapters::mcp::task_driver::McpTaskRuntime::new(
-                task_nodes, supervised, room, task_clock,
+                task_nodes,
+                supervised,
+                room.clone(),
+                task_clock,
             ));
+            // 17.5b (Task 6): wire the input-request artifact sink (AC3).
+            let artifact_store: Arc<dyn crate::domain::ports::ArtifactStore> = Arc::new(
+                crate::adapters::artifact::FileSystemArtifactStore::new(&workspace),
+            );
+            let artifact_host = crate::domain::models::HostBinding::new(
+                "local",
+                format!("workspace:{}", workspace.display()),
+            );
+            let coordinator_authority = crate::domain::models::CapabilityToken::r1_root(
+                crate::domain::models::AgentId::root(),
+            );
+            let sink: Arc<dyn crate::domain::ports::ArtifactSink> =
+                Arc::new(crate::infrastructure::subagent::JournalArtifactSink::new(
+                    artifact_store,
+                    room,
+                    coordinator_authority.id,
+                    artifact_host,
+                ));
+            task_runtime.set_artifact_sink(sink);
             for client in composite.mcp_clients() {
                 client.set_task_runtime(Arc::clone(&task_runtime));
             }
@@ -172,8 +195,13 @@ where
             &workspace,
         ));
     #[cfg(feature = "mcp")]
-    let core_factory =
-        with_mcp_task_runtime(core_factory, node_tree.clone(), node_journal, domain_tx);
+    let core_factory = with_mcp_task_runtime(
+        core_factory,
+        node_tree.clone(),
+        node_journal,
+        workspace.clone(),
+        domain_tx,
+    );
     let result = serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,
@@ -220,8 +248,13 @@ where
         core_factory(cwd, mcp_servers).map(crate::infrastructure::composition::AcpCore::from)
     });
     #[cfg(feature = "mcp")]
-    let acp_factory =
-        with_mcp_task_runtime(acp_factory, node_tree.clone(), node_journal, domain_tx);
+    let acp_factory = with_mcp_task_runtime(
+        acp_factory,
+        node_tree.clone(),
+        node_journal,
+        workspace.clone(),
+        domain_tx,
+    );
     let result = serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,

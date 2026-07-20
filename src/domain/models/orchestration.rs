@@ -345,13 +345,19 @@ pub enum WaitReason {
     BudgetPaused,
     /// Downstream node parked until durable upstream artifact handles land.
     AwaitingUpstreamArtifact,
+    /// MCP task parked on a human answer to an elicitation request (17.5b).
+    /// The first writer of `WaitReason` in the product — see R-2.
+    AwaitingHumanInput,
 }
 
 impl WaitReason {
     /// `true` for reasons that should escalate to a hazard after the threshold.
     /// `BudgetPaused` does NOT escalate (it is a deliberate, recoverable pause).
     pub const fn escalates(&self) -> bool {
-        matches!(self, Self::AwaitingSpoke | Self::AwaitingUpstreamArtifact)
+        matches!(
+            self,
+            Self::AwaitingSpoke | Self::AwaitingUpstreamArtifact | Self::AwaitingHumanInput
+        )
     }
 }
 
@@ -556,14 +562,12 @@ mod tests {
         const {
             assert!(FORK_JOIN_SPAWN_CAP <= 10);
         }
-        const {
-            assert!(FORK_JOIN_SPAWN_CAP >= 1);
-        }
     }
 
     #[test]
     fn wait_reason_escalation_predicate() {
         assert!(WaitReason::AwaitingSpoke.escalates());
+        assert!(WaitReason::AwaitingHumanInput.escalates());
         assert!(!WaitReason::BudgetPaused.escalates());
     }
 

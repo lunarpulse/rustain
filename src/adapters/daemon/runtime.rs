@@ -144,6 +144,11 @@ pub struct DaemonTurnRuntime {
     pub plan_injector: Arc<DefaultPlanInjector>,
     pub approval: Arc<ApprovalRuntime>,
     pub workspace: PathBuf,
+    /// 17.5b — the MCP task runtimes for this activation, so a
+    /// `ClientFrame::InputResponse` (D2 inward answer surface) can route the
+    /// operator's answer to the parked `Waiting` node via `submit_answer`.
+    #[cfg(feature = "mcp")]
+    pub mcp_task_runtimes: Vec<Arc<crate::adapters::mcp::task_driver::McpTaskRuntime>>,
 }
 
 impl DaemonTurnRuntime {
@@ -304,6 +309,8 @@ mod tests {
             plan_injector: Arc::new(DefaultPlanInjector::new()),
             approval,
             workspace,
+            #[cfg(feature = "mcp")]
+            mcp_task_runtimes: Vec::new(),
         })
     }
 

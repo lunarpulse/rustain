@@ -485,9 +485,11 @@ impl McpClientAdapter {
 
     /// Send an arbitrary JSON-RPC method over the live connection as a
     /// `CustomRequest`, advertising the Tasks extension in per-request
-    /// `_meta` (R-13). Method-generic seam: 17.5a's tests arm the scripted
-    /// fake through it, and 17.5b's `tasks/update` will ride it. Returns
-    /// the raw result payload (transport-shim wrapper already removed).
+    /// `_meta` (R-13). This is the test-arming seam ONLY: 17.5a's tests drive
+    /// the scripted fake through it. Production `tasks/update` rides
+    /// `McpTaskTransport::tasks_update` (task_transport.rs), NOT this path —
+    /// routing production here would bypass the driver's state machine.
+    /// Returns the raw result payload (transport-shim wrapper already removed).
     pub async fn send_custom_request(
         &self,
         method: &str,

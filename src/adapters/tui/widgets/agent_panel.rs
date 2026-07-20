@@ -142,10 +142,24 @@ pub fn render(
                 ));
             }
 
-            // Status suffix: trust-building cue for non-obvious states
+            // Status suffix: trust-building cue for non-obvious states.
+            // 17.5b (AC8): a `Waiting` node renders its TYPED reason —
+            // `awaiting your answer` for an MCP elicitation — not the static
+            // `"waiting"`. An unstamped `Waiting` node (none exist in 17.5b
+            // production, but defensive) keeps `"waiting"` unchanged.
             let status_suffix = match entry.current_status {
                 NodeState::Suspended => Some("resumable"),
-                NodeState::Waiting => Some("waiting"),
+                NodeState::Waiting => Some(match entry.wait_reason {
+                    Some(crate::domain::models::WaitReason::AwaitingHumanInput) => {
+                        "awaiting your answer"
+                    }
+                    Some(crate::domain::models::WaitReason::AwaitingSpoke) => "awaiting spoke",
+                    Some(crate::domain::models::WaitReason::BudgetPaused) => "budget paused",
+                    Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact) => {
+                        "awaiting artifact"
+                    }
+                    None => "waiting",
+                }),
                 NodeState::Created => Some("queued"),
                 _ => None,
             };
@@ -268,6 +282,7 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             turns: 0,
+            wait_reason: None,
         }
     }
 
@@ -375,6 +390,37 @@ mod tests {
         assert!(
             !plain_text.contains("\u{2299} iso"),
             "P9: a non-isolated node must not render the iso indicator:\n{plain_text}"
+        );
+    }
+
+    /// 17.5b (AC8 / DF-14.4-WR-1): a `Waiting` node renders its TYPED reason.
+    /// The mutant: stamping the reason but reading the static `"waiting"` —
+    /// killed by asserting the typed text appears AND the static string does not.
+    #[test]
+    fn waiting_node_renders_typed_reason_not_the_static_string() {
+        let mut entry = make_entry("mcp-task", 1, NodeState::Waiting);
+        entry.wait_reason = Some(crate::domain::models::WaitReason::AwaitingHumanInput);
+        let text = render_to_text(&[entry], 0, true, 60, 5);
+        assert!(
+            text.contains("awaiting your answer"),
+            "AC8: a Waiting MCP-task node must render its typed reason:\n{text}"
+        );
+        assert!(
+            !text.contains(" waiting"),
+            "AC8: the typed reason must replace the static \"waiting\" string:\n{text}"
+        );
+    }
+
+    /// AC8 no-regression: an UNSTAMPED `Waiting` node still renders the static
+    /// `"waiting"` (every existing node today). The mutant: dropping the
+    /// `None => \"waiting\"` arm — killed by this positive control.
+    #[test]
+    fn unstamped_waiting_node_still_renders_waiting() {
+        let entry = make_entry("plain-waiter", 1, NodeState::Waiting);
+        let text = render_to_text(&[entry], 0, true, 60, 5);
+        assert!(
+            text.contains("waiting"),
+            "AC8: an unstamped Waiting node must keep rendering \"waiting\":\n{text}"
         );
     }
 }

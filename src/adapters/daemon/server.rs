@@ -706,6 +706,64 @@ impl AttachServer {
                     rt.approval.resolve(&request_id, outcome).await;
                 }
             }
+            ClientFrame::InputResponse { node, responses } => {
+                if mode != AttachMode::ReadWrite {
+                    self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
+                        .await;
+                    return false;
+                }
+                #[cfg(feature = "mcp")]
+                if let Ok(rt) = self.core.ensure_runtime().await {
+                    // Decode the raw `inputResponses` map into the driver's type
+                    // and route to the parked node. The driver validates against
+                    // `requestedSchema` (D4) and correlates by key (R-6) before
+                    // forwarding `tasks/update`; a refused answer leaves the node
+                    // `Waiting` (observable, not an error).
+                    match serde_json::from_value::<
+                        std::collections::BTreeMap<
+                            String,
+                            crate::adapters::mcp::tasks::InputResponse,
+                        >,
+                    >(responses)
+                    {
+                        Ok(parsed) => {
+                            let node_id = match crate::domain::models::AgentId::parse(&node) {
+                                Ok(node_id) => node_id,
+                                Err(error) => {
+                                    self.send_to(
+                                        conn_id,
+                                        DaemonFrame::Error(ProtocolError::Malformed(format!(
+                                            "invalid InputResponse node: {error}"
+                                        ))),
+                                    )
+                                    .await;
+                                    return false;
+                                }
+                            };
+                            let answer = crate::adapters::mcp::task_driver::InputAnswer {
+                                responses: parsed,
+                            };
+                            let mut routed = false;
+                            for runtime in &rt.mcp_task_runtimes {
+                                if runtime
+                                    .submit_answer(&node_id, answer.clone())
+                                    .await
+                                    .is_ok()
+                                {
+                                    routed = true;
+                                    break;
+                                }
+                            }
+                            if !routed {
+                                tracing::warn!(%node_id, "InputResponse: node is not in a live Waiting MCP-task epoch");
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "InputResponse: malformed inputResponses map");
+                        }
+                    }
+                }
+            }
             ClientFrame::HistoryRequest {
                 before_index,
                 count,
@@ -1584,6 +1642,8 @@ mod tests {
             ),
             approval,
             workspace: workspace.to_path_buf(),
+            #[cfg(feature = "mcp")]
+            mcp_task_runtimes: Vec::new(),
         })
     }
 

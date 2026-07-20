@@ -10,14 +10,16 @@
 //! seam). The concrete `NodeTree` implements this port and is constructed
 //! only at the composition root (`startup.rs`).
 //!
-//! The port carries exactly the methods a 17.5a code path calls — no dead
-//! methods. Every mutation is durable: the implementing tree journals
-//! checkpoint + room event per call (`register_peer` / `try_set_state`).
+//! The port carries exactly the methods an MCP-tasks code path calls — no
+//! dead methods. Every mutation is durable: the implementing tree journals
+//! checkpoint + room event per call (`register_peer` / `try_set_state` /
+//! `stamp_wait_reason`).
+
+use crate::domain::models::orchestration::WaitReason;
+use crate::domain::models::{AgentId, NodeState, Op};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-use crate::domain::models::{AgentId, NodeState, Op};
 
 /// Live handles a task driver needs after registration: the cooperative
 /// cancel token and the owner-command channel (`Op::Kill` arrives here via
@@ -78,5 +80,18 @@ pub trait TaskNodes: Send + Sync {
         &self,
         node_id: &AgentId,
         target: NodeState,
+    ) -> Result<(), TaskNodesError>;
+
+    /// Stamp (or clear) the durable `wait_reason` on a `Waiting` node's
+    /// checkpoint (17.5b / AC1, AC4, AC6). MUST be called AFTER the
+    /// transition into `Waiting`: `try_set_state` journals a fresh checkpoint
+    /// with `wait_reason: None` on every call, so the stamp is a second,
+    /// later durable record. Any later `try_set_state` on that node wipes the
+    /// stamp — callers re-stamp deliberately. `None` clears an existing stamp
+    /// (e.g. on `Waiting → Running` resume).
+    async fn stamp_wait_reason(
+        &self,
+        node_id: &AgentId,
+        reason: Option<WaitReason>,
     ) -> Result<(), TaskNodesError>;
 }

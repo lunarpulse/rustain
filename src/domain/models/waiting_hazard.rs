@@ -21,6 +21,12 @@ pub struct WaitingHazard {
 
 /// Return a hazard marker when a `Waiting` node has dwelled at least
 /// `threshold_ms` measured from its persisted `waiting_since` wall clock.
+///
+/// R-2 (17.5b): the reason is consulted, not merely stored. A `Waiting` node
+/// carrying a non-escalating reason (today only `BudgetPaused`, a deliberate
+/// recoverable pause) does NOT raise a hazard. This is the load-bearing read
+/// that makes `WaitReason::escalates()` and Task 3's stamp seam meaningful;
+/// without it, adding `AwaitingHumanInput` to `escalates()` has zero effect.
 #[must_use]
 pub fn waiting_hazard(
     checkpoint: &NodeCheckpoint,
@@ -29,6 +35,13 @@ pub fn waiting_hazard(
 ) -> Option<WaitingHazard> {
     if checkpoint.state != NodeState::Waiting {
         return None;
+    }
+    // A stamped reason that does not escalate short-circuits — the only path
+    // to `Waiting` with a non-escalating reason today is `BudgetPaused`. An
+    // unstamped node (`None`, the historical default) still escalates.
+    match checkpoint.wait_reason {
+        Some(reason) if !reason.escalates() => return None,
+        _ => {}
     }
     let waiting_since = checkpoint.waiting_since?;
     let dwell_ms = now_ms.saturating_sub(waiting_since);

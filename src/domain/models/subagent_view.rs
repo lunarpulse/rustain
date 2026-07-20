@@ -1,3 +1,4 @@
+use crate::domain::models::orchestration::WaitReason;
 use crate::domain::models::{AgentId, NodeState};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,6 +17,10 @@ pub struct AgentRowView {
     pub turns: u32,
     /// P9 (TUI): renders the ⊙ iso indicator when true.
     pub isolated: bool,
+    /// 17.5b (AC8): the typed reason a `Waiting` node is parked, so the
+    /// Agents panel renders `‖ awaiting your answer` instead of the static
+    /// `"waiting"`. `None` for every non-`Waiting` or unstamped node.
+    pub wait_reason: Option<WaitReason>,
 }
 
 /// Wire/checkpoint serialization type — **structurally has no `Self_` variant**.
@@ -127,6 +132,7 @@ mod tests {
             tokens_out: 0,
             turns: 0,
             isolated: false,
+            wait_reason: None,
         };
         let debug_str = format!("{:?}", view);
         assert!(debug_str.contains("code-reviewer"));

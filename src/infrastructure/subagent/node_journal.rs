@@ -580,6 +580,78 @@ impl crate::domain::ports::RoomJournal for NodeRoomJournal {
     }
 }
 
+/// 17.5b — `ArtifactSink` impl backed by the real `ArtifactStore` +
+/// `NodeJournal`. The composition root supplies the coordinator `authority`
+/// and `host` (orchestrator-only fields the MCP adapter cannot reach — story
+/// Task 6 / C4). Writes `ArtifactCreated` then `TicketAssigned`,
+/// durable-first / bus-second, mirroring `persist_room_event`.
+pub struct JournalArtifactSink {
+    store: std::sync::Arc<dyn crate::domain::ports::ArtifactStore>,
+    room: std::sync::Arc<dyn crate::domain::ports::RoomJournal>,
+    authority: crate::domain::models::CapabilityTokenId,
+    host: crate::domain::models::HostBinding,
+}
+
+impl JournalArtifactSink {
+    pub fn new(
+        store: std::sync::Arc<dyn crate::domain::ports::ArtifactStore>,
+        room: std::sync::Arc<dyn crate::domain::ports::RoomJournal>,
+        authority: crate::domain::models::CapabilityTokenId,
+        host: crate::domain::models::HostBinding,
+    ) -> Self {
+        Self {
+            store,
+            room,
+            authority,
+            host,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::domain::ports::ArtifactSink for JournalArtifactSink {
+    async fn write_input_request(
+        &self,
+        producer: &crate::domain::models::AgentId,
+        node: &crate::domain::models::AgentId,
+        body: serde_json::Value,
+    ) -> Result<crate::domain::models::ArtifactId, crate::domain::ports::ArtifactSinkError> {
+        use crate::domain::models::{ArtifactKind, EvidenceArtifactDraft, RoomEvent};
+        use crate::domain::ports::{ArtifactSinkError, RoomJournal};
+        let bytes = serde_json::to_vec(&body)
+            .map_err(|e| ArtifactSinkError::Write(format!("serialize body: {e}")))?;
+        let artifact = self
+            .store
+            .put(
+                EvidenceArtifactDraft {
+                    kind: ArtifactKind::InputRequest,
+                    producer: producer.clone(),
+                    authority: self.authority,
+                    provenance: Vec::new(),
+                    depends_on: Vec::new(),
+                    review: None,
+                    host: self.host.clone(),
+                },
+                &bytes,
+            )
+            .await
+            .map_err(|e| ArtifactSinkError::Write(e.to_string()))?;
+        let id = artifact.id.clone();
+        self.room
+            .record_event(RoomEvent::ArtifactCreated { artifact })
+            .await
+            .map_err(|e| ArtifactSinkError::Write(e.to_string()))?;
+        self.room
+            .record_event(RoomEvent::TicketAssigned {
+                node: node.clone(),
+                artifact: id.clone(),
+            })
+            .await
+            .map_err(|e| ArtifactSinkError::Write(e.to_string()))?;
+        Ok(id)
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum RecoveryError {

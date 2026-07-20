@@ -35,6 +35,14 @@ const POLL_INTERVAL_MS: u64 = 1;
 enum TaskScript {
     Progress,
     InputRequired,
+    /// 17.5b (AC2-a mutant enabler): two outstanding input-request keys;
+    /// completes only when BOTH are answered. Synthetic (fake-authored, NOT a
+    /// captured fixture — never added to manifest.json per C5).
+    MultiInput,
+    /// AC7: remains input-required long enough to observe the durable wait,
+    /// then the server itself emits a terminal expiry signal. Synthetic,
+    /// deterministic, and never added to the captured-fixture manifest.
+    Expiry,
     Cancellation,
     Error,
     ChildExit,
@@ -47,6 +55,8 @@ impl TaskScript {
         match value {
             "progress" => Some(Self::Progress),
             "input-required" => Some(Self::InputRequired),
+            "multi-input" => Some(Self::MultiInput),
+            "expiry" => Some(Self::Expiry),
             "cancellation" => Some(Self::Cancellation),
             "error" => Some(Self::Error),
             "child-exit" => Some(Self::ChildExit),
@@ -66,6 +76,9 @@ struct TaskRecord {
     script: TaskScript,
     polls: u32,
     input_received: bool,
+    /// 17.5b MultiInput: the input-request keys already answered. The task
+    /// completes only when both `confirm` and `reason` are present.
+    answered_keys: std::collections::HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -170,6 +183,7 @@ impl FakeServer {
                 script,
                 polls: 0,
                 input_received: false,
+                answered_keys: std::collections::HashSet::new(),
             },
         );
         task_create_reply(&task_id)
@@ -223,6 +237,83 @@ impl FakeServer {
                 "completed",
                 Some(json!({ "result": tool_result("input accepted", false) })),
             ),
+            TaskScript::MultiInput => {
+                let both_answered =
+                    task.answered_keys.contains("confirm") && task.answered_keys.contains("reason");
+                if both_answered {
+                    task_reply(
+                        task_id,
+                        "completed",
+                        Some(json!({ "result": tool_result("both inputs accepted", false) })),
+                    )
+                } else {
+                    // Re-emit BOTH outstanding keys until each is answered.
+                    task_reply(
+                        task_id,
+                        "input_required",
+                        Some(json!({
+                            "inputRequests": {
+                                "confirm": {
+                                    "method": "elicitation/create",
+                                    "params": {
+                                        "message": "Confirm?",
+                                        "requestedSchema": {
+                                            "type": "object",
+                                            "properties": { "confirm": { "type": "boolean" } },
+                                            "required": ["confirm"]
+                                        }
+                                    }
+                                },
+                                "reason": {
+                                    "method": "elicitation/create",
+                                    "params": {
+                                        "message": "Reason?",
+                                        "requestedSchema": {
+                                            "type": "object",
+                                            "properties": { "reason": { "type": "string" } },
+                                            "required": ["reason"]
+                                        }
+                                    }
+                                }
+                            }
+                        })),
+                    )
+                }
+            }
+            TaskScript::Expiry if task.polls < 20 => {
+                task.polls += 1;
+                task_reply(
+                    task_id,
+                    "input_required",
+                    Some(json!({
+                        "inputRequests": {
+                            "confirm": {
+                                "method": "elicitation/create",
+                                "params": {
+                                    "message": "Answer before the remote task expires",
+                                    "requestedSchema": {
+                                        "type": "object",
+                                        "properties": { "confirm": { "type": "boolean" } },
+                                        "required": ["confirm"]
+                                    }
+                                }
+                            }
+                        }
+                    })),
+                )
+            }
+            TaskScript::Expiry => task_reply(
+                task_id,
+                "failed",
+                Some(json!({
+                    "statusMessage": "remote task TTL expired before input arrived",
+                    "error": {
+                        "code": -32001,
+                        "message": "remote task TTL expired before input arrived",
+                        "data": { "reason": "expired" }
+                    }
+                })),
+            ),
             // Deliberately remains working after the cancel acknowledgement.
             TaskScript::Cancellation => task_reply(task_id, "working", None),
             // Acks nothing: tasks/cancel is REJECTED (see `task_cancel`); the
@@ -267,10 +358,26 @@ impl FakeServer {
         else {
             return json!({ "resultType": "complete" });
         };
-        if let Some(task) = self.tasks.lock().await.get_mut(task_id)
-            && matches!(task.script, TaskScript::InputRequired)
-        {
-            task.input_received = true;
+        // The answered keys arrive in `inputResponses` (R-6 correlation).
+        let answered_keys: Vec<String> = params
+            .as_ref()
+            .and_then(|p| p.get("inputResponses"))
+            .and_then(|v| v.as_object())
+            .map(|obj| obj.keys().cloned().collect())
+            .unwrap_or_default();
+        if let Some(task) = self.tasks.lock().await.get_mut(task_id) {
+            match task.script {
+                TaskScript::InputRequired if !answered_keys.is_empty() => {
+                    task.input_received = true;
+                }
+                // 17.5b MultiInput: completes only when BOTH keys are answered.
+                TaskScript::MultiInput => {
+                    for key in answered_keys {
+                        task.answered_keys.insert(key);
+                    }
+                }
+                _ => {}
+            }
         }
         json!({ "resultType": "complete" })
     }

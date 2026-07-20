@@ -158,6 +158,12 @@ struct NodeTreeInner {
     predecessor_of: HashMap<AgentId, AgentId>,
     /// node → outstanding `MustReport` correlation ids awaiting discharge.
     pending_obligations: HashMap<AgentId, std::collections::HashSet<CorrelationId>>,
+    /// Story 17.5b — per-agent durable `WaitReason` SIDE-TABLE (not on the
+    /// pinned `AgentNode`, per R-3). Populated by `stamp_wait_reason`,
+    /// consulted by `raise_due_hazards` and `list()` so the stamped reason
+    /// reaches the hazard policy (R-2) and the Agents panel (AC8). Cleared on
+    /// any non-`Waiting` transition (mirrors `waiting_since`).
+    wait_reasons: HashMap<AgentId, crate::domain::models::WaitReason>,
 }
 
 // ── Legacy compatibility types ──────────────────────────────────────────────
@@ -209,6 +215,8 @@ pub struct RegistryEntry {
     pub turns: u32,
     /// P9 (TUI): renders the ⊙ iso indicator when true.
     pub isolated: bool,
+    /// 17.5b (AC8): stamped `WaitReason` read from the side-table.
+    pub wait_reason: Option<crate::domain::models::WaitReason>,
 }
 
 impl RegistryEntry {
@@ -227,6 +235,7 @@ impl RegistryEntry {
             tokens_out: self.tokens_out,
             turns: self.turns,
             isolated: self.isolated,
+            wait_reason: self.wait_reason,
         }
     }
 }
@@ -336,6 +345,22 @@ impl crate::domain::ports::TaskNodes for NodeTree {
             Err(SetStateError::Durability(msg)) => Err(TaskNodesError::Internal(msg)),
         }
     }
+
+    async fn stamp_wait_reason(
+        &self,
+        node_id: &AgentId,
+        reason: Option<crate::domain::models::WaitReason>,
+    ) -> Result<(), crate::domain::ports::TaskNodesError> {
+        use crate::domain::ports::TaskNodesError;
+        match NodeTree::stamp_wait_reason(self, node_id, reason).await {
+            Ok(()) => Ok(()),
+            Err(SetStateError::NotFound(id)) => Err(TaskNodesError::NotFound(id)),
+            Err(SetStateError::InvalidTransition { from, to }) => {
+                Err(TaskNodesError::InvalidTransition { from, to })
+            }
+            Err(SetStateError::Durability(msg)) => Err(TaskNodesError::Internal(msg)),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -382,6 +407,7 @@ impl NodeTree {
             aliases: HashMap::new(),
             predecessor_of: HashMap::new(),
             pending_obligations: HashMap::new(),
+            wait_reasons: HashMap::new(),
         })
     }
 
@@ -897,6 +923,9 @@ impl NodeTree {
             tokens_out: checkpoint.tokens_out,
             turns: checkpoint.turns,
         };
+        // 17.5b: a recovered node keeps its stamped reason in the side-table
+        // (the durable checkpoint carries it; `AgentNode` does not, R-3).
+        let recovered_wait_reason = checkpoint.wait_reason;
         let node = checkpoint.into_node(CheckpointTrust::TrustedLocal);
         let (command_tx, command_rx) = mpsc::channel(MAILBOX_CAP);
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -904,6 +933,9 @@ impl NodeTree {
         let (_metrics_tx, metrics_rx) = watch::channel(metrics);
         let mailbox_budget = MailboxBudget::new();
 
+        if let Some(reason) = recovered_wait_reason {
+            guard.wait_reasons.insert(agent_id.clone(), reason);
+        }
         guard.nodes.insert(agent_id.clone(), node);
         guard.handles.insert(
             agent_id.clone(),
@@ -1199,7 +1231,14 @@ impl NodeTree {
                 .nodes
                 .iter()
                 .filter_map(|(id, node)| {
-                    let checkpoint = node.checkpoint();
+                    // R-2 (17.5b): `node.checkpoint()` writes `wait_reason:
+                    // None` (the field is not on `AgentNode`, R-3). Restore
+                    // the stamped reason from the side-table so
+                    // `waiting_hazard()` can distinguish escalating vs
+                    // non-escalating reasons — without this, `escalates()`
+                    // is inert.
+                    let mut checkpoint = node.checkpoint();
+                    checkpoint.wait_reason = guard.wait_reasons.get(id).copied();
                     crate::domain::models::waiting_hazard(&checkpoint, now_ms, threshold_ms).map(
                         |hazard| {
                             (
@@ -1226,6 +1265,42 @@ impl NodeTree {
             }
         }
         escalated
+    }
+
+    /// Evaluate + append a waiting hazard against a checkpoint that is NOT yet
+    /// restored to the tree (recovery: a `Waiting` checkpoint is about to be
+    /// folded to `Suspended`, C3 — the hazard must be captured against the
+    /// pre-fold state or restart-time escalation is silently lost). Returns
+    /// `true` if a NEW hazard was journaled for this node/epoch. Idempotent via
+    /// `append_hazard_once`.
+    pub async fn raise_hazard_for_checkpoint(
+        &self,
+        checkpoint: &crate::domain::models::NodeCheckpoint,
+        threshold_ms: i64,
+    ) -> bool {
+        let Some(journal) = self.journal.clone() else {
+            return false;
+        };
+        let now_ms = (self.now_fn)();
+        let Some(hazard) = crate::domain::models::waiting_hazard(checkpoint, now_ms, threshold_ms)
+        else {
+            return false;
+        };
+        match journal
+            .append_hazard_once(
+                checkpoint.id.clone(),
+                checkpoint.waiting_since.unwrap_or(now_ms),
+                hazard.dwell_ms,
+            )
+            .await
+        {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::error!(node = %checkpoint.id, %error, "durable hazard append failed");
+                false
+            }
+        }
     }
 
     /// Clear integrity taint only for a true context reset (`/clear`/new conversation).
@@ -1361,6 +1436,7 @@ impl NodeTree {
                         .get(agent_id)
                         .copied()
                         .unwrap_or(false),
+                    wait_reason: guard.wait_reasons.get(agent_id).copied(),
                 }
             })
             .collect();
@@ -1571,6 +1647,12 @@ impl NodeTree {
         if durable && self.journal.is_some() && !terminal_violations.is_empty() {
             guard.pending_obligations.remove(agent_id);
         }
+        // 17.5b: a committed transition out of `Waiting` wipes the stamped
+        // reason (mirrors `waiting_since`). The stamp is always re-applied
+        // deliberately after a fresh entry into `Waiting` (Task 3 ordering).
+        if target != NodeState::Waiting {
+            guard.wait_reasons.remove(agent_id);
+        }
         let sender_opt = guard.status_senders.get(agent_id).cloned();
         drop(guard);
         if let Some(sender) = sender_opt {
@@ -1579,6 +1661,64 @@ impl NodeTree {
         self.emit_status_updated(agent_id).await;
         if durable && self.journal.is_some() {
             self.emit_room_event(room_event);
+        }
+        Ok(())
+    }
+
+    /// Stamp (or clear) the durable `wait_reason` on a `Waiting` node
+    /// (17.5b / AC1, AC4, AC6). Writes the side-table (so `list()` and
+    /// `raise_due_hazards` read it) AND journals a fresh checkpoint carrying
+    /// the reason. MUST be called AFTER `try_set_state(_, Waiting)` — every
+    /// `try_set_state` journals `wait_reason: None` and (on commit) wipes the
+    /// side-table, so the stamp is a second, later durable record. `None`
+    /// clears an existing stamp.
+    pub async fn stamp_wait_reason(
+        &self,
+        agent_id: &AgentId,
+        reason: Option<crate::domain::models::WaitReason>,
+    ) -> Result<(), SetStateError> {
+        use crate::domain::models::JournalRecord;
+
+        // Match `try_set_state`'s commit protocol: hold the node-tree write
+        // lock through the journal append so a concurrent transition cannot
+        // durably overtake this checkpoint. Publish the side-table value only
+        // after durability succeeds; on failure live state remains unchanged.
+        let mut guard = self.inner.write().await;
+        let Some(node) = guard.nodes.get(agent_id) else {
+            return Err(SetStateError::NotFound(agent_id.clone()));
+        };
+        if reason.is_some() && node.state != NodeState::Waiting {
+            return Err(SetStateError::InvalidTransition {
+                from: node.state,
+                to: NodeState::Waiting,
+            });
+        }
+        let durable = !matches!(node.ownership, OwnershipKind::Self_(_));
+        let checkpoint = {
+            let mut cp = node.checkpoint();
+            cp.wait_reason = reason;
+            cp
+        };
+        if durable
+            && let Some(journal) = &self.journal
+            && let Err(error) = journal
+                .append_atomic_batch(vec![JournalRecord::Checkpoint(checkpoint)])
+                .await
+        {
+            tracing::error!(
+                agent_id = %agent_id,
+                %error,
+                "Rejecting wait_reason stamp because checkpoint durability failed"
+            );
+            return Err(SetStateError::Durability(error.to_string()));
+        }
+        match reason {
+            Some(r) => {
+                guard.wait_reasons.insert(agent_id.clone(), r);
+            }
+            None => {
+                guard.wait_reasons.remove(agent_id);
+            }
         }
         Ok(())
     }

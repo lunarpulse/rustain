@@ -18,8 +18,8 @@
 //! 2. [`McpTaskTransport`] — the narrow seam the poll loop drives, mirroring
 //!    `A2aTaskTransport` (`a2a/lifecycle.rs`) so scripted doubles and the
 //!    real peer share one trait. Both methods travel as
-//!    `ClientRequest::CustomRequest`; `tasks/update` is deliberately absent
-//!    (17.5b adds it as an arm — the seam is method-generic).
+//!    `ClientRequest::CustomRequest`; `tasks/update` rides the same seam
+//!    (`tasks_update`, added in 17.5b — the helper is params-generic).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +33,8 @@ use tokio::sync::Mutex;
 
 use super::error::McpError;
 use super::tasks::{
-    self, TASKS_CANCEL_METHOD, TASKS_GET_METHOD, TaskAck, TaskGetReply, TaskIdParams,
+    self, InputResponse, TASKS_CANCEL_METHOD, TASKS_GET_METHOD, TASKS_UPDATE_METHOD, TaskAck,
+    TaskGetReply, TaskIdParams, TasksUpdateParams,
 };
 
 /// Byte-level stdio transport that guards the Tasks wire shapes.
@@ -184,6 +185,16 @@ pub trait McpTaskTransport: Send + Sync {
     async fn tasks_get(&self, task_id: &str) -> Result<TaskGetReply, McpError>;
     /// `tasks/cancel` — cooperative; the ack is all the driver needs (R-15).
     async fn tasks_cancel(&self, task_id: &str) -> Result<TaskAck, McpError>;
+    /// `tasks/update` — resume a parked task by answering its outstanding
+    /// input requests (FR147 / AC1). Correlation is `taskId` + key (R-6); the
+    /// driver refuses unknown keys before this call. Ack is tolerant (R-1):
+    /// both `{}` and `{"resultType":"complete"}` are accepted — the next
+    /// `tasks/get` observes whether the task actually left `input_required`.
+    async fn tasks_update(
+        &self,
+        task_id: &str,
+        responses: std::collections::BTreeMap<String, InputResponse>,
+    ) -> Result<TaskAck, McpError>;
 }
 
 /// Production [`McpTaskTransport`] over the live rmcp peer.
@@ -201,10 +212,23 @@ impl PeerTaskTransport {
     /// transport shim's wrapper; refuses rmcp's typed task variants loudly —
     /// a legacy (SEP-1686) reply must never decode into the superseded shape.
     async fn send_task_request(&self, method: &str, task_id: &str) -> Result<Value, McpError> {
-        let mut params = serde_json::to_value(TaskIdParams {
+        let params = serde_json::to_value(TaskIdParams {
             task_id: task_id.to_string(),
         })
         .map_err(|e| McpError::TaskProtocol(format!("params serialize: {e}")))?;
+        self.send_task_request_with_params(method, params).await
+    }
+
+    /// Send an arbitrary Tasks method whose `params` are caller-built, via
+    /// `CustomRequest`. Stamps the per-request extension `_meta`, sends the
+    /// request, unwraps the transport shim's wrapper, and maps transport
+    /// failures to [`McpError::TransportClosed`]. Used by `tasks/update`
+    /// (17.5b) whose params are `{taskId, inputResponses}`, not `{taskId}`.
+    async fn send_task_request_with_params(
+        &self,
+        method: &str,
+        mut params: Value,
+    ) -> Result<Value, McpError> {
         if let Some(obj) = params.as_object_mut() {
             obj.insert("_meta".into(), tasks::tasks_extension_meta());
         }
@@ -252,12 +276,71 @@ impl McpTaskTransport for PeerTaskTransport {
         }
         Ok(ack)
     }
+
+    async fn tasks_update(
+        &self,
+        task_id: &str,
+        responses: std::collections::BTreeMap<String, InputResponse>,
+    ) -> Result<TaskAck, McpError> {
+        let params = serde_json::to_value(TasksUpdateParams {
+            task_id: task_id.to_string(),
+            input_responses: responses,
+        })
+        .map_err(|e| McpError::TaskProtocol(format!("params serialize: {e}")))?;
+        let value = self
+            .send_task_request_with_params(TASKS_UPDATE_METHOD, params)
+            .await?;
+        decode_tasks_update_ack(task_id, value)
+    }
+}
+
+fn decode_tasks_update_ack(task_id: &str, value: serde_json::Value) -> Result<TaskAck, McpError> {
+    // R-1: accept exactly the two measured ack shapes. Serde's default
+    // unknown-field tolerance must not turn `pending` or arbitrary objects
+    // into an acknowledgement that resumes the node.
+    let Some(object) = value.as_object() else {
+        return Err(McpError::TaskProtocol(
+            "tasks/update ack must be an object".into(),
+        ));
+    };
+    if object.is_empty() {
+        return Ok(TaskAck { result_type: None });
+    }
+    if object.len() == 1
+        && object.get("resultType").and_then(serde_json::Value::as_str) == Some("complete")
+    {
+        return Ok(TaskAck {
+            result_type: Some("complete".into()),
+        });
+    }
+    Err(McpError::TaskProtocol(format!(
+        "tasks/update for {task_id}: reply is neither `{{}}` nor a `resultType:\"complete\"` ack"
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn tasks_update_ack_accepts_only_empty_or_complete() {
+        assert!(decode_tasks_update_ack("task-1", serde_json::json!({})).is_ok());
+        assert!(
+            decode_tasks_update_ack("task-1", serde_json::json!({"resultType": "complete"}))
+                .is_ok()
+        );
+        for malformed in [
+            serde_json::json!({"resultType": "pending"}),
+            serde_json::json!({"unexpected": true}),
+            serde_json::json!({"resultType": "complete", "unexpected": true}),
+            serde_json::json!([]),
+        ] {
+            assert!(
+                decode_tasks_update_ack("task-1", malformed).is_err(),
+                "malformed update ack must be refused"
+            );
+        }
+    }
     #[test]
     fn guard_wraps_task_shaped_results_only() {
         // tasks/get reply shape: wrapped.

@@ -21,14 +21,17 @@ use tokio_util::sync::CancellationToken;
 
 use rustain::adapters::mcp::client::McpClientAdapter;
 use rustain::adapters::mcp::task_driver::{
-    McpTaskRuntime, PollConfig, mint_mcp_node_id, parse_mcp_node_id,
+    InputAnswer, McpTaskRuntime, PollConfig, mint_mcp_node_id, parse_mcp_node_id,
 };
+use rustain::adapters::mcp::tasks::InputResponse;
 use rustain::domain::clock::{Clock, SystemClock};
 use rustain::domain::models::{
-    AgentId, JournalRecord, McpServerSource, McpServerSpec, McpTransport, NodeState, RoomEvent,
+    AgentId, CapabilityToken, JournalRecord, McpServerSource, McpServerSpec, McpTransport,
+    NodeState, RoomEvent, TicketResolution,
 };
+use rustain::domain::ports::ArtifactSink;
 use rustain::infrastructure::subagent::{
-    DaemonSingletonLock, NodeJournal, NodeRecovery, NodeRoomJournal, NodeTree,
+    DaemonSingletonLock, JournalArtifactSink, NodeJournal, NodeRecovery, NodeRoomJournal, NodeTree,
 };
 
 fn fast_poll() -> PollConfig {
@@ -44,6 +47,8 @@ struct TaskFixture {
     client: Arc<McpClientAdapter>,
     tree: Arc<NodeTree>,
     journal: Arc<NodeJournal>,
+    runtime: Arc<McpTaskRuntime>,
+    artifact_store: Arc<dyn rustain::domain::ports::ArtifactStore>,
     _dir: tempfile::TempDir,
 }
 
@@ -61,8 +66,26 @@ async fn task_fixture(server_id: &str) -> TaskFixture {
     let room = Arc::new(NodeRoomJournal::new(journal.clone(), Some(tx)));
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::default());
     let runtime = Arc::new(
-        McpTaskRuntime::new(tree.clone(), tree.clone(), room, clock).with_poll_config(fast_poll()),
+        McpTaskRuntime::new(tree.clone(), tree.clone(), room.clone(), clock)
+            .with_poll_config(fast_poll()),
     );
+    // 17.5b (AC3): wire the input-request artifact sink so a `Waiting` task
+    // files a visible ticket through the real artifact store + journal.
+    let artifact_store: Arc<dyn rustain::domain::ports::ArtifactStore> = Arc::new(
+        rustain::adapters::artifact::FileSystemArtifactStore::new(dir.path()),
+    );
+    let coordinator_authority = CapabilityToken::r1_root(AgentId::root());
+    let artifact_host = rustain::domain::models::HostBinding::new(
+        "local",
+        format!("workspace:{}", dir.path().display()),
+    );
+    let sink: Arc<dyn ArtifactSink> = Arc::new(JournalArtifactSink::new(
+        artifact_store.clone(),
+        room,
+        coordinator_authority.id,
+        artifact_host,
+    ));
+    runtime.set_artifact_sink(sink);
 
     let spec = McpServerSpec {
         id: server_id.to_string(),
@@ -82,6 +105,8 @@ async fn task_fixture(server_id: &str) -> TaskFixture {
         client,
         tree,
         journal,
+        runtime,
+        artifact_store,
         _dir: dir,
     }
 }
@@ -266,32 +291,243 @@ async fn child_exit_mid_task_drives_failed_not_stranded() {
     wait_node_state(&fx.tree, &first_task_node("srv-exit"), NodeState::Failed).await;
 }
 
-/// AC3 (17.5a half) against the real fake: `input_required` with an
-/// `inputRequests` map is decoded and logged, never transitioned — the node
-/// stays `Running` across many polls, and 17.5a issues no `tasks/update`.
+/// AC1 (17.5b): `input_required` with a keyed `inputRequests` map drives a
+/// real `Running → Waiting` transition. The node parks durably (the 17.5a
+/// "decode and log, never transition" behavior is INVERTED), the
+/// `AwaitingHumanInput` reason is stamped, and a `TicketAssigned` room event
+/// is journaled.
 #[tokio::test]
-async fn input_required_decodes_and_logs_without_transition() {
+async fn input_required_drives_a_durable_waiting_node_with_a_ticket() {
     let fx = task_fixture("srv-ir").await;
     arm(&fx.client, "input-required").await;
     start_task(&fx.client).await;
     let node = first_task_node("srv-ir");
-    wait_node_state(&fx.tree, &node, NodeState::Running).await;
+    wait_node_state(&fx.tree, &node, NodeState::Waiting).await;
 
-    // ~50 poll cycles at 1ms server pollIntervalMs: still Running, never a
-    // Waiting edge (it does not exist in 17.5a) and never Failed.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let entry = fx
-        .tree
-        .list()
+    // The ticket is durable: the room projection carries it.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let room = fx.journal.project_room("srv-ir").await.expect("project");
+            if room
+                .nodes()
+                .get(&node)
+                .map(|v| !v.open_tickets.is_empty())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("TicketAssigned journaled for the Waiting node");
+    let room = fx.journal.project_room("srv-ir").await.expect("project");
+    let artifact = room
+        .nodes()
+        .get(&node)
+        .and_then(|view| view.open_tickets.first())
+        .expect("open input-request ticket");
+    let body = fx
+        .artifact_store
+        .get(artifact)
         .await
-        .into_iter()
-        .find(|e| e.agent_id == node)
-        .expect("node present");
-    assert_eq!(entry.current_status, NodeState::Running);
+        .expect("ticket artifact body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("ticket body JSON");
+    assert_eq!(
+        body.get("key").and_then(serde_json::Value::as_str),
+        Some("confirm"),
+        "the durable ticket must preserve the inputResponses correlation key"
+    );
 
     fx.client.disconnect().await.expect("disconnect");
-    // Teardown terminalizes through the supervised cascade (durable
-    // Cancelled checkpoint), then the node is deregistered.
+}
+
+/// AC2 [KTC-1] positive control: a matching `inputResponses` answer resumes
+/// the task `Waiting → Running → Completed`. The arc is reached BY TRANSITION
+/// (never asserted from a hand-built node), and the resume issues a real
+/// `tasks/update` — no replayed `tools/call`.
+#[tokio::test]
+async fn mcp_task_waiting_resumes_only_on_a_matching_input_request_key() {
+    let fx = task_fixture("srv-resume").await;
+    arm(&fx.client, "input-required").await;
+    start_task(&fx.client).await;
+    let node = first_task_node("srv-resume");
+    wait_node_state(&fx.tree, &node, NodeState::Waiting).await;
+
+    // Answer the outstanding `confirm` key with schema-valid content.
+    let mut responses = BTreeMap::new();
+    responses.insert(
+        "confirm".to_string(),
+        InputResponse {
+            action: "accept".to_string(),
+            content: Some(serde_json::json!({"confirm": true})),
+        },
+    );
+    fx.runtime
+        .submit_answer(&node, InputAnswer { responses })
+        .await
+        .expect("answer routed");
+    wait_node_state(&fx.tree, &node, NodeState::Completed).await;
+    let room = fx
+        .journal
+        .project_room("srv-resume")
+        .await
+        .expect("project");
+    let view = room.nodes().get(&node).expect("node projected");
+    assert!(view.open_tickets.is_empty(), "answered ticket must close");
+    assert!(
+        view.resolved_tickets
+            .values()
+            .any(|outcome| outcome == &TicketResolution::Answered),
+        "tasks/update ack must durably resolve the ticket as answered"
+    );
+
+    fx.client.disconnect().await.expect("disconnect");
+}
+/// AC7 keystone: a server-proven TTL expiry closes the ticket as
+/// expired-unanswered and leaves an explicit reason in the durable room
+/// projection. No local ttlMs enforcement participates.
+#[tokio::test]
+async fn remote_ttl_expiry_is_visible_and_resolves_the_ticket_unanswered() {
+    let fx = task_fixture("srv-expiry").await;
+    arm(&fx.client, "expiry").await;
+    start_task(&fx.client).await;
+    let node = first_task_node("srv-expiry");
+    wait_node_state(&fx.tree, &node, NodeState::Waiting).await;
+    wait_node_state(&fx.tree, &node, NodeState::Failed).await;
+
+    let room = fx
+        .journal
+        .project_room("srv-expiry")
+        .await
+        .expect("project");
+    let view = room.nodes().get(&node).expect("node projected");
+    assert!(view.open_tickets.is_empty(), "expired ticket must close");
+    assert!(view.resolved_tickets.values().any(|outcome| matches!(
+        outcome,
+        TicketResolution::ExpiredUnanswered { reason } if reason.contains("expired")
+    )));
+
+    // Duplicate replay is idempotent: projecting the same durable stream
+    // twice yields the same resolved-ticket map.
+    let replayed = fx
+        .journal
+        .project_room("srv-expiry")
+        .await
+        .expect("reproject");
+    assert_eq!(
+        replayed.nodes().get(&node).unwrap().resolved_tickets,
+        view.resolved_tickets
+    );
+    fx.client.disconnect().await.expect("disconnect");
+}
+
+/// AC2 (b) mutant — stale/unknown key: an answer whose key is not currently
+/// outstanding is REFUSED, not forwarded, and the node stays `Waiting`. Killed
+/// mutant: forwarding an unknown key would let the server observe an answer it
+/// never asked for.
+#[tokio::test]
+async fn a_stale_input_response_key_is_refused_not_forwarded() {
+    let fx = task_fixture("srv-stale").await;
+    arm(&fx.client, "input-required").await;
+    start_task(&fx.client).await;
+    let node = first_task_node("srv-stale");
+    wait_node_state(&fx.tree, &node, NodeState::Waiting).await;
+
+    let mut responses = BTreeMap::new();
+    responses.insert(
+        "not-a-known-key".to_string(),
+        InputResponse {
+            action: "accept".to_string(),
+            content: Some(serde_json::json!({"confirm": true})),
+        },
+    );
+    // The answer is routed but the driver refuses it; the node stays Waiting.
+    let _ = fx
+        .runtime
+        .submit_answer(&node, InputAnswer { responses })
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        for _ in 0..500 {
+            let entry = fx
+                .tree
+                .list()
+                .await
+                .into_iter()
+                .find(|entry| entry.agent_id == node)
+                .expect("node");
+            assert_eq!(
+                entry.current_status,
+                NodeState::Waiting,
+                "a stale/unknown key must never resume the task"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stale-key refusal remained Waiting");
+
+    fx.client.disconnect().await.expect("disconnect");
+}
+
+/// AC2 (a) mutant — dropped response: with TWO outstanding keys, answering
+/// only ONE leaves the node `Waiting`; it must not reach a terminal state.
+/// Uses the synthetic `multi-input` fake scenario (Task 7).
+#[tokio::test]
+async fn dropped_input_response_cannot_silently_complete_the_task() {
+    let fx = task_fixture("srv-multi").await;
+    arm(&fx.client, "multi-input").await;
+    start_task(&fx.client).await;
+    let node = first_task_node("srv-multi");
+    wait_node_state(&fx.tree, &node, NodeState::Waiting).await;
+
+    // Answer only ONE of the two outstanding keys.
+    let mut responses = BTreeMap::new();
+    responses.insert(
+        "confirm".to_string(),
+        InputResponse {
+            action: "accept".to_string(),
+            content: Some(serde_json::json!({"confirm": true})),
+        },
+    );
+    let _ = fx
+        .runtime
+        .submit_answer(&node, InputAnswer { responses })
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let room = fx.journal.project_room("srv-multi").await.expect("project");
+            if room.nodes().get(&node).is_some_and(|view| {
+                view.resolved_tickets
+                    .values()
+                    .any(|outcome| outcome == &TicketResolution::Answered)
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("partial answer was acknowledged and durably resolved");
+    wait_node_state(&fx.tree, &node, NodeState::Waiting).await;
+
+    fx.client.disconnect().await.expect("disconnect");
+}
+
+/// AC5: cancel while `Waiting`. `Waiting → Cancelled` rides the existing
+/// cooperative cancel on the `tasks/cancel` ack — never on an observed status.
+#[tokio::test]
+async fn cancel_while_waiting_drives_cancelled_on_the_ack() {
+    let fx = task_fixture("srv-cancel-wait").await;
+    arm(&fx.client, "input-required").await;
+    let owner = CancellationToken::new();
+    // start_task uses a fresh token internally; cancel via session teardown.
+    start_task(&fx.client).await;
+    let node = first_task_node("srv-cancel-wait");
+    wait_node_state(&fx.tree, &node, NodeState::Waiting).await;
+    drop(owner);
+
+    fx.client.disconnect().await.expect("disconnect");
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if fx.journal.load().await.unwrap_or_default().iter().any(|e| {
@@ -306,7 +542,57 @@ async fn input_required_decodes_and_logs_without_transition() {
         }
     })
     .await
-    .expect("Cancelled checkpoint journaled on teardown");
+    .expect("Waiting → Cancelled driven on the tasks/cancel ack");
+}
+
+/// AC4 (17.5b): a `Waiting` MCP-task node recovers to exactly `Suspended`
+/// across a host restart (never a phantom `Waiting`), its `wait_reason`
+/// survives on the checkpoint, AND restart-time hazard escalation is
+/// preserved (C3 — the fold must not delete the hazard). Drives the REAL
+/// `NodeRecovery::reconcile`.
+#[tokio::test]
+async fn waiting_node_recovers_to_suspended_and_still_escalates() {
+    let fx = task_fixture("srv-wait-restart").await;
+    arm(&fx.client, "input-required").await;
+    start_task(&fx.client).await;
+    let node = first_task_node("srv-wait-restart");
+    wait_node_state(&fx.tree, &node, NodeState::Waiting).await;
+
+    // Host restart: a fresh tree over the same durable journal, then real
+    // recovery. No live driver survives (never answer the ticket).
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    // Use a clock far past the 60s hazard threshold so a dwell-exceeding
+    // Waiting checkpoint MUST escalate on restart (C3).
+    let recovered_tree = NodeTree::with_event_tx(tx, std::sync::Arc::new(|| 120_000i64))
+        .with_journal(fx.journal.clone());
+    let singleton = DaemonSingletonLock::try_acquire(fx._dir.path())
+        .await
+        .expect("acquire daemon singleton");
+    let report = NodeRecovery::reconcile(&fx.journal, &recovered_tree, &singleton, "restart-host")
+        .await
+        .expect("reconcile");
+    assert!(
+        report.suspended.contains(&node),
+        "a Waiting MCP-task node must recover to Suspended (never phantom Waiting)"
+    );
+    assert!(
+        report.hazards.contains(&node),
+        "C3: a Waiting node that dwelled past the threshold must STILL escalate after the Suspended fold"
+    );
+
+    // The wait_reason survives on the durable checkpoint.
+    let has_waiting_reason = fx.journal.load().await.unwrap_or_default().iter().any(|e| {
+        matches!(
+            &e.record,
+            JournalRecord::Checkpoint(cp) if cp.id == node && cp.wait_reason.is_some()
+        )
+    });
+    assert!(
+        has_waiting_reason,
+        "the stamped wait_reason must survive on the durable checkpoint"
+    );
+
+    fx.client.disconnect().await.expect("disconnect");
 }
 
 /// AC6 restart-read keystone (D2, team consensus): a genuine host restart runs

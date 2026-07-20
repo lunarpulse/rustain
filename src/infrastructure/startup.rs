@@ -1602,7 +1602,9 @@ pub async fn run() -> Result<()> {
             // `RoomJournal`); the MCP adapter never holds a concrete
             // `NodeTree`/`NodeJournal` (ADR-17-5-01 D2).
             #[cfg(feature = "mcp")]
-            {
+            let mcp_task_runtimes: Vec<
+                Arc<crate::adapters::mcp::task_driver::McpTaskRuntime>,
+            > = {
                 let task_nodes: Arc<dyn crate::domain::ports::TaskNodes> =
                     subagent_registry.clone();
                 let supervised: Arc<dyn crate::domain::ports::SupervisedNodes> =
@@ -1614,17 +1616,19 @@ pub async fn run() -> Result<()> {
                     ));
                 let task_clock: Arc<dyn crate::domain::clock::Clock> =
                     Arc::new(crate::domain::clock::SystemClock::default());
+                let mut runtimes = Vec::new();
                 for client in composite.mcp_clients() {
-                    client.set_task_runtime(Arc::new(
-                        crate::adapters::mcp::task_driver::McpTaskRuntime::new(
-                            task_nodes.clone(),
-                            supervised.clone(),
-                            room.clone(),
-                            task_clock.clone(),
-                        ),
+                    let runtime = Arc::new(crate::adapters::mcp::task_driver::McpTaskRuntime::new(
+                        task_nodes.clone(),
+                        supervised.clone(),
+                        room.clone(),
+                        task_clock.clone(),
                     ));
+                    client.set_task_runtime(Arc::clone(&runtime));
+                    runtimes.push(runtime);
                 }
-            }
+                runtimes
+            };
             let authority_provider: Arc<dyn crate::domain::ports::AuthorityProvider> = Arc::new(
                 crate::adapters::authority::InProcessAuthorityProvider::new(
                     authority_ledger.clone(),
@@ -1802,6 +1806,28 @@ pub async fn run() -> Result<()> {
                 "local",
                 format!("workspace:{}", workspace_path.display()),
             );
+            // 17.5b (Task 6): wire the input-request artifact sink into every
+            // MCP task runtime. The coordinator authority + host are
+            // orchestrator-only fields; the sink impl supplies them so the
+            // adapter stays free of authority plumbing.
+            #[cfg(feature = "mcp")]
+            {
+                let sink_room: Arc<dyn crate::domain::ports::RoomJournal> =
+                    Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
+                        node_journal.clone(),
+                        Some(domain_tx.clone()),
+                    ));
+                let sink: Arc<dyn crate::domain::ports::ArtifactSink> =
+                    Arc::new(crate::infrastructure::subagent::JournalArtifactSink::new(
+                        artifact_store.clone(),
+                        sink_room,
+                        root_authority.id,
+                        artifact_host.clone(),
+                    ));
+                for runtime in &mcp_task_runtimes {
+                    runtime.set_artifact_sink(sink.clone());
+                }
+            }
             let patch_merge_back =
                 Arc::new(crate::infrastructure::orchestrator::PatchMergeBack::new(
                     workspace_path.clone(),

@@ -8,8 +8,8 @@
 //! The one exception is [`rmcp::model::TaskStatus`], whose five snake_case
 //! variants are byte-correct against the RC and the capture.
 //!
-//! Scope (17.5a): `tasks/get` and `tasks/cancel` only. `tasks/update` is
-//! 17.5b's method; there is deliberately no type for it here.
+//! Scope (17.5a + 17.5b): `tasks/get`, `tasks/cancel`, and `tasks/update`
+//! (the elicitation resume method — [`InputResponse`] / [`TasksUpdateParams`]).
 
 use std::collections::BTreeMap;
 
@@ -23,6 +23,7 @@ pub use rmcp::model::TaskStatus;
 /// Wire method names (sent via `ClientRequest::CustomRequest`).
 pub const TASKS_GET_METHOD: &str = "tasks/get";
 pub const TASKS_CANCEL_METHOD: &str = "tasks/cancel";
+pub const TASKS_UPDATE_METHOD: &str = "tasks/update";
 
 /// `resultType` discriminator on a `tools/call` reply that created a task (R-13).
 pub const RESULT_TYPE_TASK: &str = "task";
@@ -103,8 +104,9 @@ pub struct TaskGetReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<TaskError>,
     /// Outstanding input requests when `status == "input_required"`.
-    /// Keys are unique over the task lifetime. Decoded, never interpreted,
-    /// in 17.5a (the resume path is 17.5b).
+    /// Keys are unique over the task lifetime. The driver correlates an
+    /// answer by key (R-6) and resumes via `tasks/update` — never a replayed
+    /// `tools/call`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_requests: Option<BTreeMap<String, InputRequest>>,
 }
@@ -125,6 +127,26 @@ pub struct InputRequest {
     pub method: String,
     #[serde(default)]
     pub params: Value,
+}
+
+/// The operator's answer to one outstanding [`InputRequest`] (captured:
+/// `{action, content?}` where action is `"accept" | "decline" | "cancel"`).
+/// `decline`/`cancel` are forwarded verbatim, never locally mapped (R-10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputResponse {
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Value>,
+}
+
+/// Params for `tasks/update` (captured: `{taskId, inputResponses}` + `_meta`).
+/// Serialize-only — rustain only ever SENDS this shape (mirroring
+/// [`TaskIdParams`]). `BTreeMap` keeps wire ordering deterministic.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TasksUpdateParams {
+    pub task_id: String,
+    pub input_responses: BTreeMap<String, InputResponse>,
 }
 
 /// Ack reply for `tasks/cancel` (and, in 17.5b, `tasks/update`).
@@ -373,6 +395,76 @@ mod tests {
             serde_json::to_value(&params).unwrap(),
             serde_json::json!({"taskId": "task-abc"})
         );
+    }
+
+    #[test]
+    fn tasks_update_params_round_trip_the_captured_resume_transcript() {
+        // The pinned transcript is the ground truth for the resume wire shape:
+        // serializing `TasksUpdateParams` must reproduce its `params` object
+        // exactly (minus `_meta`, which the transport stamps per request).
+        let path = format!(
+            "{}/../_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/transcripts/22_tasks_update_resume.request.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("transcript {path}: {e}"));
+        let request: Value = serde_json::from_str(&raw).expect("transcript parses");
+        assert_eq!(
+            request.get("method").and_then(Value::as_str),
+            Some(TASKS_UPDATE_METHOD)
+        );
+        let captured_params = request.get("params").cloned().expect("params present");
+        let captured_params = {
+            let mut obj = captured_params
+                .as_object()
+                .expect("params is an object")
+                .clone();
+            obj.remove("_meta").expect("captured params carry _meta");
+            Value::Object(obj)
+        };
+
+        let mut input_responses = BTreeMap::new();
+        input_responses.insert(
+            "elicit-1".to_string(),
+            InputResponse {
+                action: "accept".to_string(),
+                content: Some(serde_json::json!({"confirm": true})),
+            },
+        );
+        let params = TasksUpdateParams {
+            task_id: "task-efa06cd4cfd1c2703c8b857c".to_string(),
+            input_responses,
+        };
+        assert_eq!(
+            serde_json::to_value(&params).expect("serializes"),
+            captured_params,
+            "TasksUpdateParams must serialize to the captured wire bytes"
+        );
+    }
+
+    #[test]
+    fn input_response_serializes_action_only_when_content_is_absent() {
+        // `decline`/`cancel` answers may carry no content (R-10); the field
+        // must be omitted from the wire, not serialized as null.
+        let response = InputResponse {
+            action: "decline".to_string(),
+            content: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            serde_json::json!({"action": "decline"})
+        );
+    }
+
+    #[test]
+    fn update_ack_fixture_decodes_tolerantly() {
+        // R-1: `tasks/update` accepts BOTH `{}` and `{"resultType":"complete"}`
+        // — the next `tasks/get` observes whether the task actually left
+        // `input_required`, so over-tolerance here is self-correcting.
+        let ack: TaskAck = serde_json::from_value(fixture("update_ack.json")).expect("decodes");
+        assert_eq!(ack.result_type.as_deref(), Some("complete"));
+        let empty: TaskAck = serde_json::from_value(serde_json::json!({})).expect("empty decodes");
+        assert_eq!(empty.result_type, None);
     }
 
     #[test]
