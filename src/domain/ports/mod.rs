@@ -48,6 +48,8 @@ mod provider_info;
 #[allow(unused_imports)]
 mod recall_provider;
 #[allow(unused_imports)]
+mod room_journal;
+#[allow(unused_imports)]
 mod sandbox;
 #[allow(unused_imports)]
 mod scheduler;
@@ -66,6 +68,7 @@ mod storage;
 #[allow(unused_imports)]
 mod subagent_runner;
 mod supervised_nodes;
+mod task_nodes;
 #[allow(unused_imports)]
 mod tool_exposure;
 #[allow(unused_imports)]
@@ -107,6 +110,7 @@ pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};
 pub use provider_info::ProviderInfoPort;
 pub use recall_provider::RecallProviderPort;
+pub use room_journal::{RoomJournal, RoomJournalError};
 pub use sandbox::SandboxManager;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;
@@ -114,6 +118,7 @@ pub use session_holder::{HeldSession, HolderState, SessionHolderPort};
 pub use session_port::SessionPort;
 pub use subagent_runner::SubagentRunner;
 pub use supervised_nodes::{SupervisedNodes, SupervisedNodesError};
+pub use task_nodes::{TaskNodeHandle, TaskNodes, TaskNodesError};
 pub use wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
 pub mod search;
 pub use search::{IndexableItem, MetaSearchEngine, MetaSearchError};

@@ -278,6 +278,66 @@ impl crate::domain::ports::SupervisedNodes for NodeTree {
     }
 }
 
+/// Story 17.5a (ADR-17-5-01 D2): the single-node lifecycle seam external-task
+/// drivers reach through. Mirrors the A2A driver's materialize recipe
+/// (`a2a/driver.rs`) but behind a domain port so `adapters/mcp` never imports
+/// `infrastructure/`. Registration reuses `register_peer` —
+/// `OwnershipKind::Peer`, `NodeOrigin::Remote`, `NodeHandle::Local` — so
+/// `cascade_kill`, recovery, and the durable checkpoint path behave exactly
+/// as they do for A2A peer nodes.
+#[async_trait::async_trait]
+impl crate::domain::ports::TaskNodes for NodeTree {
+    async fn register_task_node(
+        &self,
+        node_id: &AgentId,
+        subagent_type: &str,
+    ) -> Result<crate::domain::ports::TaskNodeHandle, crate::domain::ports::TaskNodesError> {
+        use crate::domain::ports::{TaskNodeHandle, TaskNodesError};
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let (status_tx, _) = watch::channel(NodeState::Created);
+        let (_, metrics_rx) = watch::channel(AgentMetrics::default());
+        self.register_peer(
+            node_id.clone(),
+            AgentHandle {
+                agent_id: node_id.clone(),
+                token: crate::domain::models::CapabilityTokenId::nil(),
+                command_tx,
+                cancel_token: cancel_token.clone(),
+                depth: 0,
+                subagent_type: subagent_type.to_string(),
+                spawned_at: 0,
+                status: status_tx,
+                metrics: metrics_rx,
+                isolated: false,
+                mailbox_budget: MailboxBudget::new(),
+            },
+        )
+        .await
+        .map_err(|error| TaskNodesError::Internal(error.to_string()))?;
+        Ok(TaskNodeHandle {
+            cancel_token,
+            command_rx,
+        })
+    }
+
+    async fn try_set_state(
+        &self,
+        node_id: &AgentId,
+        target: NodeState,
+    ) -> Result<(), crate::domain::ports::TaskNodesError> {
+        use crate::domain::ports::TaskNodesError;
+        match NodeTree::try_set_state(self, node_id, target).await {
+            Ok(()) => Ok(()),
+            Err(SetStateError::NotFound(id)) => Err(TaskNodesError::NotFound(id)),
+            Err(SetStateError::InvalidTransition { from, to }) => {
+                Err(TaskNodesError::InvalidTransition { from, to })
+            }
+            Err(SetStateError::Durability(msg)) => Err(TaskNodesError::Internal(msg)),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OwnerCommandError {
     #[error("agent not found: {0:?}")]

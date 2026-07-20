@@ -544,6 +544,42 @@ pub enum JournalError {
     SequenceExhausted,
 }
 
+/// Concrete [`crate::domain::ports::RoomJournal`] over a `NodeJournal` +
+/// the domain-event bus (Story 17.5a, ADR-17-5-01 D2). Durable-first,
+/// bus-second: the journal append must succeed before the bus emit is
+/// attempted, matching `orchestrator::persist_room_event`.
+pub struct NodeRoomJournal {
+    journal: std::sync::Arc<NodeJournal>,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>>,
+}
+
+impl NodeRoomJournal {
+    pub fn new(
+        journal: std::sync::Arc<NodeJournal>,
+        event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>>,
+    ) -> Self {
+        Self { journal, event_tx }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::domain::ports::RoomJournal for NodeRoomJournal {
+    async fn record_event(
+        &self,
+        event: RoomEvent,
+    ) -> Result<(), crate::domain::ports::RoomJournalError> {
+        use crate::domain::ports::RoomJournalError;
+        self.journal
+            .append_room(event.clone())
+            .await
+            .map_err(|error| RoomJournalError::Append(error.to_string()))?;
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(crate::domain::events::AppEvent::DomainEvent(event.into()));
+        }
+        Ok(())
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum RecoveryError {

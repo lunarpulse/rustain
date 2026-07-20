@@ -20,7 +20,7 @@ name = "fake-mcp-server"
 path = "tests/common/fake_mcp_server.rs"
 test = true
 bench = false
-required-features = ["mcp"]
+required-features = ["test-fake-mcp"]
 [[bin]]
 name = "startup-panic-harness"
 path = "tests/common/startup_panic_harness.rs"
@@ -209,6 +209,7 @@ ollama = ["dep:reqwest"]
 # resolver + disk-cache logic compile unconditionally (pure serde/fs).
 models-dev = ["dep:reqwest"]
 mcp = ["dep:rmcp"]
+test-fake-mcp = ["mcp", "rmcp/server"]
 # DF-17-4a-6: composite_toolset_adapter remains MCP-gated across its lifecycle surface.
 a2a = ["mcp", "dep:reqwest", "dep:serde_jcs"]
 skills-validation = []

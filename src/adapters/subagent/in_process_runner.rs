@@ -6330,6 +6330,12 @@ mod tests {
                         "journal HostBoundUnavailable node={n} host={host:?}"
                     ));
                 }
+                RoomEvent::McpTaskBound { node, server, task } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal McpTaskBound node={n} server={server:?} task={task:?}"
+                    ));
+                }
             }
         }
         for ev in &trace.app_events {

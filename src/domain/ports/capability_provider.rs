@@ -222,6 +222,100 @@ mod a2a_conformance {
     }
 
     #[test]
+    fn every_mcp_integration_test_is_wired_into_the_ci_mcp_lane() {
+        // Story 17.5a. The default CI job runs only `cargo test --lib`, which
+        // leaves integration targets false-green unless the MCP lane names them.
+        //
+        // Select by observable MCP behavior, not filename: a target either
+        // exercises production adapter/client code, starts the in-tree fake
+        // server with an MCP spec, or verifies MCP's canonical approval
+        // namespace. The narrow exclusions avoid unrelated tests that merely
+        // inspect the MCP error type or mention the fake in a comment.
+        //
+        // Adding a behavioral MCP target? Add `--test <name>` to the `mcp` job in
+        // .github/workflows/ci.yml. This guard runs under `cargo test --lib`, so
+        // the omission fails in the default lane too.
+        fn exercises_mcp_surface(content: &str) -> bool {
+            let exercises_adapter = content.contains("rustain::adapters::mcp::")
+                && !content.contains("rustain::adapters::mcp::error::McpError");
+            let spawns_fake =
+                content.contains("fake-mcp-server") && content.contains("McpServerSpec");
+            let verifies_approval_namespace =
+                content.contains("mcp__") && content.contains("ApprovalSource");
+
+            exercises_adapter
+                || content.contains("McpClientAdapter")
+                || spawns_fake
+                || verifies_approval_namespace
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut targets = Vec::new();
+        for entry in std::fs::read_dir(root.join("tests"))
+            .expect("tests/ must be readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "rs")
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                && exercises_mcp_surface(
+                    &std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                        panic!("{} must be readable: {error}", path.display())
+                    }),
+                )
+            {
+                targets.push(stem.to_owned());
+            }
+        }
+        targets.sort();
+        assert!(
+            !targets.is_empty(),
+            "expected behavioral MCP integration tests under tests/"
+        );
+
+        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+            .expect(".github/workflows/ci.yml must be readable");
+        let mut in_mcp_lane = false;
+        let mut ci_targets = Vec::new();
+        for line in ci.lines() {
+            if line == "  mcp:" {
+                in_mcp_lane = true;
+                continue;
+            }
+            if in_mcp_lane && line.starts_with("  ") && !line.starts_with("    ") {
+                break;
+            }
+            if in_mcp_lane
+                && let Some(target) = line
+                    .trim_start()
+                    .strip_prefix("--test ")
+                    .and_then(|rest| rest.split_whitespace().next())
+            {
+                ci_targets.push(target);
+            }
+        }
+        assert!(
+            in_mcp_lane,
+            "expected an `mcp` job in .github/workflows/ci.yml"
+        );
+
+        // Parsing complete `--test` arguments makes `conformance_mcp` distinct
+        // from `conformance_mcp_config`; a substring check would not.
+        let missing: Vec<&str> = targets
+            .iter()
+            .map(String::as_str)
+            .filter(|stem| !ci_targets.iter().any(|target| target == stem))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "MCP integration tests exist that the CI `mcp` lane never runs — a test that \
+             never executes is a false green. Add `--test <name>` to the `mcp` job in \
+             .github/workflows/ci.yml for: {missing:?}"
+        );
+    }
+
+    #[test]
     fn a2a_adapter_never_calls_the_silent_set_state_shim() {
         // Story 17.4b (R-E), CI-enforced in the DEFAULT lane (runs under
         // `cargo test --lib`). The node tree's `set_state` returns `()` and silently

@@ -1214,6 +1214,8 @@ pub fn build_daemon_core(
     channel_turn_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::domain::models::ChannelTurnRequest>,
     >,
+    _node_tree: crate::infrastructure::subagent::NodeTree,
+    _node_journal: Arc<crate::infrastructure::subagent::NodeJournal>,
 ) -> Result<crate::adapters::daemon::runtime::DaemonCore, AdapterCompositionError> {
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
     use crate::adapters::filesystem::FileSystemStorage;
@@ -1262,6 +1264,10 @@ pub fn build_daemon_core(
         let security = security.clone();
         let domain_tx = domain_tx.clone();
         let channel_turn_tx = channel_turn_tx.clone();
+        #[cfg(feature = "mcp")]
+        let task_node_tree = _node_tree;
+        #[cfg(feature = "mcp")]
+        let task_node_journal = _node_journal;
         Box::new(
             move || -> Result<Arc<DaemonTurnRuntime>, AdapterCompositionError> {
                 let ctx = daemon_compose_context(
@@ -1277,6 +1283,36 @@ pub fn build_daemon_core(
                     layer.router as Arc<dyn StreamingProvider>
                 };
                 let tools = build_tools(&tools_name, None, &ctx)?;
+                // Story 17.5a — deferred MCP Tasks injection preserves the
+                // daemon's lazy provider/tool construction while connecting
+                // every live MCP client to the shared durable node tree.
+                #[cfg(feature = "mcp")]
+                if let Some(composite) = tools.as_any().downcast_ref::<
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
+                >() {
+                    let task_nodes: Arc<dyn crate::domain::ports::TaskNodes> =
+                        Arc::new(task_node_tree.clone());
+                    let supervised: Arc<dyn crate::domain::ports::SupervisedNodes> =
+                        Arc::new(task_node_tree.clone());
+                    let room: Arc<dyn crate::domain::ports::RoomJournal> =
+                        Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
+                            task_node_journal.clone(),
+                            Some(domain_tx.clone()),
+                        ));
+                    let task_clock: Arc<dyn crate::domain::clock::Clock> =
+                        Arc::new(crate::domain::clock::SystemClock::default());
+                    let task_runtime = Arc::new(
+                        crate::adapters::mcp::task_driver::McpTaskRuntime::new(
+                            task_nodes,
+                            supervised,
+                            room,
+                            task_clock,
+                        ),
+                    );
+                    for client in composite.mcp_clients() {
+                        client.set_task_runtime(Arc::clone(&task_runtime));
+                    }
+                }
                 let context_assembler = build_context_assembler(&ctx)?;
                 // Deny-by-default approval (AC6): NoOp persistence so no stale
                 // "always-allow" rule can undermine the unattended deny policy.

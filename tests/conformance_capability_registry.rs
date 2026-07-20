@@ -5,6 +5,8 @@
 //!
 //! Fake-mcp-server tests are `#[serial]`-annotated per Story 9.1 / 9.2 convention.
 
+mod common;
+
 use std::sync::Arc;
 
 #[cfg(feature = "mcp")]
@@ -371,25 +373,7 @@ fn test_no_new_eventbus_bypass_for_capability_events() {
 #[test]
 #[serial_test::serial]
 fn test_mcp_provider_discover_round_trip() {
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let candidates = [
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ];
-    let command = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates[0].clone());
+    let command = common::fake_mcp_binary();
 
     let spec = rustain::domain::models::McpServerSpec {
         id: "discover-test".to_string(),
@@ -679,25 +663,7 @@ async fn test_registry_holds_all_three_protocols() {
     ));
 
     // Fake MCP server with 2 tools (echo, add)
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let candidates = [
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ];
-    let command = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates[0].clone());
+    let command = common::fake_mcp_binary();
 
     let spec = McpServerSpec {
         id: "three-proto".to_string(),
@@ -950,25 +916,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     ));
 
     // Fake MCP server with 2 tools (echo, add)
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let candidates = [
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ];
-    let command = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates[0].clone());
+    let command = common::fake_mcp_binary();
 
     let spec = McpServerSpec {
         id: "delta-test".to_string(),

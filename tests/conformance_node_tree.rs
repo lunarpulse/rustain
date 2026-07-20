@@ -534,7 +534,21 @@ fn test_import_site_count_pinned() {
     /// Story 17.4b adds the A2A delegation driver (`adapters/a2a/driver.rs`),
     /// which materializes `RemotePeer` nodes through `NodeTree::register_peer` and
     /// projects the remote task lifecycle via `try_set_state` — one new consumer.
-    const EXPECTED: usize = 18;
+    // 18 -> 21 (Story 17.5a): three new sites, all DOCUMENTED, none a new
+    // coupling: (1) `domain/ports/task_nodes.rs` — the port's doc comment
+    // names `NodeTree` as its concrete impl (the MCP adapter itself never
+    // holds one — pinned by `mcp_adapter_production_code_never_imports_
+    // infrastructure`); (2) `adapters/mcp/mod.rs` — the set_state-shim
+    // guard's assertion message names `NodeTree::set_state`; (3)
+    // `adapters/mcp/task_driver.rs` — test-only doubles build a REAL
+    // NodeTree fixture, the a2a/driver.rs test pattern.
+    // 21 -> 22 (Story 17.5a review, finding P1): `infrastructure/composition/
+    // mod.rs` `build_daemon_core` now receives the shared `NodeTree` (+journal)
+    // so it can inject the MCP task runtime into the daemon's composite MCP
+    // clients — the deferred-injection wiring startup.rs already does, extended
+    // to the daemon/ACP composition roots. An infrastructure composition site,
+    // not a domain/executor coupling (still proven by the boundary tests).
+    const EXPECTED: usize = 22;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

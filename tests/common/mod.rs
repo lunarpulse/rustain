@@ -7,6 +7,31 @@ pub mod eval_report_writer;
 #[cfg(feature = "meta-search")]
 pub mod eval_types;
 pub mod stub_subagent;
+#[allow(dead_code)] // used only by targets that spawn the fake-mcp-server
+pub fn fake_mcp_binary() -> std::path::PathBuf {
+    let binary_name = if cfg!(target_os = "windows") {
+        "fake-mcp-server.exe"
+    } else {
+        "fake-mcp-server"
+    };
+    let exe_dir = std::env::current_exe()
+        .expect("current test executable")
+        .parent()
+        .expect("test executable parent")
+        .to_path_buf();
+    for candidate in [
+        exe_dir.join(binary_name),
+        exe_dir.parent().expect("deps parent").join(binary_name),
+    ] {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    panic!(
+        "fake-mcp-server binary not found near {} — ensure this test lane passes `--features test-fake-mcp`",
+        exe_dir.display()
+    );
+}
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;

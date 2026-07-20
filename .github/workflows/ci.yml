@@ -118,6 +118,54 @@ jobs:
             --test a2a_trust_registry \
             --test conformance_a2a_architecture
 
+  mcp:
+    name: MCP Feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Story 17.5a. The Check job runs `cargo test --lib`, so MCP integration
+      # targets would otherwise compile but never execute. Keep this explicit list
+      # fast and honest: the lib guard
+      # `every_mcp_integration_test_is_wired_into_the_ci_mcp_lane`
+      # (src/domain/ports/capability_provider.rs) fails when a behavioral MCP
+      # target is added without a matching `--test` entry here.
+      - name: Test with mcp feature (lib + every MCP integration target)
+        run: |
+          cargo test --lib --features mcp
+          cargo test --features test-fake-mcp \
+            --test conformance_acp_mcp \
+            --test conformance_mcp_config \
+            --test conformance_mcp_lifecycle \
+            --test conformance_mcp_profile_swap \
+            --test conformance_mcp_status_panel \
+            --test conformance_mcp_tool_invocation \
+            --test integration_mcp_approval_persistence \
+            --test integration_mcp_env_expansion \
+            --test integration_mcp_resilience \
+            --test integration_mcp_routing \
+            --test integration_mcp_tasks \
+            --test unit_mcp_content_rendering \
+            --test unit_mcp_unsupported_transport \
+            --test conformance_capability_registry
+
+      # MCP is enabled by default, but the fake server is not: these targets
+      # exercise the MCP surface without `test-fake-mcp`. A true MCP-off build
+      # (`--no-default-features`) is pre-existing broken by DF-17-4a-6: runtime,
+      # startup, and ACP reference MCP-gated adapters before any target compiles.
+      - name: Test MCP targets without test-fake-mcp (default features)
+        run: |
+          cargo test \
+            --test conformance_mcp_config \
+            --test conformance_mcp_profile_swap \
+            --test conformance_mcp_status_panel \
+            --test integration_mcp_approval_persistence \
+            --test integration_mcp_env_expansion \
+            --test unit_mcp_content_rendering \
+            --test unit_mcp_unsupported_transport
+
   vector-search:
     name: Vector Search Feature
     runs-on: ubuntu-latest

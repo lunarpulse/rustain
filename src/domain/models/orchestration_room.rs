@@ -179,6 +179,15 @@ pub enum RoomEvent {
         node: AgentId,
         host: HostBinding,
     },
+    /// An MCP long-running task was bound to a durable node (Story 17.5a).
+    /// `task` is the server-chosen task id; identity is additionally
+    /// recoverable from the node id itself (reversible mint), so this event
+    /// is the room's display/audit record, not the source of truth.
+    McpTaskBound {
+        node: AgentId,
+        server: String,
+        task: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,6 +198,8 @@ pub struct NodeView {
     pub host: HostBinding,
     pub host_bound_unavailable: bool,
     pub last_remote_content: Option<ContentHash>,
+    /// `(server, taskId)` when this node is a bound MCP task (17.5a).
+    pub mcp_task: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -299,6 +310,7 @@ impl OrchestrationRoom {
                         host,
                         host_bound_unavailable: false,
                         last_remote_content: None,
+                        mcp_task: None,
                     },
                 );
             }
@@ -381,6 +393,11 @@ impl OrchestrationRoom {
                 if let Some(view) = self.nodes.get_mut(&node) {
                     view.host = host;
                     view.host_bound_unavailable = true;
+                }
+            }
+            RoomEvent::McpTaskBound { node, server, task } => {
+                if let Some(view) = self.nodes.get_mut(&node) {
+                    view.mcp_task = Some((server, task));
                 }
             }
         }

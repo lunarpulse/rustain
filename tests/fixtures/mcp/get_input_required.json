@@ -1,0 +1,38 @@
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "resultType": "complete",
+    "taskId": "task-efa06cd4cfd1c2703c8b857c",
+    "status": "input_required",
+    "createdAt": "2026-07-19T12:05:39Z",
+    "lastUpdatedAt": "2026-07-19T12:05:39Z",
+    "ttlMs": 300000,
+    "pollIntervalMs": 1000,
+    "inputRequests": {
+      "elicit-1": {
+        "method": "elicitation/create",
+        "params": {
+          "message": "Delete 'spike.txt'?",
+          "requestedSchema": {
+            "type": "object",
+            "properties": {
+              "confirm": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "confirm"
+            ]
+          },
+          "_meta": {
+            "io.modelcontextprotocol/related-task": {
+              "taskId": "task-efa06cd4cfd1c2703c8b857c"
+            }
+          }
+        }
+      }
+    },
+    "requestState": "task-efa06cd4cfd1c2703c8b857c"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 22,
+  "result": {
+    "resultType": "complete",
+    "content": [
+      {
+        "type": "text",
+        "text": "Computation \"spike-nocaps\" completed after 1 seconds. Result: 42."
+      }
+    ]
+  }
+}

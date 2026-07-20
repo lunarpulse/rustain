@@ -20,6 +20,10 @@ pub enum McpError {
     Unsupported(String),
     #[error("MCP tool call failed: {0}")]
     CallToolFailed(String),
+    #[error("MCP task protocol error: {0}")]
+    TaskProtocol(String),
+    #[error("MCP task failed: {0}")]
+    TaskFailed(String),
     #[error("MCP tool call cancelled")]
     Cancelled,
     #[error("Internal error: {0}")]

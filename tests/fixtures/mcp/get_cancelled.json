@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "result": {
+    "resultType": "complete",
+    "taskId": "task-af15c0609bd9be3c39e8726c",
+    "status": "cancelled",
+    "statusMessage": "task was cancelled",
+    "createdAt": "2026-07-19T12:05:41Z",
+    "lastUpdatedAt": "2026-07-19T12:05:41Z",
+    "ttlMs": 300000,
+    "pollIntervalMs": 1000,
+    "requestState": "task-af15c0609bd9be3c39e8726c"
+  }
+}

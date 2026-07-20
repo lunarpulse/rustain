@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "result": {
+    "resultType": "complete",
+    "taskId": "task-d797c26a4380af43f1f653b9",
+    "status": "working",
+    "createdAt": "2026-07-19T12:05:33Z",
+    "lastUpdatedAt": "2026-07-19T12:05:33Z",
+    "ttlMs": 300000,
+    "pollIntervalMs": 1000,
+    "requestState": "task-d797c26a4380af43f1f653b9"
+  }
+}

@@ -41,6 +41,8 @@
 //! (mirrors the 14-9 injected-clock/id-source precedent reused across the ACP
 //! conformance suite).
 
+mod common;
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -530,25 +532,7 @@ async fn build_acp_core_composite_branch_makes_forwarded_mcp_tool_callable() {
     // same resolution `fake_spec` in conformance_mcp_tool_invocation.rs uses.
     // The fixture exposes an `echo` tool: `{"text": "..."}` -> `echo: <text>`,
     // projected to the wire name `mcp__echo-svr__echo`.
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let mut candidates = vec![
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ];
-    let command = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates.remove(0));
+    let command = common::fake_mcp_binary();
 
     let spec = McpServerSpec {
         id: "echo-svr".to_string(),
@@ -657,19 +641,7 @@ async fn close_session_reaps_real_forwarded_mcp_child() {
             .collect()
     }
 
-    let binary_name = "fake-mcp-server";
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let command = [
-        exe_dir.join(binary_name),
-        exe_dir.parent().unwrap().join(binary_name),
-    ]
-    .into_iter()
-    .find(|path| path.exists())
-    .expect("compiled fake-mcp-server");
+    let command = common::fake_mcp_binary();
     let token = format!("reap-probe-{}", std::process::id());
     let workspace = tempfile::tempdir().expect("workspace");
     let config = AppConfig::default();

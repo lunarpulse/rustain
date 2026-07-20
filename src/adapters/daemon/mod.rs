@@ -331,6 +331,8 @@ async fn run_daemon_foreground(
             &memory_adapter,
             domain_tx.clone(),
             Some(channel_turn_tx.clone()),
+            node_tree.clone(),
+            node_journal.clone(),
         )
         .map_err(|e| anyhow::anyhow!("composing daemon core: {e}"))?,
     );

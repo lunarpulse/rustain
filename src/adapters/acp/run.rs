@@ -106,6 +106,43 @@ async fn observe_acp_events(mut events: mpsc::UnboundedReceiver<AppEvent>) {
         tracing::info!(?event, "ACP local lifecycle event");
     }
 }
+/// Decorate a per-session ACP factory once the durable ACP lifecycle seams
+/// exist. Each resulting composite receives one shared runtime for all of its
+/// MCP clients, so disconnect reaps the nodes created by that composite.
+#[cfg(feature = "mcp")]
+fn with_mcp_task_runtime(
+    core_factory: AcpCoreFactory,
+    node_tree: NodeTree,
+    node_journal: Arc<NodeJournal>,
+    domain_tx: mpsc::UnboundedSender<AppEvent>,
+) -> AcpCoreFactory {
+    Rc::new(move |cwd, mcp_servers| {
+        let core = core_factory(cwd, mcp_servers)?;
+        if let Some(composite) = core
+            .tools
+            .as_any()
+            .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>(
+        ) {
+            let task_nodes: Arc<dyn crate::domain::ports::TaskNodes> = Arc::new(node_tree.clone());
+            let supervised: Arc<dyn crate::domain::ports::SupervisedNodes> =
+                Arc::new(node_tree.clone());
+            let room: Arc<dyn crate::domain::ports::RoomJournal> =
+                Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
+                    node_journal.clone(),
+                    Some(domain_tx.clone()),
+                ));
+            let task_clock: Arc<dyn crate::domain::clock::Clock> =
+                Arc::new(crate::domain::clock::SystemClock::default());
+            let task_runtime = Arc::new(crate::adapters::mcp::task_driver::McpTaskRuntime::new(
+                task_nodes, supervised, room, task_clock,
+            ));
+            for client in composite.mcp_clients() {
+                client.set_task_runtime(Arc::clone(&task_runtime));
+            }
+        }
+        Ok(core)
+    })
+}
 
 pub async fn serve_acp_with_acp_core_factory<W, R>(
     outgoing: W,
@@ -125,13 +162,18 @@ where
         Arc::new(move || clock.wall_now_ms())
     };
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    #[cfg(feature = "mcp")]
+    let domain_tx = event_tx.clone();
     let event_observer = tokio::spawn(observe_acp_events(event_rx));
     let node_journal = Arc::new(NodeJournal::open_workspace(&workspace).await?);
     let node_tree = NodeTree::with_event_tx(event_tx, now_fn)
-        .with_journal(node_journal)
+        .with_journal(node_journal.clone())
         .with_host_binding(crate::infrastructure::subagent::current_host_binding(
             &workspace,
         ));
+    #[cfg(feature = "mcp")]
+    let core_factory =
+        with_mcp_task_runtime(core_factory, node_tree.clone(), node_journal, domain_tx);
     let result = serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,
@@ -165,16 +207,21 @@ where
         Arc::new(move || clock.wall_now_ms())
     };
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    #[cfg(feature = "mcp")]
+    let domain_tx = event_tx.clone();
     let event_observer = tokio::spawn(observe_acp_events(event_rx));
     let node_journal = Arc::new(NodeJournal::open_workspace(&workspace).await?);
     let node_tree = NodeTree::with_event_tx(event_tx, now_fn)
-        .with_journal(node_journal)
+        .with_journal(node_journal.clone())
         .with_host_binding(crate::infrastructure::subagent::current_host_binding(
             &workspace,
         ));
     let acp_factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
         core_factory(cwd, mcp_servers).map(crate::infrastructure::composition::AcpCore::from)
     });
+    #[cfg(feature = "mcp")]
+    let acp_factory =
+        with_mcp_task_runtime(acp_factory, node_tree.clone(), node_journal, domain_tx);
     let result = serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,

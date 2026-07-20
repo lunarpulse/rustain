@@ -2,6 +2,7 @@
 //!
 //! Exercises AC-1 through AC-8 using the fake-mcp-server binary
 //! and pure-unit tests on the projection helpers.
+mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,25 +21,7 @@ use tokio_util::sync::CancellationToken;
 // ── Test helpers ────────────────────────────────────────────────────────────
 
 fn fake_spec(id: &str, env: BTreeMap<String, String>) -> McpServerSpec {
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let mut candidates = vec![
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ];
-    let command = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates.remove(0));
+    let command = common::fake_mcp_binary();
     McpServerSpec {
         id: id.to_string(),
         transport: McpTransport::Stdio,
