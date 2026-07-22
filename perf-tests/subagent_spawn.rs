@@ -12,7 +12,7 @@ use rustain::adapters::sandbox::NoOpSandbox;
 use rustain::adapters::security_adapter::SecurityAdapter;
 use rustain::adapters::subagent::InProcessSubagentRunner;
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
-use rustain::domain::models::{AgentLaunchSpec, ModelTier, SandboxPolicy, ToolPolicy};
+use rustain::domain::models::{AgentId, AgentLaunchSpec, ModelTier, SandboxPolicy, ToolPolicy};
 use rustain::domain::ports::SubagentRunner;
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
@@ -113,7 +113,7 @@ async fn subagent_spawn_latency() {
         let cancel = CancellationToken::new();
         let start = Instant::now();
         let handle = runner
-            .launch(spec.clone(), cancel.clone(), None)
+            .launch(spec.clone(), cancel.clone(), None, AgentId::new())
             .await
             .unwrap();
         let elapsed = start.elapsed();
@@ -172,7 +172,7 @@ async fn cancellation_propagation_latency() {
     for _ in 0..iterations {
         let cancel = CancellationToken::new();
         let handle = runner
-            .launch(spec.clone(), cancel.clone(), None)
+            .launch(spec.clone(), cancel.clone(), None, AgentId::new())
             .await
             .unwrap();
         let start = Instant::now();
@@ -215,7 +215,10 @@ async fn memory_rss_per_agent() {
     let mut handles = Vec::new();
     for _ in 0..10 {
         let cancel = CancellationToken::new();
-        let h = runner.launch(spec.clone(), cancel, None).await.unwrap();
+        let h = runner
+            .launch(spec.clone(), cancel, None, AgentId::new())
+            .await
+            .unwrap();
         handles.push(h);
     }
     let after = procfs::process::Process::myself()

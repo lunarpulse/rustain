@@ -163,6 +163,7 @@ impl SubagentRunner for FakeRunner {
         spec: AgentLaunchSpec,
         cancel: CancellationToken,
         parent: Option<&rustain::domain::models::TaskHandle>,
+        agent_id: AgentId,
     ) -> Result<TaskHandle, SubagentError> {
         // Bump the launch counter BEFORE popping the terminal so the spec-named
         // cancel test can assert no new dispatch happens after cancel.
@@ -187,7 +188,6 @@ impl SubagentRunner for FakeRunner {
             let (status_tx, status_rx) = tokio::sync::mpsc::channel::<NodeState>(8);
             let (command_tx, _) = tokio::sync::mpsc::channel::<Op>(8);
             let (parent_disc_tx, _) = tokio::sync::mpsc::unbounded_channel::<()>();
-            let agent_id = AgentId::new();
             let task_id = nanoid::nanoid!(12);
             let child_cancel = cancel.child_token();
             let child_cancel_for_task = child_cancel.clone();
@@ -239,7 +239,6 @@ impl SubagentRunner for FakeRunner {
         // LIVE in the wave path (P1). Cancelled/Failed children emit nothing
         // (salvage/Failed paths).
         let (yield_tx, yield_rx) = tokio::sync::mpsc::channel::<String>(4);
-        let agent_id = AgentId::new();
         let task_id = nanoid::nanoid!(12);
         let child_cancel = cancel.child_token();
         let cancel_for_task = child_cancel.clone();
@@ -301,6 +300,7 @@ impl SubagentRunner for FailingLaunchRunner {
         _spec: AgentLaunchSpec,
         _cancel: CancellationToken,
         _parent: Option<&rustain::domain::models::TaskHandle>,
+        _agent_id: AgentId,
     ) -> Result<TaskHandle, SubagentError> {
         Err(SubagentError::Internal(
             "injected launch failure (PATCH-12 settle coverage)".into(),
@@ -1344,6 +1344,7 @@ async fn murat_child_token_lacking_spawn_is_refused_no_node() {
         child_no_spawn,
         CancellationToken::new(),
         None,
+        AgentId::new(),
     )
     .await
     .err()
@@ -1366,6 +1367,7 @@ async fn murat_pre_revoked_child_token_is_refused() {
         child,
         CancellationToken::new(),
         None,
+        AgentId::new(),
     )
     .await
     .err()
@@ -1388,6 +1390,7 @@ async fn murat_valid_child_token_dispatches_once() {
         child,
         CancellationToken::new(),
         None,
+        AgentId::new(),
     )
     .await
     .unwrap();
@@ -1827,6 +1830,7 @@ async fn patch12_launch_err_settles_gate_token_reservation() {
         gate_token,
         CancellationToken::new(),
         None,
+        AgentId::new(),
     )
     .await
     .err()

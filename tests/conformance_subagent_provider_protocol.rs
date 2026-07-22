@@ -13,6 +13,7 @@ impl rustain::domain::ports::SubagentRunner for StubRunner {
         _spec: rustain::domain::models::AgentLaunchSpec,
         _cancel: tokio_util::sync::CancellationToken,
         _parent: Option<&rustain::domain::models::TaskHandle>,
+        _agent_id: rustain::domain::models::AgentId,
     ) -> Result<rustain::domain::models::TaskHandle, rustain::domain::models::SubagentError> {
         unimplemented!()
     }

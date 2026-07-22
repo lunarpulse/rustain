@@ -416,7 +416,16 @@ impl SubagentProvider {
         );
 
         // 7. Launch
-        let handle = match self.runner.launch(spec, cancel.clone(), None).await {
+        let handle = match self
+            .runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+        {
             Ok(h) => h,
             Err(e) => {
                 return Ok(map_subagent_error(e));

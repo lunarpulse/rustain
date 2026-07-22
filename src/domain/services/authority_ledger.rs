@@ -729,10 +729,44 @@ impl AuthorityLedger {
                 attempted: attempted_depth,
             });
         }
-        if state.scope_to_token.contains_key(&req.scope) {
-            return Err(AuthorityError::Malformed {
-                reason: "scope already has a token",
-            });
+        if let Some(existing_id) = state.scope_to_token.get(&req.scope).copied() {
+            // The scope is already mapped. If the existing entry is inert —
+            // settled or revoked (conservation already transferred to its
+            // parent by `settle_locked`) AND childless — evict it so the scope
+            // is reusable. Deterministic ids (nonce_qualified) make a
+            // retry/rerun-after-pre-spawn-failure reproduce the same scope; the
+            // journal-proof-gated `prune_terminal` cannot run there (no durable
+            // terminal), so re-delegation reclaims the inert scope here. A live
+            // entry, or an inert one with live children, still refuses.
+            let can_evict = state
+                .entries
+                .get(&existing_id)
+                .is_some_and(|entry| entry.settled || entry.revoked)
+                && state
+                    .children
+                    .get(&existing_id)
+                    .is_none_or(|siblings| siblings.is_empty());
+            if !can_evict {
+                return Err(AuthorityError::Malformed {
+                    reason: "scope already has a token",
+                });
+            }
+            let evicted = state
+                .entries
+                .remove(&existing_id)
+                .expect("entry existence verified above");
+            state.scope_to_token.remove(&evicted.token.scope);
+            state.children.remove(&existing_id);
+            state.pending_prune.remove(&existing_id);
+            if let Some(parent) = evicted.token.parent {
+                let parent_now_empty = state.children.get_mut(&parent).is_some_and(|siblings| {
+                    siblings.remove(&existing_id);
+                    siblings.is_empty()
+                });
+                if parent_now_empty {
+                    state.children.remove(&parent);
+                }
+            }
         }
         validate_request_subset(&parent_entry.token, &req)?;
         if !req.budget.is_within(parent_entry.available) {

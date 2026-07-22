@@ -162,7 +162,15 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
     };
 
     let cancel = CancellationToken::new();
-    let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+    let handle = runner
+        .launch(
+            spec,
+            cancel.clone(),
+            None,
+            rustain::domain::models::AgentId::new(),
+        )
+        .await
+        .unwrap();
     assert!(!handle.task_id.is_empty());
     assert_eq!(handle.subagent_type, "in-process");
     handle.cancel.cancel();

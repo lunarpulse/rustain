@@ -1376,7 +1376,15 @@ impl PlanRuntime {
                 .child_token()
         };
 
-        let task_handle = match runner.launch(spec, child_cancel, None).await {
+        let task_handle = match runner
+            .launch(
+                spec,
+                child_cancel,
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+        {
             Ok(handle) => handle,
             Err(e) => {
                 // Revert on launch failure

@@ -242,7 +242,15 @@ async fn status_bridge_registry_list_reflects_child_status() {
     };
 
     let cancel = CancellationToken::new();
-    let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+    let handle = runner
+        .launch(
+            spec,
+            cancel.clone(),
+            None,
+            rustain::domain::models::AgentId::new(),
+        )
+        .await
+        .unwrap();
 
     // Wait for child to emit Running and bridge to mirror it
     let reg = runner.registry();

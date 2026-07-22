@@ -122,6 +122,7 @@ impl SubagentRunner for InProcessSubagentRunner {
         spec: AgentLaunchSpec,
         cancel: CancellationToken,
         parent: Option<&TaskHandle>,
+        agent_id: AgentId,
     ) -> Result<TaskHandle, SubagentError> {
         if parent.is_some_and(|handle| handle.isolated) && !spec.isolated {
             return Err(SubagentError::NonIsolatedNestedLaunchRefused);
@@ -164,8 +165,7 @@ impl SubagentRunner for InProcessSubagentRunner {
         let child_cancel = cancel.child_token();
         let subagent_type = String::from("in-process"); // overridden by caller via TaskHandle
 
-        // 4. Generate IDs
-        let agent_id = AgentId::new();
+        // 4. Generate the task id; the node identity is caller-chosen.
         let task_id = nanoid::nanoid!(12);
         let started_at_ms = self.clock.wall_now_ms();
         let delegation_request = match spec.delegation {
@@ -224,6 +224,10 @@ impl SubagentRunner for InProcessSubagentRunner {
             // `SecurityAdapter` is clone-rooted (roots disagree → isolation
             // silently defeated). This is the AC4 keystone mutant; refuse it.
             if !self.isolation_configured {
+                // Settle the delegated child token before refusing. The id is
+                // deterministic, so an unsettled scope would poison a later
+                // rerun/retry that reproduces (coordinator, spoke, rN).
+                let _ = self.authority.settle(&child_token.id).await;
                 return Err(SubagentError::Internal(
                     "isolated launch requires `.with_isolation(...)` (default tools_factory is parent-rooted)"
                         .to_string(),
@@ -240,12 +244,19 @@ impl SubagentRunner for InProcessSubagentRunner {
                     .validate(&child_token, &CapabilityFlag::WriteFs, &agent_id)
                     .await
                 {
+                    let _ = self.authority.settle(&child_token.id).await;
                     return Err(SubagentError::Internal(format!(
                         "isolated child refused by WriteFs authority gate: {err}"
                     )));
                 }
             }
-            let handle = self.isolation.start(base_workspace).await?;
+            let handle = match self.isolation.start(base_workspace).await {
+                Ok(h) => h,
+                Err(error) => {
+                    let _ = self.authority.settle(&child_token.id).await;
+                    return Err(error.into());
+                }
+            };
             let tools = (self.tools_factory)(handle.path());
             let security = Arc::new(crate::adapters::security_adapter::SecurityAdapter::new(
                 handle.path().to_path_buf(),
@@ -1883,6 +1894,29 @@ mod tests {
     use futures::{StreamExt, stream::BoxStream};
     use std::path::PathBuf;
 
+    #[test]
+    fn launch_path_contains_no_production_agent_id_mint() {
+        let source = include_str!("in_process_runner.rs");
+        let start = source
+            .find("impl SubagentRunner for InProcessSubagentRunner")
+            .expect("production runner impl");
+        let end = source[start..]
+            .find("\n}\n\n/// DF-310")
+            .map(|offset| start + offset)
+            .expect("production runner impl end");
+        let launch_impl = &source[start..end];
+
+        assert!(
+            !launch_impl.contains("AgentId::new()"),
+            "the production launch path must consume its caller-chosen id"
+        );
+        let restored_mint_mutant = "let agent_id = AgentId::new();";
+        assert!(
+            restored_mint_mutant.contains("AgentId::new()"),
+            "positive control: the ratchet recognizes the restored-mint mutant"
+        );
+    }
+
     struct HangingProvider;
 
     #[async_trait::async_trait]
@@ -2177,7 +2211,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
         let agent_id = handle.agent_id.clone();
         let mut status_rx = handle.status_rx;
 
@@ -2301,7 +2343,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
         let agent_id = handle.agent_id.clone();
         let mut status_rx = handle.status_rx;
 
@@ -2405,7 +2455,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
         let agent_id = handle.agent_id.clone();
         let bus = crate::infrastructure::subagent::LocalMessageBus::new(
             (*registry).clone(),
@@ -2498,7 +2556,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
         assert!(!handle.task_id.is_empty());
         // Let it run briefly then kill
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -2527,7 +2593,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
         handle.cancel.cancel();
         // Wait for status
         let mut rx = handle.status_rx;
@@ -2557,7 +2631,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
         let mut status_rx = handle.status_rx;
 
         // Wait for Running — child is now streaming from HangingProvider
@@ -2630,7 +2712,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
         let mut status_rx = handle.status_rx;
 
         // Wait for Running
@@ -2697,7 +2787,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
         let mut status_rx = handle.status_rx;
 
         // Wait for Running
@@ -2792,7 +2890,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
         let mut status_rx = handle.status_rx;
 
         // Wait for Running
@@ -2952,7 +3058,10 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel, None).await.unwrap();
+        let handle = runner
+            .launch(spec, cancel, None, crate::domain::models::AgentId::new())
+            .await
+            .unwrap();
         let mut status_rx = handle.status_rx;
 
         let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2991,7 +3100,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
 
         let _ = handle.command_tx.send(Op::ChangeModel("opus".into())).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -3018,7 +3135,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
 
         let _ = handle
             .command_tx
@@ -3047,7 +3172,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
 
         let mut rx = handle.status_rx;
         let terminal = tokio::time::timeout(tokio::time::Duration::from_millis(500), async {
@@ -3112,7 +3245,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
 
         let crate::domain::models::TaskHandle {
             mut status_rx,
@@ -3174,7 +3315,10 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel, None).await.unwrap();
+        let handle = runner
+            .launch(spec, cancel, None, crate::domain::models::AgentId::new())
+            .await
+            .unwrap();
         let agent_id = handle.agent_id.clone();
         let mut status_rx = handle.status_rx;
 
@@ -3220,7 +3364,15 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
+        let handle = runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
 
         // Send ReportFull
         let _ = handle.command_tx.send(Op::ReportFull).await;
@@ -3376,7 +3528,12 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let handle = runner
-            .launch(spec, CancellationToken::new(), None)
+            .launch(
+                spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .unwrap();
         let task_id = handle.task_id.clone();
@@ -3476,7 +3633,7 @@ mod tests {
         };
         let cancel = CancellationToken::new();
         let mut handle = runner
-            .launch(spec, cancel, None)
+            .launch(spec, cancel, None, crate::domain::models::AgentId::new())
             .await
             .expect("launch should succeed");
 
@@ -3548,7 +3705,14 @@ mod tests {
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
-        let result = runner.launch(spec, CancellationToken::new(), None).await;
+        let result = runner
+            .launch(
+                spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await;
         assert!(
             result.is_err(),
             "P11: isolated launch on the default (parent-rooted) runner must be refused fail-closed"
@@ -3723,10 +3887,100 @@ mod tests {
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
-        let result = runner.launch(spec, CancellationToken::new(), None).await;
+        let result = runner
+            .launch(
+                spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await;
         assert!(
             result.is_err(),
             "AC3: isolation-start failure must refuse the launch, never fall through to the real workspace"
+        );
+    }
+    // Story 17.2d-a fix 3 + ledger scope-reuse: a post-delegation failure
+    // (isolation.start) settles the child token, and the ledger now lets a
+    // later delegation re-use a SETTLED, childless scope. So a retry that
+    // reproduces the same deterministic id is NOT poisoned — it reaches
+    // isolation.start again instead of being refused at delegation.
+    // RED mutants: drop the runner settle (the scope stays LIVE → delegate
+    // refuses "scope already has a token"); drop the ledger inert-eviction
+    // (the settled scope stays mapped → same refusal).
+    #[tokio::test]
+    async fn post_delegation_failure_then_retry_reaches_isolation_not_delegation() {
+        let (runner, tmp) = make_runner().await;
+        let factory_storage = Arc::new(FileSystemStorage::new(tmp.path().to_path_buf()))
+            as Arc<dyn crate::domain::ports::StoragePort>;
+        let factory_sandbox = Arc::new(ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>
+        ));
+        let factory_policy = Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::SandboxPolicy::Permissive,
+        ));
+        let tools_factory: Arc<
+            dyn Fn(&std::path::Path) -> Arc<dyn crate::domain::ports::ToolSetPort> + Send + Sync,
+        > = Arc::new(move |p| {
+            Arc::new(ToolSetAdapter::new(
+                p.to_path_buf(),
+                factory_storage.clone(),
+                factory_sandbox.clone(),
+                factory_policy.clone(),
+            )) as Arc<dyn crate::domain::ports::ToolSetPort>
+        });
+        let runner = runner.with_isolation(
+            tmp.path().to_path_buf(),
+            Arc::new(FailingIsolation) as Arc<dyn crate::domain::ports::IsolationProvider>,
+            tools_factory,
+        );
+        let make_spec = || AgentLaunchSpec {
+            prompt: "iso".to_string(),
+            effective_model: "m".to_string(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: true,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+        };
+        let deterministic_id = crate::domain::models::AgentId::from_validated("retry-scope-id");
+
+        // First launch fails AFTER delegation at isolation.start.
+        let first = runner
+            .launch(
+                make_spec(),
+                CancellationToken::new(),
+                None,
+                deterministic_id.clone(),
+            )
+            .await;
+        assert!(first.is_err(), "first launch must fail at isolation.start");
+
+        // Retry with the SAME deterministic id. With fix 3 (settle) + the
+        // ledger inert-eviction, delegation succeeds and the retry reaches
+        // isolation.start again. Without either it dies at delegation.
+        let second = runner
+            .launch(
+                make_spec(),
+                CancellationToken::new(),
+                None,
+                deterministic_id.clone(),
+            )
+            .await;
+        let second_msg = match second {
+            Ok(_) => String::new(),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(
+            !second_msg.contains("scope already has a token")
+                && !second_msg.contains("authority delegation failed"),
+            "fix 3 + ledger: the deterministic scope must be reusable so the retry reaches isolation.start, not a delegation refusal. Got: {second_msg}"
+        );
+        assert!(
+            second_msg.contains("forced failure") || second_msg.contains("isolation"),
+            "the retry must fail at the isolation stage again. Got: {second_msg}"
         );
     }
     struct PanicIfInvokedProvider;
@@ -4019,11 +4273,15 @@ mod tests {
             spec: AgentLaunchSpec,
             cancel: CancellationToken,
             parent: Option<&TaskHandle>,
+            agent_id: AgentId,
         ) -> Result<TaskHandle, SubagentError> {
             let parent_id = parent.map(|handle| handle.agent_id.clone());
             let handle = match spec.delegation {
                 DelegationProfile::Coordinator { .. } => {
-                    let handle = self.coordinator.launch(spec, cancel, parent).await?;
+                    let handle = self
+                        .coordinator
+                        .launch(spec, cancel, parent, agent_id)
+                        .await?;
                     std::fs::write(
                         handle.effective_workspace.join("parent-only.txt"),
                         "parent-visible\n",
@@ -4031,7 +4289,9 @@ mod tests {
                     .map_err(|error| SubagentError::Internal(error.to_string()))?;
                     handle
                 }
-                DelegationProfile::Child => self.leaf.launch(spec, cancel, parent).await?,
+                DelegationProfile::Child => {
+                    self.leaf.launch(spec, cancel, parent, agent_id).await?
+                }
             };
             self.launches.lock().await.push(NestedLaunchRecord {
                 agent_id: handle.agent_id.clone(),
@@ -4292,7 +4552,12 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let mut h = runner_a
-            .launch(spec, CancellationToken::new(), None)
+            .launch(
+                spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("non-isolated launch");
         assert_eq!(
@@ -4322,7 +4587,12 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let mut h2 = runner_b
-            .launch(spec_iso, CancellationToken::new(), None)
+            .launch(
+                spec_iso,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("isolated launch (with_isolation configured)");
         assert_eq!(
@@ -4375,6 +4645,7 @@ mod tests {
                 },
                 CancellationToken::new(),
                 None,
+                crate::domain::models::AgentId::new(),
             )
             .await
             .expect("real isolated parent launch");
@@ -4394,6 +4665,7 @@ mod tests {
                 },
                 CancellationToken::new(),
                 Some(&parent),
+                crate::domain::models::AgentId::new(),
             )
             .await;
 
@@ -4428,7 +4700,12 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let parent = parent_runner
-            .launch(parent_spec, CancellationToken::new(), None)
+            .launch(
+                parent_spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("real parent launch");
         std::fs::write(
@@ -4453,7 +4730,12 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let mut nested = runner
-            .launch(spec, CancellationToken::new(), Some(&parent))
+            .launch(
+                spec,
+                CancellationToken::new(),
+                Some(&parent),
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("nested isolated launch");
         assert_eq!(
@@ -4520,7 +4802,12 @@ mod tests {
             grandchild_count: 1,
         };
         let parent = parent_runner
-            .launch(parent_spec, CancellationToken::new(), None)
+            .launch(
+                parent_spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("real isolated parent");
         std::fs::write(
@@ -4794,6 +5081,16 @@ mod tests {
         .expect("nested front-door DSL");
         let request = crate::adapters::tui::fanout_spec::to_request(&spec, "m")
             .expect("bounded leaf-only nested request");
+        let coordinator_id = request.coordinator.clone();
+        let coordinator_spoke_id = request.spokes[0].id.clone();
+        let grandchild_spoke_id = match &request.spokes[0].role {
+            crate::domain::models::orchestration::SpokeRole::Coordinator {
+                grandchildren, ..
+            } => grandchildren[0].id.clone(),
+            crate::domain::models::orchestration::SpokeRole::Leaf => {
+                panic!("front-door fixture must contain a coordinator")
+            }
+        };
 
         // Enter the REAL front door — the spawn-and-publish core of
         // `launch_wave_request`. NOT `run_fork_join_run`.
@@ -4905,6 +5202,51 @@ mod tests {
         );
         let coordinator_launch = &launches[0];
         let grandchild_launch = &launches[1];
+        let expected_coordinator = crate::infrastructure::orchestrator::nonce_qualified(
+            &run.coordinator_id,
+            &coordinator_spoke_id,
+            0,
+        );
+        let expected_grandchild = crate::infrastructure::orchestrator::nonce_qualified(
+            &expected_coordinator,
+            &grandchild_spoke_id,
+            0,
+        );
+        assert_eq!(
+            coordinator_launch.agent_id, expected_coordinator,
+            "restoring the runner-local AgentId::new() mint must turn this RED"
+        );
+        assert_eq!(
+            grandchild_launch.agent_id, expected_grandchild,
+            "nested dispatch must qualify the grandchild with its live coordinator id"
+        );
+        assert_eq!(coordinator_launch.token.scope, coordinator_launch.agent_id);
+        assert_eq!(grandchild_launch.token.scope, grandchild_launch.agent_id);
+        assert_ne!(
+            coordinator_launch.agent_id,
+            crate::infrastructure::orchestrator::nonce_qualified(
+                &AgentId::from_validated("label-only-guess"),
+                &coordinator_spoke_id,
+                0,
+            ),
+            "a predictable spoke label is insufficient without the coordinator nonce"
+        );
+        // AC-a2 (root path): the live id is NOT derivable from the request's
+        // root coordinator scope alone — the per-wave nonce supplies entropy
+        // even though `request.coordinator` is the constant `AgentId::root()`.
+        assert_ne!(
+            coordinator_launch.agent_id,
+            crate::infrastructure::orchestrator::nonce_qualified(
+                &coordinator_id,
+                &coordinator_spoke_id,
+                0,
+            ),
+            "the live coordinator id must not be derivable from the root scope without the wave nonce"
+        );
+        assert_ne!(
+            run.coordinator_id, coordinator_id,
+            "the root wave mints a fresh nonce distinct from request.coordinator"
+        );
         assert_eq!(coordinator_launch.parent, None);
         assert_eq!(
             grandchild_launch.parent.as_ref(),
@@ -4967,6 +5309,211 @@ mod tests {
             room.waves().iter().all(|wave| wave.outcome.is_some()),
             "root + non-root waves must each record a WaveCompleted outcome"
         );
+    }
+
+    /// Story 17.2d-a AC-a1/a2 — two front-door fan-outs reuse the same
+    /// request-local spoke id but carry distinct coordinator nonces. Both ids
+    /// must survive real NodeTree registration, and a rerun must coexist with
+    /// the retained first registration.
+    ///
+    /// RED mutants: drop the coordinator component (the second registration
+    /// hits the duplicate-id guard); drop the rerun counter (the rerun hits the
+    /// same guard); restore the runner-local mint (the golden ids diverge).
+    #[tokio::test]
+    async fn model_b_front_door_disambiguates_dags_and_retained_reruns() {
+        let real = tempfile::tempdir().unwrap();
+        let registry = Arc::new(NodeTree::new());
+        let (mut runner_a, _, _) = make_runner_with_provider_on_registry(
+            real.path(),
+            true,
+            Arc::new(AdmissionProbeProvider::new(2)),
+            registry.clone(),
+        )
+        .await;
+        let mut runner_b = runner_a.clone();
+
+        let root_a = CapabilityToken::r1_root(AgentId::root());
+        let ledger_a = Arc::new(
+            crate::domain::services::authority_ledger::AuthorityLedger::new(
+                root_a.clone(),
+                Arc::new(crate::domain::clock::SystemClock::default()),
+            ),
+        );
+        let authority_a = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger_a.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        runner_a.authority = authority_a.clone();
+        runner_a.root_authority = root_a.clone();
+
+        let root_b = CapabilityToken::r1_root(AgentId::root());
+        let ledger_b = Arc::new(
+            crate::domain::services::authority_ledger::AuthorityLedger::new(
+                root_b.clone(),
+                Arc::new(crate::domain::clock::SystemClock::default()),
+            ),
+        );
+        let authority_b = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger_b.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        runner_b.authority = authority_b.clone();
+        runner_b.root_authority = root_b.clone();
+
+        let (event_bus, mut event_rx) = EventBus::new(256);
+        let event_bus = Arc::new(event_bus);
+        let executor_a = Arc::new(crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner_a),
+            authority_a,
+            ledger_a.clone(),
+            event_bus.clone(),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root_a.clone(),
+        ));
+        let executor_b = Arc::new(crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner_b),
+            authority_b,
+            ledger_b.clone(),
+            event_bus.clone(),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root_b.clone(),
+        ));
+
+        let fanout = crate::adapters::tui::fanout_spec::parse_fanout(Some("1 identity"))
+            .expect("single-spoke front-door fixture");
+        let request_a = crate::adapters::tui::fanout_spec::to_request(&fanout, "m")
+            .expect("bounded single-spoke request");
+        // Both requests carry the REAL production coordinator (`AgentId::root()`)
+        // and the same caller-chosen spoke id — the AC-a1 collision case. Each
+        // wave must still mint a distinct per-wave nonce (fix: root-wave nonce).
+        let request_b = request_a.clone();
+        let spoke_id = request_a.spokes[0].id.clone();
+
+        crate::infrastructure::runtime::event_loop::spawn_wave_run(
+            executor_a.clone() as Arc<dyn crate::domain::ports::Orchestrator>,
+            event_bus.clone(),
+            "model-b-a".to_string(),
+            request_a.clone(),
+            CancellationToken::new(),
+            1,
+        );
+        crate::infrastructure::runtime::event_loop::spawn_wave_run(
+            executor_b.clone() as Arc<dyn crate::domain::ports::Orchestrator>,
+            event_bus,
+            "model-b-b".to_string(),
+            request_b.clone(),
+            CancellationToken::new(),
+            2,
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut ready = 0usize;
+            while ready < 2 {
+                if matches!(
+                    event_rx.recv().await,
+                    Some(crate::domain::events::AppEvent::WaveRunReady(_))
+                ) {
+                    ready += 1;
+                }
+            }
+        })
+        .await
+        .expect("both front-door fan-outs must complete");
+
+        let run_a = executor_a.current_run().await.expect("first retained run");
+        let run_b = executor_b.current_run().await.expect("second retained run");
+        // Each root wave mints its OWN per-wave nonce; both requests share the
+        // constant `AgentId::root()` coordinator and the same spoke id, yet the
+        // live ids must differ. A constant/dropped nonce makes this RED (both
+        // nonces equal → the second registration hits the duplicate-id guard).
+        assert_ne!(
+            run_a.coordinator_id, run_b.coordinator_id,
+            "two root waves must mint distinct per-wave nonces"
+        );
+        let expected_a = crate::infrastructure::orchestrator::nonce_qualified(
+            &run_a.coordinator_id,
+            &spoke_id,
+            0,
+        );
+        let expected_b = crate::infrastructure::orchestrator::nonce_qualified(
+            &run_b.coordinator_id,
+            &spoke_id,
+            0,
+        );
+        assert_eq!(run_a.slots[0], expected_a);
+        assert_eq!(run_b.slots[0], expected_b);
+        assert_ne!(run_a.slots[0], run_b.slots[0]);
+        // AC-a2 (root path): neither live id is derivable from the known root
+        // scope alone — the per-wave nonce supplies the entropy the constant
+        // `AgentId::root()` coordinator cannot.
+        assert_ne!(
+            run_a.slots[0],
+            crate::infrastructure::orchestrator::nonce_qualified(
+                &crate::domain::models::AgentId::root(),
+                &spoke_id,
+                0,
+            ),
+            "a predictable root-coordinator + spoke id must not predict the live scope"
+        );
+
+        // Both real runners reached their provider-side barrier, which is only
+        // reachable after NodeTree registration. A nonce-dropping mutant makes
+        // the second launch hit the duplicate-id guard before the barrier.
+        assert!(ledger_a.token_for_scope(&expected_a).is_ok());
+        assert!(ledger_b.token_for_scope(&expected_b).is_ok());
+
+        // Recreate the old registration deterministically before rerun. The
+        // production bridge normally deregisters promptly at terminal; this
+        // retained sentinel exercises the reachable rerun-before-deregister
+        // ordering without a timing race.
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(1);
+        let (status_tx, _status_rx) =
+            tokio::sync::watch::channel(crate::domain::models::NodeState::Created);
+        let (_metrics_tx, metrics_rx) =
+            tokio::sync::watch::channel(crate::domain::models::AgentMetrics::default());
+        registry
+            .register(
+                expected_a.clone(),
+                AgentId::root(),
+                crate::infrastructure::subagent::AgentHandle {
+                    agent_id: expected_a.clone(),
+                    token: crate::domain::models::CapabilityTokenId::nil(),
+                    command_tx,
+                    cancel_token: CancellationToken::new(),
+                    depth: 1,
+                    subagent_type: "retained-rerun-sentinel".into(),
+                    spawned_at: 0,
+                    status: status_tx,
+                    metrics: metrics_rx,
+                    isolated: false,
+                    mailbox_budget: crate::infrastructure::subagent::MailboxBudget::new(),
+                },
+            )
+            .await
+            .expect("old registration retained before rerun");
+
+        let (rerun_a, rerun_b) = tokio::join!(
+            executor_a.rerun_spoke_run(&run_a, 0, CancellationToken::new()),
+            executor_b.rerun_spoke_run(&run_b, 0, CancellationToken::new()),
+        );
+        let rerun = rerun_a.expect("first rerun dispatch");
+        assert!(matches!(
+            rerun,
+            crate::domain::ports::RerunOutcome::Replaced(_)
+        ));
+        assert!(matches!(
+            rerun_b.expect("second rerun dispatch"),
+            crate::domain::ports::RerunOutcome::Replaced(_)
+        ));
+        let rerun_run = executor_a.current_run().await.expect("retained rerun");
+        let expected_rerun = crate::infrastructure::orchestrator::nonce_qualified(
+            &run_a.coordinator_id,
+            &spoke_id,
+            1,
+        );
+        assert_eq!(rerun_run.slots[0], expected_rerun);
+        assert_ne!(expected_a, expected_rerun);
+        let registered = registry.snapshot().await;
+        assert!(registered.iter().any(|(id, _, _)| id == &expected_a));
+        assert!(ledger_a.token_for_scope(&expected_rerun).is_ok());
     }
 
     /// Story 17.3d-RC-B / RC-1 item 10 — root cancellation issued from the SAME
@@ -5698,7 +6245,12 @@ mod tests {
             grandchild_count: 1,
         };
         let parent = parent_runner
-            .launch(parent_spec, CancellationToken::new(), None)
+            .launch(
+                parent_spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("real nested coordinator");
         let parent_authority = parent.authority;
@@ -5864,19 +6416,39 @@ mod tests {
         };
 
         let depth_one = runner
-            .launch(spec(), CancellationToken::new(), None)
+            .launch(
+                spec(),
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("depth one");
         let depth_two = runner
-            .launch(spec(), CancellationToken::new(), Some(&depth_one))
+            .launch(
+                spec(),
+                CancellationToken::new(),
+                Some(&depth_one),
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("depth two");
         let depth_three = runner
-            .launch(spec(), CancellationToken::new(), Some(&depth_two))
+            .launch(
+                spec(),
+                CancellationToken::new(),
+                Some(&depth_two),
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("depth three");
         let depth_four = runner
-            .launch(spec(), CancellationToken::new(), Some(&depth_three))
+            .launch(
+                spec(),
+                CancellationToken::new(),
+                Some(&depth_three),
+                crate::domain::models::AgentId::new(),
+            )
             .await;
 
         match depth_four {
@@ -6041,7 +6613,12 @@ mod tests {
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let mut handle = runner
-            .launch(spec, CancellationToken::new(), None)
+            .launch(
+                spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
             .await
             .expect("launch owned child");
         let agent_id = handle.agent_id.clone();

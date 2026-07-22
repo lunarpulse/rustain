@@ -39,6 +39,9 @@ pub use window::{SpokeHandle, Window};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::clock::Clock;
@@ -91,6 +94,21 @@ pub const SYNTHESIS_RESERVE: Budget = R1_SYNTHESIS_RESERVE;
 /// Spawn-gate budget for a per-spoke child token (Murat gate-token). Minimal so
 /// the gate is decisive on `Spawn` capability + revocation, not on budget.
 const GATE_TOKEN_BUDGET: Budget = R1_GATE_TOKEN_BUDGET;
+
+/// Derive the collision-safe node identity for one spoke launch.
+///
+/// Each input is encoded independently before joining with a delimiter outside
+/// the base64url alphabet. The mapping is deterministic and unambiguous across
+/// coordinator DAGs, nested coordinator levels, and retained reruns.
+pub(crate) fn nonce_qualified(
+    coordinator_id: &AgentId,
+    spoke_id: &AgentId,
+    rerun_counter: u8,
+) -> AgentId {
+    let coordinator = URL_SAFE_NO_PAD.encode(coordinator_id.as_str().as_bytes());
+    let spoke = URL_SAFE_NO_PAD.encode(spoke_id.as_str().as_bytes());
+    AgentId::from_validated(format!("fq.{coordinator}.{spoke}.r{rerun_counter}"))
+}
 
 // AC2 discriminator instrumentation (P8 — non-vacuous zero-sibling-transition
 // proof). R1's executor NEVER schedules a spoke on a sibling's terminal state,
@@ -376,6 +394,7 @@ pub async fn dispatch_launch(
     gate_token: CapabilityToken,
     wave_cancel: CancellationToken,
     parent: Option<&TaskHandle>,
+    agent_id: AgentId,
 ) -> Result<TaskHandle, OrchestrationError> {
     // ── Spawn gate: validate the CHILD token (not the coordinator's). ──
     if let Err(err) = authority
@@ -389,7 +408,7 @@ pub async fn dispatch_launch(
 
     let launch_spec = launch_spec_for(spec);
     let cancel = wave_cancel.child_token();
-    let handle = match runner.launch(launch_spec, cancel, parent).await {
+    let handle = match runner.launch(launch_spec, cancel, parent, agent_id).await {
         Ok(h) => h,
         Err(e) => {
             // Refund the gate-token reservation on launch failure — the doc
@@ -423,8 +442,20 @@ async fn dispatch_one(
     gate_token: CapabilityToken,
     wave_cancel: CancellationToken,
     parent: Option<&TaskHandle>,
+    coordinator_id: &AgentId,
+    rerun_counter: u8,
 ) -> Result<TaskHandle, OrchestrationError> {
-    dispatch_launch(runner, authority, spec, gate_token, wave_cancel, parent).await
+    let agent_id = nonce_qualified(coordinator_id, &spec.id, rerun_counter);
+    dispatch_launch(
+        runner,
+        authority,
+        spec,
+        gate_token,
+        wave_cancel,
+        parent,
+        agent_id,
+    )
+    .await
 }
 
 #[async_trait::async_trait]
@@ -553,15 +584,24 @@ impl ForkJoinExecutor {
         // D-C (AI-12.3): RESERVE the slot atomically so the DN-3 cap bounds
         // DISPATCH (committed + in-flight reservations), not just retained
         // count. Released on every terminal path below + release_rerun_reservation.
-        {
+        let rerun_generation: u8 = {
             let mut reservations = self.rerun_reservations.lock().await;
             let committed = prev.inherent_rerun_count_for_slot(slot);
             let in_flight = reservations.get(&slot).copied().unwrap_or(0);
             if committed.saturating_add(in_flight) >= RERUN_SPOKE_CAP {
                 return Ok(RerunOutcome::Reverted { slot });
             }
+            // Allocate THIS reservation a distinct generation (committed + the
+            // reservations already in flight + 1). The reservation lock admits
+            // up to RERUN_SPOKE_CAP concurrent in-flight reruns for a slot, so
+            // deriving the identity from the stale `prev.rerun_counts[slot]`
+            // would make every concurrent rerun compute `committed + 1` and
+            // collide on the NodeTree duplicate-id guard. The per-reservation
+            // generation keeps each live rerun's node identity distinct.
+            let generation = committed.saturating_add(in_flight).saturating_add(1);
             *reservations.entry(slot).or_insert(0) += 1;
-        }
+            generation
+        };
         let old_id = &prev.slots[slot];
         let spec = prev
             .spec_by_agent
@@ -618,6 +658,7 @@ impl ForkJoinExecutor {
         // Dispatch through the sealed chokepoint (AC3 — no new `.launch(`).
         // Story 14.3a (F3): use the provided cancel token (child of wave root),
         // NOT a fresh orphan `CancellationToken::new()`.
+        let rerun_counter = rerun_generation;
         let launched = dispatch_one(
             &self.runner,
             &self.authority,
@@ -625,6 +666,8 @@ impl ForkJoinExecutor {
             gate_token,
             cancel,
             prev.parent.as_deref(),
+            &prev.coordinator_id,
+            rerun_counter,
         )
         .await;
 
@@ -804,11 +847,12 @@ impl ForkJoinExecutor {
                     patch_by_agent: next_patches,
                     slots: next_slots,
                     parent: prev.parent.clone(),
+                    coordinator_id: prev.coordinator_id.clone(),
                     resolve_count: AtomicUsize::new(0),
                     rerun_counts: {
                         let mut counts = prev.rerun_counts.clone();
                         if counts.len() > slot {
-                            counts[slot] += 1;
+                            counts[slot] = rerun_generation;
                         }
                         counts
                     },
@@ -891,6 +935,8 @@ pub struct ForkJoinRun {
     pub(crate) slots: Vec<AgentId>,
     /// Live coordinator handle retained so reruns preserve nested lineage.
     pub(crate) parent: Option<Arc<TaskHandle>>,
+    /// Stable coordinator nonce used to derive every spoke identity in this wave.
+    pub(crate) coordinator_id: AgentId,
     resolve_count: AtomicUsize,
     /// Per-slot re-run counter (DN-3 storm-cap). Indexed by dispatch slot.
     pub(crate) rerun_counts: Vec<u8>,
@@ -1212,6 +1258,20 @@ impl WaveCtx {
 
             let spokes = request.spokes.clone();
             let coordinator = request.coordinator.clone();
+            // Per-wave identity nonce (AC-a1 collision-safety, AC-a2
+            // unguessability). The ROOT wave mints a fresh, unguessable id so
+            // two concurrent root fan-outs reusing a stable `SpokeSpec.id`
+            // derive DISTINCT node identities (the production TUI coordinator
+            // is the constant `AgentId::root()`, which supplies no entropy). A
+            // NESTED wave reuses its launched coordinator handle's id — already
+            // a distinct nonce-qualified value — so grandchildren stay
+            // deterministic functions of their live coordinator. `coordinator`
+            // (request.coordinator, the root-authority scope) is UNCHANGED and
+            // still backs admission + events.
+            let wave_nonce: AgentId = match &parent {
+                Some(handle) => handle.agent_id.clone(),
+                None => AgentId::new(),
+            };
             if spokes.iter().any(|spoke| !spoke.waits_for.is_empty())
                 && ctx.artifact_store.is_none()
             {
@@ -1357,6 +1417,7 @@ impl WaveCtx {
                     let wave_cancel_child = wave_cancel.clone();
                     let admission = Arc::clone(&admission);
                     let admission_coordinator = coordinator.clone();
+                    let wave_nonce_for_dispatch = wave_nonce.clone();
                     let tx = result_tx.clone();
                     let clock = Arc::clone(&ctx.clock);
                     let parent = parent.clone();
@@ -1414,6 +1475,8 @@ impl WaveCtx {
                             gate_token,
                             wave_cancel_child.clone(),
                             parent.as_deref(),
+                            &wave_nonce_for_dispatch,
+                            0,
                         )
                         .await;
                         let (
@@ -1877,6 +1940,7 @@ impl WaveCtx {
                 patch_by_agent,
                 slots,
                 parent,
+                coordinator_id: wave_nonce,
                 resolve_count: AtomicUsize::new(0),
                 // DN-3 (AC4) storm-cap: per-slot re-run counter, starts at 0.
                 rerun_counts: vec![0u8; n],
@@ -2159,6 +2223,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nonce_qualified_identity_is_deterministic_and_collision_safe() {
+        let coordinator = AgentId::from_validated("c");
+        let spoke = AgentId::from_validated("s");
+
+        let initial = nonce_qualified(&coordinator, &spoke, 0);
+        assert_eq!(initial.as_str(), "fq.Yw.cw.r0");
+        assert_eq!(initial, nonce_qualified(&coordinator, &spoke, 0));
+        assert_ne!(initial, nonce_qualified(&coordinator, &spoke, 1));
+        assert_ne!(
+            initial,
+            nonce_qualified(&AgentId::from_validated("other"), &spoke, 0)
+        );
+        assert_ne!(
+            initial,
+            nonce_qualified(
+                &AgentId::from_validated("parent"),
+                &AgentId::from_validated("c"),
+                0,
+            )
+        );
+    }
+
+    #[test]
+    fn failed_launch_placeholder_remains_index_qualified_and_separate() {
+        let spec = SpokeSpec {
+            id: AgentId::from_validated("stable-spoke"),
+            label: "predictable".into(),
+            prompt: String::new(),
+            effective_model: String::new(),
+            tier: ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: Vec::new(),
+            role: SpokeRole::Leaf,
+        };
+
+        assert_eq!(
+            agent_id_for(&spec, 2).as_str(),
+            "failed-spoke-2-predictable"
+        );
+        assert_ne!(
+            agent_id_for(&spec, 2),
+            nonce_qualified(&spec.id, &spec.id, 0)
+        );
+        assert_ne!(agent_id_for(&spec, 2), agent_id_for(&spec, 3));
+    }
+
+    #[test]
     fn mutant_raw_wave_budget_arithmetic_returns_typed_overflow() {
         assert!(matches!(
             checked_wave_budget(usize::MAX),
@@ -2385,6 +2496,7 @@ mod tests {
             _spec: AgentLaunchSpec,
             cancel: CancellationToken,
             _parent: Option<&crate::domain::models::TaskHandle>,
+            agent_id: AgentId,
         ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
             let (status_tx, status_rx) =
                 tokio::sync::mpsc::channel::<crate::domain::models::node_state::NodeState>(8);
@@ -2397,7 +2509,6 @@ mod tests {
                 crate::domain::models::ProvisioningTier::ScratchCopy,
                 "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+x\n".into(),
             ));
-            let agent_id = AgentId::new();
             let task_id = nanoid::nanoid!(12);
             let child_cancel = cancel.child_token();
             let cancel_for_task = child_cancel.clone();
@@ -2675,6 +2786,7 @@ mod tests {
             spec: AgentLaunchSpec,
             cancel: CancellationToken,
             _parent: Option<&crate::domain::models::TaskHandle>,
+            agent_id: AgentId,
         ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
             let (status_tx, status_rx) =
                 tokio::sync::mpsc::channel::<crate::domain::models::node_state::NodeState>(8);
@@ -2690,7 +2802,6 @@ mod tests {
                 "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+{new_content}\n"
             ),
         ));
-            let agent_id = AgentId::new();
             let task_id = nanoid::nanoid!(12);
             let child_cancel = cancel.child_token();
             let cancel_for_task = child_cancel.clone();
@@ -3056,6 +3167,7 @@ mod tests {
             _spec: AgentLaunchSpec,
             _cancel: CancellationToken,
             _parent: Option<&crate::domain::models::TaskHandle>,
+            _agent_id: AgentId,
         ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
             Err(SubagentError::Internal("noop".into()))
         }
