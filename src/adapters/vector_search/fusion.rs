@@ -84,7 +84,7 @@ pub fn fuse_rank(
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.as_str().cmp(b.as_str()))
+            .then(a.0.cmp(&b.0))
     });
     scored.into_iter().take(limit).map(|(k, _)| k).collect()
 }

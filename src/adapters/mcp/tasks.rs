@@ -402,8 +402,12 @@ mod tests {
         // The pinned transcript is the ground truth for the resume wire shape:
         // serializing `TasksUpdateParams` must reproduce its `params` object
         // exactly (minus `_meta`, which the transport stamps per request).
+        // Vendored byte-identical from the 17.5a spike capture
+        // (`_bmad-output/.../mcp-tasks-17-5a-spike-2026-07-19/transcripts/22_tasks_update_resume.request.json`)
+        // into `tests/fixtures/mcp/` so the test is hermetic in a standalone
+        // CI checkout — the `_bmad-output/` tree is not part of this repo.
         let path = format!(
-            "{}/../_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/transcripts/22_tasks_update_resume.request.json",
+            "{}/tests/fixtures/mcp/22_tasks_update_resume.request.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let raw =
