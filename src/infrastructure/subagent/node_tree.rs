@@ -285,6 +285,29 @@ impl crate::domain::ports::SupervisedNodes for NodeTree {
             Err(error) => Err(SupervisedNodesError::Internal(error.to_string())),
         }
     }
+
+    async fn register_parked(
+        &self,
+        checkpoint: NodeCheckpoint,
+        spec: crate::domain::models::orchestration::SpokeSpec,
+        producers: Vec<AgentId>,
+        concurrency: usize,
+    ) -> Result<(), crate::domain::ports::SupervisedNodesError> {
+        NodeTree::register_parked(self, checkpoint, spec, producers, concurrency)
+            .await
+            .map_err(|error| {
+                crate::domain::ports::SupervisedNodesError::Internal(error.to_string())
+            })
+    }
+
+    async fn cancel_parked(
+        &self,
+        node: &AgentId,
+    ) -> Result<(), crate::domain::ports::SupervisedNodesError> {
+        NodeTree::cancel_parked(self, node).await.map_err(|error| {
+            crate::domain::ports::SupervisedNodesError::Internal(error.to_string())
+        })
+    }
 }
 
 /// Story 17.5a (ADR-17-5-01 D2): the single-node lifecycle seam external-task
@@ -767,11 +790,95 @@ impl NodeTree {
                 "parent is being torn down: {parent}"
             )));
         }
-        if guard.nodes.contains_key(&agent_id) {
-            return Err(SubagentError::Internal(format!(
-                "duplicate agent_id: {:?}",
-                agent_id
-            )));
+        if let Some(existing) = guard.nodes.get(&agent_id) {
+            // Story 17.2d-b (AC-b2): a spoke parked on dependencies was
+            // registered at park time as `Suspended` + `AwaitingUpstreamArtifact`
+            // under its full nonce-qualified id. Its real launch MUST adopt that
+            // node (not collide with it): prepare the prospective live node,
+            // commit checkpoint + state-change + `Unparked` as ONE atomic
+            // batch, then publish the in-memory mutation. Every OTHER
+            // collision (17-2d-a retained node) or a `Suspended` node parked for
+            // a different reason (17.5b `AwaitingHumanInput`) is never adopted.
+            let adoptable = existing.state == NodeState::Suspended
+                && guard.wait_reasons.get(&agent_id)
+                    == Some(&crate::domain::models::WaitReason::AwaitingUpstreamArtifact);
+            if !adoptable {
+                return Err(SubagentError::Internal(format!(
+                    "duplicate agent_id: {:?}",
+                    agent_id
+                )));
+            }
+            let depth = existing.depth;
+            let mut prospective = existing.clone();
+            prospective.token = handle.token;
+            prospective.subagent_type = handle.subagent_type.clone();
+            prospective.spawned_at = if handle.spawned_at != 0 {
+                handle.spawned_at
+            } else {
+                (self.now_fn)()
+            };
+            prospective
+                .state
+                .transition_or_err(NodeState::Running)
+                .map_err(|error| SubagentError::Internal(error.to_string()))?;
+            prospective.waiting_since = None;
+            let checkpoint = prospective.checkpoint();
+            let room_event = RoomEvent::NodeStateChanged {
+                node: agent_id.clone(),
+                from: NodeState::Suspended,
+                to: NodeState::Running,
+            };
+            if let Some(journal) = &self.journal {
+                journal
+                    .append_atomic_batch(vec![
+                        JournalRecord::Checkpoint(checkpoint),
+                        JournalRecord::Room(room_event.clone()),
+                        JournalRecord::Unparked {
+                            node: agent_id.clone(),
+                        },
+                    ])
+                    .await
+                    .map_err(|error| {
+                        SubagentError::Internal(format!(
+                            "durable park adoption failed for {agent_id}: {error}"
+                        ))
+                    })?;
+            }
+            guard.nodes.insert(agent_id.clone(), prospective);
+            guard.wait_reasons.remove(&agent_id);
+            guard.recovered_inboxes.remove(&agent_id);
+            guard.awaiting_resume.remove(&agent_id);
+            let (status_tx, status_rx) = watch::channel(NodeState::Running);
+            handle.status = status_tx.clone();
+            handle.depth = depth;
+            guard.handles.insert(
+                agent_id.clone(),
+                NodeHandle::Local {
+                    cancel_token: handle.cancel_token.clone(),
+                    command_tx: handle.command_tx.clone(),
+                },
+            );
+            guard.status_rx.insert(agent_id.clone(), status_rx);
+            guard.status_senders.insert(agent_id.clone(), status_tx);
+            guard
+                .metrics_rx
+                .insert(agent_id.clone(), handle.metrics.clone());
+            guard
+                .isolated_agents
+                .insert(agent_id.clone(), handle.isolated);
+            guard
+                .mailbox_budgets
+                .insert(agent_id.clone(), handle.mailbox_budget.clone());
+            let sender_opt = guard.status_senders.get(&agent_id).cloned();
+            drop(guard);
+            if let Some(sender) = sender_opt {
+                let _ = sender.send(NodeState::Running);
+            }
+            self.emit_status_updated(&agent_id).await;
+            if self.journal.is_some() {
+                self.emit_room_event(room_event);
+            }
+            return Ok(());
         }
         if agent_id == AgentId::root() {
             return Err(SubagentError::Internal(
@@ -959,6 +1066,173 @@ impl NodeTree {
         });
         drop(guard);
         Ok(true)
+    }
+
+    /// Story 17.2d-b (AC-b1): register a fork-join spoke parked on upstream
+    /// artifacts as a durable `Suspended` node — the identity checkpoint, the
+    /// `NodeRegistered` room event, and the `Parked` record (relaunch plan +
+    /// readiness edges) land as ONE atomic journal batch, so a crash can never
+    /// persist a partial park (no orphaned readiness). The fabricated local
+    /// handle mirrors `restore_checkpoint`: there is no live child yet; the
+    /// real launch ADOPTS this node via `register_with_identity`'s
+    /// Suspended-parked branch instead of double-registering.
+    pub async fn register_parked(
+        &self,
+        mut checkpoint: NodeCheckpoint,
+        spec: crate::domain::models::orchestration::SpokeSpec,
+        producers: Vec<AgentId>,
+        concurrency: usize,
+    ) -> Result<(), SubagentError> {
+        let agent_id = checkpoint.id.clone();
+        if agent_id == AgentId::root() {
+            return Err(SubagentError::Internal(
+                "agent_id cannot be the root sentinel".into(),
+            ));
+        }
+        checkpoint.state = NodeState::Suspended;
+        checkpoint.wait_reason = Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact);
+        let parent = checkpoint.parent.clone().unwrap_or_else(AgentId::root);
+        let mut guard = self.inner.write().await;
+        if let Some(existing) = guard.nodes.get(&agent_id) {
+            // Idempotent re-park: the composition-root resume replays the SAME
+            // durable park for a node still `Suspended` + `AwaitingUpstreamArtifact`
+            // (the `Parked` journal record is already durable — latest-wins fold,
+            // no second write). Any other occupant is a genuine collision.
+            let already_parked = existing.state == NodeState::Suspended
+                && guard.wait_reasons.get(&agent_id)
+                    == Some(&crate::domain::models::WaitReason::AwaitingUpstreamArtifact);
+            if already_parked {
+                return Ok(());
+            }
+            return Err(SubagentError::Internal(format!(
+                "duplicate agent_id: {:?}",
+                agent_id
+            )));
+        }
+        if parent != AgentId::root() && !guard.nodes.contains_key(&parent) {
+            return Err(SubagentError::Internal(format!(
+                "parent not found in node tree: {:?}",
+                parent
+            )));
+        }
+        let room_event = RoomEvent::NodeRegistered {
+            node: agent_id.clone(),
+            origin: checkpoint.origin,
+            host: self.host_binding.clone(),
+        };
+        if let Some(journal) = &self.journal {
+            journal
+                .append_atomic_batch(vec![
+                    JournalRecord::Checkpoint(checkpoint.clone()),
+                    JournalRecord::Room(room_event.clone()),
+                    JournalRecord::Parked {
+                        node: agent_id.clone(),
+                        producers,
+                        spec,
+                        concurrency,
+                    },
+                ])
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!(
+                        "durable park registration failed for {agent_id}: {error}"
+                    ))
+                })?;
+        }
+        let state = checkpoint.state;
+        let wait_reason = checkpoint.wait_reason;
+        let metrics = AgentMetrics {
+            effective_model: checkpoint.effective_model.clone(),
+            tools_summary: String::new(),
+            tokens_in: checkpoint.tokens_in,
+            tokens_out: checkpoint.tokens_out,
+            turns: checkpoint.turns,
+        };
+        let node = checkpoint.into_node(CheckpointTrust::TrustedLocal);
+        let (command_tx, command_rx) = mpsc::channel(MAILBOX_CAP);
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let (status_tx, status_rx) = watch::channel(state);
+        let (_metrics_tx, metrics_rx) = watch::channel(metrics);
+        let mailbox_budget = MailboxBudget::new();
+        if let Some(reason) = wait_reason {
+            guard.wait_reasons.insert(agent_id.clone(), reason);
+        }
+        guard.nodes.insert(agent_id.clone(), node);
+        guard.handles.insert(
+            agent_id.clone(),
+            NodeHandle::Local {
+                cancel_token,
+                command_tx,
+            },
+        );
+        guard.recovered_inboxes.insert(agent_id.clone(), command_rx);
+        guard.awaiting_resume.insert(agent_id.clone());
+        guard.parent_of.insert(agent_id.clone(), parent);
+        guard.status_rx.insert(agent_id.clone(), status_rx);
+        guard.status_senders.insert(agent_id.clone(), status_tx);
+        guard.metrics_rx.insert(agent_id.clone(), metrics_rx);
+        guard.isolated_agents.insert(agent_id.clone(), false);
+        guard
+            .mailbox_budgets
+            .insert(agent_id.clone(), mailbox_budget);
+        self.emit_capability_event(CapabilityEvent::Registered {
+            capability: self.capability_for(&agent_id),
+        });
+        if self.journal.is_some() {
+            self.emit_room_event(room_event);
+        }
+        drop(guard);
+        Ok(())
+    }
+
+    /// Cancel a durable park that never acquired a live runner. Durability is
+    /// committed before the fabricated in-memory node is removed, so recovery
+    /// observes either the original park or the terminal cancellation.
+    pub async fn cancel_parked(&self, agent_id: &AgentId) -> Result<(), SubagentError> {
+        let prospective = {
+            let guard = self.inner.read().await;
+            let Some(existing) = guard.nodes.get(agent_id) else {
+                return Ok(());
+            };
+            let parked = existing.state == NodeState::Suspended
+                && guard.wait_reasons.get(agent_id)
+                    == Some(&crate::domain::models::WaitReason::AwaitingUpstreamArtifact);
+            if !parked {
+                return Ok(());
+            }
+            let mut prospective = existing.clone();
+            prospective
+                .state
+                .transition_or_err(NodeState::Cancelled)
+                .map_err(|error| SubagentError::Internal(error.to_string()))?;
+            prospective.waiting_since = None;
+            prospective
+        };
+        let checkpoint = prospective.checkpoint();
+        let room_event = RoomEvent::NodeStateChanged {
+            node: agent_id.clone(),
+            from: NodeState::Suspended,
+            to: NodeState::Cancelled,
+        };
+        if let Some(journal) = &self.journal {
+            journal
+                .append_atomic_batch(vec![
+                    JournalRecord::Checkpoint(checkpoint),
+                    JournalRecord::Room(room_event.clone()),
+                    JournalRecord::Unparked {
+                        node: agent_id.clone(),
+                    },
+                ])
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!(
+                        "durable parked-node cancellation failed for {agent_id}: {error}"
+                    ))
+                })?;
+        }
+        self.emit_room_event(room_event);
+        self.deregister_one(agent_id).await;
+        Ok(())
     }
 
     /// Clear the awaiting-resume marker once a resumer attaches a live runner
@@ -2102,6 +2376,217 @@ mod tests {
             metrics: metrics_rx,
             mailbox_budget: MailboxBudget::new(),
         }
+    }
+
+    fn parked_spoke_checkpoint(agent_id: &AgentId) -> NodeCheckpoint {
+        NodeCheckpoint {
+            id: agent_id.clone(),
+            token: CapabilityTokenId::nil(),
+            parent: None,
+            ownership: crate::domain::models::subagent_view::WireOwnershipKind::Owned,
+            state: NodeState::Suspended,
+            origin: NodeOrigin::Subagent,
+            foreground: true,
+            effective_model: "m".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            turns: 0,
+            subagent_type: "spoke".into(),
+            spawned_at: 0,
+            depth: 1,
+            tainted: false,
+            waiting_since: None,
+            wait_reason: Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact),
+        }
+    }
+
+    fn parked_spoke_spec(
+        agent_id: &AgentId,
+        waits_for: Vec<AgentId>,
+    ) -> crate::domain::models::orchestration::SpokeSpec {
+        crate::domain::models::orchestration::SpokeSpec {
+            id: agent_id.clone(),
+            label: "spoke".into(),
+            prompt: "do the thing".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for,
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        }
+    }
+
+    /// Story 17.2d-b AC-b1/b2: the durable park writes identity checkpoint +
+    /// `NodeRegistered` + `Parked` (SpokeSpec relaunch plan) in ONE atomic
+    /// batch; the real launch ADOPTS the parked node (`Suspended→Running` +
+    /// `Unparked`), never a second register.
+    #[tokio::test]
+    async fn parked_registration_journals_atomic_batch_and_launch_adopts() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = std::sync::Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let tree = NodeTree::new().with_journal(journal.clone());
+        let node = AgentId::new();
+        let producer = AgentId::new();
+        let spec = parked_spoke_spec(&AgentId::new(), vec![producer.clone()]);
+        tree.register_parked(
+            parked_spoke_checkpoint(&node),
+            spec.clone(),
+            vec![producer.clone()],
+            2,
+        )
+        .await
+        .expect("durable park registration");
+
+        let entries = journal.load().await.unwrap();
+        let mut saw_checkpoint = false;
+        let mut saw_registered = false;
+        let mut saw_parked = false;
+        for entry in &entries {
+            match &entry.record {
+                JournalRecord::Checkpoint(cp) if cp.id == node => {
+                    saw_checkpoint = true;
+                    assert_eq!(cp.state, NodeState::Suspended);
+                    assert_eq!(
+                        cp.wait_reason,
+                        Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact)
+                    );
+                }
+                JournalRecord::Room(RoomEvent::NodeRegistered { node: n, .. }) if *n == node => {
+                    saw_registered = true;
+                }
+                JournalRecord::Parked {
+                    node: n,
+                    producers,
+                    spec: journaled_spec,
+                    concurrency,
+                } if *n == node => {
+                    saw_parked = true;
+                    assert_eq!(producers, &vec![producer.clone()]);
+                    // The full relaunch plan survives the journal round-trip.
+                    assert_eq!(journaled_spec, &spec);
+                    assert_eq!(*concurrency, 2);
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_checkpoint, "identity checkpoint journaled");
+        assert!(saw_registered, "NodeRegistered journaled");
+        assert!(saw_parked, "Parked record journaled with the SpokeSpec");
+
+        // Idempotent re-park (resume replay) is a no-op, not a collision.
+        tree.register_parked(
+            parked_spoke_checkpoint(&node),
+            spec.clone(),
+            vec![producer.clone()],
+            2,
+        )
+        .await
+        .expect("idempotent re-park");
+
+        // AC-b2: the real launch ADOPTS the parked node.
+        tree.register(node.clone(), AgentId::root(), dummy_handle(node.clone(), 1))
+            .await
+            .expect("launch adopts the parked node");
+        let entries = journal.load().await.unwrap();
+        let mut saw_adoption = false;
+        let mut saw_unparked = false;
+        for entry in &entries {
+            match &entry.record {
+                JournalRecord::Room(RoomEvent::NodeStateChanged { node: n, from, to })
+                    if *n == node =>
+                {
+                    if *from == NodeState::Suspended && *to == NodeState::Running {
+                        saw_adoption = true;
+                    }
+                }
+                JournalRecord::Unparked { node: n } if *n == node => saw_unparked = true,
+                _ => {}
+            }
+        }
+        assert!(saw_adoption, "Suspended→Running journaled at adoption");
+        assert!(saw_unparked, "Unparked journaled at adoption");
+        let entry = tree
+            .list()
+            .await
+            .into_iter()
+            .find(|entry| entry.agent_id == node)
+            .expect("adopted node listed");
+        assert_eq!(entry.current_status, NodeState::Running);
+        assert_eq!(entry.wait_reason, None, "adoption clears the park reason");
+    }
+
+    #[tokio::test]
+    async fn cancelling_never_launched_park_terminalizes_and_unparks_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = std::sync::Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let tree = NodeTree::new().with_journal(journal.clone());
+        let node = AgentId::new();
+        tree.register_parked(
+            parked_spoke_checkpoint(&node),
+            parked_spoke_spec(&AgentId::new(), vec![AgentId::new()]),
+            vec![AgentId::new()],
+            1,
+        )
+        .await
+        .unwrap();
+
+        tree.cancel_parked(&node).await.unwrap();
+        assert!(
+            tree.list().await.iter().all(|entry| entry.agent_id != node),
+            "fabricated parked node is removed from live capacity"
+        );
+        let entries = journal.load().await.unwrap();
+        assert!(
+            crate::infrastructure::subagent::fold_parked_records(&entries).is_empty(),
+            "Unparked consumes the durable relaunch plan"
+        );
+        assert!(entries.iter().any(|entry| {
+            matches!(
+                &entry.record,
+                JournalRecord::Checkpoint(checkpoint)
+                    if checkpoint.id == node && checkpoint.state == NodeState::Cancelled
+            )
+        }));
+    }
+
+    /// Story 17.2d-b AC-b2 [positive control]: the adoption predicate must
+    /// NOT weaken the dup-guard — a genuine collision (Running node) and a
+    /// `Suspended` node parked for a DIFFERENT reason both still `Err`.
+    #[tokio::test]
+    async fn adoption_refuses_genuine_collisions() {
+        let tree = NodeTree::new();
+        let a = AgentId::new();
+        tree.register(a.clone(), AgentId::root(), dummy_handle(a.clone(), 1))
+            .await
+            .unwrap();
+        let err = tree
+            .register(a.clone(), AgentId::root(), dummy_handle(a.clone(), 1))
+            .await
+            .expect_err("a genuine duplicate stays a hard error");
+        assert!(err.to_string().contains("duplicate agent_id"));
+
+        // Suspended WITHOUT the park reason (e.g. a pause/resume node) is NOT
+        // adopted either.
+        let tree = NodeTree::new();
+        let b = AgentId::new();
+        tree.register(b.clone(), AgentId::root(), dummy_handle(b.clone(), 1))
+            .await
+            .unwrap();
+        tree.try_set_state(&b, NodeState::Running).await.unwrap();
+        tree.try_set_state(&b, NodeState::Suspended).await.unwrap();
+        let err = tree
+            .register(b.clone(), AgentId::root(), dummy_handle(b.clone(), 1))
+            .await
+            .expect_err("a non-parked Suspended node is not adopted");
+        assert!(err.to_string().contains("duplicate agent_id"));
     }
 
     #[tokio::test]

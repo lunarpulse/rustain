@@ -548,7 +548,13 @@ fn test_import_site_count_pinned() {
     // clients — the deferred-injection wiring startup.rs already does, extended
     // to the daemon/ACP composition roots. An infrastructure composition site,
     // not a domain/executor coupling (still proven by the boundary tests).
-    const EXPECTED: usize = 22;
+    // 22 -> 23 (Story 17.2d-b): `infrastructure/orchestrator/mod.rs` — the
+    // durable park reaches the tree ONLY through the `SupervisedNodes` port
+    // (production executor still holds no concrete `NodeTree`); the one new
+    // textual site is a `#[cfg(test)]` constructor binding an in-memory
+    // `NodeTree` as the seam in unit tests. The real boundary is unchanged
+    // (proven by `test_domain_no_adapter_or_infra_imports`).
+    const EXPECTED: usize = 23;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

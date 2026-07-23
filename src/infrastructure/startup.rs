@@ -1581,6 +1581,50 @@ pub async fn run() -> Result<()> {
                         })
                     }),
             );
+            // Rehydrate the process-local NodeTree before any fork-join resume.
+            // The daemon singleton serializes reconciliation's journal folds;
+            // it is released before the shorter per-wave journal claim.
+            let recovery_report =
+                match crate::infrastructure::subagent::DaemonSingletonLock::try_acquire(
+                    &workspace_path,
+                )
+                .await
+                {
+                    Ok(singleton) => {
+                        let host_id =
+                            crate::infrastructure::subagent::current_host_id(&workspace_path);
+                        match crate::infrastructure::subagent::NodeRecovery::reconcile(
+                            &node_journal,
+                            subagent_registry.as_ref(),
+                            &singleton,
+                            &host_id,
+                        )
+                        .await
+                        {
+                            Ok(report) => Some(report),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "interactive node recovery failed; durable parks remain for a later restart"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(crate::infrastructure::subagent::RecoveryError::SingletonBusy) => {
+                        tracing::info!(
+                            "another process owns node reconciliation; this process will not resume its parks"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "node recovery lock failed; durable parks remain for a later restart"
+                        );
+                        None
+                    }
+                };
             // Story 17.4b: now that the node tree and durable journal exist,
             // inject the A2A delegation runtime so `A2aProvider::invoke` can
             // materialize peer nodes and journal room events (durable-first).
@@ -1802,10 +1846,8 @@ pub async fn run() -> Result<()> {
             let artifact_store: Arc<dyn crate::domain::ports::ArtifactStore> = Arc::new(
                 crate::adapters::artifact::FileSystemArtifactStore::new(&workspace_path),
             );
-            let artifact_host = crate::domain::models::HostBinding::new(
-                "local",
-                format!("workspace:{}", workspace_path.display()),
-            );
+            let artifact_host =
+                crate::infrastructure::subagent::current_host_binding(&workspace_path);
             // 17.5b (Task 6): wire the input-request artifact sink into every
             // MCP task runtime. The coordinator authority + host are
             // orchestrator-only fields; the sink impl supplies them so the
@@ -1836,7 +1878,7 @@ pub async fn run() -> Result<()> {
                     event_bus.clone(),
                     Arc::new(crate::adapters::merge_back::GitPatchApplier),
                 ));
-            let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> = Arc::new(
+            let fork_join_executor = Arc::new(
                 crate::infrastructure::orchestrator::ForkJoinExecutor::new(
                     runner.clone(),
                     authority_provider.clone(),
@@ -1857,6 +1899,8 @@ pub async fn run() -> Result<()> {
                 })
                 .with_permission_source(security.clone()),
             );
+            let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> =
+                fork_join_executor.clone();
             orchestrator = Some(orchestrator_inner);
 
             let subagent_provider = Arc::new(crate::adapters::subagent::SubagentProvider::new(
@@ -1871,6 +1915,33 @@ pub async fn run() -> Result<()> {
                 .await;
 
             composite.set_subagent_provider(subagent_provider);
+
+            // Resume only after composition is complete. The wave runs under a
+            // supervised Tokio task so a long-lived provider cannot block
+            // application startup; the durable claim prevents another process
+            // from selecting the same park concurrently.
+            if let Some(recovery_report) = recovery_report
+                && !recovery_report.parked.is_empty()
+            {
+                let resume_executor = fork_join_executor.clone();
+                tokio::spawn(async move {
+                    match resume_executor.resume_fork_join_run(&recovery_report).await {
+                        Ok(resumed) if !resumed.is_empty() => {
+                            tracing::info!(
+                                waves = resumed.len(),
+                                "resumed durably parked fork-join wave(s) after restart"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "fork-join resumption failed; parked spokes remain durable for the next restart"
+                            );
+                        }
+                    }
+                });
+            }
 
             // Story 14-4a (AC5, CS-1) — re-store the agent_message_bus slot with
             // a LocalMessageBus wired to the REAL subagent_registry tree (not the

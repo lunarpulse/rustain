@@ -83,7 +83,7 @@ impl WaitPolicy {
 /// R1 supports one nested coordinator layer. Grandchildren must be leaves;
 /// deeper role composition is refused before any launch.
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpokeRole {
     /// Execute the spoke once and collect its terminal result.
     Leaf,
@@ -107,7 +107,7 @@ impl Default for SpokeRole {
 ///
 /// `id` and `waits_for` form the active dependency DAG consumed by the
 /// multi-wave scheduler.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpokeSpec {
     /// Stable logical node id used by `waits_for` dependency edges.
     pub id: AgentId,

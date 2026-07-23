@@ -7,6 +7,10 @@ use crate::domain::models::orchestration_room::RoomEvent;
 
 pub const NODE_JOURNAL_SCHEMA_VERSION: u32 = 1;
 
+fn default_park_concurrency() -> usize {
+    crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP
+}
+
 /// One durable line in a room journal. Sequence numbers establish the total
 /// order consumed by both recovery and room-projection folds.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -119,6 +123,48 @@ pub enum JournalRecord {
     /// token, journaled write-ahead on each budget/grant mutation so the head
     /// survives a restart. Replayed idempotently on recovery.
     LedgerConservation(LedgerConservationRecord),
+    /// Story 17.2d-b (AC-b1): a fork-join spoke parked on upstream artifacts.
+    /// Carries the durable relaunch plan — the full `SpokeSpec` (prompt/tier/
+    /// tools/role/waits_for) a checkpoint cannot hold — plus the readiness
+    /// edges. `node` is the FULL nonce-qualified tree-node id
+    /// (`nonce_qualified(wave_nonce, spoke.id, rerun)`), so the wave nonce is
+    /// embedded losslessly in the identity itself (no separate field). Folded
+    /// as `Parked − Unparked` on recovery (the `ObligationAccepted/Discharged`
+    /// precedent) and consumed by `resume_fork_join_run` at the composition
+    /// root — a park record with no consumer is a wiring hole.
+    Parked {
+        node: crate::domain::models::AgentId,
+        producers: Vec<crate::domain::models::AgentId>,
+        spec: crate::domain::models::orchestration::SpokeSpec,
+        /// Effective concurrency of the original fork-join request. Older
+        /// records predate this field and safely fall back to the static cap.
+        #[serde(default = "default_park_concurrency")]
+        concurrency: usize,
+    },
+    /// Story 17.2d-b (AC-b1): a previously parked spoke was revived (its
+    /// launch adopted the park-time node) or its wave ended without reaching
+    /// it. Removes the node from the recovered parked set; replay is
+    /// idempotent (an `Unparked` for a never-parked or already-cleared node is
+    /// a no-op in the fold).
+    Unparked {
+        node: crate::domain::models::AgentId,
+    },
+    /// A short-lived cross-process claim acquired atomically before a parked
+    /// spoke is selected for resume. A different claimant may take over only
+    /// after `expires_at_ms`; successful adoption clears both park and claim
+    /// through `Unparked`.
+    ParkClaimed {
+        node: crate::domain::models::AgentId,
+        claim_id: crate::domain::models::AgentId,
+        expires_at_ms: i64,
+    },
+    /// Releases a failed resume attempt without clearing the durable park.
+    /// The fold removes the claim only when `claim_id` is still its owner, so
+    /// a late release cannot erase a newer claimant's lease.
+    ParkClaimReleased {
+        node: crate::domain::models::AgentId,
+        claim_id: crate::domain::models::AgentId,
+    },
     /// An atomic multi-record group written as ONE journal line. Because a torn
     /// write of a single JSONL line is discarded by the torn-tail repair, a
     /// crash can never persist a PARTIAL group — the whole cascade of terminal

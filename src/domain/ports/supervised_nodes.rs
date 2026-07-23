@@ -11,13 +11,17 @@
 //! executor — is preserved; its letter is deliberately superseded).
 //!
 //! The port is intentionally minimal (party ruling fork 1 + dev-story roundtable
-//! ruling 4): it exposes exactly the mutation a 17-2c code path calls — no dead
-//! methods. Durable park does NOT go through here (it is a write-ahead journal
-//! record written through the supervisor's own `NodeJournal` handle).
+//! ruling 4): it exposes exactly the mutations the supervisor-driven lifecycle
+//! needs — no dead methods. Story 17.2d-b added `register_parked` (durable
+//! park-time node registration); the `Parked` record itself rides the SAME
+//! atomic batch as the checkpoint so registration + park record are
+//! all-or-nothing.
 
 use std::time::Duration;
 
 use crate::domain::models::AgentId;
+use crate::domain::models::agent_node::NodeCheckpoint;
+use crate::domain::models::orchestration::SpokeSpec;
 
 /// Failure surface for a lifecycle mutation reached through the seam. Kept in
 /// `domain/` so the trait carries no infra error type.
@@ -57,4 +61,26 @@ pub trait SupervisedNodes: Send + Sync {
         root: &AgentId,
         timeout_per_node: Duration,
     ) -> Result<Vec<AgentId>, SupervisedNodesError>;
+
+    /// Story 17.2d-b (AC-b1): register a fork-join spoke parked on upstream
+    /// artifacts as a durable `Suspended` tree node, journaling the identity
+    /// checkpoint + `RoomEvent::NodeRegistered` + the `Parked` record
+    /// (relaunch plan + readiness edges) as ONE atomic batch — the durable
+    /// park write and the node registration are all-or-nothing (a partial
+    /// write leaves no orphaned readiness). `checkpoint` arrives with
+    /// `state == Suspended` and `wait_reason == AwaitingUpstreamArtifact`;
+    /// `checkpoint.id` is the full nonce-qualified id. The live launch of the
+    /// same spoke later ADOPTS this node (no second register).
+    async fn register_parked(
+        &self,
+        checkpoint: NodeCheckpoint,
+        spec: SpokeSpec,
+        producers: Vec<AgentId>,
+        concurrency: usize,
+    ) -> Result<(), SupervisedNodesError>;
+
+    /// Terminalize and remove a never-launched durable park. The terminal
+    /// checkpoint, state-change event, and `Unparked` record are one atomic
+    /// journal batch; already-adopted or already-removed nodes are a no-op.
+    async fn cancel_parked(&self, node: &AgentId) -> Result<(), SupervisedNodesError>;
 }

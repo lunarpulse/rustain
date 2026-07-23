@@ -153,6 +153,59 @@ pub struct RecoveryReport {
     /// Waves that journaled `WaveStarted` before the crash but never reached
     /// `WaveCompleted`; recovery closes each with `WaveOutcome::Failed`.
     pub interrupted_waves: Vec<WaveId>,
+    /// Story 17.2d-b (AC-b1/b3): fork-join spokes still durably parked at
+    /// recovery time (`Parked − Unparked` fold). Consumed by
+    /// `resume_fork_join_run` at the composition root — `reconcile` itself
+    /// stays state-only (layering: `subagent` never calls the orchestrator).
+    pub parked: Vec<RecoveredPark>,
+}
+
+/// Story 17.2d-b (AC-b1): one durably parked fork-join spoke recovered from
+/// the journal — the relaunch plan (`spec`) plus its readiness edges.
+/// `node` is the full nonce-qualified tree-node id (the wave nonce is
+/// embedded losslessly in the identity).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveredPark {
+    pub node: AgentId,
+    pub producers: Vec<AgentId>,
+    pub spec: crate::domain::models::orchestration::SpokeSpec,
+    pub concurrency: usize,
+}
+
+/// Story 17.2d-b (AC-b1/b3): pure `Parked − Unparked` fold over a journal
+/// entry stream (the `ObligationAccepted/Discharged` precedent). Latest
+/// `Parked` per node wins; an `Unparked` clears it. Shared by `reconcile`
+/// (populating `RecoveryReport.parked`) and the composition-root resume scan,
+/// so both read the SAME recovered parked set.
+pub fn fold_parked_records(
+    entries: &[crate::domain::models::JournalEntry],
+) -> std::collections::BTreeMap<AgentId, RecoveredPark> {
+    let mut parked = std::collections::BTreeMap::<AgentId, RecoveredPark>::new();
+    for entry in entries {
+        match &entry.record {
+            JournalRecord::Parked {
+                node,
+                producers,
+                spec,
+                concurrency,
+            } => {
+                parked.insert(
+                    node.clone(),
+                    RecoveredPark {
+                        node: node.clone(),
+                        producers: producers.clone(),
+                        spec: spec.clone(),
+                        concurrency: *concurrency,
+                    },
+                );
+            }
+            JournalRecord::Unparked { node } => {
+                parked.remove(node);
+            }
+            _ => {}
+        }
+    }
+    parked
 }
 
 enum AliasLink {
@@ -188,6 +241,8 @@ impl NodeRecovery {
         // accepted − discharged − violated.
         let mut accepted = BTreeMap::<AgentId, std::collections::HashSet<CorrelationId>>::new();
         let mut resolved = BTreeMap::<AgentId, std::collections::HashSet<CorrelationId>>::new();
+        // 17.2d-b (AC-b1): durable fork-join parked set (`Parked − Unparked`).
+        let mut parked_set = BTreeMap::<AgentId, RecoveredPark>::new();
         // Track in-flight waves so recovery can close any wave that started but
         // never completed (host-loss / crash mid-flight) — see the fold below.
         let mut started_waves = Vec::<WaveId>::new();
@@ -242,6 +297,30 @@ impl NodeRecovery {
                     resolved.entry(node).or_default().insert(correlation_id);
                 }
                 JournalRecord::HazardRaised { .. } => {}
+                // Durable fork-join park records fold into the recovered
+                // parked set (`Parked − Unparked`); node STATE is recovered by
+                // the checkpoint loop, which already restores the parked
+                // `Suspended` node + its `wait_reason` side-table.
+                JournalRecord::Parked {
+                    node,
+                    producers,
+                    spec,
+                    concurrency,
+                } => {
+                    parked_set.insert(
+                        node.clone(),
+                        RecoveredPark {
+                            node,
+                            producers,
+                            spec,
+                            concurrency,
+                        },
+                    );
+                }
+                JournalRecord::Unparked { node } => {
+                    parked_set.remove(&node);
+                }
+                JournalRecord::ParkClaimed { .. } | JournalRecord::ParkClaimReleased { .. } => {}
                 // Ledger conservation head is recovered separately by
                 // `AuthorityLedger::recover_from_journal` (17-2c D4); this fold
                 // rebuilds node/room state only.
@@ -406,6 +485,11 @@ impl NodeRecovery {
             tree.restore_pending_obligations(node, pending).await;
         }
 
+        // 17.2d-b (AC-b1/b3): expose the durable parked set (`Parked −
+        // Unparked`) for the composition-root resume consumer. `reconcile`
+        // stays state-only — it never dispatches (layering).
+        report.parked = parked_set.into_values().collect();
+
         // 17.5b (C3): `Waiting` hazards were captured against the pre-fold
         // checkpoint above (folding to `Suspended` first would make
         // `waiting_hazard()` return `None` and silently delete restart-time
@@ -422,5 +506,78 @@ impl NodeRecovery {
         }
 
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{JournalEntry, JournalRecord};
+
+    fn parked_spec(
+        id: &AgentId,
+        waits_for: Vec<AgentId>,
+    ) -> crate::domain::models::orchestration::SpokeSpec {
+        crate::domain::models::orchestration::SpokeSpec {
+            id: id.clone(),
+            label: "spoke".into(),
+            prompt: "p".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for,
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        }
+    }
+
+    /// Story 17.2d-b AC-b1/b3: the recovered parked set is `Parked − Unparked`
+    /// (latest-wins, idempotent replay) — the ObligationAccepted/Discharged
+    /// precedent.
+    #[test]
+    fn parked_fold_is_set_difference_and_idempotent() {
+        let node_a = AgentId::new();
+        let node_b = AgentId::new();
+        let spec_a = parked_spec(&AgentId::new(), vec![AgentId::new()]);
+        let spec_b = parked_spec(&AgentId::new(), vec![]);
+        let entries = vec![
+            JournalEntry::new(
+                1,
+                JournalRecord::Parked {
+                    node: node_a.clone(),
+                    producers: vec![AgentId::new()],
+                    spec: spec_a.clone(),
+                    concurrency: 2,
+                },
+            ),
+            JournalEntry::new(
+                2,
+                JournalRecord::Parked {
+                    node: node_b.clone(),
+                    producers: vec![],
+                    spec: spec_b.clone(),
+                    concurrency: 1,
+                },
+            ),
+            JournalEntry::new(
+                3,
+                JournalRecord::Unparked {
+                    node: node_a.clone(),
+                },
+            ),
+            // Duplicate Unparked is a no-op (idempotent replay).
+            JournalEntry::new(
+                4,
+                JournalRecord::Unparked {
+                    node: node_a.clone(),
+                },
+            ),
+        ];
+        let folded = fold_parked_records(&entries);
+        assert!(!folded.contains_key(&node_a), "unparked node folds out");
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[&node_b].spec, spec_b);
+        // Replaying the same stream yields the identical set.
+        let replayed = fold_parked_records(&entries);
+        assert_eq!(folded, replayed);
     }
 }

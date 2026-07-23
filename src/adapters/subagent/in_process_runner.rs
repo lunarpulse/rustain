@@ -5980,6 +5980,770 @@ mod tests {
         }
     }
 
+    /// 17-2d-b test fixture: a provider that records every prompt it sees,
+    /// completes quickly otherwise, and hangs forever when the prompt carries
+    /// the `hang` marker — the deterministic way to keep one spoke in flight
+    /// while its dependent stays durably parked.
+    #[derive(Default)]
+    struct SelectiveHangProvider {
+        prompts: tokio::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for SelectiveHangProvider {
+        async fn stream_completion(
+            &self,
+            messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            let rendered = format!("{messages:?}");
+            self.prompts.lock().await.push(rendered.clone());
+            if rendered.contains("hang") {
+                let chunks = vec![StreamChunk::Text {
+                    content: "working...".into(),
+                    parent_tool_use_id: None,
+                }];
+                let stream = futures::stream::iter(chunks).chain(futures::stream::pending());
+                return Ok(Box::pin(stream));
+            }
+            let chunks = vec![
+                StreamChunk::Text {
+                    content: "done".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::EndTurn,
+                },
+            ];
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        fn provider_id(&self) -> String {
+            "selective-hang".into()
+        }
+
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    fn resumed_leaf_spec(
+        raw: &AgentId,
+        prompt: &str,
+        waits_for: Vec<AgentId>,
+    ) -> crate::domain::models::orchestration::SpokeSpec {
+        crate::domain::models::orchestration::SpokeSpec {
+            id: raw.clone(),
+            label: prompt.into(),
+            prompt: prompt.into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for,
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        }
+    }
+
+    /// Story 17.2d-b / AC-b1+b2+b3 (Rule 2 front door, RC-C `rc7` shape) — a
+    /// REAL host loss while a root-wave spoke is durably parked: host A runs
+    /// the front door with a hanging sibling so `s3` (waits on the fast `s1`)
+    /// is journaled `Suspended` + `Parked` and never launches; the runtime is
+    /// terminated; host B reopens the SAME journal, reconciles, and invokes
+    /// `resume_fork_join_run` at the composition root. The parked spoke is
+    /// revived under its park-time nonce-qualified id (launch ADOPTS the
+    /// node), the done producer is NEVER re-executed, and a second resume is
+    /// a no-op.
+    ///
+    /// Mutants (each turns this keystone RED):
+    ///  - fresh `wave_nonce` per resume → `s3` relaunches under a NEW id → the
+    ///    exactly-one-node assertion (and the adoption marker) fails;
+    ///  - second register instead of adoption → the launch fails on the
+    ///    duplicate guard → `s3` never reaches `Completed`;
+    ///  - skip the resume consumer → the `Parked` record is orphaned, `s3`
+    ///    stays `Suspended`, the provider is never invoked;
+    ///  - re-execute done spokes → the provider sees `s1`'s prompt again.
+    #[tokio::test]
+    async fn rc8_host_loss_resumes_parked_root_wave_spoke() {
+        use std::time::Duration;
+
+        let real = tempfile::tempdir().unwrap();
+        let workspace = real.path().to_path_buf();
+        let workspace_id = crate::infrastructure::paths::workspace_hash(&workspace);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<(AgentId, AgentId, AgentId)>();
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+        let workspace_id_a = workspace_id.clone();
+
+        // Host A on a dedicated runtime (dropping it destroys every live
+        // handle — host loss, not a detached task).
+        let host_a_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("build host-A runtime");
+            let ready = runtime.block_on(async move {
+                let host_a =
+                    crate::domain::models::HostBinding::new("host-A", workspace_id_a.clone());
+                let journal = Arc::new(
+                    crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace)
+                        .await
+                        .expect("open host-A journal"),
+                );
+                let host_a_tree = Arc::new(
+                    crate::infrastructure::subagent::NodeTree::with_now_fn(Arc::new(|| {
+                        1_700_000_000_000
+                    }))
+                    .with_journal(journal.clone())
+                    .with_host_binding(host_a.clone()),
+                );
+                let provider = Arc::new(SelectiveHangProvider::default());
+                let (runner, ledger, root) = make_runner_with_provider_on_registry(
+                    &workspace,
+                    true,
+                    provider,
+                    host_a_tree.clone(),
+                )
+                .await;
+                let authority = Arc::new(
+                    crate::adapters::authority::InProcessAuthorityProvider::new(ledger.clone()),
+                )
+                    as Arc<dyn crate::domain::ports::AuthorityProvider>;
+                let (event_bus, event_rx) = EventBus::new(256);
+                std::mem::forget(event_rx);
+                let event_bus = Arc::new(event_bus);
+                let clock = Arc::new(crate::domain::clock::MockClock::at_wall_ms(0))
+                    as Arc<dyn crate::domain::clock::Clock>;
+                let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+                    &workspace,
+                ));
+                let supervisor = Arc::new(
+                    crate::infrastructure::supervisor::Supervisor::new(
+                        crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+                        crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+                        ledger.clone(),
+                        root.clone(),
+                        clock.clone(),
+                        event_bus.clone(),
+                    )
+                    .with_journal(journal.clone())
+                    .with_nodes(host_a_tree.clone()),
+                );
+                let executor = Arc::new(
+                    crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+                        Arc::new(runner),
+                        authority,
+                        ledger,
+                        event_bus.clone(),
+                        clock,
+                        root,
+                    )
+                    .with_journal(journal.clone())
+                    .with_supervisor(supervisor)
+                    .with_artifact_store(store, host_a),
+                );
+                // Wave shape: wave1=[s1], wave2=[s2h (hangs), s2f (fast)],
+                // wave3=[s3 waits s2f]. The hanging s2h blocks wave-2
+                // completion forever, so s3 stays DURABLY PARKED with its
+                // producer (s2f) terminal-Completed — the exact resumable
+                // shape, reached deterministically.
+                let s1 = AgentId::new();
+                let s2h = AgentId::new();
+                let s2f = AgentId::new();
+                let s3 = AgentId::new();
+                let request = crate::domain::ports::ForkJoinRequest {
+                    coordinator: AgentId::root(),
+                    spokes: vec![
+                        resumed_leaf_spec(&s1, "fast s1", vec![]),
+                        resumed_leaf_spec(&s2h, "hang s2h", vec![s1.clone()]),
+                        resumed_leaf_spec(&s2f, "fast s2f", vec![s1.clone()]),
+                        resumed_leaf_spec(&s3, "fast s3", vec![s2f.clone()]),
+                    ],
+                    wait_policy: crate::domain::models::WaitPolicy::All,
+                    concurrency: 2,
+                };
+                crate::infrastructure::runtime::event_loop::spawn_wave_run(
+                    executor as Arc<dyn crate::domain::ports::Orchestrator>,
+                    event_bus,
+                    "rc8-resume".to_string(),
+                    request,
+                    CancellationToken::new(),
+                    1,
+                );
+
+                let (s1, s2h, s2f, s3) = (s1, s2h, s2f, s3);
+                let poll = tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        let entries = journal.load().await.expect("load host-A journal");
+                        let mut states = std::collections::BTreeMap::new();
+                        let mut parked_nodes = std::collections::BTreeMap::new();
+                        let mut unparked = std::collections::BTreeSet::new();
+                        let mut artifact_producers = std::collections::BTreeSet::new();
+                        for entry in &entries {
+                            match &entry.record {
+                                crate::domain::models::JournalRecord::Checkpoint(cp) => {
+                                    states.insert(cp.id.clone(), cp.state);
+                                }
+                                crate::domain::models::JournalRecord::Parked {
+                                    node, spec, ..
+                                } => {
+                                    parked_nodes.insert(node.clone(), spec.id.clone());
+                                }
+                                crate::domain::models::JournalRecord::Unparked { node } => {
+                                    unparked.insert(node.clone());
+                                }
+                                crate::domain::models::JournalRecord::Room(
+                                    crate::domain::models::RoomEvent::ArtifactCreated { artifact },
+                                ) => {
+                                    if let Some((_, raw, _)) =
+                                        crate::infrastructure::orchestrator::decode_nonce_qualified(
+                                            &artifact.producer,
+                                        )
+                                    {
+                                        artifact_producers.insert(raw);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        let parked_set: Vec<AgentId> = parked_nodes
+                            .iter()
+                            .filter(|(node, _)| !unparked.contains(*node))
+                            .map(|(_, raw)| raw.clone())
+                            .collect();
+                        let state_of = |raw: &AgentId| -> Option<NodeState> {
+                            states.iter().find_map(|(id, state)| {
+                                let (_, decoded_raw, _) =
+                                    crate::infrastructure::orchestrator::decode_nonce_qualified(
+                                        id,
+                                    )?;
+                                (&decoded_raw == raw).then_some(*state)
+                            })
+                        };
+                        if state_of(&s1) == Some(NodeState::Completed)
+                            && state_of(&s2f) == Some(NodeState::Completed)
+                            && artifact_producers.contains(&s2f)
+                            && state_of(&s2h) == Some(NodeState::Running)
+                            && state_of(&s3) == Some(NodeState::Suspended)
+                            && parked_set == vec![s3.clone()]
+                        {
+                            break (s1.clone(), s2f.clone(), s3.clone());
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await;
+                match poll {
+                    Ok(ready) => ready,
+                    Err(_) => {
+                        let entries = journal.load().await.expect("load host-A journal");
+                        let summary: Vec<String> = entries
+                            .iter()
+                            .map(|entry| format!("{:?}", entry.record))
+                            .collect();
+                        panic!(
+                            "host-A readiness timed out; journal records ({}):\n{}",
+                            summary.len(),
+                            summary.join("\n")
+                        );
+                    }
+                }
+            });
+            ready_tx.send(ready).expect("host-B receives readiness");
+            let _ = shutdown_rx.recv();
+            drop(runtime);
+        });
+
+        let (_s1, s2f, s3) = match ready_rx.await {
+            Ok(ready) => ready,
+            Err(_) => {
+                let _ = shutdown_tx.send(());
+                let join = tokio::task::spawn_blocking(move || host_a_thread.join()).await;
+                panic!("host-A runtime failed before readiness: {join:?}");
+            }
+        };
+        shutdown_tx.send(()).expect("terminate host A");
+        tokio::task::spawn_blocking(move || host_a_thread.join())
+            .await
+            .expect("join host-A thread")
+            .expect("host-A runtime exits cleanly");
+
+        // Host B (SAME host id — a restart, not a foreign host) reopens the
+        // journal only after the runtime owning every live handle is gone.
+        let reopened = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(real.path())
+                .await
+                .unwrap(),
+        );
+        let host_b_binding =
+            crate::domain::models::HostBinding::new("host-A", workspace_id.clone());
+        let host_b_tree = Arc::new(
+            crate::infrastructure::subagent::NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_100))
+                .with_journal(reopened.clone())
+                .with_host_binding(host_b_binding.clone()),
+        );
+        let singleton =
+            crate::infrastructure::subagent::DaemonSingletonLock::try_acquire(real.path())
+                .await
+                .expect("host B acquires the daemon singleton");
+        let report = crate::infrastructure::subagent::NodeRecovery::reconcile(
+            &reopened,
+            &host_b_tree,
+            &singleton,
+            "host-A",
+        )
+        .await
+        .expect("reconcile on restart");
+        // The durable parked set is exactly s3 — s2 was adopted (Unparked at
+        // launch) before the crash.
+        assert_eq!(report.parked.len(), 1, "exactly one spoke still parked");
+        assert_eq!(report.parked[0].spec.id, s3);
+        let s3_node = report.parked[0].node.clone();
+        assert!(report.host_bound_unavailable.is_empty());
+
+        let provider_b = Arc::new(SelectiveHangProvider::default());
+        let (runner_b, ledger_b, root_b) = make_runner_with_provider_on_registry(
+            real.path(),
+            true,
+            provider_b.clone(),
+            host_b_tree.clone(),
+        )
+        .await;
+        let authority_b = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger_b.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus_b, event_rx_b) = EventBus::new(256);
+        std::mem::forget(event_rx_b);
+        let event_bus_b = Arc::new(event_bus_b);
+        let clock_b = Arc::new(crate::domain::clock::MockClock::at_wall_ms(0))
+            as Arc<dyn crate::domain::clock::Clock>;
+        let store_b = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            real.path(),
+        ));
+        let supervisor_b = Arc::new(
+            crate::infrastructure::supervisor::Supervisor::new(
+                crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+                crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+                ledger_b.clone(),
+                root_b.clone(),
+                clock_b.clone(),
+                event_bus_b.clone(),
+            )
+            .with_journal(reopened.clone())
+            .with_nodes(host_b_tree.clone()),
+        );
+        let executor_b = Arc::new(
+            crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+                Arc::new(runner_b),
+                authority_b,
+                ledger_b,
+                event_bus_b,
+                clock_b,
+                root_b,
+            )
+            .with_journal(reopened.clone())
+            .with_supervisor(supervisor_b)
+            .with_artifact_store(store_b, host_b_binding),
+        );
+
+        let resumed = executor_b
+            .resume_fork_join_run(&report)
+            .await
+            .expect("resume after restart");
+        assert_eq!(resumed.len(), 1, "one wave resumed");
+        let run = &resumed[0];
+        // s3 revived under its park-time id; s1 seeded as done (never re-run).
+        let s2f_node = run
+            .outcome
+            .spokes
+            .iter()
+            .map(|(id, _)| id.clone())
+            .find(|id| {
+                crate::infrastructure::orchestrator::decode_nonce_qualified(id)
+                    .is_some_and(|(_, raw, _)| raw == s2f)
+            })
+            .expect("done producer s2f seeded into the resumed wave outcome");
+        let recovered = run
+            .store
+            .get(&s2f_node)
+            .expect("done producer restored into ResultStore");
+        assert_eq!(
+            recovered.body, "done",
+            "durable result detail is rehydrated"
+        );
+        assert_eq!(
+            recovered.to_spoke_result(),
+            crate::domain::models::SpokeResult::Completed {
+                summary: "done".into(),
+            }
+        );
+        let producer_artifact = run
+            .artifact_by_spoke
+            .get(&s2f)
+            .expect("producer artifact retained");
+        let resumed_artifact = run
+            .artifact_by_spoke
+            .get(&s3)
+            .expect("resumed artifact persisted");
+        assert!(
+            resumed_artifact.depends_on.contains(&producer_artifact.id),
+            "resumed artifact preserves the completed producer lineage"
+        );
+        assert_eq!(report.parked[0].concurrency, 2);
+        assert!(
+            run.outcome.spokes.iter().any(|(id, result)| {
+                *id == s3_node
+                    && matches!(result, crate::domain::models::SpokeResult::Completed { .. })
+            }),
+            "s3 must revive + complete under its park-time id: {:?}",
+            run.outcome.spokes
+        );
+        // Exactly ONE durable identity for s3's logical spoke (adoption, not
+        // a second register — the fresh-nonce mutant journals a SECOND
+        // NodeRegistered under a new id). The live bridge deregisters at
+        // terminal, so the durable journal is the source of truth here.
+        let entries = reopened.load().await.unwrap();
+        let s3_registrations: Vec<AgentId> = entries
+            .iter()
+            .filter_map(|entry| match &entry.record {
+                crate::domain::models::JournalRecord::Room(
+                    crate::domain::models::RoomEvent::NodeRegistered { node, .. },
+                ) => crate::infrastructure::orchestrator::decode_nonce_qualified(node)
+                    .and_then(|(_, raw, _)| (raw == s3).then_some(node.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            s3_registrations,
+            vec![s3_node.clone()],
+            "one durable identity for s3, adopted not duplicated"
+        );
+        // s1 was NOT re-executed on host B (skip-done): the provider saw only
+        // s3's prompt, exactly once.
+        let prompts = provider_b.prompts.lock().await.clone();
+        assert_eq!(
+            prompts.len(),
+            1,
+            "only the revived spoke re-runs: {prompts:?}"
+        );
+        assert!(prompts[0].contains("fast s3"));
+        assert!(!prompts.iter().any(|p| p.contains("fast s1")));
+        assert!(!prompts.iter().any(|p| p.contains("fast s2f")));
+        // Partial-wave classification (Boundary #3): the mid-flight s2h
+        // (Running at crash → Suspended, spec never durable) is honestly NOT
+        // revived — the terminal checkpoint is the single source of truth and
+        // no stranger is launched under a fresh identity.
+        assert!(!prompts.iter().any(|p| p.contains("hang s2h")));
+        // The adoption transition + Unparked are durable.
+        let mut adopted = false;
+        let mut unparked = false;
+        for entry in &entries {
+            match &entry.record {
+                crate::domain::models::JournalRecord::Room(
+                    crate::domain::models::RoomEvent::NodeStateChanged { node, from, to },
+                ) if *node == s3_node
+                    && *from == NodeState::Suspended
+                    && *to == NodeState::Running =>
+                {
+                    adopted = true;
+                }
+                crate::domain::models::JournalRecord::Unparked { node } if *node == s3_node => {
+                    unparked = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(adopted, "Suspended→Running journaled at the revived launch");
+        assert!(unparked, "Unparked journaled at the revived launch");
+        // Idempotent replay (Rule 4): a second resume folds Parked − Unparked
+        // to empty — no re-dispatch, no second node.
+        let second = executor_b
+            .resume_fork_join_run(&report)
+            .await
+            .expect("second resume is a no-op");
+        assert!(second.is_empty(), "idempotent resume yields no wave");
+        assert_eq!(provider_b.prompts.lock().await.len(), 1);
+        let _ = s2f_node;
+    }
+
+    /// Story 17.2d-b / AC-b4 (host-bound honesty) — a parked spoke journaled
+    /// under a FOREIGN host binding is never revived locally. Mutant: seeding
+    /// from the `Suspended` checkpoint WITHOUT re-consulting the host filter
+    /// launches the foreign spoke (provider invoked, node Running) → RED.
+    #[tokio::test]
+    async fn rc8_foreign_host_parked_spoke_not_revived_locally() {
+        use std::time::Duration;
+
+        let real = tempfile::tempdir().unwrap();
+        let workspace = real.path().to_path_buf();
+        let workspace_id = crate::infrastructure::paths::workspace_hash(&workspace);
+
+        // Host A parks the spoke durably, then loses its host.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<AgentId>();
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+        let workspace_id_a = workspace_id.clone();
+        let host_a_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("build host-A runtime");
+            let ready = runtime.block_on(async move {
+                let host_a =
+                    crate::domain::models::HostBinding::new("host-A", workspace_id_a.clone());
+                let journal = Arc::new(
+                    crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace)
+                        .await
+                        .expect("open host-A journal"),
+                );
+                let host_a_tree = Arc::new(
+                    crate::infrastructure::subagent::NodeTree::with_now_fn(Arc::new(|| {
+                        1_700_000_000_000
+                    }))
+                    .with_journal(journal.clone())
+                    .with_host_binding(host_a.clone()),
+                );
+                let provider = Arc::new(SelectiveHangProvider::default());
+                let (runner, ledger, root) = make_runner_with_provider_on_registry(
+                    &workspace,
+                    true,
+                    provider,
+                    host_a_tree.clone(),
+                )
+                .await;
+                let authority = Arc::new(
+                    crate::adapters::authority::InProcessAuthorityProvider::new(ledger.clone()),
+                )
+                    as Arc<dyn crate::domain::ports::AuthorityProvider>;
+                let (event_bus, event_rx) = EventBus::new(256);
+                std::mem::forget(event_rx);
+                let event_bus = Arc::new(event_bus);
+                let clock = Arc::new(crate::domain::clock::MockClock::at_wall_ms(0))
+                    as Arc<dyn crate::domain::clock::Clock>;
+                let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+                    &workspace,
+                ));
+                let supervisor = Arc::new(
+                    crate::infrastructure::supervisor::Supervisor::new(
+                        crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+                        crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+                        ledger.clone(),
+                        root.clone(),
+                        clock.clone(),
+                        event_bus.clone(),
+                    )
+                    .with_journal(journal.clone())
+                    .with_nodes(host_a_tree.clone()),
+                );
+                let executor = Arc::new(
+                    crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+                        Arc::new(runner),
+                        authority,
+                        ledger,
+                        event_bus.clone(),
+                        clock,
+                        root,
+                    )
+                    .with_journal(journal.clone())
+                    .with_supervisor(supervisor)
+                    .with_artifact_store(store, host_a),
+                );
+                let s1 = AgentId::new();
+                let s2h = AgentId::new();
+                let s2f = AgentId::new();
+                let s3 = AgentId::new();
+                let request = crate::domain::ports::ForkJoinRequest {
+                    coordinator: AgentId::root(),
+                    spokes: vec![
+                        resumed_leaf_spec(&s1, "fast s1", vec![]),
+                        resumed_leaf_spec(&s2h, "hang s2h", vec![s1.clone()]),
+                        resumed_leaf_spec(&s2f, "fast s2f", vec![s1.clone()]),
+                        resumed_leaf_spec(&s3, "fast s3", vec![s2f.clone()]),
+                    ],
+                    wait_policy: crate::domain::models::WaitPolicy::All,
+                    concurrency: 2,
+                };
+                crate::infrastructure::runtime::event_loop::spawn_wave_run(
+                    executor as Arc<dyn crate::domain::ports::Orchestrator>,
+                    event_bus,
+                    "rc8-foreign".to_string(),
+                    request,
+                    CancellationToken::new(),
+                    1,
+                );
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        let entries = journal.load().await.expect("load host-A journal");
+                        let mut states = std::collections::BTreeMap::new();
+                        let mut parked_specs = Vec::new();
+                        let mut unparked_nodes = 0usize;
+                        for entry in &entries {
+                            match &entry.record {
+                                crate::domain::models::JournalRecord::Checkpoint(cp) => {
+                                    states.insert(cp.id.clone(), cp.state);
+                                }
+                                crate::domain::models::JournalRecord::Parked { spec, .. } => {
+                                    parked_specs.push(spec.id.clone());
+                                }
+                                crate::domain::models::JournalRecord::Unparked { .. } => {
+                                    unparked_nodes += 1;
+                                }
+                                _ => {}
+                            }
+                        }
+                        let state_of = |raw: &AgentId| -> Option<NodeState> {
+                            states.iter().find_map(|(id, state)| {
+                                let (_, decoded_raw, _) =
+                                    crate::infrastructure::orchestrator::decode_nonce_qualified(
+                                        id,
+                                    )?;
+                                (&decoded_raw == raw).then_some(*state)
+                            })
+                        };
+                        // s3 parked; s2f done; s2h adopted (its Unparked is
+                        // durable) so the parked SET is exactly {s3}.
+                        if parked_specs.contains(&s3)
+                            && state_of(&s2f) == Some(NodeState::Completed)
+                            && state_of(&s2h) == Some(NodeState::Running)
+                            && unparked_nodes >= 2
+                        {
+                            break s3;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("s3 durably parked on host A")
+            });
+            ready_tx.send(ready).expect("host-B receives readiness");
+            let _ = shutdown_rx.recv();
+            drop(runtime);
+        });
+        let s3 = ready_rx.await.expect("host-A readiness");
+        shutdown_tx.send(()).expect("terminate host A");
+        tokio::task::spawn_blocking(move || host_a_thread.join())
+            .await
+            .expect("join host-A thread")
+            .expect("host-A runtime exits cleanly");
+
+        // Host B is a FOREIGN host: reconcile renders the parked spoke
+        // HostBoundUnavailable, and resume must NOT launch it locally.
+        let reopened = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(real.path())
+                .await
+                .unwrap(),
+        );
+        let host_b_tree = Arc::new(
+            crate::infrastructure::subagent::NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_100))
+                .with_journal(reopened.clone())
+                .with_host_binding(crate::domain::models::HostBinding::new(
+                    "host-B",
+                    workspace_id.clone(),
+                )),
+        );
+        let singleton =
+            crate::infrastructure::subagent::DaemonSingletonLock::try_acquire(real.path())
+                .await
+                .expect("host B acquires the daemon singleton");
+        let report = crate::infrastructure::subagent::NodeRecovery::reconcile(
+            &reopened,
+            &host_b_tree,
+            &singleton,
+            "host-B",
+        )
+        .await
+        .expect("reconcile on the foreign host");
+        assert_eq!(report.parked.len(), 1);
+        let s3_node = report.parked[0].node.clone();
+        assert!(
+            report.host_bound_unavailable.contains(&s3_node),
+            "foreign parked spoke renders HostBoundUnavailable: {report:?}"
+        );
+
+        let provider_b = Arc::new(SelectiveHangProvider::default());
+        let (runner_b, ledger_b, root_b) = make_runner_with_provider_on_registry(
+            real.path(),
+            true,
+            provider_b.clone(),
+            host_b_tree.clone(),
+        )
+        .await;
+        let authority_b = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger_b.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus_b, event_rx_b) = EventBus::new(256);
+        std::mem::forget(event_rx_b);
+        let event_bus_b = Arc::new(event_bus_b);
+        let clock_b = Arc::new(crate::domain::clock::MockClock::at_wall_ms(0))
+            as Arc<dyn crate::domain::clock::Clock>;
+        let store_b = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            real.path(),
+        ));
+        let supervisor_b = Arc::new(
+            crate::infrastructure::supervisor::Supervisor::new(
+                crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+                crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+                ledger_b.clone(),
+                root_b.clone(),
+                clock_b.clone(),
+                event_bus_b.clone(),
+            )
+            .with_journal(reopened.clone())
+            .with_nodes(host_b_tree.clone()),
+        );
+        let executor_b = Arc::new(
+            crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+                Arc::new(runner_b),
+                authority_b,
+                ledger_b,
+                event_bus_b,
+                clock_b,
+                root_b,
+            )
+            .with_journal(reopened.clone())
+            .with_supervisor(supervisor_b)
+            .with_artifact_store(
+                store_b,
+                crate::domain::models::HostBinding::new("host-B", workspace_id),
+            ),
+        );
+        let resumed = executor_b
+            .resume_fork_join_run(&report)
+            .await
+            .expect("resume on the foreign host");
+        assert!(
+            resumed.is_empty(),
+            "foreign parked work is never revived locally"
+        );
+        assert!(
+            provider_b.prompts.lock().await.is_empty(),
+            "no local launch for a foreign parked spoke"
+        );
+        let snapshot = host_b_tree.snapshot().await;
+        assert!(
+            !snapshot.iter().any(|(id, _, _)| {
+                crate::infrastructure::orchestrator::decode_nonce_qualified(id)
+                    .is_some_and(|(_, raw, _)| raw == s3)
+            }),
+            "foreign parked node is not restored as a live local node"
+        );
+    }
+
     #[tokio::test]
     async fn four_delegations_at_global_cap_do_not_block_four_grandchildren() {
         const CAP: usize = 4;

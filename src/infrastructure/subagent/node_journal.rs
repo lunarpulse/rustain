@@ -186,6 +186,119 @@ impl NodeJournal {
         .expect("journal hazard task panicked")
     }
 
+    /// Atomically claim an entire recovered park set under the journal's
+    /// cross-process file lock. The operation is compare-and-append: every node
+    /// must still be parked and have no unexpired claim owned by another
+    /// process, otherwise nothing is written.
+    pub async fn claim_parks(
+        &self,
+        nodes: &[AgentId],
+        claim_id: AgentId,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<bool, JournalError> {
+        if nodes.is_empty() {
+            return Ok(true);
+        }
+        let nodes = nodes.to_vec();
+        let expires_at_ms = now_ms.saturating_add(lease_duration_ms.max(1));
+        let _guard = self.append_guard.lock().await;
+        let path = self.path.clone();
+        let lock_path = self.lock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = FileLock::acquire_exclusive(&lock_path)?;
+            let (entries, valid_len, file_len) = parse_journal(&path)?;
+            let flat = flatten_batches(entries.clone());
+            let mut parked = std::collections::BTreeSet::<AgentId>::new();
+            let mut claims = std::collections::BTreeMap::<AgentId, (AgentId, i64)>::new();
+            for entry in flat {
+                match entry.record {
+                    JournalRecord::Parked { node, .. } => {
+                        parked.insert(node.clone());
+                        claims.remove(&node);
+                    }
+                    JournalRecord::Unparked { node } => {
+                        parked.remove(&node);
+                        claims.remove(&node);
+                    }
+                    JournalRecord::ParkClaimed {
+                        node,
+                        claim_id,
+                        expires_at_ms,
+                    } if parked.contains(&node) => {
+                        claims.insert(node, (claim_id, expires_at_ms));
+                    }
+                    JournalRecord::ParkClaimReleased { node, claim_id } => {
+                        if claims
+                            .get(&node)
+                            .is_some_and(|(owner, _)| *owner == claim_id)
+                        {
+                            claims.remove(&node);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let unavailable = nodes.iter().any(|node| {
+                !parked.contains(node)
+                    || claims
+                        .get(node)
+                        .is_some_and(|(owner, expires)| *owner != claim_id && *expires > now_ms)
+            });
+            if unavailable {
+                return Ok(false);
+            }
+            let records = nodes
+                .into_iter()
+                .filter(|node| {
+                    !claims
+                        .get(node)
+                        .is_some_and(|(owner, expires)| *owner == claim_id && *expires > now_ms)
+                })
+                .map(|node| JournalRecord::ParkClaimed {
+                    node,
+                    claim_id: claim_id.clone(),
+                    expires_at_ms,
+                })
+                .collect::<Vec<_>>();
+            if !records.is_empty() {
+                append_records_locked(
+                    &path,
+                    &entries,
+                    valid_len,
+                    file_len,
+                    vec![JournalRecord::Batch(records)],
+                )?;
+            }
+            Ok(true)
+        })
+        .await
+        .expect("journal park-claim task panicked")
+    }
+
+    /// Release a failed resume attempt without consuming the parked records.
+    /// A release is owner-qualified, so it cannot clear a newer claimant.
+    pub async fn release_park_claims(
+        &self,
+        nodes: &[AgentId],
+        claim_id: &AgentId,
+    ) -> Result<(), JournalError> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        self.append_atomic_batch(
+            nodes
+                .iter()
+                .map(|node| JournalRecord::ParkClaimReleased {
+                    node: node.clone(),
+                    claim_id: claim_id.clone(),
+                })
+                .collect(),
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Journaled `MustReport` violations, in durable order.
     pub async fn obligation_violations(
         &self,
@@ -542,6 +655,86 @@ pub enum JournalError {
     EmptyBatch,
     #[error("journal sequence space exhausted")]
     SequenceExhausted,
+}
+
+#[cfg(test)]
+mod park_claim_tests {
+    use super::*;
+
+    fn parked_spec(id: AgentId) -> crate::domain::models::orchestration::SpokeSpec {
+        crate::domain::models::orchestration::SpokeSpec {
+            id,
+            label: "parked".into(),
+            prompt: "resume".into(),
+            effective_model: "test".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: vec![AgentId::new()],
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        }
+    }
+
+    #[tokio::test]
+    async fn park_claim_is_cross_instance_owner_qualified_and_expiring() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal_a = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        let journal_b = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        let node = AgentId::new();
+        journal_a
+            .append(JournalRecord::Parked {
+                node: node.clone(),
+                producers: Vec::new(),
+                spec: parked_spec(AgentId::new()),
+                concurrency: 1,
+            })
+            .await
+            .unwrap();
+
+        let claim_a = AgentId::new();
+        let claim_b = AgentId::new();
+        let claim_c = AgentId::new();
+        assert!(
+            journal_a
+                .claim_parks(std::slice::from_ref(&node), claim_a.clone(), 0, 100)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !journal_b
+                .claim_parks(std::slice::from_ref(&node), claim_b.clone(), 50, 100)
+                .await
+                .unwrap(),
+            "a live claim excludes another process"
+        );
+        assert!(
+            journal_b
+                .claim_parks(std::slice::from_ref(&node), claim_b.clone(), 101, 100)
+                .await
+                .unwrap(),
+            "an expired owner can be replaced"
+        );
+        journal_a
+            .release_park_claims(std::slice::from_ref(&node), &claim_a)
+            .await
+            .unwrap();
+        assert!(
+            !journal_a
+                .claim_parks(std::slice::from_ref(&node), claim_c.clone(), 102, 100)
+                .await
+                .unwrap(),
+            "a stale release cannot erase the newer owner"
+        );
+        journal_b
+            .release_park_claims(std::slice::from_ref(&node), &claim_b)
+            .await
+            .unwrap();
+        assert!(
+            journal_a
+                .claim_parks(std::slice::from_ref(&node), claim_c, 102, 100)
+                .await
+                .unwrap()
+        );
+    }
 }
 
 /// Concrete [`crate::domain::ports::RoomJournal`] over a `NodeJournal` +

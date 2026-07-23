@@ -387,6 +387,59 @@ impl Supervisor {
         }
     }
 
+    /// Story 17.2d-b (AC-b1): the DURABLE park. Registers the spoke's
+    /// `Suspended` node (identity checkpoint + `NodeRegistered` + `Parked`
+    /// record as ONE atomic journal batch) through the `SupervisedNodes` seam,
+    /// THEN registers the in-memory readiness edges under the raw logical
+    /// spoke ids. Durable-first ordering: a failure leaves no in-memory
+    /// readiness for an unjournaled park. The supervisor remains the sole
+    /// readiness writer (INV-SUP-2); the executor holds no `NodeTree`.
+    pub async fn park_on_dependencies_durable(
+        &self,
+        checkpoint: crate::domain::models::NodeCheckpoint,
+        spec: crate::domain::models::orchestration::SpokeSpec,
+        producers: Vec<AgentId>,
+        concurrency: usize,
+        readiness_node: AgentId,
+    ) -> Result<(), OrchestrationError> {
+        let nodes = self.nodes.as_ref().ok_or_else(|| {
+            OrchestrationError::Internal(
+                "durable park requires the SupervisedNodes seam (composition root binds it)".into(),
+            )
+        })?;
+        nodes
+            .register_parked(checkpoint, spec, producers.clone(), concurrency)
+            .await
+            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+        self.park_on_dependencies(readiness_node, producers).await;
+        Ok(())
+    }
+
+    /// Terminalize durable parks that never reached launch. Adopted nodes are
+    /// already `Unparked` and removed by the runner, so the node seam treats
+    /// them as an idempotent no-op.
+    pub async fn cancel_durable_parks<'a>(
+        &self,
+        nodes_to_cancel: impl IntoIterator<Item = &'a AgentId>,
+    ) -> Result<(), OrchestrationError> {
+        let nodes_to_cancel = nodes_to_cancel.into_iter().collect::<Vec<_>>();
+        if nodes_to_cancel.is_empty() {
+            return Ok(());
+        }
+        let nodes = self.nodes.as_ref().ok_or_else(|| {
+            OrchestrationError::Internal(
+                "durable park cleanup requires the SupervisedNodes seam".into(),
+            )
+        })?;
+        for node in nodes_to_cancel {
+            nodes
+                .cancel_parked(node)
+                .await
+                .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Drop readiness registrations for nodes that never reached their wave
     /// (early budget/mint refusal, cancellation, or a mid-wave durable-store
     /// error). Idempotent — a node already revived/cleared is a no-op. Prevents

@@ -437,6 +437,42 @@ impl AuthorityLedger {
         Ok(())
     }
 
+    /// Reverse an orchestration-only debit whose side effect never committed.
+    /// This is deliberately narrower than settlement: it cannot restore a tool
+    /// use and it refuses to create budget beyond the token's consumed head.
+    pub fn refund_budget_debit(
+        &self,
+        id: &CapabilityTokenId,
+        amount: Budget,
+    ) -> Result<(), AuthorityError> {
+        let mut state = self.lock_state();
+        let token = state
+            .entries
+            .get(id)
+            .ok_or(AuthorityError::NotFound)?
+            .token
+            .clone();
+        let now_ms = self.observe_authority_time_locked(&mut state);
+        Self::validate_active_chain_locked(&state, &token, now_ms)?;
+        let entry = state.entries.get_mut(id).ok_or(AuthorityError::NotFound)?;
+        if !amount.is_within(entry.consumed) {
+            return Err(AuthorityError::Malformed {
+                reason: "budget refund exceeds consumed debit",
+            });
+        }
+        entry.available = entry
+            .available
+            .checked_add(amount)
+            .ok_or(AuthorityError::Overflow {
+                dimension: "budget refund",
+            })?;
+        entry.consumed = entry.consumed - amount;
+        if self.sink.is_some() {
+            Self::stage_head_locked(&mut state, id);
+        }
+        Ok(())
+    }
+
     pub fn revoke(&self, id: &CapabilityTokenId) -> Result<(), AuthorityError> {
         let mut state = self.lock_state();
         if !state.entries.contains_key(id) {

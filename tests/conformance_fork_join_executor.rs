@@ -328,7 +328,30 @@ fn build_executor(
         Arc::new(bus)
     };
     let clock = Arc::new(MockClock::at_wall_ms(0)) as Arc<dyn Clock>;
-    let exe = ForkJoinExecutor::new(runner, authority, ledger.clone(), event_bus, clock, root);
+    let exe = ForkJoinExecutor::new(
+        runner,
+        authority,
+        ledger.clone(),
+        event_bus,
+        clock,
+        root.clone(),
+    );
+    // 17.2d-b: dependency-wave tests park durably, which requires the
+    // `SupervisedNodes` seam; bind an in-memory `NodeTree` (the journaled
+    // durable-park path itself is covered by the rc8 keystones).
+    let (bus, rx) = EventBus::new(16);
+    std::mem::forget(rx);
+    let exe = exe.with_supervisor(Arc::new(
+        rustain::infrastructure::supervisor::Supervisor::new(
+            rustain::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+            rustain::domain::models::orchestration::FORK_JOIN_SPAWN_CAP,
+            ledger.clone(),
+            root,
+            Arc::new(MockClock::at_wall_ms(0)),
+            Arc::new(bus),
+        )
+        .with_nodes(Arc::new(rustain::infrastructure::subagent::NodeTree::new())),
+    ));
     (exe, ledger)
 }
 

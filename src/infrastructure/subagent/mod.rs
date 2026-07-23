@@ -13,7 +13,8 @@ pub use node_journal::{
     JournalArtifactSink, JournalError, NodeJournal, NodeRoomJournal, RecoveryError,
 };
 pub use node_recovery::{
-    DaemonSingletonLock, NodeRecovery, RecoveryReport, current_host_binding, current_host_id,
+    DaemonSingletonLock, NodeRecovery, RecoveredPark, RecoveryReport, current_host_binding,
+    current_host_id, fold_parked_records,
 };
 pub use node_tree::{
     AgentHandle, CascadeKillError, LocalMessageBus, MAILBOX_CAP, MAX_CHILDREN, MAX_DEPTH,
