@@ -48,6 +48,7 @@ const TRANSITIONS: &[(NodeState, NodeState)] = &[
     (NodeState::Running, NodeState::Cancelled),
     // Waiting ->
     (NodeState::Waiting, NodeState::Running),
+    (NodeState::Waiting, NodeState::Suspended),
     (NodeState::Waiting, NodeState::Cancelled),
     // Suspended ->
     (NodeState::Suspended, NodeState::Running),
@@ -146,7 +147,7 @@ mod tests {
         //Created Running  Waiting Suspended Completed Failed  Cancelled
         [false, true, false, false, false, false, true], // Created
         [false, false, true, true, true, true, true],    // Running
-        [false, true, false, false, false, false, true], // Waiting
+        [false, true, false, true, false, false, true],  // Waiting
         [false, true, false, false, false, false, true], // Suspended
         [false, false, false, false, false, false, false], // Completed
         [false, false, false, false, false, false, false], // Failed

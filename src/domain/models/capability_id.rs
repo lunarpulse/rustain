@@ -98,6 +98,36 @@ impl CapabilityId {
             None
         }
     }
+
+    /// Bridge from the LLM-wire `a2a__<peer>__<skill>` shape (Story 17.4b).
+    /// The `__` separator is reserved (`A2aPeerSpec::validate_id` rejects peer
+    /// ids containing `__`) so the peer/skill split is unambiguous.
+    pub fn from_a2a_wire_name(name: &str) -> Option<Self> {
+        let without_prefix = name.strip_prefix("a2a__")?;
+        let (server, tool) = without_prefix.split_once("__")?;
+        if server.is_empty() || tool.is_empty() {
+            return None;
+        }
+        Some(Self {
+            protocol: "a2a".to_string(),
+            server: server.to_string(),
+            tool: tool.to_string(),
+        })
+    }
+
+    /// Bridge to the LLM-wire `a2a__<peer>__<skill>` shape (Story 17.4b, R-D).
+    /// This is a SECURITY BOUNDARY: the raw peer-chosen skill *name* must never
+    /// reach the LLM tool surface (a hostile peer naming its skill `Read` would
+    /// otherwise be classified `ToolRisk::Safe`). The wire name is built from the
+    /// namespaced `a2a__` prefix + peer id + skill id, so `risk_for_tool`'s
+    /// `a2a__` arm always fires. Returns `None` for non-A2A protocols.
+    pub fn to_a2a_wire_name(&self) -> Option<String> {
+        if self.protocol == "a2a" && !self.server.is_empty() {
+            Some(format!("a2a__{}__{}", self.server, self.tool))
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Display for CapabilityId {
@@ -118,6 +148,19 @@ mod tests {
         assert_eq!(id.server, "postgres");
         assert_eq!(id.tool, "query");
         assert_eq!(id.to_mcp_wire_name().unwrap(), "mcp__postgres__query");
+    }
+
+    #[test]
+    fn test_round_trip_a2a_wire() {
+        let id = CapabilityId::from_a2a_wire_name("a2a__planets__claim_planet").unwrap();
+        assert_eq!(id.protocol, "a2a");
+        assert_eq!(id.server, "planets");
+        assert_eq!(id.tool, "claim_planet");
+        assert_eq!(id.to_a2a_wire_name().unwrap(), "a2a__planets__claim_planet");
+        // Non-A2A protocols never produce an a2a wire name.
+        assert!(id.to_mcp_wire_name().is_none());
+        let mcp = CapabilityId::from_mcp_wire_name("mcp__pg__query").unwrap();
+        assert!(mcp.to_a2a_wire_name().is_none());
     }
 
     #[test]

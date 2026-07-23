@@ -1360,6 +1360,8 @@ mod mcp_check {
             Err(McpError::Cancelled) => (CheckStatus::Warning, CheckTier::Info),
             Err(McpError::Internal(_)) => (CheckStatus::Warning, CheckTier::Info),
             Err(McpError::CallToolFailed(_)) => (CheckStatus::Warning, CheckTier::Info),
+            Err(McpError::TaskProtocol(_)) => (CheckStatus::Warning, CheckTier::Info),
+            Err(McpError::TaskFailed(_)) => (CheckStatus::Warning, CheckTier::Info),
         }
     }
 

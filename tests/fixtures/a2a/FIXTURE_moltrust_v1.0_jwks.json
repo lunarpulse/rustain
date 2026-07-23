@@ -1,0 +1,36 @@
+{
+ "keys": [
+  {
+   "kty": "OKP",
+   "crv": "Ed25519",
+   "kid": "moltrust-gateway-v1",
+   "use": "sig",
+   "x": "dVmyUUpGcDRl6lWLWBzo3TMSHDsAUKRBR2m2apV_qJI",
+   "alg": "EdDSA"
+  },
+  {
+   "kty": "OKP",
+   "crv": "Ed25519",
+   "kid": "did:web:moltrust.ch#moltguard-key-1",
+   "use": "sig",
+   "x": "wP2bZU8N6aWSjYBXVSD7x3IUgdl3VdGWi1j2lcg1r38",
+   "alg": "EdDSA"
+  },
+  {
+   "kty": "OKP",
+   "crv": "Ed25519",
+   "kid": "moltrust-registry-2026-v1",
+   "use": "sig",
+   "alg": "EdDSA",
+   "x": "Pii06SUCwAi0D_BTTOeCsD5XSSrjqFqw0nXF8STr14w"
+  },
+  {
+   "kty": "OKP",
+   "crv": "Ed25519",
+   "kid": "did:web:api.moltrust.ch#key-1",
+   "use": "sig",
+   "x": "10czv0U5JiaS0TCXi4XcTdT_WT9_cLanQ17PRonisNs",
+   "alg": "EdDSA"
+  }
+ ]
+}

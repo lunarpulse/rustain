@@ -20,7 +20,7 @@ name = "fake-mcp-server"
 path = "tests/common/fake_mcp_server.rs"
 test = true
 bench = false
-required-features = ["mcp"]
+required-features = ["test-fake-mcp"]
 [[bin]]
 name = "startup-panic-harness"
 path = "tests/common/startup_panic_harness.rs"
@@ -57,6 +57,7 @@ clap_complete = "=4.6.5"
 # ── Serialization ────────────────────────────────────────────────
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_jcs = { version = "0.2", optional = true }
 toml = "0.8"
 # Layered config merge (Epic 7 retro AI-7.2 / Path A). Provides field-level
 # merge across config layers — required by Epic 8 Story 8.1 AC. The `toml`
@@ -94,13 +95,20 @@ regex = "1"
 once_cell = "1"
 scopeguard = "1"
 shell-words = "1"
-lru = "0.12"
+lru = "0.16.3"
 blake3 = "1"
 bm25 = { version = "=2.3.2", optional = true }
 hex = "0.4"
 gray_matter = "0.2"
 url = "2"
 zeroize = { version = "1", features = ["alloc"] }
+ed25519-dalek = { version = "=2.2.0", features = ["pkcs8", "rand_core"] }
+# Portable OS CSPRNG for identity key generation (Story 17.1a: replaces the
+# Unix-only `/dev/urandom` read). Pinned to 0.6.4 — the exact version already
+# resolved transitively via ed25519-dalek's `rand_core` feature — so this only
+# makes `rand_core::OsRng` directly importable (no lockfile change). `getrandom`
+# (a rand_core default feature) backs `OsRng` on Linux/macOS/Windows/FreeBSD.
+rand_core = "0.6.4"
 rpassword = "7"
 
 # ── Self-update (Story 13.3a, feature-gated `self-update`) ──────
@@ -126,6 +134,17 @@ bincode = { version = "2", optional = true }
 
 # ── Landlock sandbox (Story 9.5, ADR-06-04) ─────────────────────
 landlock = { version = "0.4", optional = true }
+
+# ── WASM execution sandbox (Story 17.3a, ADR-17-3a-01, feature-gated `wasm-sandbox`) ──
+# Untrusted-guest execution over the wasmtime component model. OUT of `default`
+# (NFR9 binary size; no untrusted-tool population exists yet — party ruling N4):
+# the port compiles unconditionally (pure domain); only the `WasmIsolationBackend`
+# adapter is `#[cfg(feature = "wasm-sandbox")]`. Exact-major pin (wasmtime cuts a
+# new major monthly on the 20th — bump deliberately, never `^`). `default-features
+# = false` keeps the tree to cranelift + component-model + async runtime.
+wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "component-model", "async", "runtime"] }
+wasmtime-wasi = { version = "46", optional = true }
+wasmtime-wasi-io = { version = "46", optional = true }
 
 # ── Telegram channel adapter (Story 12.3, feature-gated) ──────────
 teloxide = { version = "0.17.0", optional = true, default-features = false, features = ["macros", "rustls"] }
@@ -173,6 +192,7 @@ rand = "0.9"  # deterministic seeded shuffle for stratified eval partition (Stor
 proptest = "1"  # NN2 property test for synonym collisions (Story 9-7c)
 trybuild = "1"  # Story 14.3 AC5: Window<Handle> inlining-mutant compile_fail + pass-twin pair
 minisign = "0.7"  # Story 13.3a: test-signing fixtures with ephemeral keys (NOT shipped in binary)
+parking_lot = "0.12"  # Story 17.4b: scripted A2A transport mocks (rs-parking-lot rule)
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 procfs = "0.17"
@@ -189,9 +209,16 @@ ollama = ["dep:reqwest"]
 # resolver + disk-cache logic compile unconditionally (pure serde/fs).
 models-dev = ["dep:reqwest"]
 mcp = ["dep:rmcp"]
+test-fake-mcp = ["mcp", "rmcp/server"]
+# DF-17-4a-6: composite_toolset_adapter remains MCP-gated across its lifecycle surface.
+a2a = ["mcp", "dep:reqwest", "dep:serde_jcs"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]
+# Story 17.3a — WASM execution sandbox (FR146). OFF by default (see the wasmtime
+# dep comment). The port + domain value types compile without it; enabling this
+# pulls in the wasmtime runtime and builds the `WasmIsolationBackend` adapter.
+wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-io"]
 # Test-only instrumentation for P0-2/P0-3 sentinels (Story 13.2a review patch).
 # Off by default; enabled for integration tests via `--features test-instrumentation`.
 test-instrumentation = []

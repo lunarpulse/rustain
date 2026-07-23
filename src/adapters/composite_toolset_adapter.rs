@@ -23,6 +23,10 @@ use tokio_util::sync::CancellationToken;
 /// Global counter for synthetic tool_use_id generation in the composite adapter.
 static COMPOSITE_TOOL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Upper bound on reaping one MCP child during session teardown. A hung child
+/// shutdown must not stall `close_session` with a non-terminal registered node.
+const MCP_REAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 use crate::domain::errors::{ToolError, TransitionError};
 use crate::domain::events::{AppEvent, ToolProgressEvent};
 use crate::domain::models::{
@@ -46,6 +50,14 @@ pub struct CompositeToolsetAdapter {
     capability_registry: Arc<CapabilityRegistry>,
     /// Handles keeping discovered capabilities alive.
     subscription_handles: TokioMutex<Vec<RegisterHandle>>,
+    /// Supervisor-owned connect + reconnect tasks. `Arc` so the spawned lazy
+    /// connector can retain its reconnect handles here too; session teardown
+    /// aborts and awaits every retained handle. Tokio mutex keeps the std
+    /// ratchet at 4.
+    mcp_connection_tasks: Arc<TokioMutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Set true (under the task lock) by `stop_mcp_connections` so a `start`
+    /// racing teardown aborts its freshly-spawned task instead of leaking it.
+    mcp_closed: Arc<std::sync::atomic::AtomicBool>,
     /// Story 9.3b — optional skill activator for `SkillsProvider` registration.
     skill_activator: Option<Arc<crate::adapters::skill_activation::SkillActivator>>,
     /// Story 10.3b — previous catalog snapshot for delta computation.
@@ -62,6 +74,9 @@ pub struct CompositeToolsetAdapter {
     /// Story 10.0 — optional subagent provider for agent dispatch.
     /// Uses OnceLock for two-phase wiring (adapter built first, then provider).
     subagent_provider: std::sync::OnceLock<Arc<crate::adapters::subagent::SubagentProvider>>,
+    /// Story 17.4a — cached AgentCard inventory provider, injected after startup composition.
+    #[cfg(feature = "a2a")]
+    a2a_provider: std::sync::OnceLock<Arc<dyn CapabilityProvider>>,
     /// D1 fix: per-turn context stored here, injected into subagent input JSON at dispatch.
     parent_ctx: Arc<
         tokio::sync::RwLock<Option<crate::adapters::subagent::subagent_provider::TaskToolContext>>,
@@ -99,12 +114,16 @@ impl CompositeToolsetAdapter {
             include_builtin,
             capability_registry,
             subscription_handles: TokioMutex::new(Vec::new()),
+            mcp_connection_tasks: Arc::new(TokioMutex::new(Vec::new())),
+            mcp_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             skill_activator,
             prev_catalog: TokioMutex::new(Vec::new()),
             catalog_version: AtomicU64::new(0),
             #[cfg(feature = "meta-search")]
             catalog_broadcast: std::sync::OnceLock::new(),
             subagent_provider: subagent_provider_cell,
+            #[cfg(feature = "a2a")]
+            a2a_provider: std::sync::OnceLock::new(),
             parent_ctx: Arc::new(tokio::sync::RwLock::new(None)),
             conversation_id: Arc::new(tokio::sync::RwLock::new(String::new())),
         }
@@ -136,6 +155,12 @@ impl CompositeToolsetAdapter {
         provider: Arc<crate::adapters::subagent::SubagentProvider>,
     ) {
         let _ = self.subagent_provider.set(provider);
+    }
+
+    /// Story 17.4a — wire the discovery-only A2A provider after composition.
+    #[cfg(feature = "a2a")]
+    pub fn set_a2a_provider(&self, provider: Arc<dyn CapabilityProvider>) {
+        let _ = self.a2a_provider.set(provider);
     }
 
     /// Story 9.3b — read the current catalog version (for tests).
@@ -204,6 +229,19 @@ impl CompositeToolsetAdapter {
             {
                 Ok(h) => handles.extend(h),
                 Err(e) => errors.push(format!("subagent: {e}")),
+            }
+        }
+
+        // 5. A2A AgentCard inventory (Story 17.4a; discovery only).
+        #[cfg(feature = "a2a")]
+        if let Some(a2a_provider) = self.a2a_provider.get() {
+            match self
+                .capability_registry
+                .discover_and_register_all(a2a_provider.as_ref(), "a2a")
+                .await
+            {
+                Ok(h) => handles.extend(h),
+                Err(e) => errors.push(format!("a2a: {e}")),
             }
         }
 
@@ -332,9 +370,62 @@ impl CompositeToolsetAdapter {
             return;
         }
         let clients = self.mcp_clients.clone();
-        tokio::spawn(async move {
-            crate::adapters::mcp::lazy_connect::lazy_connect_all(clients).await;
+        let sink = Arc::clone(&self.mcp_connection_tasks);
+        let closed = Arc::clone(&self.mcp_closed);
+        let handle = tokio::spawn(async move {
+            crate::adapters::mcp::lazy_connect::lazy_connect_all(clients, sink, closed).await;
         });
+        // Register under the SAME lock that stop() drains. If the session
+        // already closed (or is draining), abort instead of leaking the task
+        // past teardown — closing the start/stop race.
+        match self.mcp_connection_tasks.try_lock() {
+            Ok(mut tasks) => {
+                if self.mcp_closed.load(std::sync::atomic::Ordering::SeqCst) {
+                    handle.abort();
+                } else {
+                    tasks.push(handle);
+                }
+            }
+            Err(_) => {
+                handle.abort();
+                tracing::warn!("MCP connection supervisor busy; aborted duplicate start task");
+            }
+        }
+    }
+
+    /// Cooperative cancel-then-reap for one session's MCP children. Idempotent:
+    /// drained connect/reconnect handles and disconnected clients make a second
+    /// call a no-op. Each child reap is time-bounded so a hung MCP shutdown
+    /// cannot stall session teardown.
+    pub async fn stop_mcp_connections(&self) {
+        let tasks = {
+            let mut tasks = self.mcp_connection_tasks.lock().await;
+            // Mark closed FIRST, under the lock, so a concurrent start() aborts
+            // its freshly-spawned task rather than pushing it past this drain.
+            self.mcp_closed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            std::mem::take(&mut *tasks)
+        };
+        // Aborts both the connect task AND any retained reconnect tasks, so a
+        // reconnect can no longer spawn a child after session close.
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
+        }
+        for client in &self.mcp_clients {
+            match tokio::time::timeout(MCP_REAP_TIMEOUT, client.disconnect()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(
+                    server = %client.server_id(),
+                    %error,
+                    "Failed to reap MCP child during session teardown"
+                ),
+                Err(_) => tracing::warn!(
+                    server = %client.server_id(),
+                    "MCP child reap timed out during teardown; proceeding"
+                ),
+            }
+        }
     }
 
     async fn dispatch_mcp_call(
@@ -409,6 +500,23 @@ impl ToolSetPort for CompositeToolsetAdapter {
             if cap.protocol == "subagent" {
                 out.push(ToolDefinition {
                     name: cap.name.clone(),
+                    description: cap.description.clone(),
+                    input_schema: cap.input_schema.clone(),
+                    parallel_safe: cap.parallel_safe,
+                });
+            }
+        }
+        // Story 17.4b (R-D) — expose A2A peer skills under the namespaced wire
+        // name `a2a__<peer>__<skill>`, built from the CapabilityId, NEVER the raw
+        // peer-chosen `cap.name` (a hostile peer naming its skill `Read` must not
+        // reach the LLM surface as `Read`). The `a2a__` prefix also guarantees
+        // `risk_for_tool`'s fail-safe arm fires.
+        for cap in self.capability_registry.snapshot() {
+            if cap.protocol == "a2a"
+                && let Some(wire_name) = cap.id.to_a2a_wire_name()
+            {
+                out.push(ToolDefinition {
+                    name: wire_name,
                     description: cap.description.clone(),
                     input_schema: cap.input_schema.clone(),
                     parallel_safe: cap.parallel_safe,
@@ -567,6 +675,18 @@ impl ToolSetPort for CompositeToolsetAdapter {
             }
         }
 
+        // Story 17.4b (R-D) — route a2a__<peer>__<skill> wire names to the A2A
+        // provider, which drives the remote task lifecycle to terminal.
+        #[cfg(feature = "a2a")]
+        if let Some(a2a_provider) = self.a2a_provider.get()
+            && let Some(id) = crate::domain::models::CapabilityId::from_a2a_wire_name(tool_name)
+        {
+            return a2a_provider
+                .invoke(&id, input, cancel)
+                .await
+                .map_err(|error| ToolError::ExecutionFailed(error.to_string()));
+        }
+
         self.builtin.execute(tool_name, input, cancel).await
     }
 
@@ -629,6 +749,19 @@ impl ToolSetPort for CompositeToolsetAdapter {
                         .map_err(|e| ToolError::ExecutionFailed(e.to_string()));
                 }
             }
+        }
+
+        // Story 17.4b (R-D) — route a2a__<peer>__<skill> wire names to the A2A
+        // provider. Remote delegation does not stream local progress.
+        #[cfg(feature = "a2a")]
+        if let Some(a2a_provider) = self.a2a_provider.get()
+            && let Some(id) = crate::domain::models::CapabilityId::from_a2a_wire_name(tool_name)
+        {
+            let _ = (tool_use_id, progress_tx);
+            return a2a_provider
+                .invoke(&id, input, cancel)
+                .await
+                .map_err(|error| ToolError::ExecutionFailed(error.to_string()));
         }
 
         self.builtin

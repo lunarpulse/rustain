@@ -98,6 +98,25 @@ impl ToolScheduler {
         cancel: CancellationToken,
         active_skills: Option<&[ActiveSkill]>,
     ) -> Vec<ToolCall> {
+        self.schedule_with_provenance(
+            source,
+            batch,
+            cancel,
+            active_skills,
+            crate::domain::models::ProvenanceTag::UserOriginated,
+        )
+        .await
+    }
+
+    /// Schedule calls using the caller node's derived provenance.
+    pub async fn schedule_with_provenance(
+        self: Arc<Self>,
+        source: ApprovalSource,
+        batch: Vec<ToolCallRequest>,
+        cancel: CancellationToken,
+        active_skills: Option<&[ActiveSkill]>,
+        provenance: crate::domain::models::ProvenanceTag,
+    ) -> Vec<ToolCall> {
         let all_parallel = batch
             .iter()
             .all(|req| self.tools.is_parallel_safe(&req.tool_name));
@@ -110,7 +129,7 @@ impl ToolScheduler {
                 let src = source.clone();
                 let c = cancel.child_token();
                 let active = active_owned.clone();
-                futures.push_back(async move { s.run_one(src, req, c, active).await });
+                futures.push_back(async move { s.run_one(src, req, c, active, provenance).await });
             }
             let mut out = Vec::with_capacity(futures.len());
             while let Some(call) = futures.next().await {
@@ -123,7 +142,7 @@ impl ToolScheduler {
                 let c = cancel.child_token();
                 out.push(
                     self.clone()
-                        .run_one(source.clone(), req, c, active_owned.clone())
+                        .run_one(source.clone(), req, c, active_owned.clone(), provenance)
                         .await,
                 );
             }
@@ -131,13 +150,13 @@ impl ToolScheduler {
         }
     }
 
-    /// Execute a single tool call through the full phase pipeline.
     async fn run_one(
         self: Arc<Self>,
         source: ApprovalSource,
         req: ToolCallRequest,
         cancel: CancellationToken,
         active_skills: Option<Vec<ActiveSkill>>,
+        provenance: crate::domain::models::ProvenanceTag,
     ) -> ToolCall {
         let id = req.id.clone();
         let conversation_id = source.conversation_id().to_string();
@@ -180,7 +199,7 @@ impl ToolScheduler {
 
         // Phase 3: Permission chain check
         let plan_file = self.plan_file.read().await.clone();
-        let decision_fut = permission_chain::check_with_source(
+        let decision_fut = permission_chain::check_with_source_and_provenance(
             self.security.as_ref(),
             &req.tool_name,
             &req.input,
@@ -188,6 +207,7 @@ impl ToolScheduler {
             plan_file.as_deref(),
             self.tools.as_ref(),
             Some(&source),
+            provenance,
         );
         let decision = tokio::select! {
             d = decision_fut => d,
@@ -426,12 +446,15 @@ mod tests {
     #[async_trait]
     impl ToolSetPort for MockToolSet {
         fn available_tools(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
-                name: "Mock".to_string(),
-                description: "mock".to_string(),
-                input_schema: serde_json::json!({}),
-                parallel_safe: self.parallel_safe,
-            }]
+            ["Mock", "Bash", "Read"]
+                .into_iter()
+                .map(|name| ToolDefinition {
+                    name: name.to_string(),
+                    description: "mock".to_string(),
+                    input_schema: serde_json::json!({}),
+                    parallel_safe: self.parallel_safe,
+                })
+                .collect()
         }
 
         async fn execute(
@@ -484,6 +507,7 @@ mod tests {
                 req,
                 CancellationToken::new(),
                 None,
+                crate::domain::models::ProvenanceTag::UserOriginated,
             )
             .await;
         assert!(result.is_terminal());
@@ -528,6 +552,7 @@ mod tests {
                 req,
                 cancel,
                 None,
+                crate::domain::models::ProvenanceTag::UserOriginated,
             )
             .await;
         assert!(matches!(result, ToolCall::Cancelled { reason, .. } if reason == "pre-schedule"));
@@ -553,6 +578,7 @@ mod tests {
                     req,
                     cancel2,
                     None,
+                    crate::domain::models::ProvenanceTag::UserOriginated,
                 )
                 .await
         });
@@ -633,5 +659,49 @@ mod tests {
             "sequential batch took {:?}, expected >= 130 ms",
             elapsed
         );
+    }
+    #[tokio::test]
+    async fn tainted_destructive_call_reaches_existing_approval_state() {
+        let scheduler = make_scheduler(crate::domain::models::PermissionMode::Yolo, false, 0);
+        let mut transitions = scheduler.subscribe();
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task_scheduler = scheduler.clone();
+        let task = tokio::spawn(async move {
+            task_scheduler
+                .schedule_with_provenance(
+                    ApprovalSource::ForegroundSubagent {
+                        conversation_id: "tainted-node".into(),
+                        parent_tool_call_id: "parent-tool".into(),
+                        subagent_type: "test".into(),
+                    },
+                    vec![ToolCallRequest {
+                        id: "sink".into(),
+                        tool_name: "Bash".into(),
+                        input: serde_json::json!({"command": "echo destructive"}),
+                    }],
+                    task_cancel,
+                    None,
+                    crate::domain::models::ProvenanceTag::SelfOriginated,
+                )
+                .await
+        });
+
+        let awaiting = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let transition = transitions.recv().await.expect("scheduler transition");
+                if matches!(transition.call, ToolCall::AwaitingApproval { .. }) {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            awaiting.is_ok(),
+            "tainted destructive call must route through ApprovalRuntime"
+        );
+        cancel.cancel();
+        let terminal = task.await.unwrap();
+        assert!(matches!(terminal.as_slice(), [ToolCall::Cancelled { .. }]));
     }
 }

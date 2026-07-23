@@ -50,6 +50,7 @@ fn test_compose_ctx() -> ComposeContext {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     }
 }
 

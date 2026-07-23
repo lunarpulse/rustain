@@ -12,9 +12,10 @@ use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt 
 
 use crate::adapters::cli::commands::AcpClientProfile;
 use crate::domain::clock::{Clock, SystemClock};
+use crate::domain::events::AppEvent;
 use crate::domain::models::{AgentId, AppConfig, NodeState};
 use crate::domain::ports::AuthStorePort;
-use crate::infrastructure::subagent::node_tree::NodeTree;
+use crate::infrastructure::subagent::{NodeJournal, NodeTree};
 
 use super::agent::{
     AcpCoreFactory, CoreFactory, PermissionAsk, RustainAcpAgent, SessionNotify, SharedSessions,
@@ -100,6 +101,72 @@ where
 /// This is the deterministic harness seam: tests can provide a `CliCore` backed
 /// by a scripted provider while still driving real ACP JSON-RPC dispatch and the
 /// real `turn::run_turn` call inside `RustainAcpAgent::prompt`.
+async fn observe_acp_events(mut events: mpsc::UnboundedReceiver<AppEvent>) {
+    while let Some(event) = events.recv().await {
+        tracing::info!(?event, "ACP local lifecycle event");
+    }
+}
+/// Decorate a per-session ACP factory once the durable ACP lifecycle seams
+/// exist. Each resulting composite receives one shared runtime for all of its
+/// MCP clients, so disconnect reaps the nodes created by that composite.
+#[cfg(feature = "mcp")]
+fn with_mcp_task_runtime(
+    core_factory: AcpCoreFactory,
+    node_tree: NodeTree,
+    node_journal: Arc<NodeJournal>,
+    workspace: std::path::PathBuf,
+    domain_tx: mpsc::UnboundedSender<AppEvent>,
+) -> AcpCoreFactory {
+    Rc::new(move |cwd, mcp_servers| {
+        let core = core_factory(cwd, mcp_servers)?;
+        if let Some(composite) = core
+            .tools
+            .as_any()
+            .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>(
+        ) {
+            let task_nodes: Arc<dyn crate::domain::ports::TaskNodes> = Arc::new(node_tree.clone());
+            let supervised: Arc<dyn crate::domain::ports::SupervisedNodes> =
+                Arc::new(node_tree.clone());
+            let room: Arc<dyn crate::domain::ports::RoomJournal> =
+                Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
+                    node_journal.clone(),
+                    Some(domain_tx.clone()),
+                ));
+            let task_clock: Arc<dyn crate::domain::clock::Clock> =
+                Arc::new(crate::domain::clock::SystemClock::default());
+            let task_runtime = Arc::new(crate::adapters::mcp::task_driver::McpTaskRuntime::new(
+                task_nodes,
+                supervised,
+                room.clone(),
+                task_clock,
+            ));
+            // 17.5b (Task 6): wire the input-request artifact sink (AC3).
+            let artifact_store: Arc<dyn crate::domain::ports::ArtifactStore> = Arc::new(
+                crate::adapters::artifact::FileSystemArtifactStore::new(&workspace),
+            );
+            let artifact_host = crate::domain::models::HostBinding::new(
+                "local",
+                format!("workspace:{}", workspace.display()),
+            );
+            let coordinator_authority = crate::domain::models::CapabilityToken::r1_root(
+                crate::domain::models::AgentId::root(),
+            );
+            let sink: Arc<dyn crate::domain::ports::ArtifactSink> =
+                Arc::new(crate::infrastructure::subagent::JournalArtifactSink::new(
+                    artifact_store,
+                    room,
+                    coordinator_authority.id,
+                    artifact_host,
+                ));
+            task_runtime.set_artifact_sink(sink);
+            for client in composite.mcp_clients() {
+                client.set_task_runtime(Arc::clone(&task_runtime));
+            }
+        }
+        Ok(core)
+    })
+}
+
 pub async fn serve_acp_with_acp_core_factory<W, R>(
     outgoing: W,
     incoming: R,
@@ -117,8 +184,25 @@ where
         let clock = clock.clone();
         Arc::new(move || clock.wall_now_ms())
     };
-    let node_tree = NodeTree::with_now_fn(now_fn);
-    serve_acp_with_acp_core_factory_and_node_tree(
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    #[cfg(feature = "mcp")]
+    let domain_tx = event_tx.clone();
+    let event_observer = tokio::spawn(observe_acp_events(event_rx));
+    let node_journal = Arc::new(NodeJournal::open_workspace(&workspace).await?);
+    let node_tree = NodeTree::with_event_tx(event_tx, now_fn)
+        .with_journal(node_journal.clone())
+        .with_host_binding(crate::infrastructure::subagent::current_host_binding(
+            &workspace,
+        ));
+    #[cfg(feature = "mcp")]
+    let core_factory = with_mcp_task_runtime(
+        core_factory,
+        node_tree.clone(),
+        node_journal,
+        workspace.clone(),
+        domain_tx,
+    );
+    let result = serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,
         app_config,
@@ -128,7 +212,9 @@ where
         workspace,
         default_acp_id_source(),
     )
-    .await
+    .await;
+    event_observer.abort();
+    result
 }
 
 pub async fn serve_acp_with_core_factory<W, R>(
@@ -148,11 +234,28 @@ where
         let clock = clock.clone();
         Arc::new(move || clock.wall_now_ms())
     };
-    let node_tree = NodeTree::with_now_fn(now_fn);
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    #[cfg(feature = "mcp")]
+    let domain_tx = event_tx.clone();
+    let event_observer = tokio::spawn(observe_acp_events(event_rx));
+    let node_journal = Arc::new(NodeJournal::open_workspace(&workspace).await?);
+    let node_tree = NodeTree::with_event_tx(event_tx, now_fn)
+        .with_journal(node_journal.clone())
+        .with_host_binding(crate::infrastructure::subagent::current_host_binding(
+            &workspace,
+        ));
     let acp_factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
         core_factory(cwd, mcp_servers).map(crate::infrastructure::composition::AcpCore::from)
     });
-    serve_acp_with_acp_core_factory_and_node_tree(
+    #[cfg(feature = "mcp")]
+    let acp_factory = with_mcp_task_runtime(
+        acp_factory,
+        node_tree.clone(),
+        node_journal,
+        workspace.clone(),
+        domain_tx,
+    );
+    let result = serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,
         app_config,
@@ -162,7 +265,9 @@ where
         workspace,
         deterministic_acp_id_source(),
     )
-    .await
+    .await;
+    event_observer.abort();
+    result
 }
 
 pub async fn serve_acp_with_core_factory_and_node_tree<W, R>(
@@ -172,6 +277,7 @@ pub async fn serve_acp_with_core_factory_and_node_tree<W, R>(
     model_override: Option<String>,
     core_factory: CoreFactory,
     node_tree: NodeTree,
+    default_workspace: PathBuf,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin + 'static,
@@ -187,7 +293,7 @@ where
         model_override,
         acp_factory,
         node_tree,
-        PathBuf::new(),
+        default_workspace,
         deterministic_acp_id_source(),
     )
     .await
@@ -289,31 +395,38 @@ where
             });
 
             let result = handle_io.await.map_err(anyhow::Error::from);
-            let mut session_ids: Vec<String> = cleanup_sessions.borrow().keys().cloned().collect();
-            for entry in cleanup_tree.list().await {
-                if crate::adapters::acp::is_acp_session_id(&entry.agent_id.0)
-                    && matches!(
-                        entry.ownership,
-                        crate::domain::models::subagent_view::OwnershipKind::Self_(_)
-                    )
-                    && !session_ids.contains(&entry.agent_id.0)
-                {
-                    session_ids.push(entry.agent_id.0);
-                }
-            }
-            for session_id in session_ids {
-                let agent_id = AgentId(session_id.clone());
-                let terminal_state = if cleanup_sessions
+            // The session map is the ownership ledger for this ACP server.
+            // Never infer transport membership from NodeTree ownership: the
+            // tree may be shared with unrelated Self-rooted runtimes.
+            let cleanup: Vec<(String, bool, Arc<dyn crate::domain::ports::ToolSetPort>)> =
+                cleanup_sessions
                     .borrow()
-                    .get(&session_id)
-                    .is_some_and(|s| s.cancel.is_cancelled())
-                {
+                    .iter()
+                    .map(|(session_id, state)| {
+                        (
+                            session_id.clone(),
+                            state.cancel.is_cancelled(),
+                            Arc::clone(&state.core.tools),
+                        )
+                    })
+                    .collect();
+            for (session_id, was_cancelled, tools) in cleanup {
+                // Task 4 teardown order: terminal + deregister BEFORE the
+                // (time-bounded) MCP reap, so a hung child cannot leave a
+                // non-terminal registered node.
+                let agent_id = AgentId::from_validated(session_id);
+                let terminal_state = if was_cancelled {
                     NodeState::Cancelled
                 } else {
                     NodeState::Completed
                 };
                 cleanup_tree.set_state(&agent_id, terminal_state).await;
                 cleanup_tree.deregister(&agent_id).await;
+                if let Some(composite) = tools.as_any().downcast_ref::<
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
+                >() {
+                    composite.stop_mcp_connections().await;
+                }
             }
             result
         })

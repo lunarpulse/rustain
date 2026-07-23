@@ -1,0 +1,12 @@
+{
+ "keys": [
+  {
+   "kty": "OKP",
+   "crv": "Ed25519",
+   "x": "0_YO5n13tH07UrkcWA_i5LMVUW-XvaEacSvdYTYjAB8",
+   "kid": "agent-planets-2026-07",
+   "alg": "EdDSA",
+   "use": "sig"
+  }
+ ]
+}

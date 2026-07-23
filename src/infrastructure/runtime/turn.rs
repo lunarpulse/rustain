@@ -10,9 +10,9 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::events::AppEvent;
 use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{
-    CompletionOptions, EscalationReason, Message, MessageRole, NoticeLevel, StepKind, StopReason,
-    StreamChunk, TokenUsage, ToolCall, ToolCallInfo, ToolResultMessage, ToolUseMessage,
-    UsageLedgerEntry,
+    CompletionOptions, EscalationReason, Message, MessageRole, NoticeLevel, ProvenanceTag,
+    StepKind, StopReason, StreamChunk, TokenUsage, ToolCall, ToolCallInfo, ToolResultMessage,
+    ToolUseMessage, TurnOrigin, UsageLedgerEntry,
 };
 use crate::domain::ports::{
     SecurityPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort,
@@ -52,6 +52,7 @@ pub async fn run_turn(
     parent_ctx_tokens: u32,
     parent_trace: Option<crate::domain::models::TraceContext>,
     session_id: String,
+    turn_origin: TurnOrigin,
 ) {
     #[cfg(any(test, feature = "test-instrumentation"))]
     RUN_TURN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -67,6 +68,9 @@ pub async fn run_turn(
         );
     }
     let mut iteration = 0;
+    // Once remote content enters this turn's context, every later destructive
+    // dispatch is self-originated even when the turn itself began interactively.
+    let mut context_tainted = turn_origin.provenance() == ProvenanceTag::SelfOriginated;
     loop {
         iteration += 1;
         if iteration > MAX_TOOL_ITERATIONS {
@@ -366,23 +370,37 @@ pub async fn run_turn(
                                     )
                                 })
                                 .collect();
-                            let source = if crate::adapters::acp::is_acp_session_id(&session_id) {
-                                crate::domain::models::ApprovalSource::AcpSession {
-                                    session_id: session_id.clone(),
-                                    conversation_id: conversation_id.clone(),
-                                }
-                            } else {
-                                crate::domain::models::ApprovalSource::ForegroundTurn {
-                                    conversation_id: conversation_id.clone(),
-                                }
-                            };
+                            let source = turn_origin.approval_source(&conversation_id);
                             let active_skills = activation_set.as_ref().map(|s| s.active_skills());
                             let requests: Vec<crate::domain::models::ToolCallRequest> =
                                 batch_with_idx.iter().map(|(_, req)| req.clone()).collect();
+                            let provenance = if context_tainted {
+                                ProvenanceTag::SelfOriginated
+                            } else {
+                                ProvenanceTag::UserOriginated
+                            };
                             let terminal = tool_scheduler
                                 .clone()
-                                .schedule(source, requests, turn_cancel.clone(), active_skills)
+                                .schedule_with_provenance(
+                                    source,
+                                    requests,
+                                    turn_cancel.clone(),
+                                    active_skills,
+                                    provenance,
+                                )
                                 .await;
+                            if terminal.iter().any(|call| {
+                                matches!(
+                                    call,
+                                    ToolCall::Success {
+                                        request,
+                                        result,
+                                        ..
+                                    } if request.tool_name.starts_with("a2a__") && !result.is_error
+                                )
+                            }) {
+                                context_tainted = true;
+                            }
                             for (i, call) in terminal.into_iter().enumerate() {
                                 let (id, content, is_error, was_cancelled) = match call {
                                     ToolCall::Success { id, result, .. } => {

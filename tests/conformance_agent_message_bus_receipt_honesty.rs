@@ -262,13 +262,13 @@ async fn ac5_real_tree_wiring_behavioral() {
     let tree = NodeTree::new();
     let bus = LocalMessageBus::new(tree.clone(), Arc::new(RelationshipDeliveryPolicy));
 
-    let agent = AgentId("child".into());
+    let agent = AgentId::parse("child").unwrap();
     // Keep the receiver alive so the command channel is open for try_send.
     let _rx = register_live_child(&tree, &agent).await;
 
     let env = Envelope {
         header: MessageHeader {
-            sender: AgentId("parent".into()),
+            sender: AgentId::parse("parent").unwrap(),
             recipient: agent.clone(),
             correlation_id: CorrelationId::new("wiring"),
             kind: MessageKind::PeerMessage,
@@ -303,10 +303,10 @@ async fn ac5_mutant_empty_tree_returns_not_found() {
     let bus = LocalMessageBus::new(tree.clone(), Arc::new(RelationshipDeliveryPolicy));
 
     // No agent registered — the tree is empty.
-    let ghost = AgentId("ghost".into());
+    let ghost = AgentId::parse("ghost").unwrap();
     let env = Envelope {
         header: MessageHeader {
-            sender: AgentId("parent".into()),
+            sender: AgentId::parse("parent").unwrap(),
             recipient: ghost.clone(),
             correlation_id: CorrelationId::new("mutant"),
             kind: MessageKind::PeerMessage,

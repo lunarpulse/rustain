@@ -63,6 +63,7 @@ pub const KNOWN_TOP_LEVEL_FIELDS: &[&str] = &[
     "plan",
     "subagents",
     "daemon",
+    "fanout_spawn_gate_threshold",
 ];
 
 const CREDENTIAL_PATH_SEGMENTS: &[&str] = &[

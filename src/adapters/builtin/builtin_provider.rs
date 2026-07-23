@@ -51,6 +51,7 @@ impl CapabilityProvider for BuiltinProvider {
             .available_tools()
             .into_iter()
             .map(|t| Capability {
+                trust: crate::domain::models::TrustTier::Verified,
                 id: CapabilityId {
                     protocol: "builtin".into(),
                     server: String::new(),

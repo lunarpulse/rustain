@@ -256,8 +256,11 @@ impl ApprovalRuntime {
                     }
                 }
             }
-            ApprovalSource::ForegroundTurn { .. } | ApprovalSource::AcpSession { .. } => {
-                // Root user: never short-circuit (AC-10-X-4)
+            ApprovalSource::ForegroundTurn { .. }
+            | ApprovalSource::AcpSession { .. }
+            | ApprovalSource::RemotePeer { .. } => {
+                // User and peer-originated requests never inherit subagent
+                // auto-approval policy.
             }
         }
 

@@ -31,6 +31,8 @@ pub struct ComposeContext {
     /// MCP server specs resolved from workspace `.claude/mcp.json` + profile TOML.
     /// Populated by startup.rs after profile resolution (Story 9.1).
     pub mcp_servers: Vec<crate::domain::models::McpServerSpec>,
+    /// Allowlisted A2A peers resolved from workspace and profile configuration.
+    pub a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
     /// Whether composite adapter includes builtin tools (default true).
     /// `[tools.config] include_builtin = false` disables builtin tools
     /// so only MCP tools are available (Story 9.1 AC-4, used by 9.2).
@@ -1131,6 +1133,7 @@ pub fn build_daemon_memory(
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
     build_memory(memory_adapter, None, &ctx)
 }
@@ -1182,6 +1185,7 @@ pub(crate) fn daemon_compose_context(
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     }
 }
 
@@ -1210,6 +1214,8 @@ pub fn build_daemon_core(
     channel_turn_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::domain::models::ChannelTurnRequest>,
     >,
+    _node_tree: crate::infrastructure::subagent::NodeTree,
+    _node_journal: Arc<crate::infrastructure::subagent::NodeJournal>,
 ) -> Result<crate::adapters::daemon::runtime::DaemonCore, AdapterCompositionError> {
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
     use crate::adapters::filesystem::FileSystemStorage;
@@ -1258,6 +1264,10 @@ pub fn build_daemon_core(
         let security = security.clone();
         let domain_tx = domain_tx.clone();
         let channel_turn_tx = channel_turn_tx.clone();
+        #[cfg(feature = "mcp")]
+        let task_node_tree = _node_tree;
+        #[cfg(feature = "mcp")]
+        let task_node_journal = _node_journal;
         Box::new(
             move || -> Result<Arc<DaemonTurnRuntime>, AdapterCompositionError> {
                 let ctx = daemon_compose_context(
@@ -1273,6 +1283,64 @@ pub fn build_daemon_core(
                     layer.router as Arc<dyn StreamingProvider>
                 };
                 let tools = build_tools(&tools_name, None, &ctx)?;
+                // Story 17.5a — deferred MCP Tasks injection preserves the
+                // daemon's lazy provider/tool construction while connecting
+                // every live MCP client to the shared durable node tree.
+                #[cfg(feature = "mcp")]
+                let mcp_task_runtimes: Vec<
+                    Arc<crate::adapters::mcp::task_driver::McpTaskRuntime>,
+                > = if let Some(composite) = tools.as_any().downcast_ref::<
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
+                >() {
+                    let task_nodes: Arc<dyn crate::domain::ports::TaskNodes> =
+                        Arc::new(task_node_tree.clone());
+                    let supervised: Arc<dyn crate::domain::ports::SupervisedNodes> =
+                        Arc::new(task_node_tree.clone());
+                    let room: Arc<dyn crate::domain::ports::RoomJournal> =
+                        Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
+                            task_node_journal.clone(),
+                            Some(domain_tx.clone()),
+                        ));
+                    let task_clock: Arc<dyn crate::domain::clock::Clock> =
+                        Arc::new(crate::domain::clock::SystemClock::default());
+                    let task_runtime = Arc::new(
+                        crate::adapters::mcp::task_driver::McpTaskRuntime::new(
+                            task_nodes,
+                            supervised,
+                            room.clone(),
+                            task_clock,
+                        ),
+                    );
+                    // 17.5b (Task 6): wire the input-request artifact sink so
+                    // a `Waiting` MCP task files a visible ticket (AC3).
+                    let artifact_store: Arc<dyn crate::domain::ports::ArtifactStore> = Arc::new(
+                        crate::adapters::artifact::FileSystemArtifactStore::new(
+                            &ctx.workspace_path,
+                        ),
+                    );
+                    let artifact_host = crate::domain::models::HostBinding::new(
+                        "local",
+                        format!("workspace:{}", ctx.workspace_path.display()),
+                    );
+                    let coordinator_authority = crate::domain::models::CapabilityToken::r1_root(
+                        crate::domain::models::AgentId::root(),
+                    );
+                    let sink: Arc<dyn crate::domain::ports::ArtifactSink> = Arc::new(
+                        crate::infrastructure::subagent::JournalArtifactSink::new(
+                            artifact_store,
+                            room,
+                            coordinator_authority.id,
+                            artifact_host,
+                        ),
+                    );
+                    task_runtime.set_artifact_sink(sink);
+                    for client in composite.mcp_clients() {
+                        client.set_task_runtime(Arc::clone(&task_runtime));
+                    }
+                    vec![task_runtime]
+                } else {
+                    Vec::new()
+                };
                 let context_assembler = build_context_assembler(&ctx)?;
                 // Deny-by-default approval (AC6): NoOp persistence so no stale
                 // "always-allow" rule can undermine the unattended deny policy.
@@ -1312,6 +1380,8 @@ pub fn build_daemon_core(
                     ),
                     approval,
                     workspace: workspace.clone(),
+                    #[cfg(feature = "mcp")]
+                    mcp_task_runtimes,
                 }))
             },
         )
@@ -1461,6 +1531,7 @@ pub fn build_cli_core(
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
 
     let tools = build_tools("builtin-only", None, &ctx)?;
@@ -1566,6 +1637,7 @@ pub fn build_acp_core(
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
 
     let tools: Arc<dyn ToolSetPort> = {
@@ -1692,6 +1764,7 @@ mod tests {
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]
             meta_search_engine: None,
+            a2a_peers: Vec::new(),
         }
     }
 

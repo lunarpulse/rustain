@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-use crate::domain::models::{NodeState, SubagentError};
+use crate::domain::models::{AgentId, NodeState, SubagentError};
 
 const RING_CAP: usize = 8192;
 
@@ -173,6 +173,35 @@ impl SubagentSpool {
                 Err(e) => Err(e),
             },
         }
+    }
+
+    /// Resolve the durable spool id for a recovered node through its metadata.
+    pub async fn task_id_for_agent(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<String>, std::io::Error> {
+        let mut entries = fs::read_dir(&self.spool_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("meta") {
+                continue;
+            }
+            let bytes = fs::read(&path).await?;
+            let meta: SpoolMeta = match serde_json::from_slice(&bytes) {
+                Ok(meta) => meta,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "Skipping malformed spool metadata");
+                    continue;
+                }
+            };
+            if meta.agent_id == agent_id.as_str() {
+                return Ok(path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_owned));
+            }
+        }
+        Ok(None)
     }
 
     /// Byte-range read from disk.

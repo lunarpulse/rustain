@@ -44,23 +44,21 @@ impl CapabilityProvider for SkillsProvider {
         Ok(guard
             .skills()
             .iter()
-            .map(|def| Capability {
-                id: CapabilityId {
-                    protocol: "skill".into(),
-                    server: String::new(),
-                    tool: def.name.clone(),
+            .map(|def| Capability { trust: crate::domain::models::TrustTier::Verified, id: CapabilityId {
+                protocol: "skill".into(),
+                server: String::new(),
+                tool: def.name.clone(),
+            },
+            name: def.name.clone(),
+            description: def.description.clone(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "arguments": { "type": "string", "description": "Optional trailing arguments passed to the skill" }
                 },
-                name: def.name.clone(),
-                description: def.description.clone(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "arguments": { "type": "string", "description": "Optional trailing arguments passed to the skill" }
-                    },
-                    "required": []
-                }),
-                parallel_safe: false,
-            })
+                "required": []
+            }),
+            parallel_safe: false, })
             .collect())
     }
 

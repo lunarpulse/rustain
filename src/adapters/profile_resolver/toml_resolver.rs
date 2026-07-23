@@ -110,6 +110,32 @@ impl TomlProfileResolver {
         let loader = ProfileLoader::new(&catalog, &source);
         let mut resolved = loader.load(active_name)?;
 
+        // Story 17.4a: A2A config is parsed even without the feature so a
+        // configured peer can fail loud instead of disappearing.
+        let a2a_path = std::env::current_dir()
+            .unwrap_or_default()
+            .join(".rustain")
+            .join("a2a.json");
+        let workspace_a2a = crate::adapters::a2a::config::parse_workspace_a2a_config(&a2a_path)
+            .map_err(|error| ProfileError::Parse {
+                path: a2a_path.clone(),
+                reason: error.to_string(),
+            })?;
+        let profile_a2a = crate::adapters::a2a::config::extract_profile_a2a_peers(
+            resolved
+                .selection
+                .dimensions
+                .get(&crate::domain::models::PortDimension::Tools)
+                .and_then(|reference| reference._config.as_ref()),
+            active_name,
+        )
+        .map_err(|error| ProfileError::Parse {
+            path: config_dir.join(format!("{active_name}.toml")),
+            reason: error.to_string(),
+        })?;
+        resolved.a2a_peers =
+            crate::adapters::a2a::config::merge_a2a_specs(workspace_a2a, profile_a2a);
+
         // Story 9.1: Parse MCP server configs from workspace + profile
         #[cfg(feature = "mcp")]
         {

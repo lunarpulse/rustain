@@ -57,8 +57,8 @@ mod tests {
 
     fn header() -> MessageHeader {
         MessageHeader {
-            sender: AgentId("parent".into()),
-            recipient: AgentId("child".into()),
+            sender: AgentId::from_validated("parent"),
+            recipient: AgentId::from_validated("child"),
             correlation_id: CorrelationId::new("c"),
             kind: MessageKind::PeerMessage,
             sequence: None,

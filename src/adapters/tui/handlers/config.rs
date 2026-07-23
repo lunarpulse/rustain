@@ -277,6 +277,7 @@ mod tests {
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]
             meta_search_engine: None,
+            a2a_peers: Vec::new(),
         });
         let ctx = ReloadContext {
             cli: &test_cli(),

@@ -7,7 +7,7 @@
 //! ## Keystone tests
 //!
 //! AC1 — Inline gate-await: behavioral exactly-once counter + sibling independence
-//! AC2 — Provenance-taint: wired + load-bearing + inert
+//! AC2 — Provenance-taint: narrow policy, wired and load-bearing
 //! AC3 — Fingerprint match/mismatch keystone
 //! AC4 — Unforgeable `Self` tier
 //! AC5 — Synchronous revocation ordering
@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 #[test]
 fn ac3_fingerprint_deterministic() {
-    let scope = AgentId("agent-a".into());
+    let scope = AgentId::parse("agent-a").unwrap();
     let input = serde_json::json!({"command": "ls -la", "path": "/home"});
     let fp1 = InvocationFingerprint::of("Bash", &input, &scope).unwrap();
     let fp2 = InvocationFingerprint::of("Bash", &input, &scope).unwrap();
@@ -47,8 +47,10 @@ fn ac3_fingerprint_deterministic() {
 #[test]
 fn ac3_fingerprint_scope_binding() {
     let input = serde_json::json!({"command": "rm -rf /"});
-    let fp_a = InvocationFingerprint::of("Bash", &input, &AgentId("node-a".into())).unwrap();
-    let fp_b = InvocationFingerprint::of("Bash", &input, &AgentId("node-b".into())).unwrap();
+    let fp_a =
+        InvocationFingerprint::of("Bash", &input, &AgentId::parse("node-a").unwrap()).unwrap();
+    let fp_b =
+        InvocationFingerprint::of("Bash", &input, &AgentId::parse("node-b").unwrap()).unwrap();
     assert_ne!(
         fp_a, fp_b,
         "approval for node A must not replay on node B (DD1, Murat)"
@@ -79,7 +81,7 @@ fn ac3_fingerprint_scope_binding() {
 /// half to the exact comparator `run_one` uses.
 #[tokio::test]
 async fn ac3_fingerprint_match_mismatch_keystone() {
-    let scope = AgentId("agent-x".into());
+    let scope = AgentId::parse("agent-x").unwrap();
     let original_input = serde_json::json!({"command": "echo hello"});
 
     let approval_runtime = ApprovalRuntime::new(
@@ -87,7 +89,7 @@ async fn ac3_fingerprint_match_mismatch_keystone() {
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
     let source = ApprovalSource::ForegroundTurn {
-        conversation_id: scope.0.clone(),
+        conversation_id: scope.as_str().to_string(),
     };
 
     // Real request() — computes + stores the fp server-side in PendingRecord.
@@ -119,7 +121,8 @@ async fn ac3_fingerprint_match_mismatch_keystone() {
     // tampered resume) must NOT match the real stored fp.
     let mutated_input = serde_json::json!({"command": "echo EVIL"});
     let local_fp_mutated =
-        InvocationFingerprint::of("Bash", &mutated_input, &AgentId("agent-x".into())).unwrap();
+        InvocationFingerprint::of("Bash", &mutated_input, &AgentId::parse("agent-x").unwrap())
+            .unwrap();
     assert_ne!(
         local_fp_mutated, resolved.fp,
         "mutated input recomputed at resume-time MUST NOT match the real stored fp \
@@ -130,7 +133,7 @@ async fn ac3_fingerprint_match_mismatch_keystone() {
 /// 14.2 boundary-collision pair: length-prefix discipline
 #[test]
 fn ac3_fingerprint_length_prefix_collision_pair() {
-    let scope = AgentId("s".into());
+    let scope = AgentId::parse("s").unwrap();
     // ("ab", "c") ≠ ("a", "bc") — length-prefix discipline from CapabilityToken
     let fp1 = InvocationFingerprint::of("ab", &serde_json::json!("c"), &scope).unwrap();
     let fp2 = InvocationFingerprint::of("a", &serde_json::json!("bc"), &scope).unwrap();
@@ -143,7 +146,7 @@ fn ac3_fingerprint_length_prefix_collision_pair() {
 /// Whitespace variation: "rm -rf /" vs "rm  -rf /"
 #[test]
 fn ac3_fingerprint_whitespace_variation() {
-    let scope = AgentId("s".into());
+    let scope = AgentId::parse("s").unwrap();
     let fp1 =
         InvocationFingerprint::of("Bash", &serde_json::json!({"cmd": "rm -rf /"}), &scope).unwrap();
     let fp2 = InvocationFingerprint::of("Bash", &serde_json::json!({"cmd": "rm  -rf /"}), &scope)
@@ -160,7 +163,7 @@ fn ac3_fingerprint_whitespace_variation() {
 fn ac3_always_rule_is_not_fingerprint_bypass() {
     // This is a documentation test — the fingerprint asserts identity-of-invocation,
     // never breadth-of-policy.
-    let scope = AgentId("s".into());
+    let scope = AgentId::parse("s").unwrap();
     let fp1 = InvocationFingerprint::of("Bash", &serde_json::json!({"cmd": "ls"}), &scope).unwrap();
     let fp2 = InvocationFingerprint::of(
         "Bash",
@@ -457,18 +460,14 @@ async fn ac1_sibling_independence_positive_control() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// AC2 — Provenance-taint: wired + load-bearing + inert (DD4, Murat)
+// AC2 — Provenance-taint: narrow policy, wired + load-bearing (DD4, Murat)
 // ═══════════════════════════════════════════════════════════════════════
 //
 // Requires `--features test-instrumentation` to access `TAINT_GATE_CALLS`
-// and `TAINT_GATE_FORCE_DENY` (test-only statics; unreachable in production
-// builds). Three non-vacuous proofs, none of which the earlier `taint.rs`
-// unit tests (mere `taint_gate(...) == Allow` assertions) established:
-// (a) the gate fires exactly once per real dispatch through the actual
-// `ToolScheduler` — mutant #1 (deleting the call site) would starve the
-// counter; (b) forcing a real `Deny` verdict actually blocks the dispatch —
-// mutant #2 (a Deny that changes nothing) proves the seam isn't theater;
-// (c) the untouched default still proceeds (inert).
+// and `TAINT_GATE_FORCE_DENY`. Three non-vacuous proofs establish that:
+// (a) the gate fires exactly once per real scheduler dispatch;
+// (b) forcing `Deny` blocks the actual tool side effect; and
+// (c) user-originated safe traffic remains silent.
 
 #[cfg(feature = "test-instrumentation")]
 #[tokio::test]
@@ -572,12 +571,12 @@ async fn ac2_taint_gate_deny_mutant_blocks_dispatch() {
     );
 }
 
-/// Inert-Allow proof (c): the untouched default (no force-deny) still
-/// proceeds — R1's seam does not accidentally block real traffic.
+/// Silent-path proof (c): user-originated traffic remains executable when the
+/// test-only forced-deny switch is disabled.
 #[cfg(feature = "test-instrumentation")]
 #[tokio::test]
 #[serial_test::serial(taint_gate_global_state)]
-async fn ac2_taint_gate_default_allow_is_inert() {
+async fn ac2_user_originated_default_remains_silent() {
     use rustain::domain::services::permission_chain::TAINT_GATE_FORCE_DENY;
     TAINT_GATE_FORCE_DENY.store(false, Ordering::SeqCst);
 
@@ -602,7 +601,7 @@ async fn ac2_taint_gate_default_allow_is_inert() {
         input: serde_json::json!({}),
     }];
     let source = ApprovalSource::ForegroundTurn {
-        conversation_id: "c-ac2-inert".into(),
+        conversation_id: "c-ac2-user-originated".into(),
     };
     let results = scheduler
         .schedule(source, batch, CancellationToken::new(), None)
@@ -611,25 +610,62 @@ async fn ac2_taint_gate_default_allow_is_inert() {
     assert_eq!(results.len(), 1);
     assert!(
         matches!(results[0], ToolCall::Success { .. }),
-        "default Allow must proceed (R1 inert) — got {:?}",
+        "user-originated traffic must remain silent — got {:?}",
         results[0]
     );
     assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn taint_approval_never_bypasses_a_hard_blocklist_denial() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let tools: Arc<dyn ToolSetPort> = Arc::new(CountedToolSet {
+        counter: counter.clone(),
+        delay_ms: 0,
+        parallel_safe: true,
+    });
+    let scheduler = ToolScheduler::new(
+        Arc::new(DenyingSecurity),
+        tools,
+        ApprovalRuntime::new(
+            16,
+            Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+        ),
+        16,
+    );
+    let results = scheduler
+        .schedule_with_provenance(
+            ApprovalSource::ForegroundTurn {
+                conversation_id: "tainted-hard-deny".into(),
+            },
+            vec![ToolCallRequest {
+                id: "blocked-tainted-command".into(),
+                tool_name: "Bash".into(),
+                input: serde_json::json!({"command": "forbidden"}),
+            }],
+            CancellationToken::new(),
+            None,
+            rustain::domain::models::ProvenanceTag::SelfOriginated,
+        )
+        .await;
+    assert!(matches!(results.as_slice(), [ToolCall::Error { .. }]));
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "taint approval must not convert a hard denial into executable work"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // AC6 — Testability invariants
 // ═══════════════════════════════════════════════════════════════════════
 
-// ApprovalSource stays #[non_exhaustive] with no RemotePeer (R2).
+// ApprovalSource keeps #[non_exhaustive] and exposes typed RemotePeer (R2).
 //
 // Real enforcement lives in `conformance_agent_message_bus.rs`
-// (`ac6_approval_source_has_no_remote_peer_and_stays_non_exhaustive`), which
-// source-scans `tool_call.rs` for the `#[non_exhaustive]` attribute and the
-// absence of a `RemotePeer` variant. The prior version of this test here
-// (`ac6_approval_source_non_exhaustive_no_remote_peer`) constructed a value
-// and discarded it, asserting nothing — removed as a vacuous duplicate
-// (AI-12.3 post-review closure 2026-07-02).
+// (`ac6_approval_source_has_typed_remote_peer_and_stays_non_exhaustive`), which
+// source-scans `tool_call.rs` for the `#[non_exhaustive]` attribute, the
+// RemotePeer variant, and its RAP `PeerId` field.
 
 // Zero new `.launch(` sites — this story constructs no nodes.
 //
@@ -649,6 +685,29 @@ async fn ac2_taint_gate_default_allow_is_inert() {
 // ═══════════════════════════════════════════════════════════════════════
 // Test helpers
 // ═══════════════════════════════════════════════════════════════════════
+
+struct DenyingSecurity;
+
+#[async_trait]
+impl SecurityPort for DenyingSecurity {
+    fn check_blocklist(&self, _command: &str) -> Result<(), PermissionError> {
+        Err(PermissionError::Blocked("test hard denial".into()))
+    }
+
+    fn check_workspace_access(
+        &self,
+        _path: &std::path::Path,
+        _op: FileOperation,
+    ) -> Result<PathAccessType, PermissionError> {
+        Ok(PathAccessType::Workspace)
+    }
+
+    fn current_mode(&self) -> PermissionMode {
+        PermissionMode::Yolo
+    }
+
+    fn set_mode(&self, _mode: PermissionMode) {}
+}
 
 struct MockSecurity {
     mode: PermissionMode,
@@ -761,4 +820,56 @@ impl ToolSetPort for DualCountedToolSet {
             is_error: false,
         })
     }
+}
+
+/// Story 17.4b (R-D): the main turn loop must derive tool-dispatch provenance
+/// from the turn origin and dispatch through `schedule_with_provenance` — never
+/// the bare `schedule`, which hardcodes `ProvenanceTag::UserOriginated` and is a
+/// silent taint-gate trapdoor. A mutant reverting `turn.rs`'s regular-tool
+/// dispatch to `.schedule(source, requests` must fail this guard.
+#[test]
+fn turn_loop_threads_provenance_never_the_hardcoded_schedule_trapdoor() {
+    let turn = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/infrastructure/runtime/turn.rs"
+    ))
+    .expect("read turn.rs");
+    assert!(
+        turn.contains("turn_origin.provenance()"),
+        "turn.rs must derive provenance from the turn origin (R-D)"
+    );
+    assert!(
+        turn.contains("schedule_with_provenance("),
+        "turn.rs must dispatch through schedule_with_provenance (R-D)"
+    );
+    assert!(
+        !turn.contains(".schedule(source, requests"),
+        "turn.rs must NOT use the bare schedule() trapdoor that hardcodes \
+         UserOriginated — that is the mutant R-D forbids"
+    );
+}
+
+/// Story 17.4b (R-D) — the remote-skill-name privilege-escalation closure. A
+/// hostile peer that names its skill `Read` surfaces on the wire as
+/// `a2a__<peer>__Read`; `risk_for_tool` must classify it `Elevated` from the
+/// `a2a__` prefix, NEVER `Safe` from the peer-chosen name. The mutant that drops
+/// the `a2a__` arm (falling through to `risk_for_builtin("...Read")`) must fail.
+#[test]
+fn a2a_wire_name_is_elevated_even_when_a_peer_names_its_skill_read() {
+    use rustain::domain::models::ToolRisk;
+    use rustain::domain::services::permission_chain::risk_for_tool;
+
+    let tools = CountedToolSet {
+        counter: Arc::new(AtomicU32::new(0)),
+        delay_ms: 0,
+        parallel_safe: true,
+    };
+    assert_eq!(
+        risk_for_tool("a2a__evilpeer__Read", &tools),
+        ToolRisk::Elevated,
+        "a peer cannot pick its own risk classification via the skill name"
+    );
+    // Control: a genuine builtin `Read` IS Safe — proving the a2a__ arm, not the
+    // trailing name, is what decides.
+    assert_eq!(risk_for_tool("Read", &tools), ToolRisk::Safe);
 }

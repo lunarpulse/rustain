@@ -520,10 +520,41 @@ fn test_remote_handle_not_used_in_r1() {
 /// graph.
 #[test]
 fn test_import_site_count_pinned() {
-    /// Story 14.7 intentionally adds two `NodeTree` consumers: the ACP stdio
-    /// server registers editor sessions as Self roots, and its conformance test
-    /// guards that contract.
-    const EXPECTED: usize = 11;
+    /// Story 14.7 added the ACP Self-session consumers. Story 17.1b adds two
+    /// deliberate RemotePeer consumers: the transport-agnostic verified-frame
+    /// handler and the daemon composition path that instantiates it. Story
+    /// 17.2a adds daemon startup recovery and the recovery fold itself. Story
+    /// 17.2c adds the `SupervisedNodes` lifecycle seam: +1 for the
+    /// `domain/ports/supervised_nodes.rs` port (a `dyn` trait — its doc names
+    /// the type it fronts, NO concrete coupling) and +1 for `supervisor.rs`
+    /// (the AC2 keystone test constructs a real `NodeTree`; production still
+    /// holds only `Arc<dyn SupervisedNodes>`). The REAL boundary — domain/
+    /// executor import NO concrete `NodeTree` — is proven by
+    /// `test_domain_no_adapter_or_infra_imports` + `test_no_cross_adapter_imports`.
+    /// Story 17.4b adds the A2A delegation driver (`adapters/a2a/driver.rs`),
+    /// which materializes `RemotePeer` nodes through `NodeTree::register_peer` and
+    /// projects the remote task lifecycle via `try_set_state` — one new consumer.
+    // 18 -> 21 (Story 17.5a): three new sites, all DOCUMENTED, none a new
+    // coupling: (1) `domain/ports/task_nodes.rs` — the port's doc comment
+    // names `NodeTree` as its concrete impl (the MCP adapter itself never
+    // holds one — pinned by `mcp_adapter_production_code_never_imports_
+    // infrastructure`); (2) `adapters/mcp/mod.rs` — the set_state-shim
+    // guard's assertion message names `NodeTree::set_state`; (3)
+    // `adapters/mcp/task_driver.rs` — test-only doubles build a REAL
+    // NodeTree fixture, the a2a/driver.rs test pattern.
+    // 21 -> 22 (Story 17.5a review, finding P1): `infrastructure/composition/
+    // mod.rs` `build_daemon_core` now receives the shared `NodeTree` (+journal)
+    // so it can inject the MCP task runtime into the daemon's composite MCP
+    // clients — the deferred-injection wiring startup.rs already does, extended
+    // to the daemon/ACP composition roots. An infrastructure composition site,
+    // not a domain/executor coupling (still proven by the boundary tests).
+    // 22 -> 23 (Story 17.2d-b): `infrastructure/orchestrator/mod.rs` — the
+    // durable park reaches the tree ONLY through the `SupervisedNodes` port
+    // (production executor still holds no concrete `NodeTree`); the one new
+    // textual site is a `#[cfg(test)]` constructor binding an in-memory
+    // `NodeTree` as the seam in unit tests. The real boundary is unchanged
+    // (proven by `test_domain_no_adapter_or_infra_imports`).
+    const EXPECTED: usize = 23;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

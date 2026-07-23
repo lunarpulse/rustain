@@ -47,9 +47,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::daemon::protocol::{
-    AttachMode, AttachSnapshot, ClientFrame, DaemonFrame, FrameError, PROTOCOL_VERSION,
-    ProtocolError, read_frame, write_frame,
+    AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, FrameError,
+    ProtocolError, answer_attach_challenge, read_frame, write_frame,
 };
+use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::adapters::tui::state::{AttachInfo, TabRenderState, TuiState};
 use crate::adapters::tui::terminal;
 use crate::adapters::tui::widgets::{chat_pane, input_box, status_bar};
@@ -162,17 +163,22 @@ pub async fn attach_handshake<R, W>(
     read_half: &mut R,
     write_half: &mut W,
     read_only_ok: bool,
+    signer: &AgentSigner,
 ) -> Result<(AttachMode, AttachSnapshot)>
 where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    write_frame(
+    // Server-first challenge handshake (Story 17.1a): answer the daemon's
+    // one-use challenge with an Ed25519 proof of possession. The signer is
+    // supplied by the caller (production loads it from the data directory; the
+    // NFR49 budget test hands in a synthetic key — no disk or wall clock).
+    answer_attach_challenge(
+        read_half,
         write_half,
-        &ClientFrame::Attach {
-            protocol_version: PROTOCOL_VERSION,
-            read_only_ok,
-        },
+        read_only_ok,
+        ConnectionTier::TrustedLocal,
+        signer,
     )
     .await
     .context("sending attach handshake")?;
@@ -414,8 +420,14 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     })?;
     let (mut read_half, mut write_half) = stream.into_split();
 
-    // Handshake first (writer half still owned here).
-    let (granted_mode, snapshot) = attach_handshake(&mut read_half, &mut write_half, false).await?;
+    // Server-first challenge handshake (writer half still owned here). Load (or
+    // provision) this machine's identity key from the rustain data directory,
+    // then answer the daemon's challenge with a proof of possession.
+    let signer = IdentityKeyStore::new(crate::infrastructure::paths::data_dir()?)
+        .load_or_generate()
+        .context("loading the local peer identity key")?;
+    let (granted_mode, snapshot) =
+        attach_handshake(&mut read_half, &mut write_half, false, &signer).await?;
     let read_only = granted_mode == AttachMode::ReadOnly;
 
     // Writer task: drains the frame channel → socket. Owns the write half for the
@@ -805,7 +817,18 @@ mod tests {
             })
             .collect();
 
+        let signer =
+            AgentSigner::from_signing_key(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]));
         let server_task = tokio::spawn(async move {
+            // Server-first: issue a one-use challenge, then accept the proof.
+            write_frame(
+                &mut sw,
+                &DaemonFrame::AttachChallenge {
+                    nonce: b"nfr49-challenge".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
             let _ = read_frame::<_, ClientFrame>(&mut sr).await.unwrap();
             write_frame(
                 &mut sw,
@@ -819,7 +842,9 @@ mod tests {
         });
 
         let start = Instant::now();
-        let (mode, snap) = attach_handshake(&mut cr, &mut cw, false).await.unwrap();
+        let (mode, snap) = attach_handshake(&mut cr, &mut cw, false, &signer)
+            .await
+            .unwrap();
         let elapsed = start.elapsed();
 
         assert_eq!(mode, AttachMode::ReadWrite);
@@ -1131,7 +1156,9 @@ mod tests {
             | ClientFrame::UserMessage { .. }
             | ClientFrame::HistoryRequest { .. }
             | ClientFrame::ApprovalResponse { .. }
+            | ClientFrame::InputResponse { .. }
             | ClientFrame::ConsolidationResolve { .. }
+            | ClientFrame::PeerEnvelope(_)
             | ClientFrame::Detach => {}
         }
     }

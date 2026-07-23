@@ -49,6 +49,53 @@ impl std::fmt::Display for SubcommandExit {
 
 impl std::error::Error for SubcommandExit {}
 
+fn ensure_a2a_feature_enabled(peers: &[crate::domain::models::A2aPeerSpec]) -> Result<()> {
+    #[cfg(feature = "a2a")]
+    {
+        let _ = peers;
+        Ok(())
+    }
+    #[cfg(not(feature = "a2a"))]
+    {
+        if peers.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("A2A peers are configured, but this build has the `a2a` feature disabled")
+        }
+    }
+}
+
+#[cfg(test)]
+mod a2a_feature_tests {
+    use super::ensure_a2a_feature_enabled;
+    use crate::domain::models::{A2aPeerSource, A2aPeerSpec, RedactedUrl};
+
+    fn configured_peer() -> A2aPeerSpec {
+        A2aPeerSpec {
+            id: "peer".to_owned(),
+            url: RedactedUrl::from("https://peer.example"),
+            pinned_key: None,
+            source: A2aPeerSource::Workspace,
+        }
+    }
+
+    #[test]
+    fn configured_peer_matches_the_compile_time_feature_policy() {
+        let peer = configured_peer();
+        let result = ensure_a2a_feature_enabled(std::slice::from_ref(&peer));
+        #[cfg(feature = "a2a")]
+        assert!(result.is_ok());
+        #[cfg(not(feature = "a2a"))]
+        assert!(
+            result
+                .expect_err("feature-off A2A config must fail loud")
+                .to_string()
+                .contains("feature disabled")
+        );
+        assert!(ensure_a2a_feature_enabled(&[]).is_ok());
+    }
+}
+
 /// Ordered startup sequence.
 /// 1. Parse CLI args
 /// 2. Initialize logging (so config warnings are captured)
@@ -1285,12 +1332,14 @@ pub async fn run() -> Result<()> {
     let resolved = profile_resolver_arc
         .resolve_active()
         .expect("post-Pass-2 toml_resolver always has resolve_active populated");
+    ensure_a2a_feature_enabled(&resolved.a2a_peers)?;
     let compose_ctx = crate::infrastructure::composition::ComposeContext {
         workspace_path: workspace_path.clone(),
         project_context: project_context.clone(),
         storage: Arc::clone(&tools_storage) as Arc<dyn StoragePort>,
         skill_activator: Arc::clone(&skill_activator),
         mcp_servers: resolved.mcp_servers.clone(),
+        a2a_peers: resolved.a2a_peers.clone(),
         include_builtin_tools: resolved.include_builtin_tools,
         domain_tx: Some(domain_tx.clone()),
         channel_turn_tx: None,
@@ -1417,6 +1466,60 @@ pub async fn run() -> Result<()> {
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
         if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+            #[cfg(feature = "a2a")]
+            let a2a_provider_concrete: Option<
+                Arc<crate::adapters::a2a::provider::A2aProvider>,
+            > = {
+                let mut bindings = Vec::with_capacity(resolved.a2a_peers.len());
+                for spec in resolved.a2a_peers.iter().cloned() {
+                    let client = Arc::new(
+                        crate::adapters::a2a::client::A2aClientAdapter::new(&spec, None).map_err(
+                            |error| {
+                                anyhow::anyhow!(
+                                    "A2A peer {:?} configuration failed: {error}",
+                                    spec.id
+                                )
+                            },
+                        )?,
+                    );
+                    bindings.push((spec, client));
+                }
+
+                let refresh_bindings = bindings.clone();
+                let a2a_provider =
+                    Arc::new(crate::adapters::a2a::provider::A2aProvider::new(bindings));
+                composite.set_a2a_provider(
+                    a2a_provider.clone() as Arc<dyn crate::domain::ports::CapabilityProvider>
+                );
+
+                for (spec, client) in refresh_bindings {
+                    let event_tx = domain_tx.clone();
+                    tokio::spawn(async move {
+                        match client.refresh_agent_card(&spec).await {
+                            Ok(()) => {
+                                let skill_count = client
+                                    .cached_card()
+                                    .await
+                                    .map(|(card, _)| card.skills.len())
+                                    .unwrap_or(0);
+                                let _ = event_tx.send(AppEvent::A2aCatalogChanged {
+                                    peer_id: spec.id,
+                                    skill_count,
+                                });
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    peer_id = %spec.id,
+                                    %error,
+                                    "A2A AgentCard refresh failed"
+                                );
+                            }
+                        }
+                    });
+                }
+                Some(a2a_provider)
+            };
+
             // Eager agent discovery (needed for SubagentProvider::discover)
             let agent_registry = Arc::new(tokio::sync::RwLock::new(
                 crate::adapters::agent_registry::AgentRegistry::discover(&workspace_path),
@@ -1425,25 +1528,151 @@ pub async fn run() -> Result<()> {
             let root_authority = crate::domain::models::CapabilityToken::r1_root(
                 crate::domain::models::AgentId::root(),
             );
+            let node_journal = Arc::new(
+                crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace_path)
+                    .await
+                    .expect("NodeJournal creation failed"),
+            );
+            let orchestration_clock = Arc::new(crate::domain::clock::SystemClock::default())
+                as Arc<dyn crate::domain::clock::Clock>;
             let authority_ledger = Arc::new(
                 crate::domain::services::authority_ledger::AuthorityLedger::new(
                     root_authority.clone(),
+                    orchestration_clock.clone(),
+                )
+                .with_journal_sink(
+                    node_journal.clone() as Arc<dyn crate::domain::ports::LedgerJournalSink>
                 ),
             );
+            // Story 17.2c (D4): restore the ledger conservation head from the
+            // durable journal so spent budget cannot silently reappear and a
+            // grant cannot be double-counted across a restart.
+            {
+                let records = node_journal
+                    .load()
+                    .await
+                    .expect("NodeJournal load for ledger recovery failed")
+                    .into_iter()
+                    .filter_map(|entry| match entry.record {
+                        crate::domain::models::JournalRecord::LedgerConservation(record) => {
+                            Some(record)
+                        }
+                        _ => None,
+                    });
+                authority_ledger.recover_conservation(records);
+            }
             // Construct subagent infrastructure first so trust-drop revoke can
             // route into cascade_kill (AC5): the provider holds an Arc<NodeTree>.
+            let now_fn = {
+                use crate::domain::clock::Clock;
+                let clock = Arc::new(crate::domain::clock::SystemClock::default());
+                Arc::new(move || clock.wall_now_ms())
+            };
             let subagent_registry = Arc::new(
-                crate::infrastructure::subagent::NodeTree::with_event_tx(
-                    domain_tx.clone(),
-                    Arc::new(|| chrono::Utc::now().timestamp_millis()),
-                )
-                .with_on_cascade_kill({
-                    let authority_ledger = authority_ledger.clone();
-                    Arc::new(move |id| {
-                        let _ = authority_ledger.revoke_scope(id);
-                    })
-                }),
+                crate::infrastructure::subagent::NodeTree::with_event_tx(domain_tx.clone(), now_fn)
+                    .with_journal(node_journal.clone())
+                    .with_host_binding(crate::infrastructure::subagent::current_host_binding(
+                        &workspace_path,
+                    ))
+                    .with_on_cascade_kill({
+                        let authority_ledger = authority_ledger.clone();
+                        Arc::new(move |id| {
+                            let _ = authority_ledger.revoke_scope(id);
+                        })
+                    }),
             );
+            // Rehydrate the process-local NodeTree before any fork-join resume.
+            // The daemon singleton serializes reconciliation's journal folds;
+            // it is released before the shorter per-wave journal claim.
+            let recovery_report =
+                match crate::infrastructure::subagent::DaemonSingletonLock::try_acquire(
+                    &workspace_path,
+                )
+                .await
+                {
+                    Ok(singleton) => {
+                        let host_id =
+                            crate::infrastructure::subagent::current_host_id(&workspace_path);
+                        match crate::infrastructure::subagent::NodeRecovery::reconcile(
+                            &node_journal,
+                            subagent_registry.as_ref(),
+                            &singleton,
+                            &host_id,
+                        )
+                        .await
+                        {
+                            Ok(report) => Some(report),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "interactive node recovery failed; durable parks remain for a later restart"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(crate::infrastructure::subagent::RecoveryError::SingletonBusy) => {
+                        tracing::info!(
+                            "another process owns node reconciliation; this process will not resume its parks"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "node recovery lock failed; durable parks remain for a later restart"
+                        );
+                        None
+                    }
+                };
+            // Story 17.4b: now that the node tree and durable journal exist,
+            // inject the A2A delegation runtime so `A2aProvider::invoke` can
+            // materialize peer nodes and journal room events (durable-first).
+            #[cfg(feature = "a2a")]
+            if let Some(provider) = a2a_provider_concrete.as_ref() {
+                provider.set_delegation_runtime(Arc::new(
+                    crate::adapters::a2a::driver::A2aDelegationRuntime::new(
+                        subagent_registry.as_ref().clone(),
+                        Some(node_journal.clone()),
+                        domain_tx.clone(),
+                    ),
+                ));
+            }
+            // Story 17.5a — inject the MCP Tasks runtime into every MCP
+            // client now that the node tree, journal, and clock all exist.
+            // One runtime per client: `disconnect` cascades only that
+            // client's own task nodes (AC5). Lifecycle flows exclusively
+            // through the domain seams (`TaskNodes` / `SupervisedNodes` /
+            // `RoomJournal`); the MCP adapter never holds a concrete
+            // `NodeTree`/`NodeJournal` (ADR-17-5-01 D2).
+            #[cfg(feature = "mcp")]
+            let mcp_task_runtimes: Vec<
+                Arc<crate::adapters::mcp::task_driver::McpTaskRuntime>,
+            > = {
+                let task_nodes: Arc<dyn crate::domain::ports::TaskNodes> =
+                    subagent_registry.clone();
+                let supervised: Arc<dyn crate::domain::ports::SupervisedNodes> =
+                    subagent_registry.clone();
+                let room: Arc<dyn crate::domain::ports::RoomJournal> =
+                    Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
+                        node_journal.clone(),
+                        Some(domain_tx.clone()),
+                    ));
+                let task_clock: Arc<dyn crate::domain::clock::Clock> =
+                    Arc::new(crate::domain::clock::SystemClock::default());
+                let mut runtimes = Vec::new();
+                for client in composite.mcp_clients() {
+                    let runtime = Arc::new(crate::adapters::mcp::task_driver::McpTaskRuntime::new(
+                        task_nodes.clone(),
+                        supervised.clone(),
+                        room.clone(),
+                        task_clock.clone(),
+                    ));
+                    client.set_task_runtime(Arc::clone(&runtime));
+                    runtimes.push(runtime);
+                }
+                runtimes
+            };
             let authority_provider: Arc<dyn crate::domain::ports::AuthorityProvider> = Arc::new(
                 crate::adapters::authority::InProcessAuthorityProvider::new(
                     authority_ledger.clone(),
@@ -1584,16 +1813,94 @@ pub async fn run() -> Result<()> {
             // loop invokes `run_fork_join` when it fans out (the trigger — a
             // model fan-out intent — is the connection point wired with the
             // turn-loop integration).
-            let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> =
-                Arc::new(crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            let supervisor = Arc::new(
+                crate::infrastructure::supervisor::Supervisor::new(
+                    crate::domain::models::FORK_JOIN_SPAWN_CAP,
+                    crate::domain::models::FORK_JOIN_SPAWN_CAP,
+                    authority_ledger.clone(),
+                    root_authority.clone(),
+                    orchestration_clock.clone(),
+                    event_bus.clone(),
+                )
+                .with_journal(node_journal.clone())
+                .with_nodes(
+                    subagent_registry.clone() as Arc<dyn crate::domain::ports::SupervisedNodes>
+                ),
+            );
+            let recovered_occupancy = subagent_registry
+                .list()
+                .await
+                .into_iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.current_status,
+                        crate::domain::models::NodeState::Running
+                            | crate::domain::models::NodeState::Waiting
+                    )
+                })
+                .count();
+            supervisor
+                .derive_recovered_occupancy(recovered_occupancy)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let artifact_store: Arc<dyn crate::domain::ports::ArtifactStore> = Arc::new(
+                crate::adapters::artifact::FileSystemArtifactStore::new(&workspace_path),
+            );
+            let artifact_host =
+                crate::infrastructure::subagent::current_host_binding(&workspace_path);
+            // 17.5b (Task 6): wire the input-request artifact sink into every
+            // MCP task runtime. The coordinator authority + host are
+            // orchestrator-only fields; the sink impl supplies them so the
+            // adapter stays free of authority plumbing.
+            #[cfg(feature = "mcp")]
+            {
+                let sink_room: Arc<dyn crate::domain::ports::RoomJournal> =
+                    Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
+                        node_journal.clone(),
+                        Some(domain_tx.clone()),
+                    ));
+                let sink: Arc<dyn crate::domain::ports::ArtifactSink> =
+                    Arc::new(crate::infrastructure::subagent::JournalArtifactSink::new(
+                        artifact_store.clone(),
+                        sink_room,
+                        root_authority.id,
+                        artifact_host.clone(),
+                    ));
+                for runtime in &mcp_task_runtimes {
+                    runtime.set_artifact_sink(sink.clone());
+                }
+            }
+            let patch_merge_back =
+                Arc::new(crate::infrastructure::orchestrator::PatchMergeBack::new(
+                    workspace_path.clone(),
+                    artifact_store.clone(),
+                    node_journal.clone(),
+                    event_bus.clone(),
+                    Arc::new(crate::adapters::merge_back::GitPatchApplier),
+                ));
+            let fork_join_executor = Arc::new(
+                crate::infrastructure::orchestrator::ForkJoinExecutor::new(
                     runner.clone(),
                     authority_provider.clone(),
                     authority_ledger.clone(),
                     event_bus.clone(),
-                    Arc::new(crate::domain::clock::SystemClock::default())
-                        as Arc<dyn crate::domain::clock::Clock>,
+                    orchestration_clock,
                     root_authority.clone(),
-                ));
+                )
+                .with_journal(node_journal.clone())
+                .with_supervisor(supervisor)
+                .with_artifact_store(artifact_store, artifact_host)
+                .with_patch_merge_back(patch_merge_back)
+                // Story 17.3c (D1): preserve the pre-isolation direct-write
+                // contract — user-originated fanout edits auto-apply through the
+                // journal-authoritative gate; self-originated stay review-gated.
+                .with_merge_back_policy(crate::domain::services::patch_review::MergeBackPolicy {
+                    auto_approve_user_originated: true,
+                })
+                .with_permission_source(security.clone()),
+            );
+            let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> =
+                fork_join_executor.clone();
             orchestrator = Some(orchestrator_inner);
 
             let subagent_provider = Arc::new(crate::adapters::subagent::SubagentProvider::new(
@@ -1608,6 +1915,33 @@ pub async fn run() -> Result<()> {
                 .await;
 
             composite.set_subagent_provider(subagent_provider);
+
+            // Resume only after composition is complete. The wave runs under a
+            // supervised Tokio task so a long-lived provider cannot block
+            // application startup; the durable claim prevents another process
+            // from selecting the same park concurrently.
+            if let Some(recovery_report) = recovery_report
+                && !recovery_report.parked.is_empty()
+            {
+                let resume_executor = fork_join_executor.clone();
+                tokio::spawn(async move {
+                    match resume_executor.resume_fork_join_run(&recovery_report).await {
+                        Ok(resumed) if !resumed.is_empty() => {
+                            tracing::info!(
+                                waves = resumed.len(),
+                                "resumed durably parked fork-join wave(s) after restart"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "fork-join resumption failed; parked spokes remain durable for the next restart"
+                            );
+                        }
+                    }
+                });
+            }
 
             // Story 14-4a (AC5, CS-1) — re-store the agent_message_bus slot with
             // a LocalMessageBus wired to the REAL subagent_registry tree (not the
@@ -1641,6 +1975,22 @@ pub async fn run() -> Result<()> {
         ))
         .await
     };
+
+    // Story 17.3a (Tasks 6 + 7) — composition-root opt-in point for the WASM
+    // execution sandbox (`WasmIsolationBackend`, the sole file that may name the
+    // concrete type). Party ruling N4: there is NO untrusted-tool/extension
+    // population in rustain today, so this binding is intentionally inert —
+    // `None`, not configured — and NO production tool dispatch routes through
+    // it. When such a population exists (Epic 18 territory), construct
+    // `crate::adapters::wasm::WasmIsolationBackend` here and inject the
+    // `Arc<dyn ExecutionSandbox>` BELOW `ToolSetPort::execute`; the approval
+    // seam (`ApprovalRuntime` / `PermissionMode`) and `ToolScheduler` stay
+    // untouched ("subprocess-today → WASM-later changes no call site"). The
+    // proving consumer for 17.3a is the adversarial fixture suite, not this
+    // call site (`tests/wasm_execution_sandbox.rs`).
+    #[cfg(feature = "wasm-sandbox")]
+    let _execution_sandbox: Option<std::sync::Arc<dyn crate::domain::ports::ExecutionSandbox>> =
+        None;
 
     #[cfg(feature = "meta-search")]
     let catalog_registry_for_app_state = _catalog_registry.clone();

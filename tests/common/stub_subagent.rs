@@ -31,13 +31,15 @@ impl SubagentRunner for StubSubagentRunner {
         &self,
         spec: AgentLaunchSpec,
         cancel: CancellationToken,
+        _parent: Option<&rustain::domain::models::TaskHandle>,
+        agent_id: rustain::domain::models::AgentId,
     ) -> Result<TaskHandle, rustain::domain::models::SubagentError> {
         let (status_tx, status_rx) = mpsc::channel(4);
         let _ = status_tx.send(self.outcome).await;
         let (parent_disconnect, _parent_disconnect_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Ok(TaskHandle {
-            agent_id: rustain::domain::models::AgentId::new(),
+            agent_id,
             task_id: format!("stub-{}", spec.effective_model),
             status_rx,
             command_tx: mpsc::channel(1).0,
@@ -47,6 +49,11 @@ impl SubagentRunner for StubSubagentRunner {
             parent_disconnect,
             yield_rx: None,
             isolation_diff_rx: None,
+            effective_workspace: std::path::PathBuf::from("."),
+            isolated: false,
+            authority: rustain::domain::models::CapabilityTokenId::root(),
+            authority_token: None,
+            patch_provenance: rustain::domain::models::ProvenanceTag::UserOriginated,
         })
     }
 }
@@ -60,6 +67,8 @@ impl SubagentRunner for FailingSubagentRunner {
         &self,
         _spec: AgentLaunchSpec,
         _cancel: CancellationToken,
+        _parent: Option<&rustain::domain::models::TaskHandle>,
+        _agent_id: rustain::domain::models::AgentId,
     ) -> Result<TaskHandle, rustain::domain::models::SubagentError> {
         Err(rustain::domain::models::SubagentError::Internal(
             "injected launch failure".to_string(),

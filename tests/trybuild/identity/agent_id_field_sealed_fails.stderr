@@ -1,0 +1,25 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/trybuild/identity/agent_id_field_sealed_fails.rs:12:19
+   |
+12 |     let _forged = AgentId(String::from("forge"));
+   |                   ^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/domain/models/agent_id.rs
+   |
+   | pub struct AgentId(String);
+   |                    ^^^^^^ private field
+help: you might have meant to use an associated function to build this type
+   |
+12 -     let _forged = AgentId(String::from("forge"));
+12 +     let _forged = AgentId::new();
+   |
+12 -     let _forged = AgentId(String::from("forge"));
+12 +     let _forged = AgentId::root();
+   |
+12 -     let _forged = AgentId(String::from("forge"));
+12 +     let _forged = AgentId::from_validated(_);
+   |
+12 -     let _forged = AgentId(String::from("forge"));
+12 +     let _forged = AgentId::from_segments(_);
+   |

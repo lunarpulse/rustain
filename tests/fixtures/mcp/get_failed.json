@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "result": {
+    "resultType": "complete",
+    "taskId": "task-a558b34ba314970c02a3d86f",
+    "status": "failed",
+    "statusMessage": "internal error: simulated protocol error: server internal failure",
+    "createdAt": "2026-07-19T12:05:44Z",
+    "lastUpdatedAt": "2026-07-19T12:05:45Z",
+    "ttlMs": 300000,
+    "pollIntervalMs": 1000,
+    "error": {
+      "code": -32603,
+      "message": "internal error: simulated protocol error: server internal failure"
+    },
+    "requestState": "task-a558b34ba314970c02a3d86f"
+  }
+}

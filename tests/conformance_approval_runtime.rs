@@ -15,8 +15,8 @@
 //! Convention: `#[ignore]`-marked skeletons with empty bodies. See
 //! `tests/CONFORMANCE_README.md`.
 
-/// AC1: `RequestId` is a nanoid(12) string; `ApprovalSource` has 3 variants
-/// with the expected fields.
+/// AC1: `RequestId` is a nanoid(12) string; `ApprovalSource` has typed
+/// routing variants with the expected fields.
 #[test]
 #[ignore = "pending story 6-0c AC1: shared primitives"]
 fn ac1_request_id_and_approval_source_shapes() {}

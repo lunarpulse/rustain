@@ -1,0 +1,102 @@
+{
+  "call_sync_reply.json": {
+    "sha256": "58594d298873305cd34ed09459219a013eae5a2a94a7d65d0027f18ab90a16f8",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "call_sync_reply.json"
+    }
+  },
+  "cancel_ack.json": {
+    "sha256": "9025cb489a63236ca2d4b515c5ab048e46e68c8f9048759cbc823c0ac5dbcb37",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "cancel_ack.json"
+    }
+  },
+  "create_task.json": {
+    "sha256": "b11531be850b6682642991e35942e862967fc6e46fadf7306243ebc138f0d05d",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "create_task.json"
+    }
+  },
+  "get_cancelled.json": {
+    "sha256": "2cb218e34972adb0974fd25c1990a4e89766a6637fd8677138fe56b26f40a43f",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "get_cancelled.json"
+    }
+  },
+  "get_completed.json": {
+    "sha256": "8b93bc0c78281e898584ca0c8087fba975f5406caf930c388ae59e30d0d6100a",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "get_completed.json"
+    }
+  },
+  "get_completed_iserror.json": {
+    "sha256": "5f8e7e7ab7293914676b3cc9cef39f7588f74a9b3199bcd82731447afd454403",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "get_completed_iserror.json"
+    }
+  },
+  "get_failed.json": {
+    "sha256": "43a63dec3d59400ece3206e4c878cc44cd8392aacb88f37ad7cbf8ba855ccb03",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "get_failed.json"
+    }
+  },
+  "get_input_required.json": {
+    "sha256": "f79ca721e2f005d25a8c43c1fd8a30b7e004f094509ebae379c9dcaa1408105b",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "get_input_required.json"
+    }
+  },
+  "get_working.json": {
+    "sha256": "93206fb789fc414beca8adedb8dcdb2973b15289bd7cd463446b2dfa6ae7c912",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "get_working.json"
+    }
+  },
+  "update_ack.json": {
+    "sha256": "c288568b2e3c6985d718efafafc3c185ec51f9ad3056e9abc866e92e4e185fca",
+    "provenance": {
+      "capture_date": "2026-07-19",
+      "capture_server": "mcpkit@02cfbe0d2cada8167b9043b9130804c8638b0aa5 examples/tasks-v2 (Go reference implementation named by SEP-2663)",
+      "schema_pin": "ext-tasks@2c1425d9a288b9b1f489430fe1e00bb392b47e48 (schema/spec only - no runnable server)",
+      "spike_report": "_bmad-output/planning-artifacts/research/mcp-tasks-17-5a-spike-2026-07-19/SPIKE_REPORT.md",
+      "original_filename": "update_ack.json"
+    }
+  }
+}

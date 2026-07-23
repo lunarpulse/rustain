@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "method": "tasks/update", "id": 9, "params": {"taskId": "task-efa06cd4cfd1c2703c8b857c", "inputResponses": {"elicit-1": {"action": "accept", "content": {"confirm": true}}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"extensions": {"io.modelcontextprotocol/tasks": {}}}}}}

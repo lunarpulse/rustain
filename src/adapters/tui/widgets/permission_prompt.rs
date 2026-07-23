@@ -74,6 +74,9 @@ pub fn render_permission_lines<'a>(
         ApprovalSource::BackgroundAgent { subagent_type, .. } => {
             format!("[background: {}] ", subagent_type)
         }
+        ApprovalSource::RemotePeer { peer_id, .. } => {
+            format!("[remote peer: {}] ", peer_id)
+        }
         ApprovalSource::ForegroundTurn { .. } | ApprovalSource::AcpSession { .. } => String::new(),
     };
 

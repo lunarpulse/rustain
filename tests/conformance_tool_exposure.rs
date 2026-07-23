@@ -231,6 +231,7 @@ fn test_compose_with_default_config_binds_static_full() {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
     let selection = ProfileSelection {
         dimensions: std::collections::BTreeMap::new(),
@@ -285,6 +286,7 @@ fn test_compose_with_unknown_exposure_returns_error() {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
     let selection = ProfileSelection {
         dimensions: std::collections::BTreeMap::new(),

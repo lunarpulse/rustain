@@ -6,15 +6,19 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
-use crate::domain::events::{AppEvent, CapabilityEvent};
-use crate::domain::models::agent_node::{AgentMetrics, AgentNode, NodeOrigin};
+use crate::domain::events::{AppEvent, CapabilityEvent, DomainEventPayload};
+use crate::domain::models::agent_node::{
+    AgentMetrics, AgentNode, CheckpointTrust, NodeCheckpoint, NodeOrigin,
+};
 use crate::domain::models::capability_id::CapabilityId;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::subagent_view::OwnershipKind;
 use crate::domain::models::{
-    AgentId, CapabilityTokenId, Op, RegisteredCapability, SpawnLimitKind, SubagentError,
+    AgentId, CapabilityTokenId, CorrelationId, HostBinding, JournalRecord, Op,
+    RegisteredCapability, RoomEvent, SpawnLimitKind, SubagentError,
 };
 use crate::infrastructure::subagent::node_handle::{NodeHandle, NodeHandleError};
+use crate::infrastructure::subagent::node_journal::NodeJournal;
 
 pub const MAX_DEPTH: usize = 3;
 pub const MAX_CHILDREN: usize = 10;
@@ -101,6 +105,10 @@ pub struct NodeTree {
     inner: Arc<tokio::sync::RwLock<NodeTreeInner>>,
     event_tx: Option<mpsc::UnboundedSender<AppEvent>>,
     now_fn: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Durable lifecycle sink. When present, an accepted transition becomes
+    /// visible only after its checkpoint has reached the ordered room journal.
+    journal: Option<Arc<NodeJournal>>,
+    host_binding: HostBinding,
     /// Hook point that revokes descendant capability tokens synchronously
     /// *before* `Op::Kill` is issued to each node in a cascade_kill. Wired at
     /// the composition root (`startup.rs:1427-1432`) to
@@ -119,6 +127,17 @@ struct NodeTreeInner {
     nodes: HashMap<AgentId, AgentNode>,
     /// Infrastructure handles (cancel token + command channel) — side-table.
     handles: HashMap<AgentId, NodeHandle>,
+    /// Receivers rebuilt during recovery. Keeping them in the side-table makes
+    /// the corresponding command senders live until a resumed runner claims
+    /// the inbox in a later orchestration step.
+    recovered_inboxes: HashMap<AgentId, mpsc::Receiver<Op>>,
+    /// Crash-recovered nodes with no live runner yet (a later story attaches
+    /// one on resume). Delivery to these is honestly refused rather than
+    /// silently queued into the unconsumed recovered inbox.
+    awaiting_resume: std::collections::HashSet<AgentId>,
+    /// Nodes whose subtree teardown has linearized. Registration checks this
+    /// tombstone while holding the same write lock, closing snapshot-then-act.
+    tearing_down: std::collections::HashSet<AgentId>,
     /// agent → parent (root sentinel for top-level).
     parent_of: HashMap<AgentId, AgentId>,
     /// Keeps watch channel alive for status broadcasting.
@@ -132,6 +151,19 @@ struct NodeTreeInner {
     isolated_agents: HashMap<AgentId, bool>,
     /// Story 14-4a (AC1) — per-agent mailbox budget for reserve-at-admission.
     mailbox_budgets: HashMap<AgentId, MailboxBudget>,
+    /// Stable alias → live node. A successor spawn re-points its predecessor's
+    /// alias so callers keep addressing a durable name across generations.
+    aliases: HashMap<String, AgentId>,
+    /// successor → predecessor lineage (for transcript inheritance).
+    predecessor_of: HashMap<AgentId, AgentId>,
+    /// node → outstanding `MustReport` correlation ids awaiting discharge.
+    pending_obligations: HashMap<AgentId, std::collections::HashSet<CorrelationId>>,
+    /// Story 17.5b — per-agent durable `WaitReason` SIDE-TABLE (not on the
+    /// pinned `AgentNode`, per R-3). Populated by `stamp_wait_reason`,
+    /// consulted by `raise_due_hazards` and `list()` so the stamped reason
+    /// reaches the hazard policy (R-2) and the Agents panel (AC8). Cleared on
+    /// any non-`Waiting` transition (mirrors `waiting_since`).
+    wait_reasons: HashMap<AgentId, crate::domain::models::WaitReason>,
 }
 
 // ── Legacy compatibility types ──────────────────────────────────────────────
@@ -183,6 +215,8 @@ pub struct RegistryEntry {
     pub turns: u32,
     /// P9 (TUI): renders the ⊙ iso indicator when true.
     pub isolated: bool,
+    /// 17.5b (AC8): stamped `WaitReason` read from the side-table.
+    pub wait_reason: Option<crate::domain::models::WaitReason>,
 }
 
 impl RegistryEntry {
@@ -201,6 +235,7 @@ impl RegistryEntry {
             tokens_out: self.tokens_out,
             turns: self.turns,
             isolated: self.isolated,
+            wait_reason: self.wait_reason,
         }
     }
 }
@@ -216,6 +251,139 @@ pub enum CascadeKillError {
         killed: Vec<AgentId>,
         unresponsive: Vec<AgentId>,
     },
+    #[error("cascade terminal checkpoint failed: {0}")]
+    Durability(String),
+}
+
+/// Story 17.4b (R-E): the typed failure surface of [`NodeTree::try_set_state`].
+/// `set_state` swallows this so pre-17.4b callers are unchanged; the A2A path
+/// must use `try_set_state` and surface every illegal edge loudly.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SetStateError {
+    #[error("node not found in tree: {0:?}")]
+    NotFound(AgentId),
+    #[error("illegal node state transition: {from:?} -> {to:?}")]
+    InvalidTransition { from: NodeState, to: NodeState },
+    #[error("node state checkpoint durability failed: {0}")]
+    Durability(String),
+}
+
+/// Story 17.2c: the narrow lifecycle seam the `Supervisor` reaches through
+/// (see `domain/ports/supervised_nodes.rs` + ADR-17-2c-01). A thin forward
+/// onto the existing `cascade_kill` — NO second cascade path.
+#[async_trait::async_trait]
+impl crate::domain::ports::SupervisedNodes for NodeTree {
+    async fn cascade_kill(
+        &self,
+        root: &AgentId,
+        timeout_per_node: Duration,
+    ) -> Result<Vec<AgentId>, crate::domain::ports::SupervisedNodesError> {
+        use crate::domain::ports::SupervisedNodesError;
+        match NodeTree::cascade_kill(self, root, timeout_per_node).await {
+            Ok(killed) => Ok(killed),
+            Err(CascadeKillError::NotFound(id)) => Err(SupervisedNodesError::NotFound(id)),
+            Err(error) => Err(SupervisedNodesError::Internal(error.to_string())),
+        }
+    }
+
+    async fn register_parked(
+        &self,
+        checkpoint: NodeCheckpoint,
+        spec: crate::domain::models::orchestration::SpokeSpec,
+        producers: Vec<AgentId>,
+        concurrency: usize,
+    ) -> Result<(), crate::domain::ports::SupervisedNodesError> {
+        NodeTree::register_parked(self, checkpoint, spec, producers, concurrency)
+            .await
+            .map_err(|error| {
+                crate::domain::ports::SupervisedNodesError::Internal(error.to_string())
+            })
+    }
+
+    async fn cancel_parked(
+        &self,
+        node: &AgentId,
+    ) -> Result<(), crate::domain::ports::SupervisedNodesError> {
+        NodeTree::cancel_parked(self, node).await.map_err(|error| {
+            crate::domain::ports::SupervisedNodesError::Internal(error.to_string())
+        })
+    }
+}
+
+/// Story 17.5a (ADR-17-5-01 D2): the single-node lifecycle seam external-task
+/// drivers reach through. Mirrors the A2A driver's materialize recipe
+/// (`a2a/driver.rs`) but behind a domain port so `adapters/mcp` never imports
+/// `infrastructure/`. Registration reuses `register_peer` —
+/// `OwnershipKind::Peer`, `NodeOrigin::Remote`, `NodeHandle::Local` — so
+/// `cascade_kill`, recovery, and the durable checkpoint path behave exactly
+/// as they do for A2A peer nodes.
+#[async_trait::async_trait]
+impl crate::domain::ports::TaskNodes for NodeTree {
+    async fn register_task_node(
+        &self,
+        node_id: &AgentId,
+        subagent_type: &str,
+    ) -> Result<crate::domain::ports::TaskNodeHandle, crate::domain::ports::TaskNodesError> {
+        use crate::domain::ports::{TaskNodeHandle, TaskNodesError};
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let (status_tx, _) = watch::channel(NodeState::Created);
+        let (_, metrics_rx) = watch::channel(AgentMetrics::default());
+        self.register_peer(
+            node_id.clone(),
+            AgentHandle {
+                agent_id: node_id.clone(),
+                token: crate::domain::models::CapabilityTokenId::nil(),
+                command_tx,
+                cancel_token: cancel_token.clone(),
+                depth: 0,
+                subagent_type: subagent_type.to_string(),
+                spawned_at: 0,
+                status: status_tx,
+                metrics: metrics_rx,
+                isolated: false,
+                mailbox_budget: MailboxBudget::new(),
+            },
+        )
+        .await
+        .map_err(|error| TaskNodesError::Internal(error.to_string()))?;
+        Ok(TaskNodeHandle {
+            cancel_token,
+            command_rx,
+        })
+    }
+
+    async fn try_set_state(
+        &self,
+        node_id: &AgentId,
+        target: NodeState,
+    ) -> Result<(), crate::domain::ports::TaskNodesError> {
+        use crate::domain::ports::TaskNodesError;
+        match NodeTree::try_set_state(self, node_id, target).await {
+            Ok(()) => Ok(()),
+            Err(SetStateError::NotFound(id)) => Err(TaskNodesError::NotFound(id)),
+            Err(SetStateError::InvalidTransition { from, to }) => {
+                Err(TaskNodesError::InvalidTransition { from, to })
+            }
+            Err(SetStateError::Durability(msg)) => Err(TaskNodesError::Internal(msg)),
+        }
+    }
+
+    async fn stamp_wait_reason(
+        &self,
+        node_id: &AgentId,
+        reason: Option<crate::domain::models::WaitReason>,
+    ) -> Result<(), crate::domain::ports::TaskNodesError> {
+        use crate::domain::ports::TaskNodesError;
+        match NodeTree::stamp_wait_reason(self, node_id, reason).await {
+            Ok(()) => Ok(()),
+            Err(SetStateError::NotFound(id)) => Err(TaskNodesError::NotFound(id)),
+            Err(SetStateError::InvalidTransition { from, to }) => {
+                Err(TaskNodesError::InvalidTransition { from, to })
+            }
+            Err(SetStateError::Durability(msg)) => Err(TaskNodesError::Internal(msg)),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -235,6 +403,9 @@ pub struct DeliveryTarget {
     pub handle: NodeHandle,
     /// Story 14-4a (AC1) — the recipient's shared mailbox budget.
     pub mailbox_budget: MailboxBudget,
+    /// A crash-recovered node awaiting resume: no live consumer, so delivery is
+    /// refused rather than silently queued into a dead inbox.
+    pub awaiting_resume: bool,
 }
 
 // ── NodeTree implementation ─────────────────────────────────────────────────
@@ -248,11 +419,18 @@ impl NodeTree {
             nodes: HashMap::new(),
             isolated_agents: HashMap::new(),
             handles: HashMap::new(),
+            recovered_inboxes: HashMap::new(),
+            awaiting_resume: std::collections::HashSet::new(),
+            tearing_down: std::collections::HashSet::new(),
             parent_of: HashMap::new(),
             status_rx: HashMap::new(),
             status_senders: HashMap::new(),
             metrics_rx: HashMap::new(),
             mailbox_budgets: HashMap::new(),
+            aliases: HashMap::new(),
+            predecessor_of: HashMap::new(),
+            pending_obligations: HashMap::new(),
+            wait_reasons: HashMap::new(),
         })
     }
 
@@ -261,6 +439,8 @@ impl NodeTree {
             inner: Arc::new(Self::build_inner()),
             event_tx: None,
             now_fn: Arc::new(|| chrono::Utc::now().timestamp_millis()),
+            journal: None,
+            host_binding: HostBinding::new("local", "unknown"),
             on_cascade_kill: Arc::new(|_| {}),
         }
     }
@@ -270,6 +450,8 @@ impl NodeTree {
             inner: Arc::new(Self::build_inner()),
             event_tx: None,
             now_fn,
+            journal: None,
+            host_binding: HostBinding::new("local", "unknown"),
             on_cascade_kill: Arc::new(|_| {}),
         }
     }
@@ -282,6 +464,8 @@ impl NodeTree {
             inner: Arc::new(Self::build_inner()),
             event_tx: Some(event_tx),
             now_fn,
+            journal: None,
+            host_binding: HostBinding::new("local", "unknown"),
             on_cascade_kill: Arc::new(|_| {}),
         }
     }
@@ -297,6 +481,282 @@ impl NodeTree {
         self
     }
 
+    /// Install the durable lifecycle journal used by production composition.
+    #[must_use]
+    pub fn with_journal(mut self, journal: Arc<NodeJournal>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    pub fn has_journal(&self) -> bool {
+        self.journal.is_some()
+    }
+
+    pub async fn journaled_terminal(
+        &self,
+        node: &AgentId,
+    ) -> Result<
+        Option<crate::domain::models::JournaledTerminalCheckpoint>,
+        crate::infrastructure::subagent::JournalError,
+    > {
+        let Some(journal) = &self.journal else {
+            return Ok(None);
+        };
+        journal.journaled_terminal(node).await
+    }
+
+    /// Spawn a successor for a TERMINAL predecessor. This is a NEW node under a
+    /// stable alias inheriting the predecessor's transcript — never a revival:
+    /// the predecessor stays terminal and no `Running` edge is re-opened.
+    pub async fn spawn_successor(
+        &self,
+        predecessor: &AgentId,
+        alias: impl Into<String>,
+        parent: AgentId,
+        handle: AgentHandle,
+    ) -> Result<AgentId, SubagentError> {
+        let alias = alias.into();
+        let successor = handle.agent_id.clone();
+        {
+            let guard = self.inner.read().await;
+            match guard.nodes.get(predecessor) {
+                Some(node) if node.state.is_terminal() => {}
+                Some(node) => {
+                    return Err(SubagentError::Internal(format!(
+                        "successor requires a terminal predecessor; {predecessor} is {:?}",
+                        node.state
+                    )));
+                }
+                None => {
+                    return Err(SubagentError::Internal(format!(
+                        "successor predecessor not found: {predecessor}"
+                    )));
+                }
+            }
+        }
+        self.register(successor.clone(), parent, handle).await?;
+        self.link_successor(predecessor, &successor, alias).await?;
+        Ok(successor)
+    }
+
+    /// Durably bind a stable user-facing alias to an existing node.
+    pub async fn bind_alias(
+        &self,
+        node: &AgentId,
+        alias: impl Into<String>,
+    ) -> Result<(), SubagentError> {
+        let alias = alias.into();
+        if !self.inner.read().await.nodes.contains_key(node) {
+            return Err(SubagentError::Internal(format!(
+                "alias target not found: {node}"
+            )));
+        }
+        if let Some(journal) = &self.journal {
+            journal
+                .append_alias(node.clone(), alias.clone())
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!("durable alias binding failed: {error}"))
+                })?;
+        }
+        self.inner.write().await.aliases.insert(alias, node.clone());
+        Ok(())
+    }
+
+    /// Link a runner-created node to a terminal predecessor. This is the
+    /// production follow-up seam used after the runner has registered the new
+    /// node and before its result is exposed under the stable alias.
+    pub async fn link_successor(
+        &self,
+        predecessor: &AgentId,
+        successor: &AgentId,
+        alias: impl Into<String>,
+    ) -> Result<(), SubagentError> {
+        let alias = alias.into();
+        let predecessor_gone = {
+            let guard = self.inner.read().await;
+            let gone = match guard.nodes.get(predecessor) {
+                Some(node) if node.state.is_terminal() => false,
+                Some(node) => {
+                    return Err(SubagentError::Internal(format!(
+                        "successor requires a terminal predecessor; {predecessor} is {:?}",
+                        node.state
+                    )));
+                }
+                // The terminal bridge may have already deregistered a genuinely
+                // terminal predecessor; a durable terminal checkpoint (below)
+                // proves it existed and ended — never a revival, the alias is
+                // repointed at the NEW successor.
+                None => true,
+            };
+            if !guard.nodes.contains_key(successor) {
+                return Err(SubagentError::Internal(format!(
+                    "successor node not found: {successor}"
+                )));
+            }
+            gone
+        };
+        if predecessor_gone
+            && let Some(journal) = &self.journal
+            && journal
+                .journaled_terminal(predecessor)
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!("successor predecessor proof failed: {error}"))
+                })?
+                .is_none()
+        {
+            return Err(SubagentError::Internal(format!(
+                "successor predecessor not found or not terminal: {predecessor}"
+            )));
+        }
+        if let Some(journal) = &self.journal {
+            journal
+                .append_successor(predecessor.clone(), successor.clone(), alias.clone())
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!("durable successor link failed: {error}"))
+                })?;
+        }
+        let mut guard = self.inner.write().await;
+        guard.aliases.insert(alias, successor.clone());
+        guard
+            .predecessor_of
+            .insert(successor.clone(), predecessor.clone());
+        Ok(())
+    }
+
+    /// Resolve a stable alias to its current live node.
+    pub async fn resolve_alias(&self, alias: &str) -> Option<AgentId> {
+        self.inner.read().await.aliases.get(alias).cloned()
+    }
+
+    /// The predecessor a successor inherited its transcript from.
+    pub async fn predecessor_of(&self, successor: &AgentId) -> Option<AgentId> {
+        self.inner
+            .read()
+            .await
+            .predecessor_of
+            .get(successor)
+            .cloned()
+    }
+
+    pub(crate) async fn restore_alias_link(&self, node: AgentId, alias: String) {
+        let mut guard = self.inner.write().await;
+        if guard.nodes.contains_key(&node) {
+            guard.aliases.insert(alias, node);
+        }
+    }
+
+    /// Restore durable successor lineage after both nodes have been rebuilt.
+    pub(crate) async fn restore_successor_link(
+        &self,
+        predecessor: AgentId,
+        successor: AgentId,
+        alias: String,
+    ) {
+        let mut guard = self.inner.write().await;
+        if guard.nodes.contains_key(&predecessor) && guard.nodes.contains_key(&successor) {
+            guard.aliases.insert(alias, successor.clone());
+            guard.predecessor_of.insert(successor, predecessor);
+        }
+    }
+
+    /// Record a `MustReport` obligation stamped at delivery for an `Owned`
+    /// recipient. Discharged by [`Self::discharge_obligation`] when it reports.
+    pub async fn note_obligation(&self, node: &AgentId, correlation_id: CorrelationId) {
+        {
+            let mut guard = self.inner.write().await;
+            guard
+                .pending_obligations
+                .entry(node.clone())
+                .or_default()
+                .insert(correlation_id.clone());
+        }
+        // Durable so a crash before the node reaches terminal can rebuild the
+        // pending set on recovery (else an undischarged obligation is lost).
+        if let Some(journal) = &self.journal
+            && let Err(error) = journal
+                .append_obligation_accepted(node.clone(), correlation_id)
+                .await
+        {
+            tracing::error!(node = %node, %error, "durable obligation-accepted append failed");
+        }
+    }
+
+    /// Discharge a previously noted `MustReport` obligation.
+    pub async fn discharge_obligation(&self, node: &AgentId, correlation_id: &CorrelationId) {
+        let removed = {
+            let mut guard = self.inner.write().await;
+            if let Some(pending) = guard.pending_obligations.get_mut(node) {
+                let removed = pending.remove(correlation_id);
+                if pending.is_empty() {
+                    guard.pending_obligations.remove(node);
+                }
+                removed
+            } else {
+                false
+            }
+        };
+        if removed
+            && let Some(journal) = &self.journal
+            && let Err(error) = journal
+                .append_obligation_discharged(node.clone(), correlation_id.clone())
+                .await
+        {
+            tracing::error!(node = %node, %error, "durable obligation-discharged append failed");
+        }
+    }
+
+    /// Rebuild the in-memory pending obligation set during recovery (the
+    /// journal records already exist; do not re-journal). pending = accepted −
+    /// discharged − violated, computed by the caller.
+    pub(crate) async fn restore_pending_obligations(
+        &self,
+        node: AgentId,
+        correlation_ids: Vec<CorrelationId>,
+    ) {
+        if correlation_ids.is_empty() {
+            return;
+        }
+        let mut guard = self.inner.write().await;
+        guard
+            .pending_obligations
+            .entry(node)
+            .or_default()
+            .extend(correlation_ids);
+    }
+
+    /// Journal every outstanding `MustReport` obligation for a node as a
+    /// durable violation and clear them. Returns the violated correlation ids.
+    pub async fn journal_obligation_violations(
+        &self,
+        node: &AgentId,
+    ) -> Result<Vec<CorrelationId>, crate::infrastructure::subagent::JournalError> {
+        let outstanding: Vec<CorrelationId> = {
+            let mut guard = self.inner.write().await;
+            guard
+                .pending_obligations
+                .remove(node)
+                .map(|set| set.into_iter().collect())
+                .unwrap_or_default()
+        };
+        if let Some(journal) = &self.journal {
+            for correlation_id in &outstanding {
+                journal
+                    .append_obligation_violation(node.clone(), correlation_id.clone())
+                    .await?;
+            }
+        }
+        Ok(outstanding)
+    }
+
+    #[must_use]
+    pub fn with_host_binding(mut self, host_binding: HostBinding) -> Self {
+        self.host_binding = host_binding;
+        self
+    }
+
     /// Register a node from the legacy `AgentHandle` shape. All in-process
     /// subagents are `Owned` foreground spawns in R1; `Peer`/`Self_` and
     /// non-`Subagent` origins arrive with later stories.
@@ -304,26 +764,128 @@ impl NodeTree {
         &self,
         agent_id: AgentId,
         parent: AgentId,
+        handle: AgentHandle,
+    ) -> Result<(), SubagentError> {
+        self.register_with_identity(
+            agent_id,
+            parent,
+            handle,
+            OwnershipKind::Owned,
+            NodeOrigin::Subagent,
+        )
+        .await
+    }
+
+    async fn register_with_identity(
+        &self,
+        agent_id: AgentId,
+        parent: AgentId,
         mut handle: AgentHandle,
+        ownership: OwnershipKind,
+        origin: NodeOrigin,
     ) -> Result<(), SubagentError> {
         let mut guard = self.inner.write().await;
-
-        if guard.nodes.contains_key(&agent_id) {
+        if guard.tearing_down.contains(&parent) {
             return Err(SubagentError::Internal(format!(
-                "duplicate agent_id: {:?}",
-                agent_id
+                "parent is being torn down: {parent}"
             )));
         }
-
-        // The root sentinel is a parent-only marker; registering it as a node
-        // would corrupt parent_of/depth invariants.
+        if let Some(existing) = guard.nodes.get(&agent_id) {
+            // Story 17.2d-b (AC-b2): a spoke parked on dependencies was
+            // registered at park time as `Suspended` + `AwaitingUpstreamArtifact`
+            // under its full nonce-qualified id. Its real launch MUST adopt that
+            // node (not collide with it): prepare the prospective live node,
+            // commit checkpoint + state-change + `Unparked` as ONE atomic
+            // batch, then publish the in-memory mutation. Every OTHER
+            // collision (17-2d-a retained node) or a `Suspended` node parked for
+            // a different reason (17.5b `AwaitingHumanInput`) is never adopted.
+            let adoptable = existing.state == NodeState::Suspended
+                && guard.wait_reasons.get(&agent_id)
+                    == Some(&crate::domain::models::WaitReason::AwaitingUpstreamArtifact);
+            if !adoptable {
+                return Err(SubagentError::Internal(format!(
+                    "duplicate agent_id: {:?}",
+                    agent_id
+                )));
+            }
+            let depth = existing.depth;
+            let mut prospective = existing.clone();
+            prospective.token = handle.token;
+            prospective.subagent_type = handle.subagent_type.clone();
+            prospective.spawned_at = if handle.spawned_at != 0 {
+                handle.spawned_at
+            } else {
+                (self.now_fn)()
+            };
+            prospective
+                .state
+                .transition_or_err(NodeState::Running)
+                .map_err(|error| SubagentError::Internal(error.to_string()))?;
+            prospective.waiting_since = None;
+            let checkpoint = prospective.checkpoint();
+            let room_event = RoomEvent::NodeStateChanged {
+                node: agent_id.clone(),
+                from: NodeState::Suspended,
+                to: NodeState::Running,
+            };
+            if let Some(journal) = &self.journal {
+                journal
+                    .append_atomic_batch(vec![
+                        JournalRecord::Checkpoint(checkpoint),
+                        JournalRecord::Room(room_event.clone()),
+                        JournalRecord::Unparked {
+                            node: agent_id.clone(),
+                        },
+                    ])
+                    .await
+                    .map_err(|error| {
+                        SubagentError::Internal(format!(
+                            "durable park adoption failed for {agent_id}: {error}"
+                        ))
+                    })?;
+            }
+            guard.nodes.insert(agent_id.clone(), prospective);
+            guard.wait_reasons.remove(&agent_id);
+            guard.recovered_inboxes.remove(&agent_id);
+            guard.awaiting_resume.remove(&agent_id);
+            let (status_tx, status_rx) = watch::channel(NodeState::Running);
+            handle.status = status_tx.clone();
+            handle.depth = depth;
+            guard.handles.insert(
+                agent_id.clone(),
+                NodeHandle::Local {
+                    cancel_token: handle.cancel_token.clone(),
+                    command_tx: handle.command_tx.clone(),
+                },
+            );
+            guard.status_rx.insert(agent_id.clone(), status_rx);
+            guard.status_senders.insert(agent_id.clone(), status_tx);
+            guard
+                .metrics_rx
+                .insert(agent_id.clone(), handle.metrics.clone());
+            guard
+                .isolated_agents
+                .insert(agent_id.clone(), handle.isolated);
+            guard
+                .mailbox_budgets
+                .insert(agent_id.clone(), handle.mailbox_budget.clone());
+            let sender_opt = guard.status_senders.get(&agent_id).cloned();
+            drop(guard);
+            if let Some(sender) = sender_opt {
+                let _ = sender.send(NodeState::Running);
+            }
+            self.emit_status_updated(&agent_id).await;
+            if self.journal.is_some() {
+                self.emit_room_event(room_event);
+            }
+            return Ok(());
+        }
         if agent_id == AgentId::root() {
             return Err(SubagentError::Internal(
                 "agent_id cannot be the root sentinel".into(),
             ));
         }
 
-        // 1. Compute depth = depth(parent) + 1 (root depth = 0)
         let depth = if parent == AgentId::root() {
             1
         } else if let Some(parent_node) = guard.nodes.get(&parent) {
@@ -334,8 +896,11 @@ impl NodeTree {
                 parent
             )));
         };
-
-        // 2. Reject if depth > MAX_DEPTH
+        let parent_tainted = guard
+            .nodes
+            .get(&parent)
+            .map(|node| node.tainted)
+            .unwrap_or(false);
         if depth > MAX_DEPTH {
             return Err(SubagentError::SpawnLimitExceeded {
                 kind: SpawnLimitKind::Depth,
@@ -343,8 +908,6 @@ impl NodeTree {
                 attempted: depth,
             });
         }
-
-        // 3. Count current children_of(parent); reject if >= MAX_CHILDREN
         let children_count = guard.parent_of.values().filter(|p| **p == parent).count();
         if children_count >= MAX_CHILDREN {
             return Err(SubagentError::SpawnLimitExceeded {
@@ -354,17 +917,12 @@ impl NodeTree {
             });
         }
 
-        // 4. Create watch channel for status broadcasting
         let (status_tx, status_rx) = watch::channel(NodeState::Created);
-
-        // 5. Set computed depth and spawn time on handle
         handle.depth = depth;
         if handle.spawned_at == 0 {
             handle.spawned_at = (self.now_fn)();
         }
         handle.status = status_tx.clone();
-
-        // Build AgentNode from legacy AgentHandle
         let node = AgentNode {
             id: agent_id.clone(),
             token: handle.token,
@@ -373,9 +931,9 @@ impl NodeTree {
             } else {
                 Some(parent.clone())
             },
-            ownership: OwnershipKind::Owned,
+            ownership,
             state: NodeState::Created,
-            origin: NodeOrigin::Subagent,
+            origin,
             foreground: true,
             effective_model: String::new(),
             tokens_in: 0,
@@ -384,18 +942,33 @@ impl NodeTree {
             subagent_type: handle.subagent_type.clone(),
             spawned_at: handle.spawned_at,
             depth,
+            tainted: parent_tainted,
+            waiting_since: None,
         };
-
-        // Build NodeHandle from legacy AgentHandle. The cancel token is the
-        // child task's REAL token (carried on the handle from `launch()`), so
-        // `cascade_kill`'s `handle.cancel()` interrupts the task at any await
-        // point it selects on `cancel.cancelled()` — not an orphan minted here.
-        // `cascade_kill` walks every descendant and cancels each explicitly, so
-        // per-node storage is sufficient for the cascade (AC10 child-cascade).
         let node_handle = NodeHandle::Local {
             cancel_token: handle.cancel_token.clone(),
             command_tx: handle.command_tx.clone(),
         };
+        let room_event = RoomEvent::NodeRegistered {
+            node: agent_id.clone(),
+            origin,
+            host: self.host_binding.clone(),
+        };
+        if let Some(journal) = &self.journal
+            && !matches!(ownership, OwnershipKind::Self_(_))
+        {
+            journal
+                .append_batch(vec![
+                    JournalRecord::Checkpoint(node.checkpoint()),
+                    JournalRecord::Room(room_event.clone()),
+                ])
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!(
+                        "durable node registration failed for {agent_id}: {error}"
+                    ))
+                })?;
+        }
 
         guard.nodes.insert(agent_id.clone(), node);
         guard.handles.insert(agent_id.clone(), node_handle);
@@ -412,30 +985,283 @@ impl NodeTree {
             .mailbox_budgets
             .insert(agent_id.clone(), handle.mailbox_budget.clone());
 
-        // Release write guard BEFORE any subsequent .await (CLAUDE.md async-lock policy)
+        // The event is sent while the mutation-ordering lock is still held.
+        // Unbounded send never awaits, so a concurrent cascade cannot publish a
+        // deregistration before this registration.
+        self.emit_capability_event(CapabilityEvent::Registered {
+            capability: self.capability_for(&agent_id),
+        });
+        if self.journal.is_some() {
+            self.emit_room_event(room_event);
+        }
         drop(guard);
+        Ok(())
+    }
 
-        // 6. Emit registration event
-        if let Some(tx) = &self.event_tx {
-            let cap = RegisteredCapability {
-                id: CapabilityId {
-                    protocol: "subagent".into(),
-                    server: String::new(),
-                    tool: agent_id.0.clone(),
-                },
-                protocol: "subagent".into(),
-                provider_id: "subagent".into(),
-                name: agent_id.0.clone(),
-                description: String::new(),
-                input_schema: serde_json::Value::Object(Default::default()),
-                parallel_safe: false,
-            };
-            let _ = tx.send(AppEvent::CapabilityEvent(CapabilityEvent::Registered {
-                capability: cap,
-            }));
+    /// Rehydrate a trusted local checkpoint and rebuild every transient
+    /// side-table handle. Replaying the same checkpoint is idempotent.
+    pub async fn restore_checkpoint(
+        &self,
+        checkpoint: NodeCheckpoint,
+    ) -> Result<bool, SubagentError> {
+        let agent_id = checkpoint.id.clone();
+        let parent = checkpoint.parent.clone().unwrap_or_else(AgentId::root);
+        let mut guard = self.inner.write().await;
+        if guard.nodes.contains_key(&agent_id) {
+            return Ok(false);
+        }
+        if checkpoint.depth == 0 || checkpoint.depth > MAX_DEPTH {
+            return Err(SubagentError::Internal(format!(
+                "recovered node depth {} is outside 1..={MAX_DEPTH}",
+                checkpoint.depth
+            )));
+        }
+        if parent != AgentId::root() && !guard.nodes.contains_key(&parent) {
+            return Err(SubagentError::Internal(format!(
+                "recovered parent not found in node tree: {parent}"
+            )));
         }
 
+        let state = checkpoint.state;
+        let metrics = AgentMetrics {
+            effective_model: checkpoint.effective_model.clone(),
+            tools_summary: String::new(),
+            tokens_in: checkpoint.tokens_in,
+            tokens_out: checkpoint.tokens_out,
+            turns: checkpoint.turns,
+        };
+        // 17.5b: a recovered node keeps its stamped reason in the side-table
+        // (the durable checkpoint carries it; `AgentNode` does not, R-3).
+        let recovered_wait_reason = checkpoint.wait_reason;
+        let node = checkpoint.into_node(CheckpointTrust::TrustedLocal);
+        let (command_tx, command_rx) = mpsc::channel(MAILBOX_CAP);
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let (status_tx, status_rx) = watch::channel(state);
+        let (_metrics_tx, metrics_rx) = watch::channel(metrics);
+        let mailbox_budget = MailboxBudget::new();
+
+        if let Some(reason) = recovered_wait_reason {
+            guard.wait_reasons.insert(agent_id.clone(), reason);
+        }
+        guard.nodes.insert(agent_id.clone(), node);
+        guard.handles.insert(
+            agent_id.clone(),
+            NodeHandle::Local {
+                cancel_token,
+                command_tx,
+            },
+        );
+        guard.recovered_inboxes.insert(agent_id.clone(), command_rx);
+        guard.awaiting_resume.insert(agent_id.clone());
+        guard.parent_of.insert(agent_id.clone(), parent);
+        guard.status_rx.insert(agent_id.clone(), status_rx);
+        guard.status_senders.insert(agent_id.clone(), status_tx);
+        guard.metrics_rx.insert(agent_id.clone(), metrics_rx);
+        guard.isolated_agents.insert(agent_id.clone(), false);
+        guard
+            .mailbox_budgets
+            .insert(agent_id.clone(), mailbox_budget);
+        self.emit_capability_event(CapabilityEvent::Registered {
+            capability: self.capability_for(&agent_id),
+        });
+        drop(guard);
+        Ok(true)
+    }
+
+    /// Story 17.2d-b (AC-b1): register a fork-join spoke parked on upstream
+    /// artifacts as a durable `Suspended` node — the identity checkpoint, the
+    /// `NodeRegistered` room event, and the `Parked` record (relaunch plan +
+    /// readiness edges) land as ONE atomic journal batch, so a crash can never
+    /// persist a partial park (no orphaned readiness). The fabricated local
+    /// handle mirrors `restore_checkpoint`: there is no live child yet; the
+    /// real launch ADOPTS this node via `register_with_identity`'s
+    /// Suspended-parked branch instead of double-registering.
+    pub async fn register_parked(
+        &self,
+        mut checkpoint: NodeCheckpoint,
+        spec: crate::domain::models::orchestration::SpokeSpec,
+        producers: Vec<AgentId>,
+        concurrency: usize,
+    ) -> Result<(), SubagentError> {
+        let agent_id = checkpoint.id.clone();
+        if agent_id == AgentId::root() {
+            return Err(SubagentError::Internal(
+                "agent_id cannot be the root sentinel".into(),
+            ));
+        }
+        checkpoint.state = NodeState::Suspended;
+        checkpoint.wait_reason = Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact);
+        let parent = checkpoint.parent.clone().unwrap_or_else(AgentId::root);
+        let mut guard = self.inner.write().await;
+        if let Some(existing) = guard.nodes.get(&agent_id) {
+            // Idempotent re-park: the composition-root resume replays the SAME
+            // durable park for a node still `Suspended` + `AwaitingUpstreamArtifact`
+            // (the `Parked` journal record is already durable — latest-wins fold,
+            // no second write). Any other occupant is a genuine collision.
+            let already_parked = existing.state == NodeState::Suspended
+                && guard.wait_reasons.get(&agent_id)
+                    == Some(&crate::domain::models::WaitReason::AwaitingUpstreamArtifact);
+            if already_parked {
+                return Ok(());
+            }
+            return Err(SubagentError::Internal(format!(
+                "duplicate agent_id: {:?}",
+                agent_id
+            )));
+        }
+        if parent != AgentId::root() && !guard.nodes.contains_key(&parent) {
+            return Err(SubagentError::Internal(format!(
+                "parent not found in node tree: {:?}",
+                parent
+            )));
+        }
+        let room_event = RoomEvent::NodeRegistered {
+            node: agent_id.clone(),
+            origin: checkpoint.origin,
+            host: self.host_binding.clone(),
+        };
+        if let Some(journal) = &self.journal {
+            journal
+                .append_atomic_batch(vec![
+                    JournalRecord::Checkpoint(checkpoint.clone()),
+                    JournalRecord::Room(room_event.clone()),
+                    JournalRecord::Parked {
+                        node: agent_id.clone(),
+                        producers,
+                        spec,
+                        concurrency,
+                    },
+                ])
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!(
+                        "durable park registration failed for {agent_id}: {error}"
+                    ))
+                })?;
+        }
+        let state = checkpoint.state;
+        let wait_reason = checkpoint.wait_reason;
+        let metrics = AgentMetrics {
+            effective_model: checkpoint.effective_model.clone(),
+            tools_summary: String::new(),
+            tokens_in: checkpoint.tokens_in,
+            tokens_out: checkpoint.tokens_out,
+            turns: checkpoint.turns,
+        };
+        let node = checkpoint.into_node(CheckpointTrust::TrustedLocal);
+        let (command_tx, command_rx) = mpsc::channel(MAILBOX_CAP);
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let (status_tx, status_rx) = watch::channel(state);
+        let (_metrics_tx, metrics_rx) = watch::channel(metrics);
+        let mailbox_budget = MailboxBudget::new();
+        if let Some(reason) = wait_reason {
+            guard.wait_reasons.insert(agent_id.clone(), reason);
+        }
+        guard.nodes.insert(agent_id.clone(), node);
+        guard.handles.insert(
+            agent_id.clone(),
+            NodeHandle::Local {
+                cancel_token,
+                command_tx,
+            },
+        );
+        guard.recovered_inboxes.insert(agent_id.clone(), command_rx);
+        guard.awaiting_resume.insert(agent_id.clone());
+        guard.parent_of.insert(agent_id.clone(), parent);
+        guard.status_rx.insert(agent_id.clone(), status_rx);
+        guard.status_senders.insert(agent_id.clone(), status_tx);
+        guard.metrics_rx.insert(agent_id.clone(), metrics_rx);
+        guard.isolated_agents.insert(agent_id.clone(), false);
+        guard
+            .mailbox_budgets
+            .insert(agent_id.clone(), mailbox_budget);
+        self.emit_capability_event(CapabilityEvent::Registered {
+            capability: self.capability_for(&agent_id),
+        });
+        if self.journal.is_some() {
+            self.emit_room_event(room_event);
+        }
+        drop(guard);
         Ok(())
+    }
+
+    /// Cancel a durable park that never acquired a live runner. Durability is
+    /// committed before the fabricated in-memory node is removed, so recovery
+    /// observes either the original park or the terminal cancellation.
+    pub async fn cancel_parked(&self, agent_id: &AgentId) -> Result<(), SubagentError> {
+        let prospective = {
+            let guard = self.inner.read().await;
+            let Some(existing) = guard.nodes.get(agent_id) else {
+                return Ok(());
+            };
+            let parked = existing.state == NodeState::Suspended
+                && guard.wait_reasons.get(agent_id)
+                    == Some(&crate::domain::models::WaitReason::AwaitingUpstreamArtifact);
+            if !parked {
+                return Ok(());
+            }
+            let mut prospective = existing.clone();
+            prospective
+                .state
+                .transition_or_err(NodeState::Cancelled)
+                .map_err(|error| SubagentError::Internal(error.to_string()))?;
+            prospective.waiting_since = None;
+            prospective
+        };
+        let checkpoint = prospective.checkpoint();
+        let room_event = RoomEvent::NodeStateChanged {
+            node: agent_id.clone(),
+            from: NodeState::Suspended,
+            to: NodeState::Cancelled,
+        };
+        if let Some(journal) = &self.journal {
+            journal
+                .append_atomic_batch(vec![
+                    JournalRecord::Checkpoint(checkpoint),
+                    JournalRecord::Room(room_event.clone()),
+                    JournalRecord::Unparked {
+                        node: agent_id.clone(),
+                    },
+                ])
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!(
+                        "durable parked-node cancellation failed for {agent_id}: {error}"
+                    ))
+                })?;
+        }
+        self.emit_room_event(room_event);
+        self.deregister_one(agent_id).await;
+        Ok(())
+    }
+
+    /// Clear the awaiting-resume marker once a resumer attaches a live runner
+    /// to a crash-recovered node (the resume path lands in a later story).
+    /// After this, normal `Suspended` queuing semantics apply.
+    pub async fn mark_resumed(&self, agent_id: &AgentId) {
+        let mut guard = self.inner.write().await;
+        guard.awaiting_resume.remove(agent_id);
+    }
+
+    /// Register a local mailbox representing a verified remote peer.
+    ///
+    /// The handle remains local because the existing `LocalMessageBus` must
+    /// perform reserve-and-send admission. Ownership and origin distinguish it
+    /// from an owned subagent; a transport-backed `NodeHandle::Remote` remains
+    /// an R3 concern.
+    pub async fn register_peer(
+        &self,
+        agent_id: AgentId,
+        handle: AgentHandle,
+    ) -> Result<(), SubagentError> {
+        self.register_with_identity(
+            agent_id,
+            AgentId::root(),
+            handle,
+            OwnershipKind::Peer,
+            NodeOrigin::Remote,
+        )
+        .await
     }
 
     /// Register a live ACP/editor attachment as a non-durable `Self` session root.
@@ -449,70 +1275,62 @@ impl NodeTree {
     pub async fn register_self_session(
         &self,
         agent_id: AgentId,
-        mut handle: AgentHandle,
+        handle: AgentHandle,
     ) -> Result<(), SubagentError> {
-        let mut guard = self.inner.write().await;
+        self.register_with_identity(
+            agent_id,
+            AgentId::root(),
+            handle,
+            OwnershipKind::self_root(),
+            NodeOrigin::Interactive,
+        )
+        .await
+    }
 
-        if guard.nodes.contains_key(&agent_id) {
-            return Err(SubagentError::Internal(format!(
-                "duplicate agent_id: {:?}",
-                agent_id
-            )));
+    fn capability_for(&self, agent_id: &AgentId) -> RegisteredCapability {
+        RegisteredCapability {
+            trust: crate::domain::models::TrustTier::Verified,
+            id: CapabilityId {
+                protocol: "subagent".into(),
+                server: String::new(),
+                tool: agent_id.as_str().to_string(),
+            },
+            protocol: "subagent".into(),
+            provider_id: "subagent".into(),
+            name: agent_id.as_str().to_string(),
+            description: String::new(),
+            input_schema: serde_json::Value::Object(Default::default()),
+            parallel_safe: false,
         }
+    }
 
-        if agent_id == AgentId::root() {
-            return Err(SubagentError::Internal(
-                "agent_id cannot be the root sentinel".into(),
-            ));
-        }
-
-        let (status_tx, status_rx) = watch::channel(NodeState::Created);
-        handle.depth = 1;
-        if handle.spawned_at == 0 {
-            handle.spawned_at = (self.now_fn)();
-        }
-        handle.status = status_tx.clone();
-
-        let node = AgentNode {
-            id: agent_id.clone(),
-            token: handle.token,
-            parent: None,
-            ownership: OwnershipKind::self_root(),
-            state: NodeState::Created,
-            origin: NodeOrigin::Interactive,
-            foreground: true,
-            effective_model: String::new(),
-            tokens_in: 0,
-            tokens_out: 0,
-            turns: 0,
-            subagent_type: handle.subagent_type.clone(),
-            spawned_at: handle.spawned_at,
-            depth: 1,
+    fn emit_capability_event(&self, event: CapabilityEvent) -> bool {
+        let Some(tx) = &self.event_tx else {
+            return false;
         };
+        if tx.send(AppEvent::CapabilityEvent(event)).is_err() {
+            tracing::warn!(
+                "NodeTree lifecycle event receiver closed; capability observability is unavailable"
+            );
+            return false;
+        }
+        true
+    }
 
-        let node_handle = NodeHandle::Local {
-            cancel_token: handle.cancel_token.clone(),
-            command_tx: handle.command_tx.clone(),
+    pub(crate) fn emit_room_event(&self, event: RoomEvent) -> bool {
+        let Some(tx) = &self.event_tx else {
+            return false;
         };
-
-        guard.nodes.insert(agent_id.clone(), node);
-        guard.handles.insert(agent_id.clone(), node_handle);
-        guard.parent_of.insert(agent_id.clone(), AgentId::root());
-        guard.status_rx.insert(agent_id.clone(), status_rx);
-        guard.status_senders.insert(agent_id.clone(), status_tx);
-        guard
-            .metrics_rx
-            .insert(agent_id.clone(), handle.metrics.clone());
-        guard
-            .isolated_agents
-            .insert(agent_id.clone(), handle.isolated);
-        guard
-            .mailbox_budgets
-            .insert(agent_id.clone(), handle.mailbox_budget.clone());
-
-        drop(guard);
-
-        Ok(())
+        if tx
+            .send(AppEvent::DomainEvent(DomainEventPayload::Room(event)))
+            .is_err()
+        {
+            tracing::warn!(
+                "NodeTree room event receiver closed; live room reactivity is unavailable"
+            );
+            return false;
+        }
+        true
     }
 
     #[cfg(any(test, feature = "test-instrumentation"))]
@@ -524,16 +1342,27 @@ impl NodeTree {
     /// Remove a single node from every map. No cascade, no event emission.
     /// Used internally by `cascade_kill` (which walks the subtree in kill
     /// order itself) and as the per-node primitive of [`Self::deregister`].
-    async fn deregister_one(&self, agent_id: &AgentId) {
+    async fn deregister_one(&self, agent_id: &AgentId) -> bool {
         let mut guard = self.inner.write().await;
-        guard.nodes.remove(agent_id);
+        let removed = guard.nodes.remove(agent_id).is_some();
+        if !removed {
+            return false;
+        }
         guard.handles.remove(agent_id);
+        guard.recovered_inboxes.remove(agent_id);
+        guard.awaiting_resume.remove(agent_id);
         guard.parent_of.remove(agent_id);
         guard.status_rx.remove(agent_id);
         guard.status_senders.remove(agent_id);
         guard.metrics_rx.remove(agent_id);
         guard.mailbox_budgets.remove(agent_id);
+        guard.tearing_down.remove(agent_id);
+        guard.isolated_agents.remove(agent_id);
+        self.emit_capability_event(CapabilityEvent::Deregistered {
+            capability: self.capability_for(agent_id),
+        });
         drop(guard);
+        true
     }
 
     /// Remove `agent_id` **and its entire subtree** from the tree.
@@ -544,6 +1373,20 @@ impl NodeTree {
     /// [`Self::deregister_one`] directly; external callers get the safe
     /// cascading semantics here.
     pub async fn deregister(&self, agent_id: &AgentId) {
+        {
+            let mut guard = self.inner.write().await;
+            let mut queue = std::collections::VecDeque::from([agent_id.clone()]);
+            while let Some(current) = queue.pop_front() {
+                guard.tearing_down.insert(current.clone());
+                let children = guard
+                    .parent_of
+                    .iter()
+                    .filter(|(_, parent)| **parent == current)
+                    .map(|(child, _)| child.clone())
+                    .collect::<Vec<_>>();
+                queue.extend(children);
+            }
+        }
         // Collect the subtree under a short read lock. Removal is
         // order-independent, so descendant ordering does not matter.
         let to_remove = {
@@ -565,53 +1408,41 @@ impl NodeTree {
         for id in &to_remove {
             self.deregister_one(id).await;
         }
-
-        // Emit a deregistration event per removed node.
-        if let Some(tx) = &self.event_tx {
-            for id in &to_remove {
-                let cap = RegisteredCapability {
-                    id: CapabilityId {
-                        protocol: "subagent".into(),
-                        server: String::new(),
-                        tool: id.0.clone(),
-                    },
-                    protocol: "subagent".into(),
-                    provider_id: "subagent".into(),
-                    name: id.0.clone(),
-                    description: String::new(),
-                    input_schema: serde_json::Value::Object(Default::default()),
-                    parallel_safe: false,
-                };
-                let _ = tx.send(AppEvent::CapabilityEvent(CapabilityEvent::Deregistered {
-                    capability: cap,
-                }));
-            }
-        }
     }
 
     /// Emit a CapabilityEvent::Updated for a subagent status change (AC-10-2-4).
+    ///
+    /// Story 17.4b (R-F): the `"subagent"` protocol below is emitted for EVERY
+    /// node, including A2A `Peer` nodes. This is deliberate — the TUI panel
+    /// refresh in `event_loop.rs` is gated on `protocol == "subagent"`, and A2A
+    /// peer nodes ride this same capability-event channel so every outbound
+    /// delegation is surfaced live in the agents panel. Do NOT split this into a
+    /// per-protocol arm without also teaching the panel-refresh gate about `a2a`,
+    /// or peer delegations would become invisible (the FR92 failure).
     pub async fn emit_status_updated(&self, agent_id: &AgentId) {
         if let Some(tx) = &self.event_tx {
             let guard = self.inner.read().await;
             if let Some(node) = guard.nodes.get(agent_id) {
                 let old_cap = RegisteredCapability {
+                    trust: crate::domain::models::TrustTier::Verified,
                     id: CapabilityId {
                         protocol: "subagent".into(),
                         server: String::new(),
-                        tool: agent_id.0.clone(),
+                        tool: agent_id.as_str().to_string(),
                     },
                     protocol: "subagent".into(),
                     provider_id: "subagent".into(),
-                    name: agent_id.0.clone(),
+                    name: agent_id.as_str().to_string(),
                     description: String::new(),
                     input_schema: serde_json::Value::Object(Default::default()),
                     parallel_safe: false,
                 };
                 let new_cap = RegisteredCapability {
+                    trust: crate::domain::models::TrustTier::Verified,
                     id: CapabilityId {
                         protocol: "subagent".into(),
                         server: String::new(),
-                        tool: agent_id.0.clone(),
+                        tool: agent_id.as_str().to_string(),
                     },
                     protocol: "subagent".into(),
                     provider_id: "subagent".into(),
@@ -631,6 +1462,137 @@ impl NodeTree {
         }
     }
 
+    /// Mark a node tainted after a cross-agent message is actually ingested.
+    /// This operation is monotone; repeated ingest is idempotent.
+    pub async fn mark_tainted(&self, agent_id: &AgentId) -> bool {
+        let (changed, checkpoint) = {
+            let mut guard = self.inner.write().await;
+            if let Some(node) = guard.nodes.get_mut(agent_id) {
+                let changed = !node.tainted;
+                node.tainted = true;
+                let durable = changed && !matches!(node.ownership, OwnershipKind::Self_(_));
+                let checkpoint = durable.then(|| node.checkpoint());
+                (changed, checkpoint)
+            } else {
+                (false, None)
+            }
+        };
+        // Persist taint so a crash before the node's next state transition can
+        // still restore it; a stale `tainted:false` checkpoint would let policy
+        // re-grant capabilities that cross-agent input should have tainted.
+        if let (Some(checkpoint), Some(journal)) = (checkpoint, &self.journal)
+            && let Err(error) = journal.append_checkpoint(checkpoint).await
+        {
+            tracing::error!(agent_id = %agent_id, %error, "durable taint checkpoint append failed");
+        }
+        changed
+    }
+
+    /// Escalate every `Waiting` node whose persisted wall-clock dwell has
+    /// crossed `threshold_ms`. The hazard is a derived policy marker (never a
+    /// new `NodeState` variant or FSM edge) journaled once per node per waiting
+    /// epoch — idempotent across re-evaluation and restart. Dwell rides the
+    /// injected clock (`now_fn`), never a monotonic `Instant` that resets on
+    /// restart. Returns the nodes newly escalated by this call.
+    pub async fn raise_due_hazards(&self, threshold_ms: i64) -> Vec<AgentId> {
+        let Some(journal) = self.journal.clone() else {
+            return Vec::new();
+        };
+        let now_ms = (self.now_fn)();
+        let candidates: Vec<(AgentId, i64, i64)> = {
+            let guard = self.inner.read().await;
+            guard
+                .nodes
+                .iter()
+                .filter_map(|(id, node)| {
+                    // R-2 (17.5b): `node.checkpoint()` writes `wait_reason:
+                    // None` (the field is not on `AgentNode`, R-3). Restore
+                    // the stamped reason from the side-table so
+                    // `waiting_hazard()` can distinguish escalating vs
+                    // non-escalating reasons — without this, `escalates()`
+                    // is inert.
+                    let mut checkpoint = node.checkpoint();
+                    checkpoint.wait_reason = guard.wait_reasons.get(id).copied();
+                    crate::domain::models::waiting_hazard(&checkpoint, now_ms, threshold_ms).map(
+                        |hazard| {
+                            (
+                                id.clone(),
+                                checkpoint.waiting_since.unwrap_or(now_ms),
+                                hazard.dwell_ms,
+                            )
+                        },
+                    )
+                })
+                .collect()
+        };
+        let mut escalated = Vec::new();
+        for (id, waiting_since, dwell_ms) in candidates {
+            match journal
+                .append_hazard_once(id.clone(), waiting_since, dwell_ms)
+                .await
+            {
+                Ok(Some(_)) => escalated.push(id),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(node = %id, %error, "durable hazard append failed");
+                }
+            }
+        }
+        escalated
+    }
+
+    /// Evaluate + append a waiting hazard against a checkpoint that is NOT yet
+    /// restored to the tree (recovery: a `Waiting` checkpoint is about to be
+    /// folded to `Suspended`, C3 — the hazard must be captured against the
+    /// pre-fold state or restart-time escalation is silently lost). Returns
+    /// `true` if a NEW hazard was journaled for this node/epoch. Idempotent via
+    /// `append_hazard_once`.
+    pub async fn raise_hazard_for_checkpoint(
+        &self,
+        checkpoint: &crate::domain::models::NodeCheckpoint,
+        threshold_ms: i64,
+    ) -> bool {
+        let Some(journal) = self.journal.clone() else {
+            return false;
+        };
+        let now_ms = (self.now_fn)();
+        let Some(hazard) = crate::domain::models::waiting_hazard(checkpoint, now_ms, threshold_ms)
+        else {
+            return false;
+        };
+        match journal
+            .append_hazard_once(
+                checkpoint.id.clone(),
+                checkpoint.waiting_since.unwrap_or(now_ms),
+                hazard.dwell_ms,
+            )
+            .await
+        {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::error!(node = %checkpoint.id, %error, "durable hazard append failed");
+                false
+            }
+        }
+    }
+
+    /// Clear integrity taint only for a true context reset (`/clear`/new conversation).
+    pub async fn clear_taint(&self, agent_id: &AgentId) {
+        let mut guard = self.inner.write().await;
+        if let Some(node) = guard.nodes.get_mut(agent_id) {
+            node.tainted = false;
+        }
+    }
+
+    pub async fn is_tainted(&self, agent_id: &AgentId) -> bool {
+        let guard = self.inner.read().await;
+        guard
+            .nodes
+            .get(agent_id)
+            .map(|n| n.tainted)
+            .unwrap_or(false)
+    }
     pub async fn depth(&self, agent_id: &AgentId) -> usize {
         let guard = self.inner.read().await;
         guard.nodes.get(agent_id).map(|n| n.depth).unwrap_or(0)
@@ -702,7 +1664,7 @@ impl NodeTree {
                 .filter(|(_, p)| *p == &current)
                 .map(|(id, _)| id.clone())
                 .collect();
-            children.sort_by(|a, b| a.0.cmp(&b.0));
+            children.sort_by(|a, b| a.as_str().cmp(b.as_str()));
             for child in children {
                 if !result.contains(&child) {
                     result.push(child.clone());
@@ -748,12 +1710,100 @@ impl NodeTree {
                         .get(agent_id)
                         .copied()
                         .unwrap_or(false),
+                    wait_reason: guard.wait_reasons.get(agent_id).copied(),
                 }
             })
             .collect();
         drop(guard);
-        entries.sort_by(|a, b| a.agent_id.0.cmp(&b.agent_id.0));
+        entries.sort_by(|a, b| {
+            a.agent_id
+                .as_str()
+                .to_string()
+                .cmp(&b.agent_id.as_str().to_string())
+        });
         entries
+    }
+
+    /// Atomically checkpoint an entire cascade as terminal before any node is
+    /// deregistered. One journal batch closes the crash-between-nodes window.
+    async fn checkpoint_cancelled_batch(&self, ids: &[AgentId]) -> Result<(), CascadeKillError> {
+        let mut guard = self.inner.write().await;
+        let mut previous = Vec::new();
+        let mut records = Vec::new();
+        let mut updates = Vec::new();
+
+        for id in ids {
+            let Some(node) = guard.nodes.get_mut(id) else {
+                continue;
+            };
+            if node.state.is_terminal() {
+                continue;
+            }
+            if node.state.transition_or_err(NodeState::Cancelled).is_err() {
+                continue;
+            }
+            let old_state = node.state;
+            let old_waiting_since = node.waiting_since;
+            previous.push((id.clone(), old_state, old_waiting_since));
+            node.state = NodeState::Cancelled;
+            node.waiting_since = None;
+            let durable = !matches!(node.ownership, OwnershipKind::Self_(_));
+            let checkpoint = node.checkpoint();
+            let room_event = RoomEvent::NodeStateChanged {
+                node: id.clone(),
+                from: old_state,
+                to: NodeState::Cancelled,
+            };
+            if durable {
+                records.push(JournalRecord::Checkpoint(checkpoint));
+                records.push(JournalRecord::Room(room_event.clone()));
+                let mut obligations = guard
+                    .pending_obligations
+                    .get(id)
+                    .map(|pending| pending.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                obligations.sort_by(|left, right| left.0.cmp(&right.0));
+                records.extend(obligations.into_iter().map(|correlation_id| {
+                    JournalRecord::ObligationViolation {
+                        node: id.clone(),
+                        correlation_id,
+                    }
+                }));
+            }
+            updates.push((
+                id.clone(),
+                guard.status_senders.get(id).cloned(),
+                durable,
+                room_event,
+            ));
+        }
+
+        if let Some(journal) = &self.journal
+            && !records.is_empty()
+            && let Err(error) = journal.append_atomic_batch(records).await
+        {
+            for (id, state, waiting_since) in previous {
+                if let Some(node) = guard.nodes.get_mut(&id) {
+                    node.state = state;
+                    node.waiting_since = waiting_since;
+                }
+            }
+            return Err(CascadeKillError::Durability(error.to_string()));
+        }
+        for (id, _, durable, _) in &updates {
+            if *durable && self.journal.is_some() {
+                guard.pending_obligations.remove(id);
+            }
+        }
+        drop(guard);
+
+        for (id, _sender, durable, room_event) in updates {
+            self.emit_status_updated(&id).await;
+            if durable && self.journal.is_some() {
+                self.emit_room_event(room_event);
+            }
+        }
+        Ok(())
     }
 
     /// Return a clone of the watch sender for a given agent_id, if registered.
@@ -777,38 +1827,180 @@ impl NodeTree {
     /// diverging on a transition the FSM rejected (e.g. an illegal
     /// `Suspended → Waiting` re-emission). Transitions go through
     /// `transition_or_err` → `can_transition_to` only (no ad-hoc predicate).
-    pub async fn set_state(&self, agent_id: &AgentId, target: NodeState) {
+    pub async fn try_set_state(
+        &self,
+        agent_id: &AgentId,
+        target: NodeState,
+    ) -> Result<(), SetStateError> {
         let mut guard = self.inner.write().await;
-        let applied = {
+        let idempotent_sender = guard.status_senders.get(agent_id).cloned();
+        let current;
+        let prev_waiting_since;
+        let checkpoint;
+        let durable;
+        {
             let Some(node) = guard.nodes.get_mut(agent_id) else {
-                return;
+                return Err(SetStateError::NotFound(agent_id.clone()));
             };
-            let current = node.state;
+            current = node.state;
             if current == target {
-                return;
-            }
-            match node.state.transition_or_err(target) {
-                Ok(()) => true,
-                Err(error) => {
-                    tracing::warn!(
-                        agent_id = %agent_id.0,
-                        current = ?current,
-                        ?target,
-                        %error,
-                        "Ignoring invalid node state transition"
-                    );
-                    false
+                if let Some(sender) = idempotent_sender {
+                    let _ = sender.send(target);
                 }
+                return Ok(());
             }
+            if let Err(error) = node.state.transition_or_err(target) {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    current = ?current,
+                    ?target,
+                    %error,
+                    "Ignoring invalid node state transition"
+                );
+                return Err(SetStateError::InvalidTransition {
+                    from: current,
+                    to: target,
+                });
+            }
+            prev_waiting_since = node.waiting_since;
+            // Persist the wall-clock instant this node entered `Waiting` so
+            // hazard dwell survives a restart; clear it on any other state.
+            node.waiting_since = if target == NodeState::Waiting {
+                Some((self.now_fn)())
+            } else {
+                None
+            };
+            durable = !matches!(node.ownership, OwnershipKind::Self_(_));
+            checkpoint = node.checkpoint();
+        }
+
+        let room_event = RoomEvent::NodeStateChanged {
+            node: agent_id.clone(),
+            from: current,
+            to: target,
         };
+        let mut records = vec![
+            JournalRecord::Checkpoint(checkpoint),
+            JournalRecord::Room(room_event.clone()),
+        ];
+        let mut terminal_violations = if target.is_terminal() {
+            guard
+                .pending_obligations
+                .get(agent_id)
+                .map(|pending| pending.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        terminal_violations.sort_by(|left, right| left.0.cmp(&right.0));
+        records.extend(terminal_violations.iter().cloned().map(|correlation_id| {
+            JournalRecord::ObligationViolation {
+                node: agent_id.clone(),
+                correlation_id,
+            }
+        }));
+        if durable
+            && let Some(journal) = &self.journal
+            && let Err(error) = journal.append_atomic_batch(records).await
+        {
+            // The runtime state must never outrun its durable source of truth.
+            if let Some(node) = guard.nodes.get_mut(agent_id) {
+                node.state = current;
+                node.waiting_since = prev_waiting_since;
+            }
+            tracing::error!(
+                agent_id = %agent_id,
+                current = ?current,
+                ?target,
+                %error,
+                "Rejecting node state transition because checkpoint durability failed"
+            );
+            return Err(SetStateError::Durability(error.to_string()));
+        }
+
+        if durable && self.journal.is_some() && !terminal_violations.is_empty() {
+            guard.pending_obligations.remove(agent_id);
+        }
+        // 17.5b: a committed transition out of `Waiting` wipes the stamped
+        // reason (mirrors `waiting_since`). The stamp is always re-applied
+        // deliberately after a fresh entry into `Waiting` (Task 3 ordering).
+        if target != NodeState::Waiting {
+            guard.wait_reasons.remove(agent_id);
+        }
         let sender_opt = guard.status_senders.get(agent_id).cloned();
         drop(guard);
-        if applied {
-            if let Some(sender) = sender_opt {
-                let _ = sender.send(target);
-            }
-            self.emit_status_updated(agent_id).await;
+        if let Some(sender) = sender_opt {
+            let _ = sender.send(target);
         }
+        self.emit_status_updated(agent_id).await;
+        if durable && self.journal.is_some() {
+            self.emit_room_event(room_event);
+        }
+        Ok(())
+    }
+
+    /// Stamp (or clear) the durable `wait_reason` on a `Waiting` node
+    /// (17.5b / AC1, AC4, AC6). Writes the side-table (so `list()` and
+    /// `raise_due_hazards` read it) AND journals a fresh checkpoint carrying
+    /// the reason. MUST be called AFTER `try_set_state(_, Waiting)` — every
+    /// `try_set_state` journals `wait_reason: None` and (on commit) wipes the
+    /// side-table, so the stamp is a second, later durable record. `None`
+    /// clears an existing stamp.
+    pub async fn stamp_wait_reason(
+        &self,
+        agent_id: &AgentId,
+        reason: Option<crate::domain::models::WaitReason>,
+    ) -> Result<(), SetStateError> {
+        use crate::domain::models::JournalRecord;
+
+        // Match `try_set_state`'s commit protocol: hold the node-tree write
+        // lock through the journal append so a concurrent transition cannot
+        // durably overtake this checkpoint. Publish the side-table value only
+        // after durability succeeds; on failure live state remains unchanged.
+        let mut guard = self.inner.write().await;
+        let Some(node) = guard.nodes.get(agent_id) else {
+            return Err(SetStateError::NotFound(agent_id.clone()));
+        };
+        if reason.is_some() && node.state != NodeState::Waiting {
+            return Err(SetStateError::InvalidTransition {
+                from: node.state,
+                to: NodeState::Waiting,
+            });
+        }
+        let durable = !matches!(node.ownership, OwnershipKind::Self_(_));
+        let checkpoint = {
+            let mut cp = node.checkpoint();
+            cp.wait_reason = reason;
+            cp
+        };
+        if durable
+            && let Some(journal) = &self.journal
+            && let Err(error) = journal
+                .append_atomic_batch(vec![JournalRecord::Checkpoint(checkpoint)])
+                .await
+        {
+            tracing::error!(
+                agent_id = %agent_id,
+                %error,
+                "Rejecting wait_reason stamp because checkpoint durability failed"
+            );
+            return Err(SetStateError::Durability(error.to_string()));
+        }
+        match reason {
+            Some(r) => {
+                guard.wait_reasons.insert(agent_id.clone(), r);
+            }
+            None => {
+                guard.wait_reasons.remove(agent_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Legacy fire-and-forget lifecycle shim. Prefer [`Self::try_set_state`];
+    /// this swallows the FSM/durability error for pre-17.4b callers (R-E).
+    pub async fn set_state(&self, agent_id: &AgentId, target: NodeState) {
+        let _ = self.try_set_state(agent_id, target).await;
     }
 
     /// Advance the node's live inspector metrics (AC11).
@@ -832,11 +2024,13 @@ impl NodeTree {
         let node = guard.nodes.get(agent_id)?;
         let handle = guard.handles.get(agent_id)?.clone();
         let mailbox_budget = guard.mailbox_budgets.get(agent_id)?.clone();
+        let awaiting_resume = guard.awaiting_resume.contains(agent_id);
         Some(DeliveryTarget {
             state: node.state,
             ownership: node.ownership,
             handle,
             mailbox_budget,
+            awaiting_resume,
         })
     }
 
@@ -862,19 +2056,34 @@ impl NodeTree {
         agent_id: &AgentId,
         timeout_per_node: Duration,
     ) -> Result<Vec<AgentId>, CascadeKillError> {
-        // Verify agent exists
-        {
-            let guard = self.inner.read().await;
+        // Linearize teardown under the same write lock used by registration.
+        // The tombstones remain while cooperative cancellation awaits, so a
+        // late child cannot attach beneath any node in this subtree.
+        let mut descendants = {
+            let mut guard = self.inner.write().await;
             if !guard.nodes.contains_key(agent_id) {
                 return Err(CascadeKillError::NotFound(agent_id.clone()));
             }
-        }
-
-        // Build kill order: subtree (BFS) → reverse → append self, so every
-        // descendant precedes its parent (reversed-BFS, not DFS).
-        let mut descendants = self.subtree(agent_id).await;
+            let mut descendants = Vec::new();
+            let mut queue = std::collections::VecDeque::from([agent_id.clone()]);
+            while let Some(current) = queue.pop_front() {
+                guard.tearing_down.insert(current.clone());
+                let children = guard
+                    .parent_of
+                    .iter()
+                    .filter(|(_, parent)| **parent == current)
+                    .map(|(child, _)| child.clone())
+                    .collect::<Vec<_>>();
+                for child in children {
+                    descendants.push(child.clone());
+                    queue.push_back(child);
+                }
+            }
+            descendants
+        };
         descendants.reverse();
         descendants.push(agent_id.clone());
+        self.checkpoint_cancelled_batch(&descendants).await?;
 
         let mut killed = Vec::new();
         let mut unresponsive = Vec::new();
@@ -913,7 +2122,8 @@ impl NodeTree {
                         }
                     }
                     NodeHandle::Remote { .. } => {
-                        // Remote kill not supported in R1
+                        // Remote kill not supported in R1.
+                        self.set_state(id, NodeState::Cancelled).await;
                         self.deregister_one(id).await;
                         killed.push(id.clone());
                         continue;
@@ -921,7 +2131,8 @@ impl NodeTree {
                 };
 
                 if send_result.is_err() {
-                    // Channel closed or send timed out — treat as already terminal
+                    // Channel closed or send timed out — treat as already terminal.
+                    self.set_state(id, NodeState::Cancelled).await;
                     self.deregister_one(id).await;
                     killed.push(id.clone());
                     continue;
@@ -943,6 +2154,12 @@ impl NodeTree {
                     } else {
                         let mut rx = sender.subscribe();
                         tokio::time::timeout(timeout_per_node, async {
+                            if matches!(
+                                *rx.borrow(),
+                                NodeState::Completed | NodeState::Failed | NodeState::Cancelled
+                            ) {
+                                return;
+                            }
                             loop {
                                 if rx.changed().await.is_err() {
                                     return;
@@ -969,8 +2186,11 @@ impl NodeTree {
                 }
 
                 // Deregister this node only — the loop handles each descendant.
+                self.set_state(id, NodeState::Cancelled).await;
                 self.deregister_one(id).await;
             } else {
+                self.set_state(id, NodeState::Cancelled).await;
+                self.deregister_one(id).await;
                 // Already gone — skip
                 killed.push(id.clone());
             }
@@ -1043,7 +2263,8 @@ impl crate::domain::ports::AgentMessageBus for LocalMessageBus {
         env: crate::domain::models::Envelope<crate::domain::models::AgentMessage>,
     ) -> Result<crate::domain::models::DeliveryOutcome, crate::domain::ports::DeliveryError> {
         use crate::domain::models::{
-            AgentDelivery, DeliveryMode, DeliveryOutcome, Op, RefuseReason, delivery_decision,
+            AgentDelivery, DeliveryDisposition, DeliveryMode, DeliveryOutcome, MessageKind, Op,
+            RefuseReason, delivery_decision,
         };
         use crate::domain::ports::DeliveryError;
 
@@ -1058,34 +2279,75 @@ impl crate::domain::ports::AgentMessageBus for LocalMessageBus {
         if mode == DeliveryMode::Refuse {
             return Err(DeliveryError::Refused(RefuseReason::TerminalState));
         }
+        // A crash-recovered node has no live runner until a later story resumes
+        // it; queuing into its unconsumed inbox would be a silent black-hole, so
+        // refuse honestly rather than falsely reporting Accepted.
+        if target.awaiting_resume {
+            return Err(DeliveryError::Refused(RefuseReason::AwaitingResume));
+        }
 
-        // Story 14-4a (AC1) — reserve a slot BEFORE try_send. Atomic
-        // fetch_update closes the TOCTOU window: two concurrent senders
-        // at 63/64 → exactly one Accepted.
-        target
-            .mailbox_budget
-            .reserve()
-            .map_err(|_| DeliveryError::Full(to.clone()))?;
+        let correlation_id = env.header.correlation_id.clone();
+        let sender = env.header.sender.clone();
+        let discharges_obligation = env.header.kind == MessageKind::OwnerReport;
+        let is_must_report = disposition == DeliveryDisposition::MustReport;
+
+        // Record the obligation durably BEFORE the message becomes visible, so a
+        // fast OwnerReport cannot be processed (and discharge) before it exists.
+        if is_must_report {
+            self.node_tree
+                .note_obligation(to, correlation_id.clone())
+                .await;
+        }
+
+        // Story 14-4a (AC1) — reserve a slot BEFORE try_send; the atomic
+        // fetch_update closes the TOCTOU window.
+        if target.mailbox_budget.reserve().is_err() {
+            if is_must_report {
+                self.node_tree
+                    .discharge_obligation(to, &correlation_id)
+                    .await;
+            }
+            return Err(DeliveryError::Full(to.clone()));
+        }
 
         match target.handle {
-            NodeHandle::Local { command_tx, .. } => command_tx
-                .try_send(Op::Deliver(AgentDelivery::new(env, mode, disposition)))
-                .map(|()| DeliveryOutcome::Accepted)
-                .map_err(|err| {
-                    // Self-release the reservation on failed try_send (CS-3)
-                    target.mailbox_budget.release();
-                    match err {
-                        tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                            DeliveryError::Full(to.clone())
+            NodeHandle::Local { command_tx, .. } => {
+                match command_tx.try_send(Op::Deliver(AgentDelivery::new(env, mode, disposition))) {
+                    Ok(()) => {
+                        if discharges_obligation {
+                            self.node_tree
+                                .discharge_obligation(&sender, &correlation_id)
+                                .await;
                         }
-                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                            DeliveryError::Closed(to.clone())
+                        Ok(DeliveryOutcome::Accepted)
+                    }
+                    Err(err) => {
+                        // Self-release the reservation and undo the obligation.
+                        target.mailbox_budget.release();
+                        if is_must_report {
+                            self.node_tree
+                                .discharge_obligation(to, &correlation_id)
+                                .await;
+                        }
+                        match err {
+                            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                                Err(DeliveryError::Full(to.clone()))
+                            }
+                            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                                Err(DeliveryError::Closed(to.clone()))
+                            }
                         }
                     }
-                }),
+                }
+            }
             NodeHandle::Remote { .. } => {
-                // Self-release — remote unsupported
+                // Self-release — remote unsupported; undo any obligation.
                 target.mailbox_budget.release();
+                if is_must_report {
+                    self.node_tree
+                        .discharge_obligation(to, &correlation_id)
+                        .await;
+                }
                 Err(DeliveryError::RemoteUnsupported(to.clone()))
             }
         }
@@ -1114,6 +2376,217 @@ mod tests {
             metrics: metrics_rx,
             mailbox_budget: MailboxBudget::new(),
         }
+    }
+
+    fn parked_spoke_checkpoint(agent_id: &AgentId) -> NodeCheckpoint {
+        NodeCheckpoint {
+            id: agent_id.clone(),
+            token: CapabilityTokenId::nil(),
+            parent: None,
+            ownership: crate::domain::models::subagent_view::WireOwnershipKind::Owned,
+            state: NodeState::Suspended,
+            origin: NodeOrigin::Subagent,
+            foreground: true,
+            effective_model: "m".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            turns: 0,
+            subagent_type: "spoke".into(),
+            spawned_at: 0,
+            depth: 1,
+            tainted: false,
+            waiting_since: None,
+            wait_reason: Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact),
+        }
+    }
+
+    fn parked_spoke_spec(
+        agent_id: &AgentId,
+        waits_for: Vec<AgentId>,
+    ) -> crate::domain::models::orchestration::SpokeSpec {
+        crate::domain::models::orchestration::SpokeSpec {
+            id: agent_id.clone(),
+            label: "spoke".into(),
+            prompt: "do the thing".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for,
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        }
+    }
+
+    /// Story 17.2d-b AC-b1/b2: the durable park writes identity checkpoint +
+    /// `NodeRegistered` + `Parked` (SpokeSpec relaunch plan) in ONE atomic
+    /// batch; the real launch ADOPTS the parked node (`Suspended→Running` +
+    /// `Unparked`), never a second register.
+    #[tokio::test]
+    async fn parked_registration_journals_atomic_batch_and_launch_adopts() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = std::sync::Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let tree = NodeTree::new().with_journal(journal.clone());
+        let node = AgentId::new();
+        let producer = AgentId::new();
+        let spec = parked_spoke_spec(&AgentId::new(), vec![producer.clone()]);
+        tree.register_parked(
+            parked_spoke_checkpoint(&node),
+            spec.clone(),
+            vec![producer.clone()],
+            2,
+        )
+        .await
+        .expect("durable park registration");
+
+        let entries = journal.load().await.unwrap();
+        let mut saw_checkpoint = false;
+        let mut saw_registered = false;
+        let mut saw_parked = false;
+        for entry in &entries {
+            match &entry.record {
+                JournalRecord::Checkpoint(cp) if cp.id == node => {
+                    saw_checkpoint = true;
+                    assert_eq!(cp.state, NodeState::Suspended);
+                    assert_eq!(
+                        cp.wait_reason,
+                        Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact)
+                    );
+                }
+                JournalRecord::Room(RoomEvent::NodeRegistered { node: n, .. }) if *n == node => {
+                    saw_registered = true;
+                }
+                JournalRecord::Parked {
+                    node: n,
+                    producers,
+                    spec: journaled_spec,
+                    concurrency,
+                } if *n == node => {
+                    saw_parked = true;
+                    assert_eq!(producers, &vec![producer.clone()]);
+                    // The full relaunch plan survives the journal round-trip.
+                    assert_eq!(journaled_spec, &spec);
+                    assert_eq!(*concurrency, 2);
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_checkpoint, "identity checkpoint journaled");
+        assert!(saw_registered, "NodeRegistered journaled");
+        assert!(saw_parked, "Parked record journaled with the SpokeSpec");
+
+        // Idempotent re-park (resume replay) is a no-op, not a collision.
+        tree.register_parked(
+            parked_spoke_checkpoint(&node),
+            spec.clone(),
+            vec![producer.clone()],
+            2,
+        )
+        .await
+        .expect("idempotent re-park");
+
+        // AC-b2: the real launch ADOPTS the parked node.
+        tree.register(node.clone(), AgentId::root(), dummy_handle(node.clone(), 1))
+            .await
+            .expect("launch adopts the parked node");
+        let entries = journal.load().await.unwrap();
+        let mut saw_adoption = false;
+        let mut saw_unparked = false;
+        for entry in &entries {
+            match &entry.record {
+                JournalRecord::Room(RoomEvent::NodeStateChanged { node: n, from, to })
+                    if *n == node =>
+                {
+                    if *from == NodeState::Suspended && *to == NodeState::Running {
+                        saw_adoption = true;
+                    }
+                }
+                JournalRecord::Unparked { node: n } if *n == node => saw_unparked = true,
+                _ => {}
+            }
+        }
+        assert!(saw_adoption, "Suspended→Running journaled at adoption");
+        assert!(saw_unparked, "Unparked journaled at adoption");
+        let entry = tree
+            .list()
+            .await
+            .into_iter()
+            .find(|entry| entry.agent_id == node)
+            .expect("adopted node listed");
+        assert_eq!(entry.current_status, NodeState::Running);
+        assert_eq!(entry.wait_reason, None, "adoption clears the park reason");
+    }
+
+    #[tokio::test]
+    async fn cancelling_never_launched_park_terminalizes_and_unparks_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = std::sync::Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let tree = NodeTree::new().with_journal(journal.clone());
+        let node = AgentId::new();
+        tree.register_parked(
+            parked_spoke_checkpoint(&node),
+            parked_spoke_spec(&AgentId::new(), vec![AgentId::new()]),
+            vec![AgentId::new()],
+            1,
+        )
+        .await
+        .unwrap();
+
+        tree.cancel_parked(&node).await.unwrap();
+        assert!(
+            tree.list().await.iter().all(|entry| entry.agent_id != node),
+            "fabricated parked node is removed from live capacity"
+        );
+        let entries = journal.load().await.unwrap();
+        assert!(
+            crate::infrastructure::subagent::fold_parked_records(&entries).is_empty(),
+            "Unparked consumes the durable relaunch plan"
+        );
+        assert!(entries.iter().any(|entry| {
+            matches!(
+                &entry.record,
+                JournalRecord::Checkpoint(checkpoint)
+                    if checkpoint.id == node && checkpoint.state == NodeState::Cancelled
+            )
+        }));
+    }
+
+    /// Story 17.2d-b AC-b2 [positive control]: the adoption predicate must
+    /// NOT weaken the dup-guard — a genuine collision (Running node) and a
+    /// `Suspended` node parked for a DIFFERENT reason both still `Err`.
+    #[tokio::test]
+    async fn adoption_refuses_genuine_collisions() {
+        let tree = NodeTree::new();
+        let a = AgentId::new();
+        tree.register(a.clone(), AgentId::root(), dummy_handle(a.clone(), 1))
+            .await
+            .unwrap();
+        let err = tree
+            .register(a.clone(), AgentId::root(), dummy_handle(a.clone(), 1))
+            .await
+            .expect_err("a genuine duplicate stays a hard error");
+        assert!(err.to_string().contains("duplicate agent_id"));
+
+        // Suspended WITHOUT the park reason (e.g. a pause/resume node) is NOT
+        // adopted either.
+        let tree = NodeTree::new();
+        let b = AgentId::new();
+        tree.register(b.clone(), AgentId::root(), dummy_handle(b.clone(), 1))
+            .await
+            .unwrap();
+        tree.try_set_state(&b, NodeState::Running).await.unwrap();
+        tree.try_set_state(&b, NodeState::Suspended).await.unwrap();
+        let err = tree
+            .register(b.clone(), AgentId::root(), dummy_handle(b.clone(), 1))
+            .await
+            .expect_err("a non-parked Suspended node is not adopted");
+        assert!(err.to_string().contains("duplicate agent_id"));
     }
 
     #[tokio::test]
@@ -1326,8 +2799,8 @@ mod tests {
 
         let entries = reg.list().await;
         assert_eq!(entries.len(), 3);
-        assert!(entries[0].agent_id.0 <= entries[1].agent_id.0);
-        assert!(entries[1].agent_id.0 <= entries[2].agent_id.0);
+        assert!(entries[0].agent_id.as_str() <= entries[1].agent_id.as_str());
+        assert!(entries[1].agent_id.as_str() <= entries[2].agent_id.as_str());
         assert_eq!(entries[0].spawned_at, 1_700_000_000_000);
     }
 
@@ -1472,8 +2945,8 @@ mod tests {
         use crate::domain::models::*;
         Envelope::new(
             MessageHeader {
-                sender: AgentId("parent".into()),
-                recipient: AgentId("child".into()),
+                sender: AgentId::from_validated("parent"),
+                recipient: AgentId::from_validated("child"),
                 correlation_id: CorrelationId::new(corr),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
@@ -1520,7 +2993,7 @@ mod tests {
     #[tokio::test]
     async fn t1_admission_cap_sync_refusal() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
 
         let budget = tree.mailbox_budget(&agent).await.unwrap();
@@ -1539,7 +3012,7 @@ mod tests {
     #[tokio::test]
     async fn t1_positive_below_cap_deliver_accepted() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
 
         let result = bus.deliver(&agent, make_envelope("hello", "c1")).await;
@@ -1557,7 +3030,7 @@ mod tests {
     #[tokio::test]
     async fn t2_toctou_concurrency_at_capacity_boundary() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
 
         let budget = tree.mailbox_budget(&agent).await.unwrap();
@@ -1593,7 +3066,7 @@ mod tests {
     #[tokio::test]
     async fn t5_deliver_after_terminal_refused_terminal_state() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
 
         // Valid FSM path: Created → Running → Completed
@@ -1617,7 +3090,7 @@ mod tests {
     #[tokio::test]
     async fn t8_unified_budget_bounds_aside_wake() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
         tree.set_state(&agent, NodeState::Running).await;
 
@@ -1667,7 +3140,7 @@ mod tests {
     #[tokio::test]
     async fn t3_cancel_time_conservation_keystone() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let mut rx = register_live_agent(&tree, &agent).await;
 
         let n = 10;
@@ -1701,7 +3174,7 @@ mod tests {
     #[tokio::test]
     async fn t3_mutant_skip_drain_leaks_budget() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let mut rx = register_live_agent(&tree, &agent).await;
 
         for i in 0..5 {
@@ -1741,7 +3214,7 @@ mod tests {
         }
 
         let tree = NodeTree::new();
-        let agent = AgentId("target".into());
+        let agent = AgentId::from_validated("target");
 
         // --- Hostile policy bus ---
         let hostile_bus = LocalMessageBus::new(tree.clone(), Arc::new(RefuseAllPolicy));
@@ -1801,7 +3274,7 @@ mod tests {
         // This is the "collapsed" state — the mutant that the hostile
         // differential test catches.
         let (tree, bus) = make_bus(); // uses RelationshipDeliveryPolicy
-        let agent = AgentId("target".into());
+        let agent = AgentId::from_validated("target");
         let mut rx = register_live_agent(&tree, &agent).await;
         bus.deliver(&agent, make_envelope("msg", "m1"))
             .await
@@ -1817,6 +3290,357 @@ mod tests {
             }
             _ => panic!("expected Deliver"),
         }
+    }
+
+    #[tokio::test]
+    async fn taint_is_monotone_inherited_on_spawn_and_cleared_only_explicitly() {
+        let tree = NodeTree::new();
+        let parent = AgentId::from_validated("tainted-parent");
+        let child = AgentId::from_validated("inheriting-child");
+        tree.register(
+            parent.clone(),
+            AgentId::root(),
+            dummy_handle(parent.clone(), 1),
+        )
+        .await
+        .unwrap();
+
+        assert!(!tree.is_tainted(&parent).await);
+        assert!(tree.mark_tainted(&parent).await);
+        assert!(
+            !tree.mark_tainted(&parent).await,
+            "second mark is idempotent"
+        );
+        tree.register(
+            child.clone(),
+            parent.clone(),
+            dummy_handle(child.clone(), 2),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tree.is_tainted(&child).await,
+            "spawn must inherit parent integrity taint"
+        );
+
+        // Ordinary reads/turn boundaries do not mutate the bit.
+        assert!(tree.is_tainted(&parent).await);
+        tree.clear_taint(&parent).await;
+        assert!(
+            !tree.is_tainted(&parent).await,
+            "only an explicit true-context reset clears taint"
+        );
+        assert!(
+            tree.is_tainted(&child).await,
+            "resetting one context must not launder a child context"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_cover_self_registration_and_cascade_removal() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let tree = NodeTree::with_event_tx(event_tx, Arc::new(|| 1_700_000_000_000));
+        let agent = AgentId::from_validated("acp-1");
+        let expected_id = tree.capability_for(&agent).id;
+
+        tree.register_self_session(agent.clone(), dummy_handle(agent.clone(), 1))
+            .await
+            .unwrap();
+        match tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("registered event timeout")
+            .expect("registered event")
+        {
+            AppEvent::CapabilityEvent(CapabilityEvent::Registered { capability }) => {
+                assert_eq!(capability.id, expected_id);
+            }
+            event => panic!("expected exact Registered event, got {event:?}"),
+        }
+
+        tree.cascade_kill(&agent, Duration::ZERO).await.unwrap();
+        let mut saw_terminal_update = false;
+        let mut saw_deregistered = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                AppEvent::CapabilityEvent(CapabilityEvent::Updated { .. }) => {
+                    saw_terminal_update = true;
+                }
+                AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { capability }) => {
+                    assert_eq!(capability.id, expected_id);
+                    assert!(!saw_deregistered, "exactly one removal event");
+                    saw_deregistered = true;
+                }
+                event => panic!("unexpected cascade lifecycle event: {event:?}"),
+            }
+        }
+        assert!(saw_terminal_update, "terminal checkpoint precedes removal");
+        assert!(saw_deregistered, "deregistration remains observable");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_cover_normal_terminal_cascade_arm() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let tree = NodeTree::with_event_tx(event_tx, Arc::new(|| 1_700_000_000_000));
+        let agent = AgentId::from_validated("normal-terminal");
+        let expected_id = tree.capability_for(&agent).id;
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let (status_tx, _) = watch::channel(NodeState::Running);
+        let (_, metrics_rx) = watch::channel(AgentMetrics::default());
+        tree.register(
+            agent.clone(),
+            AgentId::root(),
+            AgentHandle {
+                agent_id: agent.clone(),
+                token: CapabilityTokenId::nil(),
+                command_tx,
+                cancel_token: tokio_util::sync::CancellationToken::new(),
+                depth: 1,
+                subagent_type: "test".into(),
+                spawned_at: 0,
+                status: status_tx,
+                metrics: metrics_rx,
+                isolated: false,
+                mailbox_budget: MailboxBudget::new(),
+            },
+        )
+        .await
+        .unwrap();
+        match tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("registered event timeout")
+            .expect("registered event")
+        {
+            AppEvent::CapabilityEvent(CapabilityEvent::Registered { capability }) => {
+                assert_eq!(capability.id, expected_id);
+            }
+            event => panic!("expected exact Registered event, got {event:?}"),
+        }
+        tree.set_state(&agent, NodeState::Running).await;
+        let tree_for_task = tree.clone();
+        let agent_for_task = agent.clone();
+        tokio::spawn(async move {
+            if matches!(command_rx.recv().await, Some(Op::Kill)) {
+                tree_for_task
+                    .set_state(&agent_for_task, NodeState::Cancelled)
+                    .await;
+            }
+        });
+
+        tree.cascade_kill(&agent, Duration::from_secs(1))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match event_rx.recv().await.expect("lifecycle event stream") {
+                    AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { capability }) => {
+                        assert_eq!(capability.id, expected_id);
+                        break;
+                    }
+                    AppEvent::CapabilityEvent(CapabilityEvent::Updated { id, .. }) => {
+                        assert_eq!(id, expected_id);
+                    }
+                    event => panic!("unexpected lifecycle event before removal: {event:?}"),
+                }
+            }
+        })
+        .await
+        .expect("deregistered event timeout");
+        assert!(event_rx.try_recv().is_err(), "exactly one removal event");
+    }
+
+    #[tokio::test]
+    async fn concurrent_cascades_emit_one_deregistration_for_one_removal() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let tree = NodeTree::with_event_tx(event_tx, Arc::new(|| 1_700_000_000_000));
+        let agent = AgentId::from_validated("concurrent-cascade");
+        tree.register_self_session(agent.clone(), dummy_handle(agent.clone(), 1))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.expect("registered event");
+
+        let left = tree.clone();
+        let right = tree.clone();
+        let left_id = agent.clone();
+        let right_id = agent.clone();
+        let (left_result, right_result) = tokio::join!(
+            left.cascade_kill(&left_id, Duration::ZERO),
+            right.cascade_kill(&right_id, Duration::ZERO),
+        );
+        assert!(
+            left_result.is_ok() || right_result.is_ok(),
+            "at least one concurrent cascade must remove the node"
+        );
+        assert!(
+            matches!(left_result, Ok(_) | Err(CascadeKillError::NotFound(_)))
+                && matches!(right_result, Ok(_) | Err(CascadeKillError::NotFound(_))),
+            "the loser may observe the already-completed removal"
+        );
+
+        let mut updated = 0;
+        let mut deregistered = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                AppEvent::CapabilityEvent(CapabilityEvent::Updated { .. }) => updated += 1,
+                AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { .. }) => {
+                    deregistered += 1;
+                }
+                event => panic!("unexpected concurrent cascade event: {event:?}"),
+            }
+        }
+        assert_eq!(updated, 1, "terminal transition linearizes exactly once");
+        assert_eq!(deregistered, 1, "concurrent removal emits exactly once");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_are_silent_without_transmitter() {
+        let tree = NodeTree::new();
+        let agent = AgentId::from_validated("acp-quiet");
+        tree.register_self_session(agent.clone(), dummy_handle(agent.clone(), 1))
+            .await
+            .unwrap();
+        tree.cascade_kill(&agent, Duration::ZERO).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_cannot_attach_beneath_inflight_cascade() {
+        let tree = NodeTree::new();
+        let parent = AgentId::parse("cascade-parent").unwrap();
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let (status_tx, _status_rx) = watch::channel(NodeState::Running);
+        let (_metrics_tx, metrics_rx) = watch::channel(AgentMetrics::default());
+        let handle = AgentHandle {
+            isolated: false,
+            agent_id: parent.clone(),
+            token: CapabilityTokenId::nil(),
+            command_tx,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            depth: 1,
+            subagent_type: String::from("test"),
+            spawned_at: 0,
+            status: status_tx,
+            metrics: metrics_rx,
+            mailbox_budget: MailboxBudget::new(),
+        };
+        tree.register(parent.clone(), AgentId::root(), handle)
+            .await
+            .unwrap();
+        tree.set_state(&parent, NodeState::Running).await;
+
+        let kill_tree = tree.clone();
+        let kill_parent = parent.clone();
+        let cascade = tokio::spawn(async move {
+            kill_tree
+                .cascade_kill(&kill_parent, Duration::from_secs(5))
+                .await
+        });
+        assert!(matches!(command_rx.recv().await, Some(Op::Kill)));
+
+        let child = AgentId::parse("late-child").unwrap();
+        let result = tree
+            .register(
+                child.clone(),
+                parent.clone(),
+                dummy_handle(child.clone(), 2),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "registration under a tombstoned cascade root must be refused"
+        );
+        cascade.abort();
+    }
+
+    #[tokio::test]
+    async fn try_set_state_surfaces_the_three_silently_dropped_a2a_edges() {
+        // Story 17.4b (R-E, Task 6): the edges the A2A projection could hit that
+        // `set_state` silently drops must be a loud `Err` on `try_set_state`.
+        // `Created -> Failed`, `Waiting -> Completed`, `Suspended -> Completed`.
+        let tree = NodeTree::new();
+
+        // Created -> Failed (a peer that rejects an un-started task).
+        let created = AgentId::from_validated("edge-created");
+        tree.register_peer(created.clone(), dummy_handle(created.clone(), 1))
+            .await
+            .unwrap();
+        let error = tree
+            .try_set_state(&created, NodeState::Failed)
+            .await
+            .expect_err("Created -> Failed is illegal and must not be swallowed");
+        assert!(matches!(
+            error,
+            SetStateError::InvalidTransition {
+                from: NodeState::Created,
+                to: NodeState::Failed
+            }
+        ));
+        // The node state is unchanged after a refused edge.
+        let status = tree
+            .list()
+            .await
+            .into_iter()
+            .find(|entry| entry.agent_id == created)
+            .map(|entry| entry.current_status);
+        assert_eq!(status, Some(NodeState::Created));
+
+        // Waiting -> Completed (a task completing out of input-required).
+        let waiting = AgentId::from_validated("edge-waiting");
+        tree.register_peer(waiting.clone(), dummy_handle(waiting.clone(), 1))
+            .await
+            .unwrap();
+        tree.try_set_state(&waiting, NodeState::Running)
+            .await
+            .unwrap();
+        tree.try_set_state(&waiting, NodeState::Waiting)
+            .await
+            .unwrap();
+        let error = tree
+            .try_set_state(&waiting, NodeState::Completed)
+            .await
+            .expect_err("Waiting -> Completed is illegal");
+        assert!(matches!(error, SetStateError::InvalidTransition { .. }));
+
+        // Suspended -> Completed (a task completing after a restart) — the nasty one.
+        let suspended = AgentId::from_validated("edge-suspended");
+        tree.register_peer(suspended.clone(), dummy_handle(suspended.clone(), 1))
+            .await
+            .unwrap();
+        tree.try_set_state(&suspended, NodeState::Running)
+            .await
+            .unwrap();
+        tree.try_set_state(&suspended, NodeState::Suspended)
+            .await
+            .unwrap();
+        let error = tree
+            .try_set_state(&suspended, NodeState::Completed)
+            .await
+            .expect_err("Suspended -> Completed is illegal");
+        assert!(matches!(error, SetStateError::InvalidTransition { .. }));
+    }
+
+    #[tokio::test]
+    async fn try_set_state_drives_the_legal_a2a_terminal_route() {
+        // The mandated route for a post-restart completion: Suspended -> Running
+        // -> Completed, every hop legal.
+        let tree = NodeTree::new();
+        let node = AgentId::from_validated("legal-route");
+        tree.register_peer(node.clone(), dummy_handle(node.clone(), 1))
+            .await
+            .unwrap();
+        tree.try_set_state(&node, NodeState::Running).await.unwrap();
+        tree.try_set_state(&node, NodeState::Suspended)
+            .await
+            .unwrap();
+        tree.try_set_state(&node, NodeState::Running).await.unwrap();
+        tree.try_set_state(&node, NodeState::Completed)
+            .await
+            .unwrap();
+        let status = tree
+            .list()
+            .await
+            .into_iter()
+            .find(|entry| entry.agent_id == node)
+            .map(|entry| entry.current_status);
+        assert_eq!(status, Some(NodeState::Completed));
     }
 
     // t4 (release-on-turn-dispatch) and t6 (consent-receipt correlation)

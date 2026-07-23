@@ -187,6 +187,7 @@ fn test_coding_profile_composes_seven_ports() {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -252,6 +253,7 @@ fn test_base_profile_composes_all_noop() {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -304,6 +306,7 @@ fn test_personal_assistant_preview_composes_with_fallback() {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -366,6 +369,7 @@ fn test_reload_recomposes_agent_core() {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
     let ctx_arc = Arc::new(ctx);
 

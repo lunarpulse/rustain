@@ -82,7 +82,7 @@ pub fn render_synthesis_block_lines(outcome: &ForkJoinOutcome) -> Vec<Line<'stat
         lines.push(Line::from(vec![
             Span::styled("  ", muted),
             Span::styled(glyph.to_string(), warn),
-            Span::raw(format!(" {}{detail}", agent_id.0)),
+            Span::raw(format!(" {}{detail}", agent_id.as_str())),
         ]));
     }
 
@@ -114,12 +114,12 @@ mod tests {
         };
         let citations = vec![
             SpokeCitation {
-                agent_id: AgentId("a".into()),
+                agent_id: AgentId::from_validated("a"),
                 label: "alpha".into(),
                 summary: "sa".into(),
             },
             SpokeCitation {
-                agent_id: AgentId("b".into()),
+                agent_id: AgentId::from_validated("b"),
                 label: "beta".into(),
                 summary: "sb".into(),
             },
@@ -154,12 +154,12 @@ mod tests {
         };
         let citations = vec![
             SpokeCitation {
-                agent_id: AgentId("a".into()),
+                agent_id: AgentId::from_validated("a"),
                 label: "alpha".into(),
                 summary: "alpha summary".into(),
             },
             SpokeCitation {
-                agent_id: AgentId("b".into()),
+                agent_id: AgentId::from_validated("b"),
                 label: "beta".into(),
                 summary: "beta summary".into(),
             },

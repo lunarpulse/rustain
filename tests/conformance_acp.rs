@@ -921,6 +921,7 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
 
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let ws_for_factory = workspace.path().to_path_buf();
+    let allowed_workspace = workspace.path().to_path_buf();
 
     // In-memory duplex transport — NO network listener is bound.
     //   server_incoming : what the agent reads (client writes requests here)
@@ -947,6 +948,7 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
         None,
         core_factory,
         node_tree,
+        allowed_workspace,
     ));
 
     // ── Phase A: drive initialize + session/new, confirm `acp-1` lands. ──
@@ -1006,7 +1008,7 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
         .list()
         .await
         .into_iter()
-        .filter(|e| e.agent_id.0.as_str() == "acp-1")
+        .filter(|e| e.agent_id.as_str().to_string().as_str() == "acp-1")
         .collect();
     assert_eq!(
         present.len(),
@@ -1033,7 +1035,7 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
         .list()
         .await
         .into_iter()
-        .filter(|e| e.agent_id.0.as_str() == "acp-1")
+        .filter(|e| e.agent_id.as_str().to_string().as_str() == "acp-1")
         .collect();
     assert!(
         remaining.is_empty(),
@@ -1786,6 +1788,7 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         0,
         None,
         "direct-test".into(),
+        rustain::domain::models::TurnOrigin::Interactive,
     ));
     // `tools`/`tool_scheduler` were moved (or cloned) into run_turn above; the
     // turn owns the only live ToolSetPort senders now, so event_tx closes when
@@ -1968,6 +1971,7 @@ async fn acp_session_node_spawned_at_reflects_mock_clock() {
 
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let ws_for_factory = workspace.path().to_path_buf();
+    let allowed_workspace = workspace.path().to_path_buf();
     let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
 
@@ -1988,6 +1992,7 @@ async fn acp_session_node_spawned_at_reflects_mock_clock() {
         None,
         core_factory,
         node_tree,
+        allowed_workspace,
     ));
 
     // Drive the real dispatched initialize → session/new and confirm acp-1.
@@ -2037,7 +2042,7 @@ async fn acp_session_node_spawned_at_reflects_mock_clock() {
         .list()
         .await
         .into_iter()
-        .find(|e| e.agent_id.0.as_str() == "acp-1")
+        .find(|e| e.agent_id.as_str().to_string().as_str() == "acp-1")
         .expect("session/new must register the `acp-1` Self-rooted node");
     assert_eq!(
         entry.spawned_at, FIXED_NOW_MS,
@@ -2829,7 +2834,7 @@ async fn acp_approval_source_routing_matrix() {
 
     // DD1 node-binding on the live path: scope must be length-prefixed, so it
     // cannot equal a bare delimiter join of the two components.
-    let scope = source.scope_agent_id().0;
+    let scope = source.scope_agent_id().as_str().to_string();
     let bare_join = format!("{conversation_id}/{session_id}");
     assert_ne!(
         scope, bare_join,

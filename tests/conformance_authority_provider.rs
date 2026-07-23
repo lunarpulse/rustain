@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use proptest::prelude::*;
 use rustain::domain::models::{
     AgentId, Budget, CapabilityFlag, CapabilitySet, CapabilityToken, DelegateConstraint,
-    DelegateRequest, Op,
+    DelegateRequest, NodeCheckpoint, NodeOrigin, NodeState, Op, WireOwnershipKind,
 };
 use rustain::domain::ports::{AuthorityError, AuthorityProvider};
 use rustain::domain::services::authority_ledger::{AuthorityLedger, ConservationSnapshot};
+use rustain::infrastructure::subagent::NodeJournal;
 
 const MAX_KNOWN_DISCOVERY_CAPABILITY_REFS: usize = 0;
 
@@ -132,7 +133,7 @@ fn root_token() -> CapabilityToken {
 
 fn child_request(scope: &str, budget: Budget) -> DelegateRequest {
     DelegateRequest {
-        scope: AgentId(scope.to_string()),
+        scope: AgentId::parse(scope).unwrap(),
         capabilities: CapabilitySet::from_flags(&[CapabilityFlag::Spawn, CapabilityFlag::ReadFs]),
         constraint: DelegateConstraint {
             allowed: CapabilitySet::from_flags(&[CapabilityFlag::Spawn, CapabilityFlag::ReadFs]),
@@ -156,7 +157,7 @@ fn canonical_id_excludes_signature_and_uses_length_prefixes() {
     );
 
     let left = CapabilityToken::root(
-        AgentId("ab/c".into()),
+        AgentId::parse("ab/c").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
         Budget {
             requests: 1,
@@ -167,7 +168,7 @@ fn canonical_id_excludes_signature_and_uses_length_prefixes() {
         None,
     );
     let right = CapabilityToken::root(
-        AgentId("a/bc".into()),
+        AgentId::parse("a/bc").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
         Budget {
             requests: 1,
@@ -186,7 +187,10 @@ fn canonical_id_excludes_signature_and_uses_length_prefixes() {
 #[test]
 fn delegate_debits_and_settle_refunds_unused_once() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -236,7 +240,10 @@ fn delegate_debits_and_settle_refunds_unused_once() {
 #[test]
 fn revoke_scope_denies_next_point_of_use() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -251,14 +258,22 @@ fn revoke_scope_denies_next_point_of_use() {
         .expect("valid subset delegates");
 
     ledger
-        .validate(&child, &CapabilityFlag::ReadFs, &AgentId("child-a".into()))
+        .validate(
+            &child,
+            &CapabilityFlag::ReadFs,
+            &AgentId::parse("child-a").unwrap(),
+        )
         .expect("pre-revoke validate succeeds");
     ledger
-        .revoke_scope(&AgentId("child-a".into()))
+        .revoke_scope(&AgentId::parse("child-a").unwrap())
         .expect("scope revoke succeeds");
 
     let err = ledger
-        .validate(&child, &CapabilityFlag::ReadFs, &AgentId("child-a".into()))
+        .validate(
+            &child,
+            &CapabilityFlag::ReadFs,
+            &AgentId::parse("child-a").unwrap(),
+        )
         .expect_err("post-revoke validate must deny next gated action");
     assert!(
         err.to_string().contains("revoked"),
@@ -269,7 +284,10 @@ fn revoke_scope_denies_next_point_of_use() {
 #[test]
 fn conservation_invariant_holds_across_delegate_consume_settle() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -336,7 +354,10 @@ fn conservation_invariant_holds_across_delegate_consume_settle() {
 #[test]
 fn token_scope_is_single_leaf_and_bijective_with_registered_tokens() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -403,7 +424,10 @@ async fn register_authorized_child(
 #[tokio::test(flavor = "current_thread")]
 async fn synchronous_revoke_differential_real_hook_denies_deferred_allows() {
     let root = root_token();
-    let ledger = std::sync::Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = std::sync::Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let child = ledger
         .delegate(
             &root,
@@ -439,7 +463,10 @@ async fn synchronous_revoke_differential_real_hook_denies_deferred_allows() {
     );
 
     let root = root_token();
-    let deferred_ledger = AuthorityLedger::new(root.clone());
+    let deferred_ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let deferred_child = deferred_ledger
         .delegate(
             &root,
@@ -493,7 +520,10 @@ proptest! {
         ttl_delta in 0u64..=10_000,
     ) {
         let root = root_token();
-        let ledger = AuthorityLedger::new(root.clone());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        );
         let mut req = child_request("child-prop", budget);
         req.uses_limit = Some(uses);
         req.not_after = Some(4_102_444_800_000 - ttl_delta);
@@ -509,7 +539,10 @@ proptest! {
         extra_cost in 1u64..=500_000,
     ) {
         let root = root_token();
-        let ledger = AuthorityLedger::new(root.clone());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        );
         let mut req = child_request(
             "child-escalates",
             Budget {
@@ -545,7 +578,10 @@ fn restricted_root() -> CapabilityToken {
 #[test]
 fn leapfrog_differential_token_rejects_depth_node_tree_would_allow() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     // Depth-1 child carrying a stricter max_depth (1) than node_tree MAX_DEPTH (3).
     let mut req1 = child_request(
         "leap-1",
@@ -586,7 +622,10 @@ fn leapfrog_differential_token_rejects_depth_node_tree_would_allow() {
 #[test]
 fn delegate_rejects_non_subset_on_every_axis() {
     let parent = restricted_root(); // caps/allowed/max_subset = {Spawn}, max_depth = 3
-    let ledger = AuthorityLedger::new(parent.clone());
+    let ledger = AuthorityLedger::new(
+        parent.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
 
     // (a) capabilities axis
     let mut req = child_request(
@@ -672,7 +711,7 @@ fn delegate_rejects_non_subset_on_every_axis() {
 #[test]
 fn subset_algebra_is_antisymmetric() {
     let a = CapabilityToken::root(
-        AgentId("a".into()),
+        AgentId::parse("a").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
         Budget {
             requests: 5,
@@ -683,7 +722,7 @@ fn subset_algebra_is_antisymmetric() {
         None,
     );
     let b = CapabilityToken::root(
-        AgentId("b".into()),
+        AgentId::parse("b").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::ReadFs]),
         Budget {
             requests: 5,
@@ -711,7 +750,10 @@ fn subset_algebra_is_antisymmetric() {
 #[test]
 fn subset_algebra_is_transitive_via_delegate() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child1 = ledger
         .delegate(
             &root,
@@ -748,7 +790,7 @@ fn subset_algebra_is_transitive_via_delegate() {
 #[test]
 fn canonical_bytes_length_prefixes_scope() {
     let token = CapabilityToken::root(
-        AgentId("hi".into()),
+        AgentId::parse("hi").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
         Budget {
             requests: 1,
@@ -775,7 +817,10 @@ fn canonical_bytes_length_prefixes_scope() {
 fn validate_rejects_malformed_and_signed_tokens() {
     use rustain::domain::models::peer_identity::{Ed25519Sig, PeerId};
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let mut child = ledger
         .delegate(
             &root,
@@ -790,7 +835,7 @@ fn validate_rejects_malformed_and_signed_tokens() {
         .unwrap();
 
     // issuer without signature ⇒ malformed (both-or-neither).
-    child.issuer = Some(PeerId("peer".into()));
+    child.issuer = Some(PeerId::from_public_key(&[7u8; 32]).expect("valid peer id"));
     let err = ledger
         .validate(&child, &CapabilityFlag::ReadFs, &child.scope)
         .expect_err("issuer⊕signature must be rejected");
@@ -826,7 +871,10 @@ fn capability_token_serialized_field_count_pinned() {
 #[tokio::test(flavor = "current_thread")]
 async fn token_node_bijection_live_counts_match() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let tree = rustain::infrastructure::subagent::NodeTree::new();
     let mut scopes = Vec::new();
     for name in ["alpha", "beta", "gamma"] {
@@ -878,7 +926,10 @@ proptest! {
         extra_settles in 0u32..=3,
     ) {
         let root = root_token();
-        let ledger = AuthorityLedger::new(root.clone());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        );
         let child = ledger
             .delegate(
                 &root,
@@ -917,7 +968,10 @@ proptest! {
 #[test]
 fn post_order_settle_propagates_grandchild_consumption_at_depth_two() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -980,7 +1034,10 @@ fn post_order_settle_propagates_grandchild_consumption_at_depth_two() {
 #[tokio::test(flavor = "current_thread")]
 async fn ac5_trust_drop_revoke_routes_into_cascade_kill() {
     let root = root_token();
-    let ledger = std::sync::Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = std::sync::Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let tree = std::sync::Arc::new(rustain::infrastructure::subagent::NodeTree::new());
     let provider = rustain::adapters::authority::InProcessAuthorityProvider::new(ledger.clone())
         .with_node_tree(tree.clone());
@@ -1024,7 +1081,10 @@ async fn ac5_trust_drop_revoke_routes_into_cascade_kill() {
 #[test]
 fn point_of_use_use_count_denies_after_limit() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     // child_request sets uses_limit: Some(10). Spend them all.
     let child = ledger
         .delegate(
@@ -1066,12 +1126,15 @@ fn point_of_use_use_count_denies_after_limit() {
 // mutation path (it reuses only `validate` / `revoke_scope`).
 #[test]
 fn revoke_happens_before_subsequent_validates_under_concurrency() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
 
     let root = root_token();
-    let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let child = ledger
         .delegate(
             &root,
@@ -1084,7 +1147,7 @@ fn revoke_happens_before_subsequent_validates_under_concurrency() {
             ),
         )
         .expect("valid subset delegates");
-    let scope = AgentId("child-a".into());
+    let scope = AgentId::parse("child-a").unwrap();
     let want = CapabilityFlag::ReadFs;
 
     // Baseline: the token validates before revocation.
@@ -1093,55 +1156,76 @@ fn revoke_happens_before_subsequent_validates_under_concurrency() {
         .expect("pre-revoke validate succeeds");
 
     const WORKERS: usize = 8;
-    const ITERS: usize = 4_096;
-    // Barrier 1 releases every worker into the validate storm at the same
-    // instant the main thread begins revoking (guarantees real interleaving).
-    // Barrier 2 releases workers to their definitive post-revoke validate only
-    // after the main thread has observed revoke() return.
-    let b1 = Arc::new(Barrier::new(WORKERS + 1));
-    let b2 = Arc::new(Barrier::new(WORKERS + 1));
+    let start = Arc::new(std::sync::Barrier::new(WORKERS + 1));
+    // Relaxed deliberately: this flag announces only that revoke returned; it
+    // does NOT establish the happens-before edge under test. The ledger Mutex
+    // must order the state mutation against each subsequent validate.
+    let revoke_returned = Arc::new(AtomicBool::new(false));
     let interleavings = Arc::new(AtomicUsize::new(0));
     let post_revoke_ok = Arc::new(AtomicUsize::new(0));
+    let post_revoke_observations = Arc::new(AtomicUsize::new(0));
 
     let mut handles = Vec::new();
     for _ in 0..WORKERS {
-        let (ledger, child, scope, b1, b2, interleavings, post_revoke_ok) = (
+        let (
+            ledger,
+            child,
+            scope,
+            start,
+            revoke_returned,
+            interleavings,
+            post_revoke_ok,
+            post_revoke_observations,
+        ) = (
             ledger.clone(),
             child.clone(),
             scope.clone(),
-            b1.clone(),
-            b2.clone(),
+            start.clone(),
+            revoke_returned.clone(),
             interleavings.clone(),
             post_revoke_ok.clone(),
+            post_revoke_observations.clone(),
         );
         handles.push(thread::spawn(move || {
-            // Phase 1 — spin validates concurrently with the revoke. Results
-            // are legitimately mixed (Ok before revoke linearizes, Revoked
-            // after); we only need to stress the lock interleaving.
-            b1.wait();
-            for _ in 0..ITERS {
-                let _ = ledger.validate(&child, &want, &scope);
+            start.wait();
+            loop {
+                if revoke_returned.load(Ordering::Relaxed) {
+                    // Definitive post-revoke validate: a FRESH call performed
+                    // AFTER observing that revoke returned. The ledger Mutex is
+                    // therefore the sole happens-before ordering this validate
+                    // against the revocation — never a stale pre-observation
+                    // result counted as post-revoke (the old bug). Drop the
+                    // Mutex (the mandated mutant) and this validate can observe
+                    // unsynchronized state → Ok → the assertion below goes RED.
+                    let accepted = ledger.validate(&child, &want, &scope).is_ok();
+                    post_revoke_observations.fetch_add(1, Ordering::Relaxed);
+                    if accepted {
+                        post_revoke_ok.fetch_add(1, Ordering::Relaxed);
+                    }
+                    break;
+                }
+                // Interleaving stress: hammer validate concurrently with the
+                // in-flight revoke to create real contention on the lock.
+                let _ = ledger.validate(&child, &want, &scope).is_ok();
                 interleavings.fetch_add(1, Ordering::Relaxed);
-            }
-            // Phase 2 — the main thread revoked between b1 and b2. By the
-            // barrier synchronization its revoke happens-before each worker's
-            // b2 release, and (independently) the shared Mutex orders this
-            // validate's acquire after revoke's release. So it MUST be Revoked.
-            b2.wait();
-            if ledger.validate(&child, &want, &scope).is_ok() {
-                post_revoke_ok.fetch_add(1, Ordering::Relaxed);
+                thread::yield_now();
             }
         }));
     }
 
-    b1.wait(); // release workers + main together
+    start.wait();
     ledger.revoke_scope(&scope).expect("scope revoke succeeds");
-    b2.wait(); // release workers to their definitive validate
+    revoke_returned.store(true, Ordering::Relaxed);
 
     for h in handles {
         h.join().expect("worker thread panicked");
     }
 
+    assert_eq!(
+        post_revoke_observations.load(Ordering::Relaxed),
+        WORKERS,
+        "every worker must validate after revoke returned without a barrier"
+    );
     assert_eq!(
         post_revoke_ok.load(Ordering::Relaxed),
         0,
@@ -1153,4 +1237,374 @@ fn revoke_happens_before_subsequent_validates_under_concurrency() {
         interleavings.load(Ordering::Relaxed) > 0,
         "probe never ran concurrent validates — no interleaving stress",
     );
+}
+
+#[tokio::test]
+async fn terminal_prune_requires_journal_proof_and_preserves_conservation() {
+    let root = root_token();
+    let ledger = std::sync::Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
+    let provider =
+        rustain::adapters::authority::in_process::InProcessAuthorityProvider::new(ledger.clone());
+    let child = ledger
+        .delegate(
+            &root,
+            child_request(
+                "prune-child",
+                Budget {
+                    requests: 10,
+                    cost_micros: 10_000,
+                },
+            ),
+        )
+        .expect("delegate child");
+    ledger
+        .consume(
+            &child.id,
+            Budget {
+                requests: 2,
+                cost_micros: 500,
+            },
+        )
+        .expect("consume child budget");
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let journal = NodeJournal::open_workspace(workspace.path())
+        .await
+        .expect("open journal");
+    let mut checkpoint = NodeCheckpoint {
+        id: child.scope.clone(),
+        token: child.id,
+        parent: None,
+        ownership: WireOwnershipKind::Owned,
+        state: NodeState::Running,
+        origin: NodeOrigin::Subagent,
+        foreground: true,
+        effective_model: "test".into(),
+        tokens_in: 0,
+        tokens_out: 0,
+        turns: 0,
+        subagent_type: "test".into(),
+        spawned_at: 1,
+        depth: 1,
+        tainted: false,
+        waiting_since: None,
+        wait_reason: None,
+    };
+    journal
+        .append_checkpoint(checkpoint.clone())
+        .await
+        .expect("append nonterminal checkpoint");
+    assert!(
+        journal
+            .journaled_terminal(&child.scope)
+            .await
+            .expect("scan journal")
+            .is_none(),
+        "crash window: no terminal proof means pruning is impossible"
+    );
+
+    ledger.settle(&child.id).expect("settle child");
+    let before = ledger.conservation(&root.id).expect("conservation before");
+    checkpoint.state = NodeState::Completed;
+    journal
+        .append_checkpoint(checkpoint)
+        .await
+        .expect("append terminal checkpoint");
+    let proof = journal
+        .journaled_terminal(&child.scope)
+        .await
+        .expect("scan journal")
+        .expect("terminal checkpoint is durably proven");
+
+    assert!(provider.prune_terminal(&proof).await.expect("prune child"));
+    assert_eq!(
+        ledger.token_for_scope(&child.scope),
+        Err(AuthorityError::NotFound)
+    );
+    assert_eq!(ledger.conservation(&root.id).unwrap(), before);
+    assert!(
+        !provider
+            .prune_terminal(&proof)
+            .await
+            .expect("idempotent prune"),
+        "second prune must be a no-op"
+    );
+}
+
+// ─── Story 17.2c (D4): durable ledger conservation head ───────────────────
+// Two crash keystones for the write-ahead conservation head. The rebuild+
+// recover models the ledger's restart transition (fresh ledger + replay from
+// the journal); the journal's own cross-process crash durability (fsync/flock/
+// torn-tail repair) is the 17-2a harness's job.
+
+struct FailOnceLedgerJournalSink {
+    fail_once: std::sync::atomic::AtomicBool,
+    records: tokio::sync::Mutex<Vec<rustain::domain::models::LedgerConservationRecord>>,
+}
+
+impl FailOnceLedgerJournalSink {
+    fn new() -> Self {
+        Self {
+            fail_once: std::sync::atomic::AtomicBool::new(true),
+            records: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn has_record(&self) -> bool {
+        !self.records.lock().await.is_empty()
+    }
+}
+
+#[async_trait::async_trait]
+impl rustain::domain::ports::LedgerJournalSink for FailOnceLedgerJournalSink {
+    async fn journal_conservation(
+        &self,
+        record: rustain::domain::models::LedgerConservationRecord,
+    ) -> Result<(), rustain::domain::ports::LedgerJournalError> {
+        if self
+            .fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(rustain::domain::ports::LedgerJournalError(
+                "injected flush failure".to_owned(),
+            ));
+        }
+        self.records.lock().await.push(record);
+        Ok(())
+    }
+}
+
+async fn journaled_conservation(
+    journal: &NodeJournal,
+) -> Vec<rustain::domain::models::LedgerConservationRecord> {
+    journal
+        .load()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.record {
+            rustain::domain::models::JournalRecord::LedgerConservation(record) => Some(record),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn ledger_head_survives_crash_after_flush() {
+    // Keystone (b): a debit whose conservation head was flushed write-ahead
+    // SURVIVES a restart — spent budget does not reappear.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = CapabilityToken::r1_root(AgentId::root());
+    let root_id = root.id;
+    let full = root.budget;
+    {
+        let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        )
+        .with_journal_sink(
+            journal.clone() as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>
+        );
+        ledger
+            .consume(
+                &root_id,
+                Budget {
+                    requests: 3,
+                    cost_micros: 300,
+                },
+            )
+            .unwrap();
+        ledger
+            .journal_head()
+            .await
+            .expect("write-ahead flush before the would-be spawn");
+    } // ledger dropped == process death
+
+    let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+    let recovered = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
+    recovered.recover_conservation(journaled_conservation(&journal).await);
+    let available = recovered.available(&root_id).unwrap();
+    assert_eq!(
+        available.requests,
+        full.requests - 3,
+        "flushed debit survives"
+    );
+    assert_eq!(
+        available.cost_micros,
+        full.cost_micros - 300,
+        "flushed debit survives"
+    );
+    // RED mutant: dropping the recovery replay leaves `available == full` — the
+    // spent budget resurrects.
+}
+
+#[tokio::test]
+async fn ledger_head_crash_before_flush_does_not_resurrect() {
+    // Keystone (a): a debit applied in memory but NOT flushed (crash between the
+    // in-memory apply and the write-ahead flush) leaves the recovered head
+    // consistent with what was externally observable — nothing was dispatched,
+    // so `available` is full. The debit simply never became durable.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = CapabilityToken::r1_root(AgentId::root());
+    let root_id = root.id;
+    let full = root.budget;
+    {
+        let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        )
+        .with_journal_sink(
+            journal.clone() as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>
+        );
+        ledger
+            .consume(
+                &root_id,
+                Budget {
+                    requests: 3,
+                    cost_micros: 300,
+                },
+            )
+            .unwrap();
+        // CRASH before journal_head(): the delta is staged, never flushed.
+    }
+
+    let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+    let recovered = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
+    recovered.recover_conservation(journaled_conservation(&journal).await);
+    let available = recovered.available(&root_id).unwrap();
+    assert_eq!(
+        available.requests, full.requests,
+        "unflushed debit does not persist — consistent with no observable spawn"
+    );
+    assert_eq!(available.cost_micros, full.cost_micros);
+}
+
+#[tokio::test]
+async fn ledger_flush_failure_requeues_conservation_head() {
+    let root = CapabilityToken::r1_root(AgentId::root());
+    let root_id = root.id;
+    let sink = std::sync::Arc::new(FailOnceLedgerJournalSink::new());
+    let ledger = AuthorityLedger::new(
+        root,
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    )
+    .with_journal_sink(
+        sink.clone() as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>
+    );
+
+    ledger
+        .consume(
+            &root_id,
+            Budget {
+                requests: 3,
+                cost_micros: 300,
+            },
+        )
+        .expect("stage a conservation head");
+    assert!(
+        ledger.journal_head().await.is_err(),
+        "a failed sink must block the write-ahead boundary"
+    );
+    assert!(
+        !sink.has_record().await,
+        "the injected failure must not falsely report persistence"
+    );
+
+    ledger
+        .journal_head()
+        .await
+        .expect("an unflushed head must remain available for retry");
+    assert!(
+        sink.has_record().await,
+        "the retry must persist the snapshot that the failed flush retained"
+    );
+}
+
+#[tokio::test]
+async fn authority_time_watermark_survives_restart_and_defeats_clock_rollback() {
+    // AC2 (RC-A residual i): the nondecreasing authority-time watermark is made
+    // DURABLE on the SAME `LedgerConservation` stream (no second store). A clock
+    // rolled back AFTER a restart cannot revive authority that expired before
+    // the durable watermark.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = CapabilityToken::r1_root(AgentId::root()); // not_after == None
+    let root_id = root.id;
+
+    // Phase 1 — wall time T = 1000: an authority op observes the watermark up to
+    // 1000 and flushes a conservation head that carries it.
+    {
+        let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::MockClock::at_wall_ms(1000)),
+        )
+        .with_journal_sink(
+            journal.clone() as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>
+        );
+        ledger
+            .consume(
+                &root_id,
+                Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+            )
+            .expect("stage the root head at T=1000");
+        ledger
+            .journal_head()
+            .await
+            .expect("watermark 1000 made durable on the conservation stream");
+    } // process death
+
+    // Phase 2 — reopen with the clock ROLLED BACK to 100 (well before the child's
+    // 600ms expiry). Without the durable watermark the fresh ledger's watermark
+    // resets to 0, so effective-now = max(0, 100) = 100 < 600 and the expired
+    // child would be revived.
+    let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+    let recovered = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::MockClock::at_wall_ms(100)),
+    );
+    recovered.recover_conservation(journaled_conservation(&journal).await);
+
+    // A child minted after the restart that expired at 600 must stay expired:
+    // effective-now = max(watermark 1000, clock 100) = 1000 > 600.
+    let child = recovered
+        .delegate(
+            &root,
+            DelegateRequest {
+                scope: AgentId::parse("rollback-child").unwrap(),
+                capabilities: CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
+                constraint: DelegateConstraint {
+                    allowed: CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
+                    max_depth: 3,
+                    max_subset: CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
+                },
+                budget: Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+                not_after: Some(600),
+                uses_limit: Some(1),
+            },
+        )
+        .expect("delegation itself does not evaluate expiry");
+    assert_eq!(
+        recovered.validate(&child, &CapabilityFlag::Spawn, &child.scope),
+        Err(AuthorityError::Expired),
+        "durable watermark keeps expired authority dead across a clock rollback",
+    );
+    // RED mutant: drop `authority_time_ms` from the head (or skip restoring it in
+    // `recover_conservation`) → the watermark resets to 0, effective-now = 100 <
+    // 600, validate returns Ok → the expired child is revived → RED.
 }

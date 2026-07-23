@@ -1,10 +1,13 @@
 use std::ops::{Add, AddAssign, Sub};
 
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::domain::models::agent_id::AgentId;
 use crate::domain::models::peer_identity::{Ed25519Sig, PeerId};
+use crate::domain::ports::AuthorityError;
 
 const DOMAIN_TAG: &[u8] = b"rustain.captoken.";
 const FORMAT_VERSION: u8 = 1;
@@ -82,6 +85,24 @@ pub struct Budget {
     pub cost_micros: u64,
 }
 
+/// Budget reserved by one fork-join child delegation.
+pub const R1_CHILD_BUDGET: Budget = Budget {
+    requests: 1,
+    cost_micros: 1_000,
+};
+
+/// Budget reserved by one fork-join spawn gate.
+pub const R1_GATE_TOKEN_BUDGET: Budget = Budget {
+    requests: 1,
+    cost_micros: 1,
+};
+
+/// Budget consumed by the coordinator's deterministic synthesis floor.
+pub const R1_SYNTHESIS_RESERVE: Budget = Budget {
+    requests: 1,
+    cost_micros: 1_000,
+};
+
 impl Budget {
     pub const ZERO: Self = Self {
         requests: 0,
@@ -97,6 +118,32 @@ impl Budget {
             requests: self.requests.saturating_sub(rhs.requests),
             cost_micros: self.cost_micros.saturating_sub(rhs.cost_micros),
         }
+    }
+
+    pub const fn checked_add(self, rhs: Self) -> Option<Self> {
+        let Some(requests) = self.requests.checked_add(rhs.requests) else {
+            return None;
+        };
+        let Some(cost_micros) = self.cost_micros.checked_add(rhs.cost_micros) else {
+            return None;
+        };
+        Some(Self {
+            requests,
+            cost_micros,
+        })
+    }
+
+    pub const fn checked_mul(self, rhs: u64) -> Option<Self> {
+        let Some(requests) = self.requests.checked_mul(rhs) else {
+            return None;
+        };
+        let Some(cost_micros) = self.cost_micros.checked_mul(rhs) else {
+            return None;
+        };
+        Some(Self {
+            requests,
+            cost_micros,
+        })
     }
 }
 
@@ -226,13 +273,63 @@ impl CapabilityToken {
                 max_depth: 3,
                 max_subset: capabilities,
             },
-            budget: Budget {
-                requests: 1,
-                cost_micros: 1_000,
-            },
+            budget: R1_CHILD_BUDGET,
             not_after: None,
             uses_limit: Some(1),
         }
+    }
+
+    /// Build the exact authority request for a declarative nested coordinator.
+    ///
+    /// The coordinator must fund each grandchild's delegation and spawn gate,
+    /// plus one deterministic synthesis reservation. No arbitrary padding is
+    /// added: changing `grandchild_count` changes the grant by exactly one
+    /// child budget plus one gate budget.
+    pub fn r1_coordinator(
+        scope: AgentId,
+        grandchild_count: usize,
+    ) -> Result<DelegateRequest, AuthorityError> {
+        let capabilities = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
+        let delegable = CapabilitySet::from_flags(&[
+            CapabilityFlag::Spawn,
+            CapabilityFlag::ReadFs,
+            CapabilityFlag::WriteFs,
+            CapabilityFlag::Network,
+        ]);
+        let count = u64::try_from(grandchild_count).map_err(|_| AuthorityError::Overflow {
+            dimension: "coordinator grandchild count",
+        })?;
+        let uses_limit = u32::try_from(grandchild_count).map_err(|_| AuthorityError::Overflow {
+            dimension: "coordinator grandchild count",
+        })?;
+        let per_grandchild =
+            R1_CHILD_BUDGET
+                .checked_add(R1_GATE_TOKEN_BUDGET)
+                .ok_or(AuthorityError::Overflow {
+                    dimension: "coordinator budget",
+                })?;
+        // Defense-in-depth (RC-C AC3): for any u32-valid `count` this checked
+        // add/mul cannot overflow u64 (per-grandchild budget × ≤u32::MAX + reserve
+        // stays far below u64::MAX); the reachable overflow is the count
+        // conversion above. Kept fail-closed regardless.
+        let budget = per_grandchild
+            .checked_mul(count)
+            .and_then(|aggregate| aggregate.checked_add(R1_SYNTHESIS_RESERVE))
+            .ok_or(AuthorityError::Overflow {
+                dimension: "coordinator budget",
+            })?;
+        Ok(DelegateRequest {
+            scope,
+            capabilities,
+            constraint: DelegateConstraint {
+                allowed: delegable,
+                max_depth: 3,
+                max_subset: delegable,
+            },
+            budget,
+            not_after: None,
+            uses_limit: Some(uses_limit),
+        })
     }
 
     pub fn child(parent: &Self, req: DelegateRequest) -> Self {
@@ -252,6 +349,9 @@ impl CapabilityToken {
         token
     }
 
+    /// Stable token identity. Issuer and signature are authenticated transport
+    /// attestations, not authority content, so attaching either cannot change
+    /// the id used by parent references and ledger entries.
     pub fn compute_id(&self) -> CapabilityTokenId {
         self.compute_id_with_signature_for_test(None)
     }
@@ -261,20 +361,20 @@ impl CapabilityToken {
         &self,
         signature: Option<&[u8]>,
     ) -> CapabilityTokenId {
-        let bytes = self.canonical_bytes(signature);
-        let digest = Sha256::digest(&bytes);
+        let _ = signature;
+        let digest = Sha256::digest(self.identity_bytes());
         let mut out = [0u8; 32];
         out.copy_from_slice(&digest);
         CapabilityTokenId(out)
     }
 
-    pub fn canonical_bytes(&self, signature: Option<&[u8]>) -> Vec<u8> {
+    fn identity_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(160);
         out.extend_from_slice(DOMAIN_TAG);
         out.push(FORMAT_VERSION);
         push_opt_token_id(&mut out, self.parent);
         push_u64(&mut out, self.capabilities.0);
-        push_str(&mut out, &self.scope.0);
+        push_str(&mut out, self.scope.as_str());
         push_u64(&mut out, self.constraint.allowed.0);
         push_u64(&mut out, self.constraint.max_depth as u64);
         push_u64(&mut out, self.constraint.max_subset.0);
@@ -282,9 +382,14 @@ impl CapabilityToken {
         push_u64(&mut out, self.budget.cost_micros);
         push_opt_u64(&mut out, self.not_after);
         push_opt_u32(&mut out, self.uses_limit);
-        push_opt_str(&mut out, self.issuer.as_ref().map(|id| id.0.as_str()));
-        // Signature is deliberately represented only by a constant exclusion tag:
-        // id(None) == id(Some(fake64)) is the R1 proof required by ADR-14-2-02.
+        out
+    }
+
+    /// Canonical bytes signed by the issuer. The issuer is included so the
+    /// signature binds the claimed key; the signature itself is excluded.
+    pub fn canonical_bytes(&self, signature: Option<&[u8]>) -> Vec<u8> {
+        let mut out = self.identity_bytes();
+        push_opt_str(&mut out, self.issuer.as_ref().map(|id| id.as_str()));
         let _ = signature;
         out.push(0xFE);
         out
@@ -296,6 +401,64 @@ impl CapabilityToken {
 
     pub fn has_signature(&self) -> bool {
         self.signature.is_some()
+    }
+
+    /// Cryptographically sign this token with the issuer's Ed25519 key.
+    ///
+    /// Sets `issuer` and `signature` together (preserving the both-or-neither
+    /// invariant enforced by [`Self::malformed_signature_state`]). The signature
+    /// covers [`Self::canonical_bytes`] with the signature excluded, so the id
+    /// (also derived from those canonical bytes) is preserved across signature
+    /// presence: `id(with-sig) == id(without-sig)`.
+    pub fn sign(&mut self, signing_key: &SigningKey, issuer: PeerId) {
+        self.issuer = Some(issuer);
+        // Recompute the id with the issuer now bound; the signature is excluded
+        // from the canonical bytes so the id is stable once set.
+        self.signature = None;
+        self.id = self.compute_id();
+        let signing_input = self.canonical_bytes(None);
+        let sig = signing_key.sign(&signing_input);
+        self.signature = Some(Ed25519Sig(sig.to_bytes().to_vec()));
+    }
+
+    /// Verify the issuer signature and content integrity cryptographically.
+    ///
+    /// Gates (all must pass): (1) issuer and signature are both present;
+    /// (2) the issuer [`PeerId`] matches the verifying key; (3) the Ed25519
+    /// signature is valid over the canonical bytes; (4) the stored id equals
+    /// the recomputed content hash (defense-in-depth tamper detection).
+    pub fn verify(&self, verifying_key: &VerifyingKey) -> Result<(), CapabilityTokenError> {
+        let sig = self
+            .signature
+            .as_ref()
+            .ok_or(CapabilityTokenError::NotSigned)?;
+        let issuer = self
+            .issuer
+            .as_ref()
+            .ok_or(CapabilityTokenError::NotSigned)?;
+        if !issuer.matches_public_key(&verifying_key.to_bytes()) {
+            return Err(CapabilityTokenError::IssuerKeyMismatch);
+        }
+        let signing_input = self.canonical_bytes(None);
+        let sig_bytes: [u8; 64] = sig
+            .as_bytes()
+            .try_into()
+            .map_err(|_| CapabilityTokenError::InvalidSignatureLength(sig.as_bytes().len()))?;
+        verifying_key
+            .verify(&signing_input, &Signature::from_bytes(&sig_bytes))
+            .map_err(|_| CapabilityTokenError::BadSignature)?;
+        if !self.integrity_ok() {
+            return Err(CapabilityTokenError::IntegrityFailed);
+        }
+        Ok(())
+    }
+
+    /// Self-consistency check: the stored id equals the content hash recomputed
+    /// from the canonical bytes. The authority ledger uses this to gate signed
+    /// tokens without a verifying key; a tampered field changes the content
+    /// hash and fails here.
+    pub fn integrity_ok(&self) -> bool {
+        self.id == self.compute_id()
     }
 
     pub fn is_subset_of(&self, parent: &Self) -> bool {
@@ -315,6 +478,22 @@ impl CapabilityToken {
             && option_u32_lte(self.uses_limit, parent.uses_limit)
             && self.constraint.max_depth <= parent.constraint.max_depth
     }
+}
+
+/// Failure modes for [`CapabilityToken::verify`] (cryptographic signed-token
+/// verification).
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum CapabilityTokenError {
+    #[error("capability token is not signed (issuer and signature both absent)")]
+    NotSigned,
+    #[error("capability token issuer peer id does not match the verifying key")]
+    IssuerKeyMismatch,
+    #[error("capability token signature is not a valid 64-byte ed25519 signature")]
+    InvalidSignatureLength(usize),
+    #[error("capability token signature is invalid")]
+    BadSignature,
+    #[error("capability token id does not match recomputed content (integrity failed)")]
+    IntegrityFailed,
 }
 
 fn option_u64_lte(child: Option<u64>, parent: Option<u64>) -> bool {
@@ -391,5 +570,158 @@ fn push_opt_token_id(out: &mut Vec<u8>, value: Option<CapabilityTokenId>) {
             out.extend_from_slice(&v.0);
         }
         None => out.push(0),
+    }
+}
+
+#[cfg(test)]
+mod sign_verify_tests {
+    use super::*;
+    use crate::domain::models::agent_id::AgentId;
+
+    fn issuer_key() -> (SigningKey, VerifyingKey, PeerId) {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let vk = key.verifying_key();
+        let peer_id = PeerId::from_public_key(&vk.to_bytes()).unwrap();
+        (key, vk, peer_id)
+    }
+
+    fn signed_token() -> (CapabilityToken, VerifyingKey) {
+        let scope = AgentId::parse("peer/agent").unwrap();
+        let mut token = CapabilityToken::r1_root(scope);
+        let (key, vk, peer_id) = issuer_key();
+        token.sign(&key, peer_id);
+        (token, vk)
+    }
+
+    #[test]
+    fn sign_then_verify_round_trips() {
+        let (token, vk) = signed_token();
+        assert!(token.has_signature());
+        assert!(!token.malformed_signature_state());
+        token.verify(&vk).expect("signed token must verify");
+    }
+
+    #[test]
+    fn id_is_preserved_under_signature_presence() {
+        // The id is derived from canonical bytes that exclude the signature, so
+        // attaching a signature must not change the id (ADR-14-2-02).
+        let scope = AgentId::parse("peer/agent").unwrap();
+        let mut token = CapabilityToken::r1_root(scope);
+        let (key, _vk, peer_id) = issuer_key();
+        // Set the issuer first so both states share identical non-signature fields.
+        token.issuer = Some(peer_id.clone());
+        let id_before = token.compute_id();
+        token.sign(&key, peer_id);
+        assert_eq!(
+            token.id, id_before,
+            "id must be stable across signature presence"
+        );
+        assert_eq!(token.compute_id(), id_before);
+    }
+
+    #[test]
+    fn signing_fresh_token_never_changes_its_identity() {
+        let mut token = CapabilityToken::r1_root(AgentId::parse("peer/agent").unwrap());
+        let id_before = token.id;
+        let (key, _vk, peer_id) = issuer_key();
+        token.sign(&key, peer_id);
+        assert_eq!(token.id, id_before);
+    }
+
+    #[test]
+    fn verify_rejects_tampered_field() {
+        let (mut token, vk) = signed_token();
+        // Tamper with a covered field after signing — signature + integrity fail.
+        token.budget.requests += 1;
+        assert!(matches!(
+            token.verify(&vk),
+            Err(CapabilityTokenError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key() {
+        let (token, _vk) = signed_token();
+        let other = SigningKey::from_bytes(&[99u8; 32]).verifying_key();
+        assert!(matches!(
+            token.verify(&other),
+            Err(CapabilityTokenError::IssuerKeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_unsigned_and_issuer_key_mismatch() {
+        let scope = AgentId::parse("peer/agent").unwrap();
+        let token = CapabilityToken::r1_root(scope); // unsigned
+        let other_vk = SigningKey::from_bytes(&[99u8; 32]).verifying_key();
+        assert!(matches!(
+            token.verify(&other_vk),
+            Err(CapabilityTokenError::NotSigned)
+        ));
+
+        // Sign with one key but lie about the issuer (different PeerId).
+        let (key, _vk, _real_peer) = issuer_key();
+        let mut bad = CapabilityToken::r1_root(AgentId::parse("peer/x").unwrap());
+        let fake_peer = PeerId::from_public_key(&[3u8; 32]).unwrap();
+        bad.sign(&key, fake_peer);
+        // Verifying against the real key: issuer PeerId won't match the key.
+        let real_vk = key.verifying_key();
+        assert!(matches!(
+            bad.verify(&real_vk),
+            Err(CapabilityTokenError::IssuerKeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn coordinator_budget_is_exactly_derived_from_grandchild_count() {
+        let request =
+            CapabilityToken::r1_coordinator(AgentId::parse("coordinator").unwrap(), 3).unwrap();
+        assert_eq!(
+            request.budget,
+            Budget {
+                requests: 7,
+                cost_micros: 4_003,
+            }
+        );
+        let coordinator_capabilities = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
+        assert_eq!(request.capabilities, coordinator_capabilities);
+        let child_capabilities =
+            CapabilityToken::r1_child_request(AgentId::parse("delegated-child").unwrap())
+                .capabilities;
+        assert_eq!(request.constraint.allowed, child_capabilities);
+        assert_eq!(request.constraint.max_subset, child_capabilities);
+        assert_eq!(request.uses_limit, Some(3));
+        for denied in [
+            CapabilityFlag::ReadFs,
+            CapabilityFlag::WriteFs,
+            CapabilityFlag::Network,
+        ] {
+            assert!(!request.capabilities.contains(denied));
+        }
+
+        let empty =
+            CapabilityToken::r1_coordinator(AgentId::parse("empty-coordinator").unwrap(), 0)
+                .unwrap();
+        assert_eq!(empty.budget, R1_SYNTHESIS_RESERVE);
+    }
+
+    #[test]
+    fn oversized_coordinator_count_returns_typed_overflow() {
+        // Precision (RC-C AC3): `usize::MAX` trips the `u32::try_from`
+        // grandchild-count conversion (line ~302, the `uses_limit` bound) and
+        // returns the typed `Overflow{ "coordinator grandchild count" }`. This
+        // proves the COUNT-CONVERSION guard, NOT the budget arithmetic — the
+        // checked budget add/mul is defense-only (unreachable for a valid u32
+        // count). Renamed from `mutant_raw_coordinator_arithmetic_*`, which
+        // overstated it as budget-arithmetic proof.
+        assert!(matches!(
+            CapabilityToken::r1_coordinator(
+                AgentId::parse("overflow-coordinator").unwrap(),
+                usize::MAX,
+            ),
+            Err(crate::domain::ports::AuthorityError::Overflow {
+                dimension: "coordinator grandchild count"
+            }),
+        ));
     }
 }

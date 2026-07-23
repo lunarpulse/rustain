@@ -1,9 +1,12 @@
+pub mod a2a_peer_spec;
 pub mod adapter_health;
 pub mod agent;
+pub mod agent_envelope;
 pub mod agent_id;
 pub mod agent_message;
 pub mod agent_node;
 pub mod approval;
+pub mod artifact;
 pub mod assembled_context;
 pub mod autocomplete;
 pub mod budget;
@@ -25,6 +28,7 @@ pub mod credential;
 pub mod cron_config;
 pub mod daemon_crash;
 pub mod doc_key;
+pub mod execution_sandbox;
 pub mod filtered_catalog;
 pub mod filtered_skill_catalog;
 mod focus;
@@ -36,9 +40,11 @@ pub mod mcp_server_state;
 pub mod memory_entry;
 pub mod memory_fact;
 mod message;
+pub mod node_journal;
 pub mod node_state;
 mod notice;
 pub mod orchestration;
+pub mod orchestration_room;
 pub mod palette;
 pub mod peer_identity;
 mod permission;
@@ -81,10 +87,14 @@ pub mod usage;
 pub mod view_state;
 #[allow(dead_code)]
 pub mod visual;
+pub mod waiting_hazard;
 
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.
 #[allow(unused_imports)]
+pub use a2a_peer_spec::{
+    A2aPeerSource, A2aPeerSpec, A2aPeerSpecError, PinnedKey, PinnedKeyAlgorithm, TrustTier,
+};
 pub use agent::{
     ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
     validate_agent_frontmatter,
@@ -97,10 +107,16 @@ pub use agent_message::{
 };
 #[allow(unused_imports)]
 pub use agent_node::{
-    AbandonmentAction, AgentMetrics, AgentNode, NodeCheckpoint, NodeOrigin, abandonment_action,
+    AbandonmentAction, AgentMetrics, AgentNode, CheckpointTrust, NodeCheckpoint, NodeOrigin,
+    abandonment_action,
 };
 #[allow(unused_imports)]
 pub use approval::{ApprovalOutcome, ApprovalScope};
+#[allow(unused_imports)]
+pub use artifact::{
+    ArtifactId, ArtifactKind, ArtifactRef, ContentHash, ContentHashError, EvidenceArtifact,
+    EvidenceArtifactDraft, ReviewStatus,
+};
 #[allow(unused_imports)]
 pub use capability_token::{
     Budget, CapabilityFlag, CapabilitySet, CapabilityToken, CapabilityTokenId, DelegateConstraint,
@@ -132,6 +148,11 @@ pub use credential::{
 pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
+#[allow(unused_imports)]
+pub use execution_sandbox::{
+    CapabilityGrant, ComponentRef, HostImport, PreopenGrant, ResourceCaps, SandboxInvocation,
+    SandboxOutcome, TrapKind,
+};
 pub use focus::FocusState;
 #[allow(unused_imports)]
 pub use invocation_fingerprint::{FingerprintError, InvocationFingerprint};
@@ -140,6 +161,11 @@ pub use isolation::{IsolationError, IsolationHandle, ProvisioningTier, UnifiedDi
 #[allow(unused_imports)]
 pub use message::{
     ImageAttachment, Message, MessageRole, ToolResultMessage, ToolUseMessage, UserMessage,
+};
+#[allow(unused_imports)]
+pub use node_journal::{
+    JournalEntry, JournalRecord, JournaledTerminalCheckpoint, LedgerConservationRecord,
+    NODE_JOURNAL_SCHEMA_VERSION,
 };
 #[allow(unused_imports)]
 pub use node_state::{NodeState, NodeStateError};
@@ -153,9 +179,15 @@ pub use orchestration::{
     WaitReason,
 };
 #[allow(unused_imports)]
+pub use orchestration_room::{
+    ApprovalView, HostBinding, NodeView, OrchestrationRoom, OrchestrationRoomId, RejectReason,
+    RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution, WaveId,
+    WaveOutcome, WaveView,
+};
+#[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 #[allow(unused_imports)]
-pub use peer_identity::{Ed25519Sig, PeerId};
+pub use peer_identity::{Ed25519Sig, PeerId, PeerIdentity, PeerIdentityError};
 #[allow(unused_imports)]
 pub use permission::{
     FileContextProvenance, FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome,
@@ -192,13 +224,17 @@ pub use subagent_view::{AgentRowView, OwnershipKind, WireOwnershipKind};
 pub use task_handle::{Op, TaskHandle};
 pub use tool_policy::ToolPolicy;
 pub use trace_context::TraceContext;
+#[allow(unused_imports)]
+pub use waiting_hazard::{WAITING_HAZARD_THRESHOLD_MS, WaitingHazard, waiting_hazard};
 // TODO(S16.4): remove these upward re-exports once consumers migrate to domain::services::reducer
 #[allow(unused_imports)]
 pub use crate::domain::services::reducer::{
     LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
 };
 pub use adapter_health::{HealthLevel, HealthSummary, McpHealthRow};
-pub use agent_id::AgentId;
+#[allow(unused_imports)]
+pub use agent_envelope::{AgentEnvelope, AgentEnvelopeHeader, RapTaskState, RapTaskStateError};
+pub use agent_id::{AgentId, AgentIdError};
 #[allow(unused_imports)]
 pub use assembled_context::{AssembledContext, AssemblyBudget};
 #[allow(unused_imports)]
@@ -256,7 +292,7 @@ pub use tool_descriptor::{ToolAnnotations, ToolDescriptor, ToolId};
 pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]
 pub use turn::{
-    InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnPart, generate_turn_id,
+    InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnOrigin, TurnPart, generate_turn_id,
     migrate_chat_message_to_turn, tool_call_id_for,
 };
 #[allow(unused_imports)]

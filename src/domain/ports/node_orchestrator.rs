@@ -70,10 +70,13 @@ pub trait Orchestrator: Send + Sync {
     /// The caller passes a `CancellationToken` that becomes the wave's cancel
     /// root — `WaveHandle::cancel()` fires it (AC8). The token tree propagates
     /// to every child via `dispatch_launch`'s `wave_cancel.child_token()`.
+    /// A non-root coordinator must also supply its live owner handle; root
+    /// coordination supplies `None`.
     async fn run_wave(
         &self,
         request: ForkJoinRequest,
         cancel: CancellationToken,
+        parent: Option<crate::domain::models::TaskHandle>,
     ) -> Result<Arc<dyn WaveHandle>, OrchestrationError>;
 
     /// Re-fork exactly one spoke through the sealed chokepoint (DD6/DD-B5/DD-B6).

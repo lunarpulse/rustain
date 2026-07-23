@@ -2,6 +2,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::domain::errors::ToolError;
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchHunk {
     AddFile {

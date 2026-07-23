@@ -125,7 +125,10 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
     let root_authority =
         rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
     let authority_ledger = Arc::new(
-        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(
+            root_authority.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        ),
     );
     let authority =
         Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
@@ -155,10 +158,19 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
         sandbox_override: None,
         parent_trace: None,
         isolated: false,
+        delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
     };
 
     let cancel = CancellationToken::new();
-    let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+    let handle = runner
+        .launch(
+            spec,
+            cancel.clone(),
+            None,
+            rustain::domain::models::AgentId::new(),
+        )
+        .await
+        .unwrap();
     assert!(!handle.task_id.is_empty());
     assert_eq!(handle.subagent_type, "in-process");
     handle.cancel.cancel();

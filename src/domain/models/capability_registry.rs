@@ -63,6 +63,8 @@ pub struct RegisteredCapability {
     pub input_schema: serde_json::Value,
     /// Whether the capability is safe for parallel execution.
     pub parallel_safe: bool,
+    /// Trust assigned by the originating provider configuration.
+    pub trust: crate::domain::models::TrustTier,
 }
 
 /// Unique identifier for a capability provider instance.
@@ -279,6 +281,7 @@ impl CapabilityRegistry {
                 description: cap.description,
                 input_schema: cap.input_schema,
                 parallel_safe: cap.parallel_safe,
+                trust: cap.trust,
             };
             let handle = self.register(registered).await?;
             handles.push(handle);
@@ -327,6 +330,7 @@ mod tests {
 
     fn test_cap(id_suffix: &str) -> RegisteredCapability {
         RegisteredCapability {
+            trust: crate::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "test".into(),
                 server: String::new(),

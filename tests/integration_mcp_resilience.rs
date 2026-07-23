@@ -17,9 +17,9 @@
 //! TUI E2E (deferred — gated on the Ctrl+X chord-UI investigation).
 
 #![cfg(feature = "mcp")]
+mod common;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,38 +30,13 @@ use rustain::domain::events::AppEvent;
 use rustain::domain::models::{McpConnectionState, McpServerSource, McpServerSpec, McpTransport};
 use rustain::domain::ports::ToolSetPort;
 
-// ── Helpers (mirror conformance_mcp_lifecycle.rs binary discovery) ──────────
-
-fn fake_mcp_binary() -> PathBuf {
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    for candidate in [
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ] {
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    panic!(
-        "fake-mcp-server binary not found near {} — run `cargo build --features mcp --bin fake-mcp-server`",
-        exe_dir.display()
-    );
-}
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 fn fake_spec(id: &str, env: BTreeMap<String, String>, persistent: bool) -> McpServerSpec {
     McpServerSpec {
         id: id.to_string(),
         transport: McpTransport::Stdio,
-        command: Some(fake_mcp_binary().to_string_lossy().into_owned()),
+        command: Some(common::fake_mcp_binary().to_string_lossy().into_owned()),
         args: vec![],
         env,
         url: None,

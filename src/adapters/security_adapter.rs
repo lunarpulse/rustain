@@ -142,6 +142,11 @@ impl SecurityAdapter {
                 if provenance == FileContextProvenance::UserProvided {
                     return Ok(PathAccessType::External);
                 }
+                if provenance == FileContextProvenance::RemoteProvided {
+                    return Err(PermissionError::WorkspaceViolation(
+                        "Remote-provided path must exist and resolve within workspace".to_string(),
+                    ));
+                }
                 if let Some(parent) = absolute.parent() {
                     match std::fs::canonicalize(parent) {
                         Ok(canon_parent) => {
@@ -207,6 +212,10 @@ impl SecurityAdapter {
 
         if resolved.starts_with(&workspace_canonical) {
             Ok(PathAccessType::Workspace)
+        } else if provenance == FileContextProvenance::RemoteProvided {
+            Err(PermissionError::WorkspaceViolation(
+                "Remote-provided path resolves outside workspace".to_string(),
+            ))
         } else if provenance == FileContextProvenance::UserProvided && op == FileOperation::Read {
             Ok(PathAccessType::External)
         } else if op == FileOperation::Read {
@@ -425,6 +434,34 @@ mod tests {
     }
 
     #[test]
+    fn remote_provided_paths_fail_closed_where_user_paths_may_be_external() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let adapter = SecurityAdapter::new(workspace.path().to_path_buf());
+        let missing = workspace.path().join("missing-remote-file");
+
+        assert_eq!(
+            adapter
+                .check_workspace_access_with_provenance(
+                    &missing,
+                    FileOperation::Read,
+                    FileContextProvenance::UserProvided,
+                )
+                .unwrap(),
+            PathAccessType::External
+        );
+        assert!(
+            adapter
+                .check_workspace_access_with_provenance(
+                    &missing,
+                    FileOperation::Read,
+                    FileContextProvenance::RemoteProvided,
+                )
+                .is_err(),
+            "cross-process provenance must never inherit the user fail-open exception"
+        );
+    }
+
+    #[test]
     fn test_workspace_rejects_path_escaping_parent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let adapter = SecurityAdapter::new(tmp.path().to_path_buf());
@@ -462,6 +499,16 @@ mod tests {
         adapter.add_active_skill_dir(skill_dir.clone());
         let read = adapter.check_workspace_access(&skill_file, FileOperation::Read);
         assert!(read.is_ok());
+        assert!(
+            adapter
+                .check_workspace_access_with_provenance(
+                    &skill_file,
+                    FileOperation::Read,
+                    FileContextProvenance::RemoteProvided,
+                )
+                .is_err(),
+            "remote provenance must not inherit an active-skill read exemption"
+        );
 
         let write = adapter.check_workspace_access(&skill_file, FileOperation::Write);
         assert!(write.is_err());

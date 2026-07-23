@@ -10,6 +10,24 @@
 use crate::domain::models::{ModelTier, ToolPolicy, TraceContext};
 use serde::{Deserialize, Serialize};
 
+/// Authority profile used when the runner mints this child's token.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationProfile {
+    /// Ordinary leaf child.
+    #[default]
+    Child,
+    /// Nested coordinator funded for exactly this many grandchildren.
+    Coordinator { grandchild_count: usize },
+}
+
+impl DelegationProfile {
+    const fn is_child(&self) -> bool {
+        matches!(self, Self::Child)
+    }
+}
+
 /// Per-call specification for launching an agent or sub-agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentLaunchSpec {
@@ -33,6 +51,10 @@ pub struct AgentLaunchSpec {
     /// legacy serialization; consumer-facing output-schema rules do not apply.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub isolated: bool,
+    /// Token-budget profile. Omitted for ordinary children to preserve legacy
+    /// launch serialization byte-for-byte.
+    #[serde(default, skip_serializing_if = "DelegationProfile::is_child")]
+    pub delegation: DelegationProfile,
 }
 
 #[cfg(test)]
@@ -49,6 +71,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated,
+            delegation: DelegationProfile::Child,
         }
     }
 

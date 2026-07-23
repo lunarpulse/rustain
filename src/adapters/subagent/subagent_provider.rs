@@ -25,12 +25,20 @@ pub struct SubagentProvider {
     spool: Arc<crate::infrastructure::subagent::SubagentSpool>,
     /// Story 10.7 — track running tasks by user-provided task_id for resume semantics.
     running_tasks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, RunningTask>>>,
+    /// Stable alias → latest terminal generation and its durable spool.
+    completed_tasks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, CompletedTask>>>,
     /// Story 10.7 — optional usage ledger for per-call TokenUsage recording (AC-10-7-12).
     ledger: Arc<tokio::sync::RwLock<Option<Arc<dyn crate::domain::ports::UsageLedgerPort>>>>,
     authority: Arc<tokio::sync::RwLock<Option<(Arc<dyn AuthorityProvider>, CapabilityToken)>>>,
 }
 
 struct RunningTask {
+    agent_id: crate::domain::models::AgentId,
+    generated_task_id: String,
+}
+
+#[derive(Clone)]
+struct CompletedTask {
     agent_id: crate::domain::models::AgentId,
     generated_task_id: String,
 }
@@ -68,9 +76,29 @@ impl SubagentProvider {
             model_router,
             spool,
             running_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            completed_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             ledger: Arc::new(tokio::sync::RwLock::new(None)),
             authority: Arc::new(tokio::sync::RwLock::new(None)),
         }
+    }
+
+    async fn predecessor_for_alias(&self, alias: &str) -> Option<CompletedTask> {
+        if let Some(task) = self.completed_tasks.read().await.get(alias).cloned() {
+            return Some(task);
+        }
+        let agent_id = self.registry.resolve_alias(alias).await?;
+        let generated_task_id = match self.spool.task_id_for_agent(&agent_id).await {
+            Ok(Some(task_id)) => task_id,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(%alias, %error, "Failed to resolve recovered successor spool");
+                return None;
+            }
+        };
+        Some(CompletedTask {
+            agent_id,
+            generated_task_id,
+        })
     }
 
     /// Story 10.7 — wire the usage ledger for per-call TokenUsage recording (AC-10-7-12).
@@ -107,6 +135,7 @@ impl CapabilityProvider for SubagentProvider {
         // Story 10.7 — advertise the generic `task` tool + `read_task_output` escape hatch.
         let mut caps = vec![
             Capability {
+                trust: crate::domain::models::TrustTier::Verified,
                 id: CapabilityId {
                     protocol: "subagent".into(),
                     server: String::new(),
@@ -128,6 +157,7 @@ impl CapabilityProvider for SubagentProvider {
                 parallel_safe: true,
             },
             Capability {
+                trust: crate::domain::models::TrustTier::Verified,
                 id: CapabilityId {
                     protocol: "subagent".into(),
                     server: String::new(),
@@ -152,6 +182,7 @@ impl CapabilityProvider for SubagentProvider {
         let agents = guard.agents();
         for agent in agents.iter().cloned() {
             caps.push(Capability {
+                trust: crate::domain::models::TrustTier::Verified,
                 id: CapabilityId {
                     protocol: "subagent".into(),
                     server: String::new(),
@@ -279,18 +310,8 @@ impl SubagentProvider {
             }
         }
 
-        // 5. Build launch spec
-        let spec = LaunchSpecBuilder::from_task_tool(
-            prompt,
-            &agent_def,
-            &effective_model,
-            tier,
-            parent_ctx_tokens,
-            parent_trace,
-        );
-
         // 6. Resume by task_id if applicable (P2 fix: cleanup on resume; P7 fix: key by user task_id)
-        if let Some(ref task_id) = task_id_opt {
+        if let Some(task_id) = &task_id_opt {
             let running_guard = self.running_tasks.read().await;
             if let Some(running) = running_guard.get(task_id) {
                 let agent_id = running.agent_id.clone();
@@ -363,18 +384,73 @@ impl SubagentProvider {
             }
         }
 
+        let predecessor = match &task_id_opt {
+            Some(alias) => self.predecessor_for_alias(alias).await,
+            None => None,
+        };
+        let inherited_prompt = if let Some(previous) = &predecessor {
+            match self.spool.read_full(&previous.generated_task_id).await {
+                Ok(transcript) if !transcript.is_empty() => format!(
+                    "<predecessor-transcript>\n{transcript}\n</predecessor-transcript>\n\n\
+                     Follow-up request:\n{prompt}"
+                ),
+                Ok(_) => prompt.to_string(),
+                Err(error) => {
+                    return Ok(ToolResult {
+                        tool_use_id: String::new(),
+                        content: format!("Cannot inherit predecessor transcript: {error}"),
+                        is_error: true,
+                    });
+                }
+            }
+        } else {
+            prompt.to_string()
+        };
+        let spec = LaunchSpecBuilder::from_task_tool(
+            &inherited_prompt,
+            &agent_def,
+            &effective_model,
+            tier,
+            parent_ctx_tokens,
+            parent_trace,
+        );
+
         // 7. Launch
-        let handle = match self.runner.launch(spec, cancel.clone()).await {
+        let handle = match self
+            .runner
+            .launch(
+                spec,
+                cancel.clone(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+        {
             Ok(h) => h,
             Err(e) => {
                 return Ok(map_subagent_error(e));
             }
         };
+        let runner_node_registered = self.registry.status_rx(&handle.agent_id).await.is_some();
+
+        let stable_alias = task_id_opt
+            .clone()
+            .unwrap_or_else(|| handle.task_id.clone());
+        if runner_node_registered
+            && let Some(previous) = &predecessor
+            && let Err(error) = self
+                .registry
+                .link_successor(&previous.agent_id, &handle.agent_id, stable_alias.clone())
+                .await
+        {
+            handle.cancel.cancel();
+            return Ok(map_subagent_error(error));
+        }
 
         // Track running task keyed by user-provided task_id if available (P7 fix)
         {
             let mut running_guard = self.running_tasks.write().await;
-            let key = task_id_opt.unwrap_or_else(|| handle.task_id.clone());
+            let key = stable_alias.clone();
             running_guard.insert(
                 key,
                 RunningTask {
@@ -438,6 +514,23 @@ impl SubagentProvider {
                 }
             }
         };
+
+        if self.registry.status_rx(&handle.agent_id).await.is_some()
+            && predecessor.is_none()
+            && let Err(error) = self
+                .registry
+                .bind_alias(&handle.agent_id, stable_alias.clone())
+                .await
+        {
+            return Ok(map_subagent_error(error));
+        }
+        self.completed_tasks.write().await.insert(
+            stable_alias,
+            CompletedTask {
+                agent_id: handle.agent_id.clone(),
+                generated_task_id: handle.task_id.clone(),
+            },
+        );
 
         // Clean up running task tracking
         {
@@ -683,6 +776,9 @@ fn map_subagent_error(e: crate::domain::models::SubagentError) -> ToolResult {
             format!("Subagent panicked: {}", msg)
         }
         crate::domain::models::SubagentError::Cancelled => "Subagent cancelled".into(),
+        crate::domain::models::SubagentError::NonIsolatedNestedLaunchRefused => {
+            "Nested non-isolated launch refused from isolated parent".into()
+        }
         crate::domain::models::SubagentError::Internal(ref msg) => {
             format!("Subagent internal error: {}", msg)
         }

@@ -35,6 +35,9 @@ use crate::domain::models::{AgentId, Budget, ModelTier, ToolPolicy};
 /// dispatched (`attempted > cap`); fan-out exactly at the cap is permitted.
 pub const FORK_JOIN_SPAWN_CAP: usize = 8;
 
+/// Maximum grandchildren accepted by one declarative coordinator.
+pub const MAX_NESTED_BREADTH: usize = FORK_JOIN_SPAWN_CAP;
+
 /// Wave-completion policy. `All` is the only active variant in R1; `Quorum(n)`
 /// is reserved + inert (R3 consensus, Story 18.6 activates it).
 ///
@@ -75,14 +78,39 @@ impl WaitPolicy {
     }
 }
 
+/// Declarative execution role for one spoke.
+///
+/// R1 supports one nested coordinator layer. Grandchildren must be leaves;
+/// deeper role composition is refused before any launch.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpokeRole {
+    /// Execute the spoke once and collect its terminal result.
+    Leaf,
+    /// Retain this spoke's live host-bound handle and drive one child wave.
+    Coordinator {
+        grandchildren: Box<[SpokeSpec]>,
+        concurrency: usize,
+        wait_policy: WaitPolicy,
+    },
+}
+
+impl Default for SpokeRole {
+    fn default() -> Self {
+        Self::Leaf
+    }
+}
+
 /// A single child spoke in a fork-join wave. The declarative input the
 /// coordinator hands to `run_fork_join`; the executor converts each spoke into
 /// an `AgentLaunchSpec` + a delegated child token before dispatching.
 ///
-/// `waits_for` is INERT (DD2): default-empty, asserted-empty, never read for
-/// scheduling. It exists so R2's readiness predicate is additive.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `id` and `waits_for` form the active dependency DAG consumed by the
+/// multi-wave scheduler.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpokeSpec {
+    /// Stable logical node id used by `waits_for` dependency edges.
+    pub id: AgentId,
     /// Short human label rendered in the coverage line / WaveStrip.
     pub label: String,
     /// Instruction text for the spoke (becomes the launch prompt).
@@ -93,15 +121,10 @@ pub struct SpokeSpec {
     pub tier: ModelTier,
     /// Tool policy for this spoke (narrowing-only inheritance).
     pub tools_allow: ToolPolicy,
-    /// INERT in R1 — default-empty, asserted-empty, never scheduled on.
+    /// Stable logical ids of prerequisite spokes.
     pub waits_for: Vec<AgentId>,
-}
-
-impl SpokeSpec {
-    /// R1 invariant (AC2): a fork-join spoke has no sibling dependencies.
-    pub const fn waits_for_is_empty(&self) -> bool {
-        self.waits_for.is_empty()
-    }
+    /// Declarative execution behavior. Defaults to a single leaf.
+    pub role: SpokeRole,
 }
 
 /// The declarative fork-join request handed to `run_fork_join`.
@@ -320,13 +343,21 @@ pub enum WaitReason {
     AwaitingSpoke,
     /// Wave auto-paused at the budget ceiling (reserve untouched, AC10).
     BudgetPaused,
+    /// Downstream node parked until durable upstream artifact handles land.
+    AwaitingUpstreamArtifact,
+    /// MCP task parked on a human answer to an elicitation request (17.5b).
+    /// The first writer of `WaitReason` in the product — see R-2.
+    AwaitingHumanInput,
 }
 
 impl WaitReason {
     /// `true` for reasons that should escalate to a hazard after the threshold.
     /// `BudgetPaused` does NOT escalate (it is a deliberate, recoverable pause).
     pub const fn escalates(&self) -> bool {
-        matches!(self, Self::AwaitingSpoke)
+        matches!(
+            self,
+            Self::AwaitingSpoke | Self::AwaitingUpstreamArtifact | Self::AwaitingHumanInput
+        )
     }
 }
 
@@ -336,17 +367,36 @@ impl WaitReason {
 #[non_exhaustive]
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OrchestrationError {
-    /// A spoke's `waits_for` was non-empty — R1 is single-level only (AC2).
-    #[error(
-        "R1 fork-join is single-level: spoke `{spoke}` has {} sibling dependency/dependencies",
-        deps
-    )]
-    NotSingleLevel { spoke: String, deps: usize },
+    /// Dependency names a spoke outside this fork-join request.
+    #[error("spoke {spoke} waits for unknown dependency {dependency}")]
+    MissingDependency { spoke: AgentId, dependency: AgentId },
+    /// Logical spoke ids must be unique inside one request.
+    #[error("duplicate spoke id {0}")]
+    DuplicateSpoke(AgentId),
+    /// The waits-for graph is cyclic and therefore cannot dispatch.
+    #[error("fork-join dependency cycle detected")]
+    DependencyCycle,
     /// Fan-out above the static spawn cap (AC4 invariant). Exactly-at-cap is
     /// permitted (`attempted > cap`); the doc on [`FORK_JOIN_SPAWN_CAP`] is the
     /// authority.
     #[error("fan-out {attempted} exceeds spawn cap {cap}")]
     SpawnCapExceeded { cap: usize, attempted: usize },
+    /// The requested concurrency bound is outside `1..=cap`. Neither validator
+    /// checked this before RC-B; the shared `validate_nested_request` does.
+    #[error("concurrency {requested} out of bounds 1..={bound}")]
+    InvalidConcurrency { bound: usize, requested: usize },
+    /// A declarative coordinator exceeded the nested fan-out bound.
+    #[error("nested fan-out {attempted} exceeds nested breadth cap {cap}")]
+    NestedBreadthExceeded { cap: usize, attempted: usize },
+    /// R1 permits root → coordinator → leaf only.
+    #[error("nested coordinator grandchildren must all be leaves")]
+    NestedDepthUnsupported,
+    /// Checked construction arithmetic refused an unrepresentable value.
+    #[error("orchestration construction overflow in {dimension}")]
+    Overflow { dimension: &'static str },
+    /// The `/fanout` command did not satisfy its typed input contract.
+    #[error("{0}")]
+    InvalidFanOut(String),
     /// `WaitPolicy::Quorum` supplied in R1 (AC9 — reserved & inert).
     #[error("{0}")]
     WaitPolicyUnsupported(&'static str),
@@ -368,6 +418,12 @@ pub enum OrchestrationError {
     /// turn-loop integration (deferred) maps it to a recoverable paused state.
     #[error("budget ceiling reached: auto-paused (have {available:?}, need {needed:?})")]
     BudgetPaused { available: Budget, needed: Budget },
+    /// A nested drive lost the in-memory owner handle required for delegation.
+    #[error("host-bound coordinator handle unavailable for {0}")]
+    HostBoundUnavailable(AgentId),
+    /// Nested coordinator waves are intentionally one-shot in R1.
+    #[error("nested coordinator spokes are not rerunnable")]
+    NestedRerunUnsupported,
     /// Internal invariant violation.
     #[error("orchestration internal error: {0}")]
     Internal(String),
@@ -385,12 +441,14 @@ mod tests {
 
     fn spoke(label: &str) -> SpokeSpec {
         SpokeSpec {
+            id: AgentId::new(),
             label: label.into(),
             prompt: format!("explore {label}"),
             effective_model: "test-model".into(),
             tier: ModelTier::Flagship,
             tools_allow: ToolPolicy::InheritFromParent,
             waits_for: Vec::new(),
+            role: SpokeRole::Leaf,
         }
     }
 
@@ -409,7 +467,7 @@ mod tests {
 
     #[test]
     fn spoke_waits_for_default_empty() {
-        assert!(spoke("a").waits_for_is_empty());
+        assert!(spoke("a").waits_for.is_empty());
     }
 
     #[test]
@@ -464,12 +522,12 @@ mod tests {
         let coverage = CoverageLine::from_results(&results);
         let citations = vec![
             SpokeCitation {
-                agent_id: AgentId("a1".into()),
+                agent_id: AgentId::from_validated("a1"),
                 label: "a".into(),
                 summary: "a".into(),
             },
             SpokeCitation {
-                agent_id: AgentId("b1".into()),
+                agent_id: AgentId::from_validated("b1"),
                 label: "b".into(),
                 summary: "b".into(),
             },
@@ -504,25 +562,18 @@ mod tests {
         const {
             assert!(FORK_JOIN_SPAWN_CAP <= 10);
         }
-        const {
-            assert!(FORK_JOIN_SPAWN_CAP >= 1);
-        }
     }
 
     #[test]
     fn wait_reason_escalation_predicate() {
         assert!(WaitReason::AwaitingSpoke.escalates());
+        assert!(WaitReason::AwaitingHumanInput.escalates());
         assert!(!WaitReason::BudgetPaused.escalates());
     }
 
     #[test]
     fn orchestration_error_is_non_exhaustive_friendly() {
-        // Constructing each variant compiles; non_exhaustive prevents
-        // exhaustive matches outside this crate from compiling.
-        let e = OrchestrationError::NotSingleLevel {
-            spoke: "x".into(),
-            deps: 1,
-        };
-        assert!(e.to_string().contains("single-level"));
+        let error = OrchestrationError::DependencyCycle;
+        assert!(error.to_string().contains("cycle"));
     }
 }

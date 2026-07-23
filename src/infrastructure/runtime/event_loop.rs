@@ -72,10 +72,38 @@ fn launch_wave_request(
     let wave_cancel = tokio_util::sync::CancellationToken::new();
     state.wave_cancel = Some(wave_cancel.clone());
     let wave_id = state.begin_wave_fanout();
+    spawn_wave_run(
+        orchestrator,
+        event_bus,
+        conversation_id,
+        request,
+        wave_cancel,
+        wave_id,
+    );
+    state.needs_redraw = true;
+}
+
+/// Spawn a fan-out wave on the orchestrator and publish its terminal outcome on
+/// the event bus — the spawn-and-publish core of the `/fanout` front door.
+///
+/// Extracted as a `pub(crate)` seam (Story 17.3d-RC-B / RC-1) so the front-door
+/// keystone can enter the EXACT production path — `run_wave` on the real
+/// orchestrator, then `WaveRunReady` / `WaveTerminated` on the real `EventBus` —
+/// without constructing a full `AppState` / `TuiState`. `wave_cancel` IS the
+/// root wave-cancel token that `state.request_wave_cancel` fires; its
+/// child-token tree terminates every descendant.
+pub(crate) fn spawn_wave_run(
+    orchestrator: Arc<dyn crate::domain::ports::Orchestrator>,
+    event_bus: Arc<crate::infrastructure::runtime::event_bus::EventBus>,
+    conversation_id: crate::domain::models::tab::ConversationId,
+    request: crate::domain::ports::ForkJoinRequest,
+    wave_cancel: CancellationToken,
+    wave_id: u64,
+) {
     let conv_id = conversation_id;
     let wave = tokio::spawn(async move {
         use crate::domain::ports::Orchestrator;
-        orchestrator.run_wave(request, wave_cancel).await
+        orchestrator.run_wave(request, wave_cancel, None).await
     });
     tokio::spawn(async move {
         match wave.await {
@@ -115,7 +143,6 @@ fn launch_wave_request(
             }
         }
     });
-    state.needs_redraw = true;
 }
 
 fn wave_result_rows(
@@ -128,7 +155,7 @@ fn wave_result_rows(
         .enumerate()
         .map(|(slot, (agent_id, result))| {
             crate::adapters::tui::widgets::result_row::ResultRowSnapshot {
-                agent_label: agent_id.0.clone(),
+                agent_label: agent_id.as_str().to_string(),
                 result: result.clone(),
                 slot,
                 is_self: false,
@@ -311,7 +338,7 @@ async fn refresh_spool_tail(
     };
     let spool = provider.spool();
     if let Ok(tail) = spool.read_tail(task_id, 8192).await {
-        let agent_id = crate::domain::models::AgentId(task_id.to_string());
+        let agent_id = crate::domain::models::AgentId::from_validated(task_id.to_string());
         state
             .agent_panel_state
             .spool_tail_cache
@@ -1169,6 +1196,14 @@ pub async fn run(
                                                             state.agent_panel_state.inspector_scroll_offset = 0;
                                                             state.agent_panel_state.pending_kill_confirm = None;
                                                         }
+                                                        Err(crate::infrastructure::subagent::registry::CascadeKillError::Durability(error)) => {
+                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                conversation_id: Some(conversation.id.clone()),
+                                                                level: NoticeLevel::Error,
+                                                                message: format!("Cascade kill refused: terminal checkpoint was not durable ({error})."),
+                                                            });
+                                                            state.agent_panel_state.pending_kill_confirm = None;
+                                                        }
                                                         Err(crate::infrastructure::subagent::registry::CascadeKillError::NotFound(_)) => {
                                                             state.agent_panel_state.drill_down_agent = None;
                                                             state.agent_panel_state.inspector_scroll_offset = 0;
@@ -1237,7 +1272,7 @@ pub async fn run(
                                                     created_at: crate::domain::models::session_meta::now_unix(),
                                                     updated_at: crate::domain::models::session_meta::now_unix(),
                                                     last_response_at: None,
-                                                    session_id: Some(agent_id.0.clone()),
+                                                    session_id: Some(agent_id.as_str().to_string()),
                                                     usage: None,
                                                     plans: std::collections::HashMap::new(),
                                                     fork_source: None,
@@ -2158,8 +2193,10 @@ pub async fn run(
                                             }
                                             _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
                                         }
-                                    } else if cmd_name == "new" {
-                                        // /new command: save current, create fresh session
+                                    } else if cmd_name == "new" || cmd_name == "clear" {
+                                        // /new and /clear are true context resets. Unlike
+                                        // /compact, they discard context and therefore clear
+                                        // provenance taint by starting a fresh conversation.
                                         // AC7: save current conversation if it has messages
                                         if !conversation.messages.is_empty() {
                                             conversation.updated_at = crate::domain::models::session_meta::now_unix();
@@ -2400,27 +2437,41 @@ pub async fn run(
                                             match crate::adapters::tui::fanout_spec::parse_fanout(cmd_arg) {
                                                 Ok(spec) => {
                                                     use crate::adapters::tui::widgets::exceptional_spawn_gate::{gate_decision, GateDecision};
-                                                    let request = crate::adapters::tui::fanout_spec::to_request(&spec, effective_model(&state, config));
-                                                    let requested = request.spokes.len();
-                                                    let threshold = config.fanout_spawn_gate_threshold;
-                                                    match gate_decision(requested, threshold) {
-                                                        GateDecision::Allow => {
-                                                            launch_wave_request(
-                                                                &mut state,
-                                                                &app_state,
-                                                                conversation.id.clone(),
-                                                                request,
-                                                            );
+                                                    match crate::adapters::tui::fanout_spec::to_request(&spec, effective_model(&state, config)) {
+                                                        Ok(request) => {
+                                                            let requested = request.spokes.len();
+                                                            let threshold = config.fanout_spawn_gate_threshold;
+                                                            match gate_decision(requested, threshold) {
+                                                                GateDecision::Allow => {
+                                                                    launch_wave_request(
+                                                                        &mut state,
+                                                                        &app_state,
+                                                                        conversation.id.clone(),
+                                                                        request,
+                                                                    );
+                                                                }
+                                                                GateDecision::Refuse => {
+                                                                    state.pending_spawn_gate = Some(
+                                                                        crate::adapters::tui::state::PendingSpawnGate {
+                                                                            spec,
+                                                                            requested,
+                                                                            threshold,
+                                                                            adjusted: None,
+                                                                        },
+                                                                    );
+                                                                    state.needs_redraw = true;
+                                                                }
+                                                            }
                                                         }
-                                                        GateDecision::Refuse => {
-                                                            state.pending_spawn_gate = Some(
-                                                                crate::adapters::tui::state::PendingSpawnGate {
-                                                                    spec,
-                                                                    requested,
-                                                                    threshold,
-                                                                    adjusted: None,
-                                                                },
-                                                            );
+                                                        Err(err) => {
+                                                            // Latent-panic removal (RC-C AC3): surface a
+                                                            // to_request refusal as a notice, mirroring the
+                                                            // parse_fanout error path — never `.expect()` panic.
+                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                conversation_id: Some(conversation.id.clone()),
+                                                                level: crate::domain::models::NoticeLevel::Warning,
+                                                                message: err.to_string(),
+                                                            });
                                                             state.needs_redraw = true;
                                                         }
                                                     }
@@ -2429,7 +2480,7 @@ pub async fn run(
                                                     let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                         conversation_id: Some(conversation.id.clone()),
                                                         level: crate::domain::models::NoticeLevel::Warning,
-                                                        message: msg,
+                                                        message: msg.to_string(),
                                                     });
                                                     state.needs_redraw = true;
                                                 }
@@ -5815,14 +5866,36 @@ pub async fn run(
                                             } => {
                                                 *count = effective_n;
                                             }
+                                            crate::adapters::tui::fanout_spec::FanOutSpec::Nested {
+                                                coordinators,
+                                                grandchildren,
+                                                ..
+                                            } => {
+                                                let per_coordinator = grandchildren.saturating_add(1);
+                                                let cap = crate::domain::models::orchestration::MAX_NESTED_BREADTH
+                                                    / per_coordinator;
+                                                *coordinators = effective_n.min(cap.max(1));
+                                            }
                                         }
-                                        let request = crate::adapters::tui::fanout_spec::to_request(&pending.spec, effective_model(&state, config));
-                                        launch_wave_request(
-                                            &mut state,
-                                            &app_state,
-                                            conversation.id.clone(),
-                                            request,
-                                        );
+                                        match crate::adapters::tui::fanout_spec::to_request(&pending.spec, effective_model(&state, config)) {
+                                            Ok(request) => {
+                                                launch_wave_request(
+                                                    &mut state,
+                                                    &app_state,
+                                                    conversation.id.clone(),
+                                                    request,
+                                                );
+                                            }
+                                            Err(err) => {
+                                                // Latent-panic removal (RC-C AC3): surface the refusal as a
+                                                // notice instead of `.expect()` panic.
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: crate::domain::models::NoticeLevel::Warning,
+                                                    message: err.to_string(),
+                                                });
+                                            }
+                                        }
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -8026,6 +8099,19 @@ pub async fn run(
                             &server_id,
                             tool_count,
                         ).await;
+                    }
+                    #[cfg(feature = "a2a")]
+                    AppEvent::A2aCatalogChanged {
+                        peer_id,
+                        skill_count,
+                    } => {
+                        crate::adapters::tui::handlers::a2a_catalog::handle_a2a_catalog_changed(
+                            &mut state,
+                            &tools,
+                            &peer_id,
+                            skill_count,
+                        )
+                        .await;
                     }
                     AppEvent::CapabilityEvent(ref ev) => {
                         let protocol = match ev {

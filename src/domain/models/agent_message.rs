@@ -99,6 +99,10 @@ pub enum RefuseReason {
     /// Consent-refusal: the recipient's delivery policy refused the message
     /// (e.g., a Peer with a RefuseAll disposition).
     Policy,
+    /// The recipient is a crash-recovered node not yet resumed (a later story
+    /// attaches the live runner). There is no consumer for a queued delivery,
+    /// so accepting it would silently black-hole the message.
+    AwaitingResume,
 }
 
 /// Story 14-4a (AC4) — honest outcome enum. `Accepted` is the sole variant:
@@ -114,10 +118,10 @@ pub enum DeliveryOutcome {
 
 /// Consent disposition stamped by the bus at delivery time.
 ///
-/// - `MustReport`: the recipient must process (Owned nodes). The *reporting
-///   obligation* check (did the recipient actually report?) is explicitly
-///   **deferred to Epic 17.2** (requires the durable journal). The stamp
-///   exists in R1; the obligation enforcement does not.
+/// - `MustReport`: the recipient must process (Owned nodes). The durable node
+///   journal records an obligation at accepted delivery, discharges it when
+///   the recipient reports with the same correlation id, and records any
+///   outstanding obligation when the node reaches a terminal state.
 /// - `MayRefuse`: the recipient may consent-refuse (Peer nodes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryDisposition {
@@ -146,7 +150,7 @@ mod tests {
     use super::*;
 
     fn id(s: &str) -> AgentId {
-        AgentId(s.to_string())
+        AgentId::from_validated(s.to_string())
     }
 
     #[test]

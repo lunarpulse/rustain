@@ -12,7 +12,7 @@ use rustain::adapters::sandbox::NoOpSandbox;
 use rustain::adapters::security_adapter::SecurityAdapter;
 use rustain::adapters::subagent::InProcessSubagentRunner;
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
-use rustain::domain::models::{AgentLaunchSpec, ModelTier, SandboxPolicy, ToolPolicy};
+use rustain::domain::models::{AgentId, AgentLaunchSpec, ModelTier, SandboxPolicy, ToolPolicy};
 use rustain::domain::ports::SubagentRunner;
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
@@ -64,7 +64,10 @@ async fn make_runner(tmp: &std::path::Path) -> InProcessSubagentRunner {
     let root_authority =
         rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
     let authority_ledger = Arc::new(
-        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(
+            root_authority.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        ),
     );
     let authority =
         Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
@@ -100,6 +103,7 @@ async fn subagent_spawn_latency() {
         sandbox_override: None,
         parent_trace: None,
         isolated: false,
+        delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
     };
 
     let iterations = 1_000;
@@ -108,7 +112,10 @@ async fn subagent_spawn_latency() {
     for _ in 0..iterations {
         let cancel = CancellationToken::new();
         let start = Instant::now();
-        let handle = runner.launch(spec.clone(), cancel.clone()).await.unwrap();
+        let handle = runner
+            .launch(spec.clone(), cancel.clone(), None, AgentId::new())
+            .await
+            .unwrap();
         let elapsed = start.elapsed();
         latencies.push(elapsed);
         handle.cancel.cancel();
@@ -156,6 +163,7 @@ async fn cancellation_propagation_latency() {
         sandbox_override: None,
         parent_trace: None,
         isolated: false,
+        delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
     };
 
     let iterations = 100;
@@ -163,7 +171,10 @@ async fn cancellation_propagation_latency() {
 
     for _ in 0..iterations {
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec.clone(), cancel.clone()).await.unwrap();
+        let handle = runner
+            .launch(spec.clone(), cancel.clone(), None, AgentId::new())
+            .await
+            .unwrap();
         let start = Instant::now();
         cancel.cancel();
         // Wait for child to observe cancellation via status channel
@@ -193,6 +204,7 @@ async fn memory_rss_per_agent() {
         sandbox_override: None,
         parent_trace: None,
         isolated: false,
+        delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
     };
 
     let before = procfs::process::Process::myself()
@@ -203,7 +215,10 @@ async fn memory_rss_per_agent() {
     let mut handles = Vec::new();
     for _ in 0..10 {
         let cancel = CancellationToken::new();
-        let h = runner.launch(spec.clone(), cancel).await.unwrap();
+        let h = runner
+            .launch(spec.clone(), cancel, None, AgentId::new())
+            .await
+            .unwrap();
         handles.push(h);
     }
     let after = procfs::process::Process::myself()

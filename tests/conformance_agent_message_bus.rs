@@ -37,8 +37,8 @@ fn ac2_run_child_production_has_no_try_recv_consumption() {
 fn ac5_header_shape_round_trip_no_sequence_by_default() {
     let env = Envelope {
         header: MessageHeader {
-            sender: AgentId("parent".into()),
-            recipient: AgentId("child".into()),
+            sender: AgentId::parse("parent").unwrap(),
+            recipient: AgentId::parse("child").unwrap(),
             correlation_id: CorrelationId::new("corr-42"),
             kind: MessageKind::PeerMessage,
             sequence: None,
@@ -52,7 +52,7 @@ fn ac5_header_shape_round_trip_no_sequence_by_default() {
 }
 
 #[test]
-fn ac6_approval_source_has_no_remote_peer_and_stays_non_exhaustive() {
+fn ac6_approval_source_has_typed_remote_peer_and_stays_non_exhaustive() {
     let source = include_str!("../src/domain/models/tool_call.rs");
     let before_enum = source
         .split("pub enum ApprovalSource")
@@ -65,10 +65,14 @@ fn ac6_approval_source_has_no_remote_peer_and_stays_non_exhaustive() {
         .expect("ApprovalSource enum body exists");
     assert!(
         before_enum.contains("#[non_exhaustive]"),
-        "ApprovalSource must remain non_exhaustive for R2 additive RemotePeer"
+        "ApprovalSource must remain non_exhaustive for future routing sources"
     );
     assert!(
-        !enum_body.contains("RemotePeer"),
-        "R1 must not add ApprovalSource::RemotePeer variant"
+        enum_body.contains("RemotePeer"),
+        "R2 must expose ApprovalSource::RemotePeer"
+    );
+    assert!(
+        enum_body.contains("peer_id: crate::domain::models::peer_identity::PeerId"),
+        "RemotePeer must carry a typed RAP PeerId, never a transport address"
     );
 }

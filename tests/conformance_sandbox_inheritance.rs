@@ -205,7 +205,10 @@ async fn make_runner_with_parent(
     let root_authority =
         rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
     let authority_ledger = Arc::new(
-        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(
+            root_authority.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        ),
     );
     let authority =
         Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
@@ -238,6 +241,7 @@ fn spec_with_override(sandbox_override: Option<SandboxPolicy>) -> AgentLaunchSpe
         sandbox_override,
         parent_trace: None,
         isolated: false,
+        delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
     }
 }
 
@@ -250,7 +254,14 @@ async fn launch_rejects_widening_variant_before_spawn() {
     let (runner, _tmp) = make_runner_with_parent(read_only(false)).await;
     let spec = spec_with_override(Some(workspace_write(&["/ws"], &[], true)));
 
-    let result = runner.launch(spec, CancellationToken::new()).await;
+    let result = runner
+        .launch(
+            spec,
+            CancellationToken::new(),
+            None,
+            rustain::domain::models::AgentId::new(),
+        )
+        .await;
     match result {
         Err(SubagentError::PolicyWidensParent { .. }) => {}
         Err(other) => panic!("expected PolicyWidensParent, got error {other:?}"),
@@ -271,7 +282,14 @@ async fn launch_rejects_network_widening_before_spawn() {
     let (runner, _tmp) = make_runner_with_parent(read_only(false)).await;
     let spec = spec_with_override(Some(read_only(true)));
 
-    let result = runner.launch(spec, CancellationToken::new()).await;
+    let result = runner
+        .launch(
+            spec,
+            CancellationToken::new(),
+            None,
+            rustain::domain::models::AgentId::new(),
+        )
+        .await;
     match result {
         Err(SubagentError::PolicyWidensParent { dimension, .. }) => {
             assert_eq!(
@@ -294,7 +312,12 @@ async fn launch_accepts_narrowing_override() {
     let spec = spec_with_override(Some(read_only(false)));
 
     let handle = runner
-        .launch(spec, CancellationToken::new())
+        .launch(
+            spec,
+            CancellationToken::new(),
+            None,
+            rustain::domain::models::AgentId::new(),
+        )
         .await
         .expect("narrowing override must be accepted");
     assert!(!handle.task_id.is_empty());

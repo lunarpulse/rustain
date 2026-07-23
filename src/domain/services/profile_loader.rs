@@ -42,6 +42,7 @@ impl<'a> ProfileLoader<'a> {
             overrides,
             preview: validated.preview,
             mcp_servers: Vec::new(),
+            a2a_peers: Vec::new(),
             include_builtin_tools: true,
         })
     }

@@ -27,25 +27,16 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             exe: ""
-            required: true
 
           # P1 — macOS aarch64 (best-effort, fail OK)
           - target: aarch64-apple-darwin
             os: macos-latest
             exe: ""
-            required: false
 
           # P1 — macOS x86_64 (best-effort, fail OK)
           - target: x86_64-apple-darwin
             os: macos-latest
             exe: ""
-            required: false
-
-          # P2 — Windows x86_64 (best-effort, fail OK)
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            exe: ".exe"
-            required: false
 
     steps:
       - uses: actions/checkout@v4
@@ -96,7 +87,7 @@ jobs:
     name: Sign & Publish
     needs: build
     runs-on: ubuntu-latest
-    # Run even if some matrix jobs failed (e.g., Windows P2 best-effort)
+    # Run even if some matrix jobs failed.
     # We only sign artifacts from successful builds.
     if: always() && !cancelled()
     # Protected environment — required reviewers + encrypted secrets

@@ -56,6 +56,10 @@ pub enum ApprovalSource {
         session_id: String,
         conversation_id: String,
     },
+    RemotePeer {
+        conversation_id: String,
+        peer_id: crate::domain::models::peer_identity::PeerId,
+    },
     BackgroundAgent {
         conversation_id: String,
         task_id: String,
@@ -72,6 +76,9 @@ impl ApprovalSource {
                 conversation_id, ..
             } => conversation_id,
             ApprovalSource::AcpSession {
+                conversation_id, ..
+            }
+            | ApprovalSource::RemotePeer {
                 conversation_id, ..
             } => conversation_id,
             ApprovalSource::BackgroundAgent {
@@ -94,31 +101,46 @@ impl ApprovalSource {
     pub fn scope_agent_id(&self) -> crate::domain::models::agent_id::AgentId {
         match self {
             ApprovalSource::ForegroundTurn { conversation_id } => {
-                crate::domain::models::agent_id::AgentId(conversation_id.clone())
+                crate::domain::models::agent_id::AgentId::from_validated(conversation_id.clone())
             }
             ApprovalSource::ForegroundSubagent {
                 conversation_id,
                 parent_tool_call_id,
                 ..
-            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
-                conversation_id,
-                parent_tool_call_id,
-            ])),
+            } => {
+                crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
+                    conversation_id,
+                    parent_tool_call_id,
+                ]))
+            }
             ApprovalSource::AcpSession {
                 conversation_id,
                 session_id,
-            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
+            } => {
+                crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
+                    conversation_id,
+                    session_id,
+                ]))
+            }
+            ApprovalSource::RemotePeer {
                 conversation_id,
-                session_id,
-            ])),
+                peer_id,
+            } => {
+                crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
+                    conversation_id,
+                    peer_id.as_str(),
+                ]))
+            }
             ApprovalSource::BackgroundAgent {
                 conversation_id,
                 task_id,
                 ..
-            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
-                conversation_id,
-                task_id,
-            ])),
+            } => {
+                crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
+                    conversation_id,
+                    task_id,
+                ]))
+            }
         }
     }
 }

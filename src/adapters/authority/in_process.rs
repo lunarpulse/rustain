@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::domain::models::{
     AgentId, CapabilityFlag, CapabilityToken, CapabilityTokenId, DelegateRequest,
+    JournaledTerminalCheckpoint,
 };
 use crate::domain::ports::{AuthorityError, AuthorityProvider};
 use crate::domain::services::authority_ledger::AuthorityLedger;
@@ -44,7 +45,16 @@ impl AuthorityProvider for InProcessAuthorityProvider {
         parent: &CapabilityToken,
         req: DelegateRequest,
     ) -> Result<CapabilityToken, AuthorityError> {
-        self.ledger.delegate(parent, req)
+        let child = self.ledger.delegate(parent, req)?;
+        // [17-2c / D4] Write-ahead the grant's conservation head before the
+        // child token is observable to the caller.
+        self.ledger
+            .journal_head()
+            .await
+            .map_err(|error| AuthorityError::Durability {
+                reason: error.to_string(),
+            })?;
+        Ok(child)
     }
 
     async fn validate(
@@ -78,10 +88,33 @@ impl AuthorityProvider for InProcessAuthorityProvider {
     }
 
     async fn settle(&self, token: &CapabilityTokenId) -> Result<(), AuthorityError> {
-        self.ledger.settle(token)
+        self.ledger.settle(token)?;
+        // [17-2c / D4] Write-ahead the refund's conservation head.
+        self.ledger
+            .journal_head()
+            .await
+            .map_err(|error| AuthorityError::Durability {
+                reason: error.to_string(),
+            })?;
+        Ok(())
+    }
+
+    async fn prune_terminal(
+        &self,
+        terminal: &JournaledTerminalCheckpoint,
+    ) -> Result<bool, AuthorityError> {
+        self.ledger.prune_terminal(terminal)
     }
 
     async fn spend_use(&self, token: &CapabilityTokenId) -> Result<(), AuthorityError> {
-        self.ledger.spend_use(token)
+        self.ledger.spend_use(token)?;
+        // [17-2c / D4] Write-ahead the use-count debit's conservation head.
+        self.ledger
+            .journal_head()
+            .await
+            .map_err(|error| AuthorityError::Durability {
+                reason: error.to_string(),
+            })?;
+        Ok(())
     }
 }

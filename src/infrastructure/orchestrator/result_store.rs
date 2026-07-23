@@ -211,7 +211,7 @@ mod tests {
             }
             _ => format!("full body of {label}"),
         };
-        NodeResult::ingest(AgentId(label.into()), label.into(), outcome, body)
+        NodeResult::ingest(AgentId::from_validated(label), label.into(), outcome, body)
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
                 summary: "sa".into(),
             },
         ));
-        let got = store.get(&AgentId("a".into())).unwrap();
+        let got = store.get(&AgentId::from_validated("a")).unwrap();
         // ingest parsed the JSON yield → detail is the side-table body.
         assert_eq!(got.body, "full body of a"); // body lives in the side-table
         assert_eq!(got.compact_summary(), "sa"); // window sees only compact
@@ -252,7 +252,7 @@ mod tests {
             },
         ));
         store.insert(nr("a", SpokeResult::Cancelled));
-        let got = store.get(&AgentId("a".into())).unwrap();
+        let got = store.get(&AgentId::from_validated("a")).unwrap();
         assert!(matches!(got.outcome, SpokeResult::Completed { .. }));
     }
 
@@ -287,9 +287,9 @@ mod tests {
         );
         // Finalize to DISPATCH order [a, b, c] (idx 0, 1, 2).
         store.reorder(vec![
-            AgentId("a".into()),
-            AgentId("b".into()),
-            AgentId("c".into()),
+            AgentId::from_validated("a"),
+            AgentId::from_validated("b"),
+            AgentId::from_validated("c"),
         ]);
         assert_eq!(
             store
@@ -305,8 +305,8 @@ mod tests {
         // the assert_eq! panics (the original PATCH-1 defect).
         store.replace_at_slot(
             1,
-            &AgentId("b".into()),
-            AgentId("b-rerun".into()),
+            &AgentId::from_validated("b"),
+            AgentId::from_validated("b-rerun"),
             nr(
                 "b-rerun",
                 SpokeResult::Completed {
@@ -321,9 +321,12 @@ mod tests {
         );
         assert_eq!(store.ordered()[0].label, "a", "slot 0 untouched");
         assert_eq!(store.ordered()[2].label, "c", "slot 2 untouched");
-        assert!(store.get(&AgentId("b".into())).is_none(), "old id removed");
         assert!(
-            store.get(&AgentId("b-rerun".into())).is_some(),
+            store.get(&AgentId::from_validated("b")).is_none(),
+            "old id removed"
+        );
+        assert!(
+            store.get(&AgentId::from_validated("b-rerun")).is_some(),
             "new id present"
         );
     }

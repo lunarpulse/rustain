@@ -5,6 +5,8 @@
 //!
 //! Fake-mcp-server tests are `#[serial]`-annotated per Story 9.1 / 9.2 convention.
 
+mod common;
+
 use std::sync::Arc;
 
 #[cfg(feature = "mcp")]
@@ -22,6 +24,7 @@ use rustain::domain::ports::ObserverError;
 
 fn test_capability(protocol: &str, server: &str, tool: &str) -> RegisteredCapability {
     RegisteredCapability {
+        trust: rustain::domain::models::TrustTier::Verified,
         id: CapabilityId {
             protocol: protocol.to_string(),
             server: server.to_string(),
@@ -370,25 +373,7 @@ fn test_no_new_eventbus_bypass_for_capability_events() {
 #[test]
 #[serial_test::serial]
 fn test_mcp_provider_discover_round_trip() {
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let candidates = [
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ];
-    let command = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates[0].clone());
+    let command = common::fake_mcp_binary();
 
     let spec = rustain::domain::models::McpServerSpec {
         id: "discover-test".to_string(),
@@ -678,25 +663,7 @@ async fn test_registry_holds_all_three_protocols() {
     ));
 
     // Fake MCP server with 2 tools (echo, add)
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let candidates = [
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ];
-    let command = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates[0].clone());
+    let command = common::fake_mcp_binary();
 
     let spec = McpServerSpec {
         id: "three-proto".to_string(),
@@ -860,6 +827,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
 
     let snap = vec![
         RegisteredCapability {
+            trust: rustain::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "mcp".into(),
                 server: "srv1".into(),
@@ -873,6 +841,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
             parallel_safe: true,
         },
         RegisteredCapability {
+            trust: rustain::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "mcp".into(),
                 server: "srv2".into(),
@@ -886,6 +855,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
             parallel_safe: true,
         },
         RegisteredCapability {
+            trust: rustain::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "builtin".into(),
                 server: String::new(),
@@ -899,6 +869,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
             parallel_safe: false,
         },
         RegisteredCapability {
+            trust: rustain::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "skill".into(),
                 server: String::new(),
@@ -945,25 +916,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     ));
 
     // Fake MCP server with 2 tools (echo, add)
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let candidates = [
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ];
-    let command = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates[0].clone());
+    let command = common::fake_mcp_binary();
 
     let spec = McpServerSpec {
         id: "delta-test".to_string(),
@@ -1012,6 +965,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     // Register a new capability manually (simulating MCP list_changed adding a tool)
     use rustain::domain::models::capability_registry::RegisteredCapability;
     let extra = RegisteredCapability {
+        trust: rustain::domain::models::TrustTier::Verified,
         id: rustain::domain::models::capability_id::CapabilityId {
             protocol: "mcp".into(),
             server: "delta-test".into(),
@@ -1072,6 +1026,8 @@ async fn test_subagent_provider_discover_round_trip() {
             &self,
             _spec: rustain::domain::models::AgentLaunchSpec,
             _cancel: tokio_util::sync::CancellationToken,
+            _parent: Option<&rustain::domain::models::TaskHandle>,
+            _agent_id: rustain::domain::models::AgentId,
         ) -> Result<rustain::domain::models::TaskHandle, rustain::domain::models::SubagentError>
         {
             unimplemented!()

@@ -22,10 +22,13 @@
 //! own delegated token at the spawn gate (Murat vacuity-closer — the 14.2-AC9
 //! defeat was validating the root token, which always passes).
 
+use crate::domain::services::dag;
+mod merge_back;
 mod result_contract;
 mod result_store;
 mod window;
 
+pub use merge_back::{MergeBackError, PatchMergeBack};
 pub use result_contract::{
     SPOKE_SUMMARY_MAX_BYTES, SpokeYield, YieldError, first_paragraph, retry_on_schema_failure,
     salvage_on_cancel, spoke_summary, validate_yield,
@@ -36,7 +39,9 @@ pub use window::{SpokeHandle, Window};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use tokio::sync::Semaphore;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::clock::Clock;
@@ -44,19 +49,32 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::agent_id::AgentId;
 use crate::domain::models::capability_token::{
     Budget, CapabilityFlag, CapabilitySet, CapabilityToken, DelegateConstraint, DelegateRequest,
+    R1_GATE_TOKEN_BUDGET, R1_SYNTHESIS_RESERVE,
 };
-use crate::domain::models::launch_spec::AgentLaunchSpec;
+use crate::domain::models::launch_spec::{AgentLaunchSpec, DelegationProfile};
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::orchestration::{
     CoverageLine, DrillId, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, OrchestrationError, SpokeCitation,
-    SpokeResult, SpokeSpec, SynthesisView, WaitPolicy, WaitReason,
+    SpokeResult, SpokeRole, SpokeSpec, SynthesisView, WaitPolicy, WaitReason,
 };
-use crate::domain::models::{ModelTier, SubagentError};
+use crate::domain::models::{
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceArtifactDraft, HostBinding, JournalRecord,
+    ModelTier, OwnershipKind, PermissionMode, RoomEvent, SubagentError, TaskHandle, WaveId,
+    WaveOutcome,
+};
+use crate::domain::ports::SecurityPort;
 use crate::domain::ports::SubagentRunner;
 use crate::domain::ports::wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
-use crate::domain::ports::{AuthorityError, AuthorityProvider, ForkJoinRequest, Orchestrator};
+use crate::domain::ports::{
+    ArtifactStore, AuthorityError, AuthorityProvider, ForkJoinRequest, Orchestrator,
+};
 use crate::domain::services::authority_ledger::AuthorityLedger;
+use crate::domain::services::fork_join_validation::{
+    map_authority_construction_error, validate_nested_request,
+};
+use crate::domain::services::patch_review::MergeBackPolicy;
 use crate::infrastructure::runtime::event_bus::EventBus;
+use crate::infrastructure::supervisor::{AdmissionClass, Supervisor};
 
 /// Ambient cost-meter escalation threshold: a wave whose cumulative cost micros
 /// crosses this triggers a `$burn ↑` surfacing on the WaveStrip (config-
@@ -72,17 +90,81 @@ pub const WAIT_ESCALATE_THRESHOLD_MS: u64 = 60_000;
 /// Synthesis reservation (reserve-the-HERO, AC10). Fan-out draws only from
 /// `(coordinator_available − reserve)`; the reserve survives the ceiling.
 /// Minimal in R1 (config-externalized later); the invariant is what matters.
-pub const SYNTHESIS_RESERVE: Budget = Budget {
-    requests: 1,
-    cost_micros: 1_000,
-};
+pub const SYNTHESIS_RESERVE: Budget = R1_SYNTHESIS_RESERVE;
 
 /// Spawn-gate budget for a per-spoke child token (Murat gate-token). Minimal so
 /// the gate is decisive on `Spawn` capability + revocation, not on budget.
-const GATE_TOKEN_BUDGET: Budget = Budget {
-    requests: 1,
-    cost_micros: 1,
-};
+const GATE_TOKEN_BUDGET: Budget = R1_GATE_TOKEN_BUDGET;
+
+/// Derive the collision-safe node identity for one spoke launch.
+///
+/// Each input is encoded independently before joining with a delimiter outside
+/// the base64url alphabet. The mapping is deterministic and unambiguous across
+/// coordinator DAGs, nested coordinator levels, and retained reruns.
+pub(crate) fn nonce_qualified(
+    coordinator_id: &AgentId,
+    spoke_id: &AgentId,
+    rerun_counter: u8,
+) -> AgentId {
+    let coordinator = URL_SAFE_NO_PAD.encode(coordinator_id.as_str().as_bytes());
+    let spoke = URL_SAFE_NO_PAD.encode(spoke_id.as_str().as_bytes());
+    AgentId::from_validated(format!("fq.{coordinator}.{spoke}.r{rerun_counter}"))
+}
+
+/// Story 17.2d-b (AC-b3): lossless inverse of [`nonce_qualified`] — the wave
+/// nonce is embedded IN the durable node id, so recovery needs no separate
+/// nonce record. Returns `(wave_nonce, raw_spoke_id, rerun_counter)`, or
+/// `None` for any id not minted by `nonce_qualified`. Idempotency of resume
+/// is keyed on this decode: a fresh random nonce per resume is the named
+/// RED mutant (two live nodes for one logical spoke).
+pub(crate) fn decode_nonce_qualified(id: &AgentId) -> Option<(AgentId, AgentId, u8)> {
+    let rest = id.as_str().strip_prefix("fq.")?;
+    let (coordinator, rest) = rest.split_once('.')?;
+    let (spoke, rerun) = rest.split_once('.')?;
+    let rerun = rerun.strip_prefix('r')?.parse::<u8>().ok()?;
+    let coordinator = String::from_utf8(URL_SAFE_NO_PAD.decode(coordinator).ok()?).ok()?;
+    let spoke = String::from_utf8(URL_SAFE_NO_PAD.decode(spoke).ok()?).ok()?;
+    Some((
+        AgentId::parse(&coordinator).ok()?,
+        AgentId::parse(&spoke).ok()?,
+        rerun,
+    ))
+}
+
+/// Story 17.2d-b (AC-b3): one done spoke recovered from durable evidence —
+/// terminal checkpoint + artifact body — seeding the resumed wave's
+/// `ResultStore` so completed spokes are NEVER re-executed (no double
+/// artifacts, no double debit).
+pub(crate) struct SeededSpoke {
+    pub agent_id: AgentId,
+    pub label: String,
+    pub result: SpokeResult,
+    pub body: String,
+}
+
+struct RecoveredTerminal {
+    artifact: ArtifactRef,
+    label: String,
+    result: SpokeResult,
+    body: String,
+}
+
+/// Story 17.2d-b (AC-b3): the recovered-wave state threaded into
+/// `run_wave_body` on the resume path. `wave_nonce` pins the ORIGINAL wave
+/// identity (decoded from the durable parked node ids) so a revived spoke
+/// re-dispatches under its park-time id and the launch ADOPTS the parked node
+/// instead of registering a stranger. `seeded_artifacts` pre-seeds
+/// `artifact_by_spoke` (raw spoke id → durable handle) so a revived spoke
+/// whose producers all completed pre-crash never waits on a readiness signal
+/// that cannot fire again.
+pub(crate) struct ResumeSeed {
+    pub wave_nonce: AgentId,
+    pub seeded: Vec<SeededSpoke>,
+    pub seeded_artifacts: std::collections::HashMap<AgentId, ArtifactRef>,
+    /// Original dependency edges retained for artifact validation and
+    /// provenance even when terminal producers are removed from the live DAG.
+    pub dependency_lineage: std::collections::HashMap<AgentId, Vec<AgentId>>,
+}
 
 // AC2 discriminator instrumentation (P8 — non-vacuous zero-sibling-transition
 // proof). R1's executor NEVER schedules a spoke on a sibling's terminal state,
@@ -109,7 +191,7 @@ pub fn record_sibling_triggered_transition() {
     SIBLING_TRIGGERED_TRANSITIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The single-level fork-join executor. Drives children through the
+/// The bounded multi-wave fork-join executor. Drives children through the
 /// [`SubagentRunner`] port (AC8), never a concrete runner.
 pub struct ForkJoinExecutor {
     runner: Arc<dyn SubagentRunner>,
@@ -117,6 +199,13 @@ pub struct ForkJoinExecutor {
     ledger: Arc<AuthorityLedger>,
     event_bus: Arc<EventBus>,
     clock: Arc<dyn Clock>,
+    journal: Option<Arc<crate::infrastructure::subagent::NodeJournal>>,
+    supervisor: Arc<Supervisor>,
+    artifact_store: Option<Arc<dyn ArtifactStore>>,
+    artifact_host: Option<HostBinding>,
+    /// First durable consumer of isolated-child deltas. When bound, every
+    /// non-empty delta is promoted to a pending Patch artifact.
+    patch_merge_back: Option<Arc<PatchMergeBack>>,
     /// The root/coordinator authority token — the mint point for per-spoke
     /// gate-tokens. In R1 the coordinator IS the root agent.
     root_authority: CapabilityToken,
@@ -134,6 +223,33 @@ pub struct ForkJoinExecutor {
     /// DISPATCH (not just retained count): reserve atomically before dispatch,
     /// release on every terminal path. tokio::sync (std::sync ratchet stays 4).
     rerun_reservations: tokio::sync::Mutex<std::collections::HashMap<usize, u8>>,
+    /// Story 17.3c (D1): owner pre-authorization for auto-applying captured
+    /// merge-back patches. Default refuses (patches stay Pending for review);
+    /// production sets `auto_approve_user_originated` so user-originated fanout
+    /// edits reach the workspace as the pre-isolation direct-write path did.
+    merge_back_policy: MergeBackPolicy,
+    /// Story 17.3c (D1): live session permission-mode source for the merge-back
+    /// apply gate. `None` fails closed (treated as Plan → apply refused).
+    permission_source: Option<Arc<dyn SecurityPort>>,
+}
+
+/// Cloneable per-wave execution dependencies. Nested recursion carries this
+/// value instead of retaining the executor or constructing a second collector.
+#[derive(Clone)]
+struct WaveCtx {
+    runner: Arc<dyn SubagentRunner>,
+    authority: Arc<dyn AuthorityProvider>,
+    ledger: Arc<AuthorityLedger>,
+    event_bus: Arc<EventBus>,
+    clock: Arc<dyn Clock>,
+    journal: Option<Arc<crate::infrastructure::subagent::NodeJournal>>,
+    supervisor: Arc<Supervisor>,
+    artifact_store: Option<Arc<dyn ArtifactStore>>,
+    artifact_host: Option<HostBinding>,
+    patch_merge_back: Option<Arc<PatchMergeBack>>,
+    root_authority: CapabilityToken,
+    merge_back_policy: MergeBackPolicy,
+    permission_source: Option<Arc<dyn SecurityPort>>,
 }
 
 impl ForkJoinExecutor {
@@ -148,17 +264,100 @@ impl ForkJoinExecutor {
         clock: Arc<dyn Clock>,
         root_authority: CapabilityToken,
     ) -> Self {
+        let supervisor = Arc::new(Supervisor::new(
+            FORK_JOIN_SPAWN_CAP,
+            FORK_JOIN_SPAWN_CAP,
+            Arc::clone(&ledger),
+            root_authority.clone(),
+            Arc::clone(&clock),
+            Arc::clone(&event_bus),
+        ));
         Self {
             runner,
             authority,
             ledger,
             event_bus,
             clock,
+            supervisor,
             root_authority,
             current_run: tokio::sync::Mutex::new(None),
+            journal: None,
+            artifact_store: None,
+            artifact_host: None,
+            patch_merge_back: None,
             wave_generation: std::sync::atomic::AtomicU64::new(0),
             rerun_reservations: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            merge_back_policy: MergeBackPolicy::default(),
+            permission_source: None,
         }
+    }
+
+    fn wave_ctx(&self) -> WaveCtx {
+        WaveCtx {
+            runner: Arc::clone(&self.runner),
+            authority: Arc::clone(&self.authority),
+            ledger: Arc::clone(&self.ledger),
+            event_bus: Arc::clone(&self.event_bus),
+            clock: Arc::clone(&self.clock),
+            journal: self.journal.clone(),
+            supervisor: Arc::clone(&self.supervisor),
+            artifact_store: self.artifact_store.clone(),
+            artifact_host: self.artifact_host.clone(),
+            patch_merge_back: self.patch_merge_back.clone(),
+            root_authority: self.root_authority.clone(),
+            merge_back_policy: self.merge_back_policy,
+            permission_source: self.permission_source.clone(),
+        }
+    }
+
+    /// Bind the canonical durable room-event sink.
+    #[must_use]
+    pub fn with_journal(
+        mut self,
+        journal: Arc<crate::infrastructure::subagent::NodeJournal>,
+    ) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Bind the composition-root supervisor. Tests and legacy constructors use
+    /// the equivalent default created by `new`; production wiring supplies the
+    /// shared lifecycle owner explicitly.
+    #[must_use]
+    pub fn with_supervisor(mut self, supervisor: Arc<Supervisor>) -> Self {
+        self.supervisor = supervisor;
+        self
+    }
+
+    /// Bind durable result persistence. Dependency waves are refused without
+    /// this handle; transcript completion alone is never a readiness signal.
+    #[must_use]
+    pub fn with_artifact_store(mut self, store: Arc<dyn ArtifactStore>, host: HostBinding) -> Self {
+        self.artifact_store = Some(store);
+        self.artifact_host = Some(host);
+        self
+    }
+
+    /// Bind the write-capable CoW merge-back service.
+    #[must_use]
+    pub fn with_patch_merge_back(mut self, service: Arc<PatchMergeBack>) -> Self {
+        self.patch_merge_back = Some(service);
+        self
+    }
+
+    /// Bind the owner's merge-back auto-approval policy (Story 17.3c / D1).
+    #[must_use]
+    pub fn with_merge_back_policy(mut self, policy: MergeBackPolicy) -> Self {
+        self.merge_back_policy = policy;
+        self
+    }
+
+    /// Bind the live session permission-mode source for the merge-back apply
+    /// gate (Story 17.3c / D1). Absent ⇒ apply is refused fail-closed.
+    #[must_use]
+    pub fn with_permission_source(mut self, security: Arc<dyn SecurityPort>) -> Self {
+        self.permission_source = Some(security);
+        self
     }
 
     /// Read the ambient cost meter (WaveStrip `$burn`). Returns the cumulative
@@ -171,78 +370,44 @@ impl ForkJoinExecutor {
             .map(|s| s.consumed.cost_micros)
             .unwrap_or(0)
     }
-
-    /// Mint a per-spoke child gate-token from the coordinator (root) authority.
-    /// The request carries `Spawn` so a normally-minted child HAS it; a probe
-    /// that omits `Spawn` (or pre-revokes) produces a child the gate refuses.
-    fn mint_gate_token(
-        &self,
-        scope: AgentId,
-        capabilities: CapabilitySet,
-    ) -> Result<CapabilityToken, OrchestrationError> {
-        let req = DelegateRequest {
-            scope,
-            capabilities,
-            constraint: DelegateConstraint {
-                allowed: capabilities,
-                max_depth: 1,
-                max_subset: capabilities,
-            },
-            budget: GATE_TOKEN_BUDGET,
-            not_after: None,
-            uses_limit: Some(1),
-        };
-        // Synchronous delegate via the ledger (the AuthorityProvider port is
-        // async; the ledger is the concrete single-writer map). The gate-token
-        // is coordinator-delegated, so it debits the coordinator — refunded on
-        // settle.
-        self.ledger
-            .delegate(&self.root_authority, req)
-            .map_err(|e| OrchestrationError::SpawnRefused(e.to_string()))
-    }
-
-    /// Emit a wave lifecycle event (the 14.3a seam — purely additive variants).
-    fn emit(&self, event: AppEvent) {
-        let _ = self.event_bus.emit_domain(event);
-    }
-
-    /// Validate a fork-join request at the boundary (AC2 single-level, AC4 cap,
-    /// AC9 WaitPolicy).
-    fn validate_request(&self, request: &ForkJoinRequest) -> Result<(), OrchestrationError> {
-        if let Some(reason) = request.wait_policy.r1_unsupported_reason() {
-            return Err(OrchestrationError::WaitPolicyUnsupported(reason));
-        }
-        let attempted = request.spokes.len();
-        if attempted == 0 {
-            return Err(OrchestrationError::Internal(
-                "fork-join requires at least one spoke".into(),
-            ));
-        }
-        if attempted > FORK_JOIN_SPAWN_CAP {
-            return Err(OrchestrationError::SpawnCapExceeded {
-                cap: FORK_JOIN_SPAWN_CAP,
-                attempted,
-            });
-        }
-        for (idx, spoke) in request.spokes.iter().enumerate() {
-            if !spoke.waits_for_is_empty() {
-                let label = if spoke.label.is_empty() {
-                    format!("spoke #{idx}")
-                } else {
-                    spoke.label.clone()
-                };
-                return Err(OrchestrationError::NotSingleLevel {
-                    spoke: label,
-                    deps: spoke.waits_for.len(),
-                });
-            }
-        }
-        Ok(())
-    }
 }
 
-/// Build an [`AgentLaunchSpec`] from a spoke (no authority concerns here).
+/// Compute the minimal transitive rerun set after one content-addressed
+/// artifact version changes. Unrelated branches are absent by construction.
+pub fn transitive_artifact_dependents(
+    artifacts: &[ArtifactRef],
+    changed: &ArtifactId,
+) -> Result<Vec<ArtifactId>, OrchestrationError> {
+    let graph = dag::DependencyGraph::new(
+        artifacts
+            .iter()
+            .map(|artifact| (artifact.id.clone(), artifact.depends_on.clone())),
+    )
+    .map_err(|error| match error {
+        dag::GraphError::Duplicate(id) => {
+            OrchestrationError::Internal(format!("duplicate artifact id {id}"))
+        }
+        dag::GraphError::Missing { node, dependency } => OrchestrationError::Internal(format!(
+            "artifact {node} depends on missing artifact {dependency}"
+        )),
+        dag::GraphError::Cycle => OrchestrationError::Internal("artifact dependency cycle".into()),
+    })?;
+    Ok(graph
+        .transitive_dependents([changed.clone()])
+        .into_iter()
+        .collect())
+}
+
+/// Build an isolated [`AgentLaunchSpec`] for a patch-bearing fork-join spoke.
+/// Root and nested waves use the same CoW launch contract; only their derived
+/// provenance differs.
 fn launch_spec_for(spec: &SpokeSpec) -> AgentLaunchSpec {
+    let delegation = match &spec.role {
+        SpokeRole::Leaf => DelegationProfile::Child,
+        SpokeRole::Coordinator { grandchildren, .. } => DelegationProfile::Coordinator {
+            grandchild_count: grandchildren.len(),
+        },
+    };
     AgentLaunchSpec {
         prompt: spec.prompt.clone(),
         effective_model: spec.effective_model.clone(),
@@ -251,8 +416,21 @@ fn launch_spec_for(spec: &SpokeSpec) -> AgentLaunchSpec {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
-        isolated: false,
+        isolated: true,
+        delegation,
     }
+}
+
+fn checked_wave_budget(spoke_count: usize) -> Result<Budget, OrchestrationError> {
+    let count = u64::try_from(spoke_count).map_err(|_| OrchestrationError::Overflow {
+        dimension: "wave spoke count",
+    })?;
+    GATE_TOKEN_BUDGET
+        .checked_mul(count)
+        .and_then(|aggregate| SYNTHESIS_RESERVE.checked_add(aggregate))
+        .ok_or(OrchestrationError::Overflow {
+            dimension: "wave budget",
+        })
 }
 
 /// **The sole spawn chokepoint** (DD1 / AC3). The single function that:
@@ -271,7 +449,9 @@ pub async fn dispatch_launch(
     spec: &SpokeSpec,
     gate_token: CapabilityToken,
     wave_cancel: CancellationToken,
-) -> Result<crate::domain::models::TaskHandle, OrchestrationError> {
+    parent: Option<&TaskHandle>,
+    agent_id: AgentId,
+) -> Result<TaskHandle, OrchestrationError> {
     // ── Spawn gate: validate the CHILD token (not the coordinator's). ──
     if let Err(err) = authority
         .validate(&gate_token, &CapabilityFlag::Spawn, &gate_token.scope)
@@ -284,7 +464,7 @@ pub async fn dispatch_launch(
 
     let launch_spec = launch_spec_for(spec);
     let cancel = wave_cancel.child_token();
-    let handle = match runner.launch(launch_spec, cancel).await {
+    let handle = match runner.launch(launch_spec, cancel, parent, agent_id).await {
         Ok(h) => h,
         Err(e) => {
             // Refund the gate-token reservation on launch failure — the doc
@@ -317,8 +497,21 @@ async fn dispatch_one(
     spec: &SpokeSpec,
     gate_token: CapabilityToken,
     wave_cancel: CancellationToken,
-) -> Result<crate::domain::models::TaskHandle, OrchestrationError> {
-    dispatch_launch(runner, authority, spec, gate_token, wave_cancel).await
+    parent: Option<&TaskHandle>,
+    coordinator_id: &AgentId,
+    rerun_counter: u8,
+) -> Result<TaskHandle, OrchestrationError> {
+    let agent_id = nonce_qualified(coordinator_id, &spec.id, rerun_counter);
+    dispatch_launch(
+        runner,
+        authority,
+        spec,
+        gate_token,
+        wave_cancel,
+        parent,
+        agent_id,
+    )
+    .await
 }
 
 #[async_trait::async_trait]
@@ -333,7 +526,9 @@ impl Orchestrator for ForkJoinExecutor {
         // `current_run`, so a later `rerun_spoke` will operate on it. Callers
         // that want an outcome with no retained side-state must be aware of
         // this (or avoid the convenience wrapper).
-        let handle = self.run_wave(request, CancellationToken::new()).await?;
+        let handle = self
+            .run_wave(request, CancellationToken::new(), None)
+            .await?;
         Ok(handle.snapshot().outcome)
     }
 
@@ -341,8 +536,11 @@ impl Orchestrator for ForkJoinExecutor {
         &self,
         request: ForkJoinRequest,
         cancel: CancellationToken,
+        parent: Option<TaskHandle>,
     ) -> Result<Arc<dyn WaveHandle>, OrchestrationError> {
-        let run = self.run_fork_join_run(request, cancel.clone()).await?;
+        let run = self
+            .run_fork_join_run(request, cancel.clone(), parent)
+            .await?;
         // Store the wave_cancel on the run so WaveHandle::cancel() works.
         let run = ForkJoinRun {
             wave_cancel: cancel,
@@ -393,263 +591,372 @@ impl ForkJoinExecutor {
         request: ForkJoinRequest,
         wave_cancel: CancellationToken,
     ) -> Result<ForkJoinOutcome, OrchestrationError> {
-        let run = self.run_fork_join_run(request, wave_cancel).await?;
+        let run = self.run_fork_join_run(request, wave_cancel, None).await?;
         Ok(run.outcome)
     }
 
-    /// The wave body — returns the infra-side [`ForkJoinRun`] handle (DD-B3).
-    /// `ForkJoinOutcome` (pure domain) is extracted by
-    /// [`run_fork_join_with_cancel`] / [`Orchestrator::run_fork_join`]. The
-    /// handle carries the drill-source (`Arc<ResultStore>`) and spec map for
-    /// rerun/drill.
+    /// Run one wave through the reusable executor body.
     pub async fn run_fork_join_run(
         &self,
         request: ForkJoinRequest,
         wave_cancel: CancellationToken,
+        parent: Option<TaskHandle>,
     ) -> Result<ForkJoinRun, OrchestrationError> {
-        self.validate_request(&request)?;
+        self.wave_ctx()
+            .run_wave_body(request, wave_cancel, parent, None)
+            .await
+    }
 
-        // P13: the coordinator that owns this wave must own the authority the
-        // executor mints child tokens from. A mismatched coordinator would
-        // silently debit root's budget under root's identity.
-        if request.coordinator != self.root_authority.scope {
-            return Err(OrchestrationError::Internal(format!(
-                "coordinator {:?} does not own this executor's root authority {:?}",
-                request.coordinator, self.root_authority.scope
-            )));
-        }
-
-        let spokes = request.spokes.clone();
-        let coordinator = request.coordinator.clone();
-        let n = spokes.len();
-
-        // ── Reserve-the-HERO + aggregate gate-token cost (AC10, P5/P11). ──
-        // Fan-out may mint up to `n` gate tokens, each `GATE_TOKEN_BUDGET`; a
-        // coordinator near its ceiling must not pass a single-dimension check
-        // then fail mid-mint. The reserve + the aggregate gate reservation are
-        // checked TOGETHER (AND, not OR) so draining either dimension refuses.
-        let gate_aggregate = Budget {
-            requests: GATE_TOKEN_BUDGET.requests * n as u64,
-            cost_micros: GATE_TOKEN_BUDGET.cost_micros * n as u64,
+    /// Story 17.2d-b (AC-b3/b4): resume durably parked ROOT-wave fork-join
+    /// spokes after a host restart. Invoked at the composition root (never by
+    /// `reconcile` — layering). Scans the durable journal (the SAME fold
+    /// `NodeRecovery::reconcile` exposes via `RecoveryReport.parked`), groups
+    /// parked records by the wave nonce decoded from their nonce-qualified
+    /// node ids, and re-enters the shared dispatch/park/collect primitive
+    /// (`run_wave_body`) for the revivable spokes of each wave:
+    ///
+    /// - **Skip done** — a producer with a terminal checkpoint + durable
+    ///   artifact seeds the `ResultStore` (no re-execution, no double
+    ///   artifacts/debit).
+    /// - **Revive parked** — a spoke whose producers are all terminal (or
+    ///   themselves revivable in the same wave) is re-dispatched under its
+    ///   park-time nonce-qualified id; the launch ADOPTS the parked
+    ///   `Suspended` node (AC-b2), journaling `Unparked` — so a second resume
+    ///   pass folds `Parked − Unparked` to empty and is a no-op
+    ///   (idempotency keyed on the durable id, never a random re-nonce).
+    /// - **Host-bound honesty** — a parked node journaled under a FOREIGN
+    ///   host binding is never revived locally; it is skipped as
+    ///   `HostBoundUnavailable` (the ADR-17-CC-03 boundary).
+    /// - **Fail-closed authority** — gate tokens are re-minted FRESH from the
+    ///   root authority; provenance/taint resets (documented `DF-17-2d-AUTH-1`
+    ///   limitation).
+    ///
+    /// ROOT-wave only: nested parent rehydration is the deferred follow-up
+    /// (a nested parked spoke's parent was a live `TaskHandle`). Returns one
+    /// `ForkJoinRun` per resumed wave (empty when nothing is durably parked).
+    pub async fn resume_fork_join_run(
+        &self,
+        recovery: &crate::infrastructure::subagent::RecoveryReport,
+    ) -> Result<Vec<ForkJoinRun>, OrchestrationError> {
+        let Some(journal) = self.journal.clone() else {
+            return Ok(Vec::new());
         };
-        let needed = Budget {
-            requests: SYNTHESIS_RESERVE.requests + gate_aggregate.requests,
-            cost_micros: SYNTHESIS_RESERVE.cost_micros + gate_aggregate.cost_micros,
-        };
-        let available = self
-            .ledger
-            .available(&self.root_authority.id)
-            .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
-        if available.requests < needed.requests || available.cost_micros < needed.cost_micros {
-            // AC10 budget-ceiling auto-pause: typed (not generic Internal) so
-            // the caller / WaveStrip can surface `paused`. Never silent death;
-            // the reserve is untouched (we have not debited it yet).
-            return Err(OrchestrationError::BudgetPaused { available, needed });
+        let entries = journal
+            .load()
+            .await
+            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+        let recovered_nodes = recovery
+            .parked
+            .iter()
+            .map(|record| record.node.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut parked = crate::infrastructure::subagent::fold_parked_records(&entries);
+        parked.retain(|node, _| recovered_nodes.contains(node));
+        if parked.is_empty() {
+            return Ok(Vec::new());
         }
+        let artifact_store = self.artifact_store.clone().ok_or_else(|| {
+            OrchestrationError::Internal(
+                "fork-join resume requires the durable artifact store".into(),
+            )
+        })?;
 
-        let concurrency = request.concurrency.clamp(1, n).min(FORK_JOIN_SPAWN_CAP);
-        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let mut checkpoints =
+            std::collections::BTreeMap::<AgentId, crate::domain::models::NodeCheckpoint>::new();
+        let mut artifact_by_producer = std::collections::BTreeMap::<AgentId, ArtifactRef>::new();
+        for entry in &entries {
+            match &entry.record {
+                JournalRecord::Checkpoint(checkpoint) => {
+                    checkpoints.insert(checkpoint.id.clone(), checkpoint.clone());
+                }
+                JournalRecord::Room(RoomEvent::ArtifactCreated { artifact }) => {
+                    artifact_by_producer.insert(artifact.producer.clone(), artifact.clone());
+                }
+                _ => {}
+            }
+        }
+        let is_done = |node: &AgentId| {
+            checkpoints
+                .get(node)
+                .is_some_and(|checkpoint| checkpoint.state.is_terminal())
+        };
 
-        self.emit(AppEvent::ForkJoinStarted {
-            coordinator: coordinator.clone(),
-            spoke_count: n,
-        });
-
-        // P2: pre-mint ALL gate tokens up front. If a mint fails on spoke k,
-        // the already-minted tokens (0..k) are refunded — no ledger leak from
-        // a partial mint failure stranding reservations.
-        let mut gate_tokens: Vec<CapabilityToken> = Vec::with_capacity(n);
-        for _ in &spokes {
-            // Fresh non-root LOCAL scope per spoke (delegate rejects path/root
-            // + duplicate scopes).
-            let scope = AgentId::new();
-            let gate_caps = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
-            match self.mint_gate_token(scope, gate_caps) {
-                Ok(tok) => gate_tokens.push(tok),
-                Err(e) => {
-                    for tok in gate_tokens {
-                        let _ = self.authority.settle(&tok.id).await;
+        // A terminal checkpoint alone is not dependency readiness: the host
+        // can die after terminal journaling but before ArtifactCreated. Verify
+        // and decode every candidate artifact before allowing a dependent to
+        // enter the resumed DAG.
+        let mut recovered_terminals =
+            std::collections::BTreeMap::<AgentId, RecoveredTerminal>::new();
+        for (producer, artifact) in &artifact_by_producer {
+            let Some(checkpoint) = checkpoints
+                .get(producer)
+                .filter(|checkpoint| checkpoint.state.is_terminal())
+            else {
+                continue;
+            };
+            let bytes = match artifact_store.get(&artifact.id).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(
+                        producer = %producer,
+                        artifact = %artifact.id,
+                        %error,
+                        "terminal producer artifact is not recoverable; dependents remain parked"
+                    );
+                    continue;
+                }
+            };
+            let Ok(envelope) = String::from_utf8(bytes) else {
+                tracing::warn!(
+                    producer = %producer,
+                    artifact = %artifact.id,
+                    "terminal producer artifact is not UTF-8; dependents remain parked"
+                );
+                continue;
+            };
+            let Some((_, raw_body)) = envelope.split_once("\n\n") else {
+                tracing::warn!(
+                    producer = %producer,
+                    artifact = %artifact.id,
+                    "terminal producer artifact has no result payload; dependents remain parked"
+                );
+                continue;
+            };
+            let result = match checkpoint.state {
+                NodeState::Completed => {
+                    let Ok(yielded) = result_contract::validate_yield(raw_body) else {
+                        tracing::warn!(
+                            producer = %producer,
+                            artifact = %artifact.id,
+                            "completed producer artifact has an invalid yield; dependents remain parked"
+                        );
+                        continue;
+                    };
+                    SpokeResult::Completed {
+                        summary: yielded.summary,
                     }
-                    return Err(e);
+                }
+                NodeState::Failed => SpokeResult::Failed {
+                    reason: "recovered pre-crash terminal failure".into(),
+                },
+                NodeState::Cancelled => SpokeResult::Cancelled,
+                _ => continue,
+            };
+            recovered_terminals.insert(
+                producer.clone(),
+                RecoveredTerminal {
+                    artifact: artifact.clone(),
+                    label: checkpoint.subagent_type.clone(),
+                    result,
+                    body: raw_body.to_owned(),
+                },
+            );
+        }
+
+        let unavailable = recovery
+            .host_bound_unavailable
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut waves = std::collections::BTreeMap::<
+            AgentId,
+            Vec<crate::infrastructure::subagent::RecoveredPark>,
+        >::new();
+        for record in parked.into_values() {
+            let Some((wave_nonce, _, _)) = decode_nonce_qualified(&record.node) else {
+                tracing::warn!(
+                    node = %record.node,
+                    "skipping durable park record with a non nonce-qualified id"
+                );
+                continue;
+            };
+            waves.entry(wave_nonce).or_default().push(record);
+        }
+
+        let mut resumed = Vec::new();
+        for (wave_nonce, records) in waves {
+            let (foreign, local): (Vec<_>, Vec<_>) = records
+                .into_iter()
+                .partition(|record| unavailable.contains(&record.node));
+            for record in &foreign {
+                tracing::info!(
+                    node = %record.node,
+                    "parked spoke is bound to a foreign host; not revived locally (HostBoundUnavailable)"
+                );
+            }
+            if local.is_empty() {
+                continue;
+            }
+
+            let mut revivable = std::collections::HashSet::<AgentId>::new();
+            loop {
+                let mut progressed = false;
+                for record in &local {
+                    if revivable.contains(&record.spec.id) {
+                        continue;
+                    }
+                    let producers_ready = record.producers.iter().all(|producer| {
+                        let producer_node = nonce_qualified(&wave_nonce, producer, 0);
+                        recovered_terminals.contains_key(&producer_node)
+                            || revivable.contains(producer)
+                    });
+                    if producers_ready {
+                        revivable.insert(record.spec.id.clone());
+                        progressed = true;
+                    }
+                }
+                if !progressed {
+                    break;
+                }
+            }
+
+            let mut terminal_nodes = Vec::new();
+            let request_records = local
+                .iter()
+                .filter(|record| {
+                    if !revivable.contains(&record.spec.id) {
+                        tracing::warn!(
+                            node = %record.node,
+                            spoke = %record.spec.id,
+                            "parked spoke NOT revived: a producer lacks a recoverable artifact or relaunch spec"
+                        );
+                        return false;
+                    }
+                    if is_done(&record.node) {
+                        terminal_nodes.push(record.node.clone());
+                        return false;
+                    }
+                    true
+                })
+                .collect::<Vec<_>>();
+            if !terminal_nodes.is_empty() {
+                journal
+                    .append_atomic_batch(
+                        terminal_nodes
+                            .iter()
+                            .map(|node| JournalRecord::Unparked { node: node.clone() })
+                            .collect(),
+                    )
+                    .await
+                    .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+            }
+            if request_records.is_empty() {
+                continue;
+            }
+
+            let claimed_nodes = request_records
+                .iter()
+                .map(|record| record.node.clone())
+                .collect::<Vec<_>>();
+            let claim_id = AgentId::new();
+            let claimed = journal
+                .claim_parks(
+                    &claimed_nodes,
+                    claim_id.clone(),
+                    self.clock.wall_now_ms(),
+                    60_000,
+                )
+                .await
+                .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+            if !claimed {
+                tracing::info!(
+                    wave = %wave_nonce,
+                    "parked wave was claimed or consumed by another composition root"
+                );
+                continue;
+            }
+
+            let request_ids = request_records
+                .iter()
+                .map(|record| record.spec.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let concurrency = request_records
+                .iter()
+                .map(|record| record.concurrency)
+                .min()
+                .unwrap_or(FORK_JOIN_SPAWN_CAP);
+            let mut request_spokes = Vec::with_capacity(request_records.len());
+            let mut seeded = Vec::<SeededSpoke>::new();
+            let mut seeded_artifacts = std::collections::HashMap::<AgentId, ArtifactRef>::new();
+            let mut dependency_lineage = std::collections::HashMap::<AgentId, Vec<AgentId>>::new();
+            let mut seeded_nodes = std::collections::HashSet::<AgentId>::new();
+            for record in request_records {
+                for producer in &record.producers {
+                    let producer_node = nonce_qualified(&wave_nonce, producer, 0);
+                    if let Some(recovered) = recovered_terminals.get(&producer_node) {
+                        seeded_artifacts
+                            .entry(producer.clone())
+                            .or_insert_with(|| recovered.artifact.clone());
+                        if seeded_nodes.insert(producer_node.clone()) {
+                            seeded.push(SeededSpoke {
+                                agent_id: producer_node,
+                                label: recovered.label.clone(),
+                                result: recovered.result.clone(),
+                                body: recovered.body.clone(),
+                            });
+                        }
+                    }
+                }
+                let mut spec = record.spec.clone();
+                dependency_lineage.insert(spec.id.clone(), spec.waits_for.clone());
+                spec.waits_for
+                    .retain(|producer| request_ids.contains(producer));
+                request_spokes.push(spec);
+            }
+            let request = ForkJoinRequest {
+                coordinator: self.root_authority.scope.clone(),
+                spokes: request_spokes,
+                wait_policy: WaitPolicy::All,
+                concurrency,
+            };
+            let seed = ResumeSeed {
+                wave_nonce: wave_nonce.clone(),
+                seeded,
+                seeded_artifacts,
+                dependency_lineage,
+            };
+            match self
+                .wave_ctx()
+                .run_wave_body(request, CancellationToken::new(), None, Some(seed))
+                .await
+            {
+                Ok(run) => resumed.push(run),
+                Err(error) => {
+                    if let Err(release_error) =
+                        journal.release_park_claims(&claimed_nodes, &claim_id).await
+                    {
+                        tracing::error!(
+                            %release_error,
+                            "failed to release durable fork-join resume claim"
+                        );
+                    }
+                    return Err(error);
                 }
             }
         }
-        // P5 (N1 fix — re-review round-2): DEBIT the synthesis reserve AFTER
-        // the gate-token pre-mint succeeds. `consume` is irreversible — the
-        // ledger has no `unconsume` — so debiting the reserve before a pre-
-        // mint failure would leak it: the already-minted tokens (0..k) ARE
-        // refunded by the settle loop above, but the reserve was not. Ordering
-        // consume AFTER pre-mint keeps conservation on every exit path. The
-        // upfront `needed` check (reserve + gate aggregate) still guarantees
-        // enough headroom here — pre-mint consumed exactly `gate_aggregate`
-        // (single-threaded; no concurrent fan-out yet), so `available` still
-        // covers `SYNTHESIS_RESERVE`.
-        self.ledger
-            .consume(&self.root_authority.id, SYNTHESIS_RESERVE)
-            .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
-
-        // P3: collect via mpsc so a panicking spoke still produces a terminal
-        // outcome (G7: exactly N, none missing). The fallback after the drain
-        // fills any idx that never sent (belt-and-suspenders for an aborted
-        // task). The semaphore permit is held across the child's whole
-        // lifetime (run-concurrency bound, not launch-rate).
-        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<SpokeOutcome>(n);
-        let mut join_set = tokio::task::JoinSet::new();
-        for (idx, (spoke, gate_token)) in spokes.iter().cloned().zip(gate_tokens).enumerate() {
-            let runner = self.runner.clone();
-            let authority = self.authority.clone();
-            let wave_cancel_child = wave_cancel.clone();
-            let permit_sem = semaphore.clone();
-            let tx = result_tx.clone();
-            let clock = self.clock.clone();
-            join_set.spawn(async move {
-                let _permit = match permit_sem.acquire().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        let _ = tx
-                            .send(failed_outcome(idx, &spoke, "semaphore closed"))
-                            .await;
-                        return;
-                    }
-                };
-                let dispatched_at_ms = clock.wall_now_ms();
-                let launched =
-                    dispatch_one(&runner, &authority, &spoke, gate_token, wave_cancel_child).await;
-                let (agent_id, label, result, body, isolation_diff) = match launched {
-                    Ok(mut handle) => {
-                        let agent_id = handle.agent_id.clone();
-                        let label = spoke.label.clone();
-                        let (terminal, raw, isolation_diff) =
-                            collect_terminal(&mut handle, clock.as_ref(), dispatched_at_ms).await;
-                        let (result, body) = structured_result(&terminal, raw.as_deref(), &label);
-                        (agent_id, label, result, body, isolation_diff)
-                    }
-                    Err(e) => {
-                        let agent_id = agent_id_for(&spoke, idx);
-                        let label = spoke.label.clone();
-                        // P21: do not surface raw internal error strings; map
-                        // to a stable, sanitized SpokeResult::Failed reason.
-                        let result = SpokeResult::Failed {
-                            reason: sanitize_failure(&e),
-                        };
-                        (agent_id, label, result, String::new(), None)
-                    }
-                };
-                let _ = tx
-                    .send(SpokeOutcome {
-                        idx,
-                        agent_id,
-                        label,
-                        result,
-                        body,
-                        isolation_diff,
-                    })
-                    .await;
+        if !resumed.is_empty() {
+            let spokes: usize = resumed.iter().map(|run| run.outcome.spokes.len()).sum();
+            use crate::domain::ports::EventEmitter as _;
+            self.event_bus.emit(AppEvent::SystemNotice {
+                conversation_id: None,
+                level: crate::domain::models::NoticeLevel::Info,
+                message: format!(
+                    "Resumed {} durably parked fork-join spoke(s) across {} wave(s) after restart.",
+                    spokes,
+                    resumed.len()
+                ),
             });
         }
-        drop(result_tx); // close after all spawns so recv() terminates.
+        Ok(resumed)
+    }
 
-        let mut store = ResultStore::new();
-        let mut spec_by_agent: std::collections::HashMap<AgentId, SpokeSpec> =
-            std::collections::HashMap::new();
-        let mut outcomes: Vec<Option<(AgentId, SpokeResult)>> = (0..n).map(|_| None).collect();
-        // P1 (DD3 / NFR68): collect isolated children's captured deltas here,
-        // then hand the map to the `ForkJoinRun` (write-only in R1; R2 reads).
-        let mut delta_store: std::collections::HashMap<
-            AgentId,
-            crate::domain::models::UnifiedDiff,
-        > = std::collections::HashMap::new();
-        while let Some(outcome) = result_rx.recv().await {
-            let SpokeOutcome {
-                idx,
-                agent_id,
-                label,
-                result,
-                body,
-                isolation_diff,
-            } = outcome;
-            store.insert(NodeResult::ingest(
-                agent_id.clone(),
-                label.clone(),
-                result.clone(),
-                body,
-            ));
-            outcomes[idx] = Some((agent_id.clone(), result.clone()));
-            spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
-            if let Some(d) = isolation_diff {
-                delta_store.insert(agent_id.clone(), d);
-            }
-            self.emit(AppEvent::SpokeCompleted { agent_id, label });
-        }
-        // P3 fallback: a task that panicked/aborted before sending still gets a
-        // terminal outcome (G7 — exactly N, none missing, none silently dropped).
-        for (idx, slot) in outcomes.iter_mut().enumerate() {
-            if slot.is_none() {
-                let agent_id = agent_id_for(&spokes[idx], idx);
-                let result = SpokeResult::Failed {
-                    reason: "spoke task did not produce a terminal result".into(),
-                };
-                store.insert(NodeResult::ingest(
-                    agent_id.clone(),
-                    spokes[idx].label.clone(),
-                    result.clone(),
-                    String::new(),
-                ));
-                spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
-                *slot = Some((agent_id, result));
-            }
-        }
-
-        // P6: emit WaveCancelled when the wave was cancelled (committed-exact:
-        // killed = count of Cancelled outcomes — the variant carries the count
-        // the 14.3a seam advertises).
-        if wave_cancel.is_cancelled() {
-            let killed = outcomes
-                .iter()
-                .filter(|o| matches!(o, Some((_, SpokeResult::Cancelled))))
-                .count();
-            self.emit(AppEvent::WaveCancelled {
-                coordinator: coordinator.clone(),
-                killed,
-            });
-        }
-
-        // Build the grounded synthesis floor (AC7) via the shared helper.
-        let synthesis = build_synthesis_floor(&store);
-
-        self.emit(AppEvent::SynthesisReady {
-            coordinator: coordinator.clone(),
-            honest_empty: synthesis.honest_empty,
-        });
-
-        let final_outcomes: Vec<(AgentId, SpokeResult)> = outcomes.into_iter().flatten().collect();
-
-        // Slots: AgentIds in dispatch order (positional — DD-B5 rerun uses
-        // replace_at_slot with a stable slot index, NOT remove+append).
-        let slots: Vec<AgentId> = final_outcomes.iter().map(|(id, _)| id.clone()).collect();
-        // PATCH-1 (review): finalize `store.order` to true dispatch order now
-        // that every spoke has terminated (insert above ran in completion
-        // order). Without this, `replace_at_slot`'s positional assert fires on
-        // any out-of-order completion — the production norm under concurrency.
-        store.reorder(slots.clone());
-
-        Ok(ForkJoinRun {
-            outcome: ForkJoinOutcome {
-                spokes: final_outcomes,
-                synthesis,
-            },
-            store: Arc::new(store),
-            spec_by_agent,
-            delta_store,
-            slots,
-            resolve_count: AtomicUsize::new(0),
-            // DN-3 (AC4) storm-cap: per-slot re-run counter, starts at 0.
-            rerun_counts: vec![0u8; n],
-            // 14.3a: default token; run_wave overrides with the real root.
-            wave_cancel: wave_cancel.clone(),
-            // D-C (AI-12.3): placeholder; run_wave assigns the real generation.
-            generation: 0,
-        })
+    /// Snapshot the retained wave run (Story 17.3d-RC-B / RC-1). `run_wave`
+    /// stores the live [`ForkJoinRun`] here; the front-door keystone reads it
+    /// back after observing `WaveRunReady` to assert patch/delta evidence the
+    /// domain `WaveHandle` trait deliberately does not expose.
+    #[cfg(test)]
+    pub(crate) async fn current_run(&self) -> Option<Arc<ForkJoinRun>> {
+        self.current_run.lock().await.clone()
     }
 
     /// Concrete single-spoke rerun (DD-B6). Borrows the prior [`ForkJoinRun`]
@@ -676,48 +983,113 @@ impl ForkJoinExecutor {
         // D-C (AI-12.3): RESERVE the slot atomically so the DN-3 cap bounds
         // DISPATCH (committed + in-flight reservations), not just retained
         // count. Released on every terminal path below + release_rerun_reservation.
-        {
+        let rerun_generation: u8 = {
             let mut reservations = self.rerun_reservations.lock().await;
             let committed = prev.inherent_rerun_count_for_slot(slot);
             let in_flight = reservations.get(&slot).copied().unwrap_or(0);
             if committed.saturating_add(in_flight) >= RERUN_SPOKE_CAP {
                 return Ok(RerunOutcome::Reverted { slot });
             }
+            // Allocate THIS reservation a distinct generation (committed + the
+            // reservations already in flight + 1). The reservation lock admits
+            // up to RERUN_SPOKE_CAP concurrent in-flight reruns for a slot, so
+            // deriving the identity from the stale `prev.rerun_counts[slot]`
+            // would make every concurrent rerun compute `committed + 1` and
+            // collide on the NodeTree duplicate-id guard. The per-reservation
+            // generation keeps each live rerun's node identity distinct.
+            let generation = committed.saturating_add(in_flight).saturating_add(1);
             *reservations.entry(slot).or_insert(0) += 1;
-        }
+            generation
+        };
         let old_id = &prev.slots[slot];
         let spec = prev
             .spec_by_agent
             .get(old_id)
             .ok_or_else(|| OrchestrationError::SpecNotFound(old_id.clone()))?
             .clone();
+        if !matches!(spec.role, SpokeRole::Leaf) {
+            self.release_rerun_reservation(slot).await;
+            return Err(OrchestrationError::NestedRerunUnsupported);
+        }
 
         // Mint a fresh gate token for the rerun spoke.
         let fresh_scope = AgentId::new();
         let gate_caps = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
-        let gate_token = match self.mint_gate_token(fresh_scope, gate_caps) {
-            Ok(t) => t,
-            Err(e) => {
+        let gate_token =
+            match self
+                .wave_ctx()
+                .mint_gate_token(&self.root_authority, fresh_scope, gate_caps)
+            {
+                Ok(token) => token,
+                Err(error) => {
+                    self.release_rerun_reservation(slot).await;
+                    return Err(error);
+                }
+            };
+
+        // [F2] Route the rerun through the SAME admission cascade as an initial
+        // dispatch — a hot failed-rerun loop must be churn-rate-refused, not
+        // exempt from flood-control. Admit-before-spawn; the permit is held
+        // across the dispatch and the spoke's run.
+        let admission_permit = match self
+            .supervisor
+            .admit(
+                &self.root_authority.scope,
+                &spec.label,
+                GATE_TOKEN_BUDGET,
+                AdmissionClass::LeafExecution,
+            )
+            .await
+        {
+            Ok(Some(permit)) => permit,
+            Ok(None) => {
+                let _ = self.authority.settle(&gate_token.id).await;
                 self.release_rerun_reservation(slot).await;
-                return Err(e);
+                return Ok(RerunOutcome::Reverted { slot });
+            }
+            Err(error) => {
+                let _ = self.authority.settle(&gate_token.id).await;
+                self.release_rerun_reservation(slot).await;
+                return Err(error);
             }
         };
 
         // Dispatch through the sealed chokepoint (AC3 — no new `.launch(`).
         // Story 14.3a (F3): use the provided cancel token (child of wave root),
         // NOT a fresh orphan `CancellationToken::new()`.
-        let launched = dispatch_one(&self.runner, &self.authority, &spec, gate_token, cancel).await;
+        let rerun_counter = rerun_generation;
+        let launched = dispatch_one(
+            &self.runner,
+            &self.authority,
+            &spec,
+            gate_token,
+            cancel,
+            prev.parent.as_deref(),
+            &prev.coordinator_id,
+            rerun_counter,
+        )
+        .await;
 
         let mut handle = match launched {
             Ok(h) => h,
-            // Dispatch failed → Reverted (prior untouched — DD-B6). Release reservation.
+            // Dispatch failed → Reverted (prior untouched — DD-B6). Refund the
+            // churn ticket (the spawn failed after admission) and release the
+            // rerun reservation.
             Err(_) => {
+                self.supervisor
+                    .refund_failed_spawn(&self.root_authority.scope, admission_permit.recorded_at())
+                    .await;
                 self.release_rerun_reservation(slot).await;
                 return Ok(RerunOutcome::Reverted { slot });
             }
         };
+        // Hold the admission permit for the spoke's full run — it occupies a
+        // running slot until terminal, released by RAII when this rerun ends.
+        let _admission_permit = admission_permit;
 
         let new_agent_id = handle.agent_id.clone();
+        let patch_authority = handle.authority;
+        let patch_provenance = handle.patch_provenance;
         let dispatched_at_ms = self.clock.wall_now_ms();
         let (terminal, raw, isolation_diff) =
             collect_terminal(&mut handle, self.clock.as_ref(), dispatched_at_ms).await;
@@ -731,9 +1103,118 @@ impl ForkJoinExecutor {
                     new_agent_id.clone(),
                     spec.label.clone(),
                     result.clone(),
-                    body,
+                    body.clone(),
                 );
                 next_store.replace_at_slot(slot, old_id, new_agent_id.clone(), new_node);
+
+                let mut next_artifacts = prev.artifact_by_spoke.clone();
+                let artifact_update: Result<(), OrchestrationError> = async {
+                    if let Some(artifact_store) = &self.artifact_store {
+                        let depends_on = spec
+                            .waits_for
+                            .iter()
+                            .map(|dependency| {
+                                next_artifacts
+                                    .get(dependency)
+                                    .map(|artifact| artifact.id.clone())
+                                    .ok_or_else(|| {
+                                        OrchestrationError::Internal(format!(
+                                            "rerun dependency {dependency} has no durable artifact"
+                                        ))
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let artifact_body = format!(
+                            "spoke_id: {}\nproducer: {new_agent_id}\nlabel: {}\nresult: {result:?}\n\n{}",
+                            spec.id, spec.label, body
+                        );
+                        let artifact = artifact_store
+                            .put(
+                                EvidenceArtifactDraft {
+                                    kind: ArtifactKind::Evidence,
+                                    producer: new_agent_id.clone(),
+                                    authority: self.root_authority.id,
+                                    provenance: Vec::new(),
+                                    depends_on,
+                                    review: None,
+                                    host: self
+                                        .artifact_host
+                                        .clone()
+                                        .expect("artifact store always has a host binding"),
+                                },
+                                artifact_body.as_bytes(),
+                            )
+                            .await
+                            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+                        self.wave_ctx().persist_room_event(RoomEvent::ArtifactCreated {
+                            artifact: artifact.clone(),
+                        })
+                        .await?;
+                        // [D6] Invalidate dependents through the DURABLE artifact
+                        // graph (`ArtifactRef.depends_on`) — the AC6 contract —
+                        // not the logical `SpokeSpec.waits_for` edges. BFS from
+                        // the OLD content-addressed `ArtifactId` the reran spoke
+                        // replaces, reusing the shared topo-traversal machinery
+                        // (`transitive_artifact_dependents`), deduped for free by
+                        // content-addressed id. Only true dependents drop; an
+                        // unrelated branch is untouched; a diamond join once.
+                        if let Some(old_artifact) = next_artifacts.get(&spec.id) {
+                            let changed = old_artifact.id.clone();
+                            let existing: Vec<crate::domain::models::ArtifactRef> =
+                                next_artifacts.values().cloned().collect();
+                            let stale: std::collections::HashSet<_> =
+                                transitive_artifact_dependents(&existing, &changed)?
+                                    .into_iter()
+                                    .collect();
+                            next_artifacts.retain(|_, artifact| !stale.contains(&artifact.id));
+                        }
+                        next_artifacts.insert(spec.id.clone(), artifact);
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = artifact_update {
+                    self.release_rerun_reservation(slot).await;
+                    return Err(error);
+                }
+                let mut next_patches = prev.patch_by_agent.clone();
+                // P6: the rerun supersedes the old producer's patch — drop it so
+                // a reviewer cannot merge stale work alongside the replacement.
+                next_patches.remove(old_id);
+                if let Some(diff) = isolation_diff.as_ref()
+                    && !diff.is_empty()
+                    && let Some(merge_back) = &self.patch_merge_back
+                {
+                    // P3/P9: per-spoke capture, never a rerun abort.
+                    let evidence = next_artifacts
+                        .get(&spec.id)
+                        .map(|artifact| artifact.id.clone());
+                    let captured = match self.artifact_host.clone() {
+                        Some(host) => merge_back
+                            .capture(
+                                new_agent_id.clone(),
+                                patch_authority,
+                                vec![patch_provenance],
+                                evidence.into_iter().collect(),
+                                host,
+                                diff,
+                            )
+                            .await
+                            .ok(),
+                        None => None,
+                    };
+                    match captured {
+                        Some(patch) => {
+                            next_patches.insert(new_agent_id.clone(), patch);
+                        }
+                        None => {
+                            tracing::warn!(
+                                %new_agent_id,
+                                "rerun patch capture skipped; delta stored without artifact"
+                            );
+                        }
+                    }
+                }
 
                 let mut next_spec = prev.spec_by_agent.clone();
                 next_spec.remove(old_id);
@@ -761,12 +1242,16 @@ impl ForkJoinExecutor {
                         }
                         m
                     },
+                    artifact_by_spoke: next_artifacts,
+                    patch_by_agent: next_patches,
                     slots: next_slots,
+                    parent: prev.parent.clone(),
+                    coordinator_id: prev.coordinator_id.clone(),
                     resolve_count: AtomicUsize::new(0),
                     rerun_counts: {
                         let mut counts = prev.rerun_counts.clone();
                         if counts.len() > slot {
-                            counts[slot] += 1;
+                            counts[slot] = rerun_generation;
                         }
                         counts
                     },
@@ -833,13 +1318,24 @@ pub struct ForkJoinRun {
     pub outcome: ForkJoinOutcome,
     /// Crate-private — `ResultStore` is `pub(crate)`, so the field is too.
     pub(crate) store: Arc<ResultStore>,
-    /// Story 14.5 — durable inert isolated-child deltas, keyed by AgentId.
-    /// Lock-free: ForkJoinRun is single-owner until wrapped in Arc after construction.
+    /// Durable isolated-child deltas keyed by AgentId. Story 17.3b consumes
+    /// each non-empty delta into the sibling `patch_by_agent` artifact map.
     pub(crate) delta_store: std::collections::HashMap<AgentId, crate::domain::models::UnifiedDiff>,
     /// Per-port spec map — `pub(crate)`.
     pub(crate) spec_by_agent: std::collections::HashMap<AgentId, SpokeSpec>,
+    /// Durable result handles keyed by stable logical spoke id. A rerun replaces
+    /// its own version and removes only transitive dependent handles.
+    pub(crate) artifact_by_spoke:
+        std::collections::HashMap<AgentId, crate::domain::models::ArtifactRef>,
+    /// Review-gated patch handles keyed by their isolated producer.
+    pub(crate) patch_by_agent:
+        std::collections::HashMap<AgentId, crate::domain::models::ArtifactRef>,
     /// Dispatch-ordered slot AgentIds — `pub(crate)`.
     pub(crate) slots: Vec<AgentId>,
+    /// Live coordinator handle retained so reruns preserve nested lineage.
+    pub(crate) parent: Option<Arc<TaskHandle>>,
+    /// Stable coordinator nonce used to derive every spoke identity in this wave.
+    pub(crate) coordinator_id: AgentId,
     resolve_count: AtomicUsize,
     /// Per-slot re-run counter (DN-3 storm-cap). Indexed by dispatch slot.
     pub(crate) rerun_counts: Vec<u8>,
@@ -982,6 +1478,1034 @@ struct SpokeOutcome {
     /// non-isolated spokes or failed dispatches). Collected into
     /// `ForkJoinRun::delta_store` — write-only in R1.
     isolation_diff: Option<crate::domain::models::UnifiedDiff>,
+    patch_authority: Option<crate::domain::models::CapabilityTokenId>,
+    patch_provenance: Option<crate::domain::models::ProvenanceTag>,
+    /// Nested child effects returned to the owning root collector.
+    nested_deltas: std::collections::HashMap<AgentId, crate::domain::models::UnifiedDiff>,
+    nested_patches: std::collections::HashMap<AgentId, ArtifactRef>,
+}
+
+impl WaveCtx {
+    /// Mint a per-spoke gate token from the wave's actual coordinator.
+    ///
+    /// Root waves debit root; nested waves debit the retained coordinator
+    /// token. The coordinator profile is sized for every child delegation,
+    /// every gate, and one synthesis reservation, so lineage and accounting
+    /// remain aligned.
+    fn mint_gate_token(
+        &self,
+        coordinator_authority: &CapabilityToken,
+        scope: AgentId,
+        capabilities: CapabilitySet,
+    ) -> Result<CapabilityToken, OrchestrationError> {
+        let req = DelegateRequest {
+            scope,
+            capabilities,
+            constraint: DelegateConstraint {
+                allowed: capabilities,
+                max_depth: 1,
+                max_subset: capabilities,
+            },
+            budget: GATE_TOKEN_BUDGET,
+            not_after: None,
+            uses_limit: Some(1),
+        };
+        self.ledger
+            .delegate(coordinator_authority, req)
+            .map_err(|e| OrchestrationError::SpawnRefused(e.to_string()))
+    }
+
+    /// Admit root coordination without a handle, or a live non-root
+    /// coordinator whose exact token can still delegate the requested wave.
+    async fn validate_coordinator(
+        &self,
+        request: &ForkJoinRequest,
+        parent: Option<&TaskHandle>,
+    ) -> Result<CapabilityToken, OrchestrationError> {
+        let required = CapabilityToken::r1_coordinator(AgentId::new(), request.spokes.len())
+            .map_err(map_authority_construction_error)?
+            .budget;
+        if request.coordinator == self.root_authority.scope {
+            if parent.is_some() {
+                return Err(OrchestrationError::SpawnRefused(
+                    "root coordinator must not carry a parent handle".into(),
+                ));
+            }
+            return Ok(self.root_authority.clone());
+        }
+
+        let parent = parent
+            .ok_or_else(|| OrchestrationError::HostBoundUnavailable(request.coordinator.clone()))?;
+        let token = parent
+            .authority_token
+            .as_ref()
+            .ok_or_else(|| OrchestrationError::HostBoundUnavailable(request.coordinator.clone()))?;
+        if parent.agent_id != request.coordinator
+            || token.scope != request.coordinator
+            || token.id != parent.authority
+        {
+            return Err(OrchestrationError::SpawnRefused(
+                "coordinator identity does not match the supplied parent handle".into(),
+            ));
+        }
+        self.ledger
+            .validate_delegation(token, &CapabilityFlag::Spawn, &request.coordinator)
+            .map_err(|error| OrchestrationError::SpawnRefused(error.to_string()))?;
+
+        let depth = self
+            .ledger
+            .depth_of(&token.id)
+            .map_err(|error| OrchestrationError::SpawnRefused(error.to_string()))?;
+        if depth >= token.constraint.max_depth {
+            return Err(OrchestrationError::SpawnRefused(format!(
+                "max depth exceeded: limit {}, attempted {}",
+                token.constraint.max_depth,
+                depth + 1
+            )));
+        }
+
+        let available = self
+            .ledger
+            .available(&token.id)
+            .map_err(|error| OrchestrationError::SpawnRefused(error.to_string()))?;
+        if !required.is_within(available) {
+            return Err(OrchestrationError::SpawnRefused(
+                AuthorityError::BudgetExhausted.to_string(),
+            ));
+        }
+        Ok(token.clone())
+    }
+
+    /// Emit a wave lifecycle event (the 14.3a seam — purely additive variants).
+    fn emit(&self, event: AppEvent) {
+        let _ = self.event_bus.emit_domain(event);
+    }
+
+    async fn persist_room_event(&self, event: RoomEvent) -> Result<(), OrchestrationError> {
+        let Some(journal) = &self.journal else {
+            return Ok(());
+        };
+        journal
+            .append_room(event.clone())
+            .await
+            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+        self.emit(AppEvent::DomainEvent(event.into()));
+        Ok(())
+    }
+
+    /// Validate and partition a fork-join request before any child dispatch.
+    fn validate_request(
+        &self,
+        request: &ForkJoinRequest,
+    ) -> Result<Vec<Vec<usize>>, OrchestrationError> {
+        validate_nested_request(request)?;
+        let graph = dag::DependencyGraph::new(
+            request
+                .spokes
+                .iter()
+                .map(|spoke| (spoke.id.clone(), spoke.waits_for.clone())),
+        )
+        .map_err(|error| match error {
+            dag::GraphError::Duplicate(id) => OrchestrationError::DuplicateSpoke(id),
+            dag::GraphError::Missing { node, dependency } => {
+                OrchestrationError::MissingDependency {
+                    spoke: node,
+                    dependency,
+                }
+            }
+            dag::GraphError::Cycle => OrchestrationError::DependencyCycle,
+        })?;
+        let waves = graph
+            .topological_waves()
+            .map_err(|_| OrchestrationError::DependencyCycle)?;
+        let index_by_id = request
+            .spokes
+            .iter()
+            .enumerate()
+            .map(|(index, spoke)| (spoke.id.clone(), index))
+            .collect::<std::collections::HashMap<_, _>>();
+        Ok(waves
+            .into_iter()
+            .map(|wave| {
+                let mut indices = wave
+                    .into_iter()
+                    .map(|id| index_by_id[&id])
+                    .collect::<Vec<_>>();
+                indices.sort_unstable();
+                indices
+            })
+            .collect())
+    }
+
+    /// Shared wave collector used by both root and nested coordination.
+    /// `resume` is `Some` ONLY on the 17-2d-b composition-root resume path:
+    /// it pins the original `wave_nonce` (identity recoverable-by-construction
+    /// from the durable parked ids) and pre-seeds done-spoke results +
+    /// artifact handles so completed spokes are never re-executed.
+    fn run_wave_body(
+        &self,
+        request: ForkJoinRequest,
+        wave_cancel: CancellationToken,
+        parent: Option<TaskHandle>,
+        resume: Option<ResumeSeed>,
+    ) -> futures::future::BoxFuture<'static, Result<ForkJoinRun, OrchestrationError>> {
+        let ctx = self.clone();
+        Box::pin(async move {
+            let wave_ctx = ctx.clone();
+            // 17.2d-b (AC-b3): destructure the resume seed BEFORE any use —
+            // the pinned nonce, done-spoke results, and pre-seeded artifact
+            // handles are consumed at distinct points below.
+            let (resume_nonce, seeded_results, seeded_artifacts, dependency_lineage) = match resume
+            {
+                Some(seed) => (
+                    Some(seed.wave_nonce),
+                    seed.seeded,
+                    seed.seeded_artifacts,
+                    seed.dependency_lineage,
+                ),
+                None => (
+                    None,
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::new(),
+                ),
+            };
+            let topological_waves = ctx.validate_request(&request)?;
+            let n = request.spokes.len();
+            let needed = checked_wave_budget(n)?;
+            let parent = parent.map(Arc::new);
+            let coordinator_authority = ctx
+                .validate_coordinator(&request, parent.as_deref())
+                .await?;
+
+            let spokes = request.spokes.clone();
+            let coordinator = request.coordinator.clone();
+            // Per-wave identity nonce (AC-a1 collision-safety, AC-a2
+            // unguessability). The ROOT wave mints a fresh, unguessable id so
+            // two concurrent root fan-outs reusing a stable `SpokeSpec.id`
+            // derive DISTINCT node identities (the production TUI coordinator
+            // is the constant `AgentId::root()`, which supplies no entropy). A
+            // NESTED wave reuses its launched coordinator handle's id — already
+            // a distinct nonce-qualified value — so grandchildren stay
+            // deterministic functions of their live coordinator. `coordinator`
+            // (request.coordinator, the root-authority scope) is UNCHANGED and
+            // still backs admission + events.
+            let wave_nonce: AgentId = match (&parent, &resume_nonce) {
+                (Some(handle), _) => handle.agent_id.clone(),
+                (None, Some(pinned)) => pinned.clone(),
+                (None, None) => AgentId::new(),
+            };
+            if spokes.iter().any(|spoke| !spoke.waits_for.is_empty())
+                && ctx.artifact_store.is_none()
+            {
+                return Err(OrchestrationError::Internal(
+                    "dependency scheduling requires a durable artifact store".into(),
+                ));
+            }
+            // [F7] Collect dependency-bearing spokes now, but DEFER parking until
+            // after the budget/mint preflight below — registering readiness before
+            // an early refusal orphans the registration in the shared supervisor.
+            let parked_nodes: Vec<AgentId> = spokes
+                .iter()
+                .filter(|spoke| !spoke.waits_for.is_empty())
+                .map(|spoke| spoke.id.clone())
+                .collect();
+
+            // ── Reserve-the-HERO + aggregate gate-token cost (AC10, P5/P11). ──
+            // Fan-out may mint up to `n` gate tokens, each `GATE_TOKEN_BUDGET`; a
+            // coordinator near its ceiling must not pass a single-dimension check
+            // then fail mid-mint. The reserve + the aggregate gate reservation are
+            // checked TOGETHER (AND, not OR) so draining either dimension refuses.
+            let available = ctx
+                .ledger
+                .available(&coordinator_authority.id)
+                .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
+            if available.requests < needed.requests || available.cost_micros < needed.cost_micros {
+                // AC10 budget-ceiling auto-pause: typed (not generic Internal) so
+                // the caller / WaveStrip can surface `paused`. Never silent death;
+                // the reserve is untouched (we have not debited it yet).
+                return Err(OrchestrationError::BudgetPaused { available, needed });
+            }
+
+            let concurrency = request.concurrency.clamp(1, n).min(FORK_JOIN_SPAWN_CAP);
+
+            // P2: pre-mint ALL gate tokens up front. If a mint fails on spoke k,
+            // the already-minted tokens (0..k) are refunded — no ledger leak from
+            // a partial mint failure stranding reservations.
+            let mut gate_tokens: Vec<CapabilityToken> = Vec::with_capacity(n);
+            for _ in &spokes {
+                let scope = AgentId::new();
+                let gate_caps = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
+                match ctx.mint_gate_token(&coordinator_authority, scope, gate_caps) {
+                    Ok(token) => gate_tokens.push(token),
+                    Err(error) => {
+                        for token in gate_tokens {
+                            let _ = ctx.authority.settle(&token.id).await;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            let mut gate_tokens = gate_tokens.into_iter().map(Some).collect::<Vec<_>>();
+            ctx.emit(AppEvent::ForkJoinStarted {
+                coordinator: coordinator.clone(),
+                spoke_count: n,
+            });
+            ctx.ledger
+                .debit_budget(&coordinator_authority.id, SYNTHESIS_RESERVE)
+                .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+            // [17-2c / D4] Write-ahead: the reserve debit's conservation head is
+            // flushed to the journal BEFORE any spoke is dispatched (the observable
+            // side-effect), so a crash cannot resurrect the reserved budget.
+            ctx.ledger
+                .journal_head()
+                .await
+                .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+
+            // [F7] Park downstream nodes now that every early-exit gate (budget,
+            // mint, reserve) has passed — a refusal above can no longer orphan a
+            // readiness registration.
+            // [17-2d-b / AC-b1] ROOT waves park DURABLY: each dependency-bearing
+            // spoke is registered as a `Suspended` node under its full
+            // nonce-qualified id, and the checkpoint + `NodeRegistered` + the
+            // `Parked` record (SpokeSpec relaunch plan + readiness edges) land as
+            // ONE atomic journal batch — identity recoverable-by-construction,
+            // no orphaned readiness on a partial write. Nested waves keep the
+            // in-memory park (parent rehydration is the deferred follow-up).
+            let mut durable_parked: Vec<(AgentId, AgentId)> = Vec::new();
+            for (idx, spoke) in spokes.iter().enumerate() {
+                if spoke.waits_for.is_empty() {
+                    continue;
+                }
+                if parent.is_none() {
+                    let node_id = nonce_qualified(&wave_nonce, &spoke.id, 0);
+                    let gate_token = gate_tokens[idx].as_ref().ok_or_else(|| {
+                        OrchestrationError::Internal(
+                            "durable park requires the pre-minted gate token".into(),
+                        )
+                    })?;
+                    let checkpoint = crate::domain::models::NodeCheckpoint {
+                        id: node_id.clone(),
+                        token: gate_token.id,
+                        parent: None,
+                        ownership: crate::domain::models::subagent_view::WireOwnershipKind::Owned,
+                        state: NodeState::Suspended,
+                        origin: crate::domain::models::NodeOrigin::Subagent,
+                        foreground: true,
+                        effective_model: spoke.effective_model.clone(),
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        turns: 0,
+                        subagent_type: spoke.label.clone(),
+                        spawned_at: ctx.clock.wall_now_ms(),
+                        depth: 1,
+                        tainted: false,
+                        waiting_since: None,
+                        wait_reason: Some(
+                            crate::domain::models::WaitReason::AwaitingUpstreamArtifact,
+                        ),
+                    };
+                    let park_result = ctx
+                        .supervisor
+                        .park_on_dependencies_durable(
+                            checkpoint,
+                            spoke.clone(),
+                            spoke.waits_for.clone(),
+                            concurrency,
+                            spoke.id.clone(),
+                        )
+                        .await;
+                    if let Err(error) = park_result {
+                        ctx.supervisor
+                            .clear_parked(durable_parked.iter().map(|(spoke, _)| spoke))
+                            .await;
+                        if let Err(cleanup_error) = ctx
+                            .supervisor
+                            .cancel_durable_parks(durable_parked.iter().map(|(_, node)| node))
+                            .await
+                        {
+                            tracing::error!(
+                                %cleanup_error,
+                                "failed to terminalize earlier durable parks after park failure"
+                            );
+                        }
+                        for token in gate_tokens.iter().flatten() {
+                            let _ = ctx.authority.settle(&token.id).await;
+                        }
+                        if let Err(refund_error) = ctx
+                            .ledger
+                            .refund_budget_debit(&coordinator_authority.id, SYNTHESIS_RESERVE)
+                        {
+                            tracing::error!(
+                                %refund_error,
+                                "failed to refund synthesis reserve after durable park failure"
+                            );
+                        } else if let Err(journal_error) = ctx.ledger.journal_head().await {
+                            tracing::error!(
+                                %journal_error,
+                                "failed to journal synthesis-reserve rollback"
+                            );
+                        }
+                        return Err(error);
+                    }
+                    durable_parked.push((spoke.id.clone(), node_id));
+                } else {
+                    ctx.supervisor
+                        .park_on_dependencies(spoke.id.clone(), spoke.waits_for.clone())
+                        .await;
+                }
+            }
+
+            let mut store = ResultStore::new();
+            let mut spec_by_agent = std::collections::HashMap::<AgentId, SpokeSpec>::new();
+            let mut outcomes: Vec<Option<(AgentId, SpokeResult)>> = (0..n).map(|_| None).collect();
+            let mut delta_store =
+                std::collections::HashMap::<AgentId, crate::domain::models::UnifiedDiff>::new();
+            let mut artifact_by_spoke =
+                std::collections::HashMap::<AgentId, crate::domain::models::ArtifactRef>::new();
+            // 17.2d-b (AC-b3): pre-seed durable artifact handles for spokes
+            // completed BEFORE the crash — a revived spoke waiting only on
+            // done producers must never block on a readiness signal that
+            // cannot fire again (the producer's `artifact_created` already
+            // fired on the dead host).
+            artifact_by_spoke.extend(seeded_artifacts);
+            let mut patch_by_agent =
+                std::collections::HashMap::<AgentId, crate::domain::models::ArtifactRef>::new();
+
+            'waves: for wave_indices in &topological_waves {
+                if wave_cancel.is_cancelled() {
+                    break;
+                }
+                for &idx in wave_indices {
+                    let dependencies = dependency_lineage
+                        .get(&spokes[idx].id)
+                        .unwrap_or(&spokes[idx].waits_for);
+                    if dependencies.is_empty() {
+                        continue;
+                    }
+                    // Resumed terminal producers are already present in the
+                    // durable artifact map; live producers still wake through
+                    // the supervisor readiness path.
+                    let deps_ready = dependencies
+                        .iter()
+                        .all(|dependency| artifact_by_spoke.contains_key(dependency));
+                    if !deps_ready
+                        && !ctx
+                            .supervisor
+                            .wait_for_artifact(&spokes[idx].id, wave_cancel.clone())
+                            .await
+                    {
+                        break 'waves;
+                    }
+                    #[cfg(any(test, feature = "test-instrumentation"))]
+                    record_sibling_triggered_transition();
+                    let artifact_store = ctx.artifact_store.as_ref().expect("validated above");
+                    for dependency in dependencies {
+                        let handle = artifact_by_spoke.get(dependency).ok_or_else(|| {
+                            OrchestrationError::Internal(format!(
+                                "terminal dependency {dependency} has no durable artifact handle"
+                            ))
+                        })?;
+                        artifact_store
+                            .head(&handle.id)
+                            .await
+                            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+                    }
+                }
+                let wave_id = WaveId::new();
+                ctx.persist_room_event(RoomEvent::WaveStarted {
+                    wave: wave_id.clone(),
+                    coordinator: coordinator.clone(),
+                    spokes: wave_indices
+                        .iter()
+                        .filter_map(|index| gate_tokens[*index].as_ref())
+                        .map(|token| token.scope.clone())
+                        .collect(),
+                })
+                .await?;
+
+                let wave_concurrency = concurrency.min(wave_indices.len()).max(1);
+                let admission = Arc::new(
+                    ctx.supervisor
+                        .for_wave(wave_concurrency, FORK_JOIN_SPAWN_CAP),
+                );
+                let (result_tx, mut result_rx) =
+                    tokio::sync::mpsc::channel::<SpokeOutcome>(wave_indices.len());
+                let mut join_set = tokio::task::JoinSet::new();
+                for &idx in wave_indices {
+                    let spoke = spokes[idx].clone();
+                    let gate_token = gate_tokens[idx]
+                        .take()
+                        .expect("validated wave dispatches each spoke exactly once");
+                    let ctx = wave_ctx.clone();
+                    let wave_cancel_child = wave_cancel.clone();
+                    let admission = Arc::clone(&admission);
+                    let admission_coordinator = coordinator.clone();
+                    let wave_nonce_for_dispatch = wave_nonce.clone();
+                    let tx = result_tx.clone();
+                    let clock = Arc::clone(&ctx.clock);
+                    let parent = parent.clone();
+                    join_set.spawn(async move {
+                        let admission_class = match &spoke.role {
+                            SpokeRole::Leaf => AdmissionClass::LeafExecution,
+                            SpokeRole::Coordinator { .. } => AdmissionClass::Delegation,
+                        };
+                        let admitted = tokio::select! {
+                            _ = wave_cancel_child.cancelled() => {
+                                let _ = ctx.authority.settle(&gate_token.id).await;
+                                let _ = tx.send(SpokeOutcome {
+                                    idx,
+                                    agent_id: agent_id_for(&spoke, idx),
+                                    label: spoke.label.clone(),
+                                    result: SpokeResult::Cancelled,
+                                    body: String::new(),
+                                    isolation_diff: None,
+                                    patch_authority: None,
+                                    patch_provenance: None,
+                                    nested_deltas: std::collections::HashMap::new(),
+                                    nested_patches: std::collections::HashMap::new(),
+                                }).await;
+                                return;
+                            }
+                            result = admission.admit(
+                                &admission_coordinator,
+                                &spoke.label,
+                                GATE_TOKEN_BUDGET,
+                                admission_class,
+                            ) => result,
+                        };
+                        let _permit = match admitted {
+                            Ok(Some(permit)) => permit,
+                            Ok(None) => {
+                                let _ = ctx.authority.settle(&gate_token.id).await;
+                                let _ = tx
+                                    .send(failed_outcome(idx, &spoke, "admission deferred"))
+                                    .await;
+                                return;
+                            }
+                            Err(error) => {
+                                let _ = ctx.authority.settle(&gate_token.id).await;
+                                let _ = tx
+                                    .send(failed_outcome(idx, &spoke, &sanitize_failure(&error)))
+                                    .await;
+                                return;
+                            }
+                        };
+                        let dispatched_at_ms = clock.wall_now_ms();
+                        let launched = dispatch_one(
+                            &ctx.runner,
+                            &ctx.authority,
+                            &spoke,
+                            gate_token,
+                            wave_cancel_child.clone(),
+                            parent.as_deref(),
+                            &wave_nonce_for_dispatch,
+                            0,
+                        )
+                        .await;
+                        let (
+                            agent_id,
+                            label,
+                            result,
+                            body,
+                            isolation_diff,
+                            patch_authority,
+                            patch_provenance,
+                            nested_deltas,
+                            nested_patches,
+                        ) = match launched {
+                            Ok(handle) if matches!(&spoke.role, SpokeRole::Coordinator { .. }) => {
+                                let agent_id = handle.agent_id.clone();
+                                let patch_authority = handle.authority;
+                                let patch_provenance = handle.patch_provenance;
+                                let (grandchildren, concurrency, wait_policy) = match &spoke.role {
+                                    SpokeRole::Coordinator {
+                                        grandchildren,
+                                        concurrency,
+                                        wait_policy,
+                                    } => (grandchildren.to_vec(), concurrency, wait_policy),
+                                    SpokeRole::Leaf => unreachable!("guarded coordinator branch"),
+                                };
+                                let nested_request = ForkJoinRequest {
+                                    coordinator: agent_id.clone(),
+                                    concurrency: *concurrency,
+                                    spokes: grandchildren,
+                                    wait_policy: *wait_policy,
+                                };
+                                match Box::pin(ctx.run_wave_body(
+                                    nested_request,
+                                    wave_cancel_child.child_token(),
+                                    Some(handle),
+                                    None,
+                                ))
+                                .await
+                                {
+                                    Ok(mut nested_run) => {
+                                        let body = nested_run.outcome.synthesis.summary.clone();
+                                        let result = if wave_cancel_child.is_cancelled() {
+                                            SpokeResult::Cancelled
+                                        } else if nested_run.outcome.spokes.iter().any(
+                                            |(_, outcome)| {
+                                                matches!(outcome, SpokeResult::Failed { .. })
+                                            },
+                                        ) {
+                                            SpokeResult::Failed {
+                                                reason: "nested wave failed".into(),
+                                            }
+                                        } else if nested_run.outcome.synthesis.honest_empty {
+                                            SpokeResult::Empty
+                                        } else {
+                                            SpokeResult::Completed {
+                                                summary: body.clone(),
+                                            }
+                                        };
+                                        let nested_deltas =
+                                            std::mem::take(&mut nested_run.delta_store);
+                                        let nested_patches =
+                                            std::mem::take(&mut nested_run.patch_by_agent);
+                                        // R12: the pure coordinator is a delegation
+                                        // carrier, not a patch producer. Its clone may
+                                        // contain test-seeded in-progress state read by
+                                        // grandchildren, but only grandchild diffs are
+                                        // surfaced for owner review.
+                                        if let Some(mut coordinator_handle) = nested_run
+                                            .parent
+                                            .take()
+                                            .and_then(|parent| Arc::try_unwrap(parent).ok())
+                                        {
+                                            coordinator_handle.cancel.cancel();
+                                            let _ = collect_terminal(
+                                                &mut coordinator_handle,
+                                                clock.as_ref(),
+                                                clock.wall_now_ms(),
+                                            )
+                                            .await;
+                                        }
+                                        (
+                                            agent_id,
+                                            spoke.label.clone(),
+                                            result,
+                                            body,
+                                            None,
+                                            Some(patch_authority),
+                                            Some(patch_provenance),
+                                            nested_deltas,
+                                            nested_patches,
+                                        )
+                                    }
+                                    Err(error) => (
+                                        agent_id,
+                                        spoke.label.clone(),
+                                        SpokeResult::Failed {
+                                            reason: sanitize_failure(&error),
+                                        },
+                                        String::new(),
+                                        None,
+                                        Some(patch_authority),
+                                        Some(patch_provenance),
+                                        std::collections::HashMap::new(),
+                                        std::collections::HashMap::new(),
+                                    ),
+                                }
+                            }
+                            Ok(mut handle) => {
+                                let agent_id = handle.agent_id.clone();
+                                let label = spoke.label.clone();
+                                let patch_authority = handle.authority;
+                                let patch_provenance = handle.patch_provenance;
+                                let (terminal, raw, isolation_diff) =
+                                    collect_terminal(&mut handle, clock.as_ref(), dispatched_at_ms)
+                                        .await;
+                                let (result, body) =
+                                    structured_result(&terminal, raw.as_deref(), &label);
+                                (
+                                    agent_id,
+                                    label,
+                                    result,
+                                    body,
+                                    isolation_diff,
+                                    Some(patch_authority),
+                                    Some(patch_provenance),
+                                    std::collections::HashMap::new(),
+                                    std::collections::HashMap::new(),
+                                )
+                            }
+                            Err(error) => {
+                                admission
+                                    .refund_failed_spawn(
+                                        &admission_coordinator,
+                                        _permit.recorded_at(),
+                                    )
+                                    .await;
+                                (
+                                    agent_id_for(&spoke, idx),
+                                    spoke.label.clone(),
+                                    SpokeResult::Failed {
+                                        reason: sanitize_failure(&error),
+                                    },
+                                    String::new(),
+                                    None,
+                                    None,
+                                    None,
+                                    std::collections::HashMap::new(),
+                                    std::collections::HashMap::new(),
+                                )
+                            }
+                        };
+                        let _ = tx
+                            .send(SpokeOutcome {
+                                idx,
+                                agent_id,
+                                label,
+                                result,
+                                body,
+                                isolation_diff,
+                                patch_authority,
+                                patch_provenance,
+                                nested_deltas,
+                                nested_patches,
+                            })
+                            .await;
+                    });
+                }
+                drop(result_tx);
+                while let Some(outcome) = result_rx.recv().await {
+                    let SpokeOutcome {
+                        idx,
+                        agent_id,
+                        label,
+                        result,
+                        body,
+                        isolation_diff,
+                        patch_authority,
+                        patch_provenance,
+                        nested_deltas,
+                        nested_patches,
+                    } = outcome;
+                    delta_store.extend(nested_deltas);
+                    patch_by_agent.extend(nested_patches);
+                    if let Some(artifact_store) = &ctx.artifact_store {
+                        let dependencies = dependency_lineage
+                            .get(&spokes[idx].id)
+                            .unwrap_or(&spokes[idx].waits_for);
+                        let depends_on = dependencies
+                            .iter()
+                            .map(|dependency| {
+                                artifact_by_spoke
+                                    .get(dependency)
+                                    .map(|artifact| artifact.id.clone())
+                                    .ok_or_else(|| {
+                                        OrchestrationError::Internal(format!(
+                                            "dependency {dependency} has no durable artifact handle"
+                                        ))
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let artifact_body = format!(
+                            "spoke_id: {}\nproducer: {agent_id}\nlabel: {label}\nresult: {result:?}\n\n{body}",
+                            spokes[idx].id
+                        );
+                        let artifact = artifact_store
+                            .put(
+                                EvidenceArtifactDraft {
+                                    kind: ArtifactKind::Evidence,
+                                    producer: agent_id.clone(),
+                                    authority: coordinator_authority.id,
+                                    provenance: Vec::new(),
+                                    depends_on,
+                                    review: None,
+                                    host: ctx
+                                        .artifact_host
+                                        .clone()
+                                        .expect("artifact store always has a host binding"),
+                                },
+                                artifact_body.as_bytes(),
+                            )
+                            .await
+                            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+                        ctx.persist_room_event(RoomEvent::ArtifactCreated {
+                            artifact: artifact.clone(),
+                        })
+                        .await?;
+                        artifact_by_spoke.insert(spokes[idx].id.clone(), artifact);
+                        ctx.supervisor.artifact_created(&spokes[idx].id).await;
+                    }
+                    store.insert(NodeResult::ingest(
+                        agent_id.clone(),
+                        label.clone(),
+                        result.clone(),
+                        body,
+                    ));
+                    outcomes[idx] = Some((agent_id.clone(), result.clone()));
+                    spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
+                    if let Some(diff) = isolation_diff {
+                        if !diff.is_empty()
+                            && let Some(merge_back) = &ctx.patch_merge_back
+                        {
+                            // P3/P9: a missing piece or a capture failure is a
+                            // per-spoke outcome, never a wave-level abort — the
+                            // delta is still stored and detached siblings keep
+                            // running. No `expect`/`?` that could abort the wave.
+                            let evidence = artifact_by_spoke
+                                .get(&spokes[idx].id)
+                                .map(|artifact| artifact.id.clone());
+                            let captured = match (
+                                patch_authority,
+                                patch_provenance,
+                                ctx.artifact_host.clone(),
+                            ) {
+                                (Some(authority), Some(provenance), Some(host)) => merge_back
+                                    .capture(
+                                        agent_id.clone(),
+                                        authority,
+                                        vec![provenance],
+                                        evidence.into_iter().collect(),
+                                        host,
+                                        &diff,
+                                    )
+                                    .await
+                                    .ok(),
+                                _ => None,
+                            };
+                            match captured {
+                                Some(patch) => {
+                                    // Story 17.3c (D1): preserve the pre-isolation
+                                    // direct-write contract for owner-authorized
+                                    // fanout edits. When the owner has pre-approved
+                                    // user-originated merge-back, auto-apply through
+                                    // the journal-authoritative gate so a successful
+                                    // /fanout's edits reach the workspace. Otherwise
+                                    // the patch stays Pending + durable (captured
+                                    // above; surfaced via PatchCaptured) for review.
+                                    if ctx.merge_back_policy.auto_approve_user_originated {
+                                        let mode = ctx
+                                            .permission_source
+                                            .as_ref()
+                                            .map(|source| source.current_mode())
+                                            .unwrap_or(PermissionMode::Plan);
+                                        match merge_back
+                                            .apply(
+                                                &patch,
+                                                OwnershipKind::Owned,
+                                                mode,
+                                                &ctx.merge_back_policy,
+                                            )
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                ctx.emit(AppEvent::SystemNotice {
+                                                conversation_id: None,
+                                                level: crate::domain::models::NoticeLevel::Info,
+                                                message: format!(
+                                                    "Applied fan-out edits from {} to the workspace.",
+                                                    spokes[idx].label
+                                                ),
+                                            });
+                                            }
+                                            Err(MergeBackError::ReviewRequired) => {
+                                                // Not owner-approvable under the
+                                                // current policy/mode (e.g. ctx-
+                                                // originated) — leave it Pending.
+                                            }
+                                            Err(apply_err) => {
+                                                // A real apply failure (conflict/git/
+                                                // malformed) must NEVER be silent:
+                                                // mark the spoke visibly unsuccessful
+                                                // and keep the patch Pending so the
+                                                // edits stay recoverable for review.
+                                                ctx.emit(AppEvent::SystemNotice {
+                                                conversation_id: None,
+                                                level: crate::domain::models::NoticeLevel::Warning,
+                                                message: format!(
+                                                    "Fan-out edits from {} could not be applied ({apply_err}); retained for review.",
+                                                    spokes[idx].label
+                                                ),
+                                            });
+                                                outcomes[idx] = Some((
+                                                    agent_id.clone(),
+                                                    SpokeResult::Failed {
+                                                        reason: format!(
+                                                            "isolated patch could not be applied: {apply_err}"
+                                                        ),
+                                                    },
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    patch_by_agent.insert(agent_id.clone(), patch);
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        %agent_id,
+                                        "patch capture skipped (missing metadata or capture error); delta stored without artifact"
+                                    );
+                                }
+                            }
+                        }
+                        delta_store.insert(agent_id.clone(), diff);
+                    }
+                    ctx.emit(AppEvent::SpokeCompleted { agent_id, label });
+                }
+                while join_set.join_next().await.is_some() {}
+
+                // [17-2c / D7 / R10] Deterministic whole-fan-out cancel. Once this
+                // wave's spoke tasks have joined, if the wave was aborted drive
+                // every LAUNCHED spoke's subtree terminal-`Cancelled` + deregistered
+                // through the supervisor seam (R6: executor → `abort_wave` → port,
+                // NEVER executor → port). The cooperative wave-cancel already freed
+                // capacity by cancel-by-drop; this makes the running subtree terminal
+                // deterministic + awaited, so no running child (or transitive
+                // descendant) is left non-terminal or registered after the abort.
+                // `NotFound` (never launched, or already reaped by the runner bridge)
+                // is benign — that node is already terminal-journaled.
+                if wave_cancel.is_cancelled() {
+                    let running_roots: Vec<AgentId> = wave_indices
+                        .iter()
+                        .filter_map(|&index| {
+                            outcomes[index]
+                                .as_ref()
+                                .map(|(agent_id, _)| agent_id.clone())
+                        })
+                        .collect();
+                    ctx.supervisor
+                        .abort_wave(
+                            &wave_cancel,
+                            running_roots,
+                            std::time::Duration::from_secs(5),
+                        )
+                        .await;
+                }
+
+                let wave_outcome = if wave_cancel.is_cancelled() {
+                    WaveOutcome::Cancelled
+                } else if wave_indices
+                    .iter()
+                    .any(|index| matches!(outcomes[*index], Some((_, SpokeResult::Failed { .. }))))
+                {
+                    WaveOutcome::Failed
+                } else {
+                    WaveOutcome::Completed
+                };
+                ctx.persist_room_event(RoomEvent::WaveCompleted {
+                    wave: wave_id,
+                    outcome: wave_outcome,
+                })
+                .await?;
+            }
+
+            // Clear readiness and terminalize any durable park that never
+            // reached launch. Adopted nodes are already Unparked and removed,
+            // so the node seam treats them as idempotent no-ops.
+            ctx.supervisor.clear_parked(parked_nodes.iter()).await;
+            ctx.supervisor
+                .cancel_durable_parks(durable_parked.iter().map(|(_, node)| node))
+                .await?;
+
+            for token in gate_tokens.into_iter().flatten() {
+                let _ = ctx.authority.settle(&token.id).await;
+            }
+            for (idx, slot) in outcomes.iter_mut().enumerate() {
+                if slot.is_none() {
+                    let agent_id = agent_id_for(&spokes[idx], idx);
+                    let result = if wave_cancel.is_cancelled() {
+                        SpokeResult::Cancelled
+                    } else {
+                        SpokeResult::Failed {
+                            reason: "spoke task did not produce a terminal result".into(),
+                        }
+                    };
+                    store.insert(NodeResult::ingest(
+                        agent_id.clone(),
+                        spokes[idx].label.clone(),
+                        result.clone(),
+                        String::new(),
+                    ));
+                    spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
+                    *slot = Some((agent_id, result));
+                }
+            }
+
+            // P6: emit WaveCancelled when the wave was cancelled (committed-exact:
+            // killed = count of Cancelled outcomes — the variant carries the count
+            // the 14.3a seam advertises).
+            if wave_cancel.is_cancelled() {
+                let killed = outcomes
+                    .iter()
+                    .filter(|o| matches!(o, Some((_, SpokeResult::Cancelled))))
+                    .count();
+                ctx.emit(AppEvent::WaveCancelled {
+                    coordinator: coordinator.clone(),
+                    killed,
+                });
+            }
+
+            // 17.2d-b (AC-b3): seed the ResultStore with spokes completed
+            // BEFORE the crash (terminal checkpoint + durable artifact body) —
+            // they are NEVER re-executed, but the synthesis floor must still
+            // count their signal (no double artifacts, no double debit).
+            for seeded in &seeded_results {
+                store.insert(NodeResult::ingest(
+                    seeded.agent_id.clone(),
+                    seeded.label.clone(),
+                    seeded.result.clone(),
+                    seeded.body.clone(),
+                ));
+            }
+            // Build the grounded synthesis floor (AC7) via the shared helper.
+            let synthesis = build_synthesis_floor(&store);
+
+            ctx.emit(AppEvent::SynthesisReady {
+                coordinator: coordinator.clone(),
+                honest_empty: synthesis.honest_empty,
+            });
+
+            let final_outcomes: Vec<(AgentId, SpokeResult)> = seeded_results
+                .iter()
+                .map(|seeded| {
+                    let result = store
+                        .get(&seeded.agent_id)
+                        .expect("seeded result was inserted")
+                        .to_spoke_result();
+                    (seeded.agent_id.clone(), result)
+                })
+                .chain(outcomes.into_iter().flatten())
+                .collect();
+
+            // Slots: AgentIds in dispatch order (positional — DD-B5 rerun uses
+            // replace_at_slot with a stable slot index, NOT remove+append).
+            let slots: Vec<AgentId> = final_outcomes.iter().map(|(id, _)| id.clone()).collect();
+            // PATCH-1 (review): finalize `store.order` to true dispatch order now
+            // that every spoke has terminated (insert above ran in completion
+            // order). Without this, `replace_at_slot`'s positional assert fires on
+            // any out-of-order completion — the production norm under concurrency.
+            store.reorder(slots.clone());
+
+            // DN-3 (AC4) storm-cap: per-slot re-run counter, starts at 0.
+            let rerun_counts = vec![0u8; slots.len()];
+
+            Ok(ForkJoinRun {
+                outcome: ForkJoinOutcome {
+                    spokes: final_outcomes,
+                    synthesis,
+                },
+                store: Arc::new(store),
+                spec_by_agent,
+                delta_store,
+                artifact_by_spoke,
+                patch_by_agent,
+                slots,
+                parent,
+                coordinator_id: wave_nonce,
+                resolve_count: AtomicUsize::new(0),
+                // DN-3 (AC4) storm-cap: per-slot re-run counter, starts at 0.
+                rerun_counts,
+                // 14.3a: default token; run_wave overrides with the real root.
+                wave_cancel: wave_cancel.clone(),
+                // D-C (AI-12.3): placeholder; run_wave assigns the real generation.
+                generation: 0,
+            })
+        })
+    }
 }
 
 /// Build a `SpokeOutcome` for a spoke that failed before producing a result.
@@ -995,6 +2519,10 @@ fn failed_outcome(idx: usize, spec: &SpokeSpec, reason: &str) -> SpokeOutcome {
         },
         body: String::new(),
         isolation_diff: None,
+        patch_authority: None,
+        patch_provenance: None,
+        nested_deltas: std::collections::HashMap::new(),
+        nested_patches: std::collections::HashMap::new(),
     }
 }
 
@@ -1015,9 +2543,9 @@ fn sanitize_failure(err: &OrchestrationError) -> String {
 /// second outcome and undercount coverage).
 fn agent_id_for(spec: &SpokeSpec, idx: usize) -> AgentId {
     if spec.label.is_empty() {
-        AgentId(format!("failed-spoke-{idx}"))
+        AgentId::from_validated(format!("failed-spoke-{idx}"))
     } else {
-        AgentId(format!("failed-spoke-{idx}-{}", spec.label))
+        AgentId::from_validated(format!("failed-spoke-{idx}-{}", spec.label))
     }
 }
 
@@ -1250,6 +2778,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nonce_qualified_identity_is_deterministic_and_collision_safe() {
+        let coordinator = AgentId::from_validated("c");
+        let spoke = AgentId::from_validated("s");
+
+        let initial = nonce_qualified(&coordinator, &spoke, 0);
+        assert_eq!(initial.as_str(), "fq.Yw.cw.r0");
+        assert_eq!(initial, nonce_qualified(&coordinator, &spoke, 0));
+        assert_ne!(initial, nonce_qualified(&coordinator, &spoke, 1));
+        assert_ne!(
+            initial,
+            nonce_qualified(&AgentId::from_validated("other"), &spoke, 0)
+        );
+        assert_ne!(
+            initial,
+            nonce_qualified(
+                &AgentId::from_validated("parent"),
+                &AgentId::from_validated("c"),
+                0,
+            )
+        );
+    }
+
+    #[test]
+    fn failed_launch_placeholder_remains_index_qualified_and_separate() {
+        let spec = SpokeSpec {
+            id: AgentId::from_validated("stable-spoke"),
+            label: "predictable".into(),
+            prompt: String::new(),
+            effective_model: String::new(),
+            tier: ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: Vec::new(),
+            role: SpokeRole::Leaf,
+        };
+
+        assert_eq!(
+            agent_id_for(&spec, 2).as_str(),
+            "failed-spoke-2-predictable"
+        );
+        assert_ne!(
+            agent_id_for(&spec, 2),
+            nonce_qualified(&spec.id, &spec.id, 0)
+        );
+        assert_ne!(agent_id_for(&spec, 2), agent_id_for(&spec, 3));
+    }
+
+    #[test]
+    fn mutant_raw_wave_budget_arithmetic_returns_typed_overflow() {
+        assert!(matches!(
+            checked_wave_budget(usize::MAX),
+            Err(OrchestrationError::Overflow {
+                dimension: "wave budget"
+            }),
+        ));
+    }
+
+    #[test]
     fn elapsed_ms_casts_i64_to_u64_once_and_handles_skew() {
         let clock = crate::domain::clock::MockClock::at_wall_ms(100_000);
         // dispatched at 90_000 → elapsed 10_000.
@@ -1283,7 +2868,10 @@ mod tests {
     fn ambient_cost_reads_conservation_consumed_micros() {
         // budget available, zero consumed.
         let root = CapabilityToken::r1_root(AgentId::root());
-        let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+        let ledger = Arc::new(AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+        ));
         let exe = ForkJoinExecutor::new(
             Arc::new(NoopRunner) as Arc<dyn SubagentRunner>,
             Arc::new(
@@ -1313,7 +2901,7 @@ mod tests {
         // 9MB. The window's handles carry NO body (the type-wall).
         let mut store_1mb = ResultStore::new();
         let mut store_10mb = ResultStore::new();
-        let aid = AgentId("spoke-A".into());
+        let aid = AgentId::from_validated("spoke-A");
         store_1mb.insert(NodeResult::ingest(
             aid.clone(),
             "alpha".into(),
@@ -1348,7 +2936,7 @@ mod tests {
             w.handles()
                 .iter()
                 .map(|h| {
-                    h.agent_id.0.len()
+                    h.agent_id.as_str().to_string().len()
                         + h.label.len()
                         + h.salience.len()
                         + std::mem::size_of_val(&h.status)
@@ -1384,7 +2972,7 @@ mod tests {
     #[test]
     fn ac7_symbolic_reference_resolves_to_full_output() {
         let full_payload = "PAYER_TXN_DETAIL:".to_string() + &"x".repeat(64 * 1024);
-        let aid = AgentId("spoke-A".into());
+        let aid = AgentId::from_validated("spoke-A");
         let mut store = ResultStore::new();
         store.insert(NodeResult::ingest(
             aid.clone(),
@@ -1430,23 +3018,43 @@ mod tests {
     // Minimal in-crate harness: a runner whose launched children emit Completed.
     fn build_exe_for_rerun() -> ForkJoinExecutor {
         let root = CapabilityToken::r1_root(AgentId::root());
-        let ledger = Arc::new(AuthorityLedger::new(root.clone()));
-        ForkJoinExecutor::new(
+        let ledger = Arc::new(AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+        ));
+        let executor = ForkJoinExecutor::new(
             Arc::new(CompletedRunner) as Arc<dyn SubagentRunner>,
             Arc::new(
                 crate::adapters::authority::in_process::InProcessAuthorityProvider::new(
                     ledger.clone(),
                 ),
             ),
-            ledger,
+            ledger.clone(),
             {
                 let (bus, rx) = EventBus::new(16);
                 std::mem::forget(rx); // keep the domain receiver alive (no silent drops)
                 Arc::new(bus)
             },
             Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
-            root,
-        )
+            root.clone(),
+        );
+        // 17.2d-b: the durable park path requires the SupervisedNodes seam.
+        // These unit tests exercise wave/rerun mechanics (not durability), so
+        // an in-memory `NodeTree` suffices — the journaled path is covered by
+        // the 17-2d-b keystones.
+        let (bus, rx) = EventBus::new(16);
+        std::mem::forget(rx);
+        executor.with_supervisor(Arc::new(
+            crate::infrastructure::supervisor::Supervisor::new(
+                FORK_JOIN_SPAWN_CAP,
+                FORK_JOIN_SPAWN_CAP,
+                ledger,
+                root,
+                Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+                Arc::new(bus),
+            )
+            .with_nodes(Arc::new(crate::infrastructure::subagent::NodeTree::new())),
+        ))
     }
 
     /// A runner whose every launched child emits a Completed terminal with a
@@ -1459,6 +3067,8 @@ mod tests {
             &self,
             _spec: AgentLaunchSpec,
             cancel: CancellationToken,
+            _parent: Option<&crate::domain::models::TaskHandle>,
+            agent_id: AgentId,
         ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
             let (status_tx, status_rx) =
                 tokio::sync::mpsc::channel::<crate::domain::models::node_state::NodeState>(8);
@@ -1466,7 +3076,11 @@ mod tests {
                 tokio::sync::mpsc::channel::<crate::domain::models::Op>(8);
             let (parent_disc_tx, _) = tokio::sync::mpsc::unbounded_channel::<()>();
             let (yield_tx, yield_rx) = tokio::sync::mpsc::channel::<String>(4);
-            let agent_id = AgentId::new();
+            let (diff_tx, diff_rx) = tokio::sync::oneshot::channel();
+            let _ = diff_tx.send(crate::domain::models::UnifiedDiff::new(
+                crate::domain::models::ProvisioningTier::ScratchCopy,
+                "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+x\n".into(),
+            ));
             let task_id = nanoid::nanoid!(12);
             let child_cancel = cancel.child_token();
             let cancel_for_task = child_cancel.clone();
@@ -1478,7 +3092,7 @@ mod tests {
                     _ = cancel_for_task.cancelled() => {
                         let _ = status_tx.send(crate::domain::models::node_state::NodeState::Cancelled).await;
                     }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+                    _ = tokio::task::yield_now() => {
                         let _ = status_tx.send(crate::domain::models::node_state::NodeState::Completed).await;
                         let _ = yield_tx.send(r#"{"summary":"ok","detail":"d"}"#.to_string()).await;
                     }
@@ -1497,7 +3111,12 @@ mod tests {
                 spawned_at: 0,
                 parent_disconnect: parent_disc_tx,
                 yield_rx: Some(yield_rx),
-                isolation_diff_rx: None,
+                isolation_diff_rx: Some(diff_rx),
+                effective_workspace: std::path::PathBuf::from("."),
+                isolated: false,
+                authority: crate::domain::models::CapabilityTokenId([9; 32]),
+                authority_token: None,
+                patch_provenance: crate::domain::models::ProvenanceTag::UserOriginated,
             })
         }
     }
@@ -1509,18 +3128,22 @@ mod tests {
         let req_a = crate::domain::ports::ForkJoinRequest {
             coordinator: AgentId::root(),
             spokes: vec![SpokeSpec {
+                id: AgentId::new(),
                 label: "a".into(),
                 prompt: "explore a".into(),
                 effective_model: "m".into(),
                 tier: crate::domain::models::ModelTier::Flagship,
                 tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
                 waits_for: Vec::new(),
+                role: SpokeRole::Leaf,
             }],
             wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
             concurrency: 1,
         };
         use crate::domain::ports::Orchestrator;
-        exe.run_wave(req_a, CancellationToken::new()).await.unwrap();
+        exe.run_wave(req_a, CancellationToken::new(), None)
+            .await
+            .unwrap();
         // Snapshot the stale prev A (in-crate: read private current_run).
         let prev_a = exe
             .current_run
@@ -1533,17 +3156,21 @@ mod tests {
         let req_b = crate::domain::ports::ForkJoinRequest {
             coordinator: AgentId::root(),
             spokes: vec![SpokeSpec {
+                id: AgentId::new(),
                 label: "b".into(),
                 prompt: "explore b".into(),
                 effective_model: "m".into(),
                 tier: crate::domain::models::ModelTier::Flagship,
                 tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
                 waits_for: Vec::new(),
+                role: SpokeRole::Leaf,
             }],
             wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
             concurrency: 1,
         };
-        exe.run_wave(req_b, CancellationToken::new()).await.unwrap();
+        exe.run_wave(req_b, CancellationToken::new(), None)
+            .await
+            .unwrap();
         // STALE rerun branched from A's prev while current is B.
         let outcome = exe
             .rerun_spoke_run(&prev_a, 0, CancellationToken::new())
@@ -1565,6 +3192,561 @@ mod tests {
             "the newer wave B must NOT be clobbered by a stale rerun commit"
         );
     }
+
+    /// Story 17.2d-b (AC-b3): the nonce is embedded losslessly in the durable
+    /// node id — decode is the exact inverse of `nonce_qualified` and rejects
+    /// foreign ids (idempotency is keyed on this decode, never a re-nonce).
+    #[test]
+    fn decode_nonce_qualified_is_lossless_inverse() {
+        let nonce = AgentId::new();
+        let spoke = AgentId::new();
+        for rerun in [0u8, 1, 7] {
+            let id = nonce_qualified(&nonce, &spoke, rerun);
+            let decoded = decode_nonce_qualified(&id).expect("round-trip decodes");
+            assert_eq!(decoded, (nonce.clone(), spoke.clone(), rerun));
+        }
+        assert!(decode_nonce_qualified(&AgentId::new()).is_none());
+        assert!(decode_nonce_qualified(&AgentId::root()).is_none());
+        assert!(decode_nonce_qualified(&AgentId::from_validated("fq.bad")).is_none());
+    }
+
+    #[tokio::test]
+    async fn canonical_wave_events_are_journaled_and_projectable() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .expect("open room journal"),
+        );
+        let exe = build_exe_for_rerun()
+            .with_journal(journal.clone())
+            .with_artifact_store(
+                Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+                    workspace.path(),
+                )),
+                HostBinding::new("host-a", "canonical-wave-test"),
+            );
+        let a = SpokeSpec {
+            id: AgentId::new(),
+            label: "a".into(),
+            prompt: "prove wave a".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: Vec::new(),
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        };
+        let b = SpokeSpec {
+            id: AgentId::new(),
+            label: "b".into(),
+            prompt: "prove wave b".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: Vec::new(),
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        };
+        let c = SpokeSpec {
+            id: AgentId::new(),
+            label: "c".into(),
+            prompt: "prove dependent wave".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: vec![a.id.clone(), b.id.clone()],
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        };
+        let request = crate::domain::ports::ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![a, b, c],
+            wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
+            concurrency: 2,
+        };
+
+        exe.run_wave(request, CancellationToken::new(), None)
+            .await
+            .expect("wave completes");
+        let projected = journal.project_room("host-a").await.expect("project room");
+        assert_eq!(projected.waves().len(), 2);
+        assert_eq!(
+            projected.waves()[0].outcome,
+            Some(WaveOutcome::Completed),
+            "each topological wave must persist its completion event"
+        );
+        assert_eq!(projected.waves()[1].outcome, Some(WaveOutcome::Completed));
+    }
+
+    #[tokio::test]
+    async fn isolated_delta_store_is_promoted_to_pending_patch_artifact() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            workspace.path(),
+        ));
+        let (merge_bus, merge_rx) = EventBus::new(16);
+        std::mem::forget(merge_rx);
+        let merge_back = Arc::new(PatchMergeBack::new(
+            workspace.path().to_path_buf(),
+            store.clone(),
+            journal.clone(),
+            Arc::new(merge_bus),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+        ));
+        let exe = build_exe_for_rerun()
+            .with_journal(journal.clone())
+            .with_artifact_store(store, HostBinding::new("host-a", "delta-consumer-test"))
+            .with_patch_merge_back(merge_back);
+        let request = crate::domain::ports::ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![SpokeSpec {
+                id: AgentId::new(),
+                label: "isolated".into(),
+                prompt: "produce a patch".into(),
+                effective_model: "m".into(),
+                tier: crate::domain::models::ModelTier::Flagship,
+                tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                waits_for: Vec::new(),
+                role: SpokeRole::Leaf,
+            }],
+            wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
+            concurrency: 1,
+        };
+
+        let run = exe
+            .run_fork_join_run(request, CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(run.delta_store.len(), 1);
+        assert_eq!(run.patch_by_agent.len(), 1);
+        let patch = run.patch_by_agent.values().next().unwrap();
+        assert_eq!(patch.kind, ArtifactKind::Patch);
+        assert_eq!(
+            patch.review,
+            Some(crate::domain::models::ReviewStatus::Pending)
+        );
+        assert_eq!(
+            patch.authority,
+            crate::domain::models::CapabilityTokenId([9; 32])
+        );
+        assert_eq!(
+            patch.provenance,
+            vec![crate::domain::models::ProvenanceTag::UserOriginated]
+        );
+        assert_eq!(
+            patch.depends_on.len(),
+            1,
+            "patch must link its spoke evidence"
+        );
+        let room = journal.project_room("host-a").await.unwrap();
+        assert_eq!(
+            room.artifacts().get(&patch.id).unwrap().review,
+            Some(crate::domain::models::ReviewStatus::Pending)
+        );
+    }
+
+    /// `run_git` helper for composition tests that need a real git workspace.
+    fn run_git_test(workspace: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .expect("git must execute");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A runner whose launched child emits a Completed terminal and a diff that
+    /// edits `file.txt` from `old` to the spoke's `prompt`. Two such spokes
+    /// produce conflicting patches over the real composition root (P11).
+    #[derive(Default)]
+    struct ConflictingDiffRunner;
+    #[async_trait::async_trait]
+    impl SubagentRunner for ConflictingDiffRunner {
+        async fn launch(
+            &self,
+            spec: AgentLaunchSpec,
+            cancel: CancellationToken,
+            _parent: Option<&crate::domain::models::TaskHandle>,
+            agent_id: AgentId,
+        ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
+            let (status_tx, status_rx) =
+                tokio::sync::mpsc::channel::<crate::domain::models::node_state::NodeState>(8);
+            let (command_tx, mut command_rx) =
+                tokio::sync::mpsc::channel::<crate::domain::models::Op>(8);
+            let (parent_disc_tx, _) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let (yield_tx, yield_rx) = tokio::sync::mpsc::channel::<String>(4);
+            let (diff_tx, diff_rx) = tokio::sync::oneshot::channel();
+            let new_content = spec.prompt.clone();
+            let _ = diff_tx.send(crate::domain::models::UnifiedDiff::new(
+            crate::domain::models::ProvisioningTier::ScratchCopy,
+            format!(
+                "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+{new_content}\n"
+            ),
+        ));
+            let task_id = nanoid::nanoid!(12);
+            let child_cancel = cancel.child_token();
+            let cancel_for_task = child_cancel.clone();
+            tokio::spawn(async move {
+                let _ = status_tx
+                    .send(crate::domain::models::node_state::NodeState::Running)
+                    .await;
+                tokio::select! {
+                    _ = cancel_for_task.cancelled() => { let _ = status_tx.send(crate::domain::models::node_state::NodeState::Cancelled).await; }
+                    _ = tokio::task::yield_now() => {
+                        let _ = status_tx.send(crate::domain::models::node_state::NodeState::Completed).await;
+                        let _ = yield_tx.send(r#"{"summary":"ok","detail":"d"}"#.to_string()).await;
+                    }
+                    _ = command_rx.recv() => { let _ = status_tx.send(crate::domain::models::node_state::NodeState::Cancelled).await; }
+                }
+            });
+            Ok(crate::domain::models::TaskHandle {
+                agent_id,
+                status_rx,
+                command_tx,
+                cancel: child_cancel,
+                task_id,
+                subagent_type: "conflicting".into(),
+                spawned_at: 0,
+                parent_disconnect: parent_disc_tx,
+                yield_rx: Some(yield_rx),
+                isolation_diff_rx: Some(diff_rx),
+                effective_workspace: std::path::PathBuf::from("."),
+                isolated: false,
+                authority: crate::domain::models::CapabilityTokenId([9; 32]),
+                authority_token: None,
+                patch_provenance: crate::domain::models::ProvenanceTag::UserOriginated,
+            })
+        }
+    }
+
+    /// P11 / N2: race two conflicting merge-backs through the REAL composition
+    /// root (executor → capture → PatchMergeBack → review → apply → real git),
+    /// not synthetic patches handed directly to the service. Exactly one patch
+    /// applies; the conflicting one is classified as a review conflict.
+    #[tokio::test]
+    async fn n2_mergeback_race_through_real_composition_serializes_and_one_conflicts() {
+        let workspace = tempfile::tempdir().unwrap();
+        run_git_test(workspace.path(), &["init", "-q"]);
+        std::fs::write(workspace.path().join("file.txt"), "old\n").unwrap();
+        run_git_test(workspace.path(), &["add", "file.txt"]);
+        run_git_test(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            workspace.path(),
+        ));
+        let host = HostBinding::new("host-a", "n2-race");
+        let (merge_bus, merge_rx) = EventBus::new(16);
+        std::mem::forget(merge_rx);
+        let merge_back = Arc::new(PatchMergeBack::new(
+            workspace.path().to_path_buf(),
+            store.clone(),
+            journal.clone(),
+            Arc::new(merge_bus),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+        ));
+
+        let root = CapabilityToken::r1_root(AgentId::root());
+        let ledger = Arc::new(AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+        ));
+        let exe = ForkJoinExecutor::new(
+            Arc::new(ConflictingDiffRunner) as Arc<dyn SubagentRunner>,
+            Arc::new(
+                crate::adapters::authority::in_process::InProcessAuthorityProvider::new(
+                    ledger.clone(),
+                ),
+            ),
+            ledger,
+            {
+                let (bus, rx) = EventBus::new(16);
+                std::mem::forget(rx);
+                Arc::new(bus)
+            },
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root,
+        )
+        .with_journal(journal.clone())
+        .with_artifact_store(store, host)
+        .with_patch_merge_back(merge_back.clone());
+
+        let request = crate::domain::ports::ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![
+                SpokeSpec {
+                    id: AgentId::new(),
+                    label: "first".into(),
+                    prompt: "first".into(),
+                    effective_model: "m".into(),
+                    tier: crate::domain::models::ModelTier::Flagship,
+                    tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                    waits_for: Vec::new(),
+                    role: SpokeRole::Leaf,
+                },
+                SpokeSpec {
+                    id: AgentId::new(),
+                    label: "second".into(),
+                    prompt: "second".into(),
+                    effective_model: "m".into(),
+                    tier: crate::domain::models::ModelTier::Flagship,
+                    tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                    waits_for: Vec::new(),
+                    role: SpokeRole::Leaf,
+                },
+            ],
+            wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
+            concurrency: 2,
+        };
+        let run = exe
+            .run_fork_join_run(request, CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            run.patch_by_agent.len(),
+            2,
+            "both isolated deltas must be captured as patches through the real composition root"
+        );
+
+        let reviewer = AgentId::new();
+        let mut patches: Vec<_> = run.patch_by_agent.values().cloned().collect();
+        let p0 = merge_back
+            .review(
+                patches.remove(0),
+                reviewer.clone(),
+                crate::domain::models::ReviewVerdict::Approved,
+            )
+            .await
+            .unwrap();
+        let p1 = merge_back
+            .review(
+                patches.remove(0),
+                reviewer,
+                crate::domain::models::ReviewVerdict::Approved,
+            )
+            .await
+            .unwrap();
+
+        let mb_a = merge_back.clone();
+        let a = tokio::spawn(async move {
+            mb_a.apply(
+                &p0,
+                crate::domain::models::OwnershipKind::Owned,
+                crate::domain::models::PermissionMode::Yolo,
+                &crate::domain::services::patch_review::MergeBackPolicy::default(),
+            )
+            .await
+        });
+        let mb_b = merge_back.clone();
+        let b = tokio::spawn(async move {
+            mb_b.apply(
+                &p1,
+                crate::domain::models::OwnershipKind::Owned,
+                crate::domain::models::PermissionMode::Yolo,
+                &crate::domain::services::patch_review::MergeBackPolicy::default(),
+            )
+            .await
+        });
+        let results = [a.await.unwrap(), b.await.unwrap()];
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "exactly one patch must apply"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(MergeBackError::Conflict(_))))
+                .count(),
+            1,
+            "the conflicting patch must be classified as a review conflict, never silently lost"
+        );
+        let body = std::fs::read_to_string(workspace.path().join("file.txt")).unwrap();
+        assert!(
+            body == "first\n" || body == "second\n",
+            "the winner's edit must be applied: {body}"
+        );
+    }
+    #[tokio::test]
+    async fn rerun_replaces_source_artifact_and_invalidates_only_dependents() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let store: Arc<dyn ArtifactStore> = Arc::new(
+            crate::adapters::artifact::FileSystemArtifactStore::new(workspace.path()),
+        );
+        let exe = build_exe_for_rerun()
+            .with_journal(journal)
+            .with_artifact_store(store.clone(), HostBinding::new("host-a", "rerun-test"));
+        let a = SpokeSpec {
+            id: AgentId::parse("logical-a").unwrap(),
+            label: "a".into(),
+            prompt: "a".into(),
+            effective_model: "m".into(),
+            tier: ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: vec![],
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        };
+        let c = SpokeSpec {
+            id: AgentId::parse("logical-c").unwrap(),
+            label: "c".into(),
+            prompt: "c".into(),
+            effective_model: "m".into(),
+            tier: ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: vec![a.id.clone()],
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        };
+        let d = SpokeSpec {
+            id: AgentId::parse("logical-d").unwrap(),
+            label: "d".into(),
+            prompt: "d".into(),
+            effective_model: "m".into(),
+            tier: ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: vec![],
+            role: crate::domain::models::orchestration::SpokeRole::Leaf,
+        };
+        let request = ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![a.clone(), c.clone(), d.clone()],
+            wait_policy: WaitPolicy::All,
+            concurrency: 2,
+        };
+        let _ = exe
+            .run_wave(request, CancellationToken::new(), None)
+            .await
+            .unwrap();
+        let prev = exe.current_run.lock().await.clone().unwrap();
+        let old_a = prev.artifact_by_spoke[&a.id].id.clone();
+        let old_d = prev.artifact_by_spoke[&d.id].id.clone();
+
+        let outcome = exe
+            .rerun_spoke_run(&prev, 0, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RerunOutcome::Replaced(_)));
+        let next = exe.current_run.lock().await.clone().unwrap();
+        assert_ne!(next.artifact_by_spoke[&a.id].id, old_a);
+        assert!(
+            !next.artifact_by_spoke.contains_key(&c.id),
+            "transitive dependent handle must be invalidated"
+        );
+        assert_eq!(
+            next.artifact_by_spoke[&d.id].id, old_d,
+            "unrelated durable handle remains valid"
+        );
+        store
+            .head(&next.artifact_by_spoke[&a.id].id)
+            .await
+            .expect("new rerun version is durable");
+    }
+
+    #[tokio::test]
+    async fn rerun_creates_new_version_and_invalidates_only_diamond_dependents() {
+        async fn put(
+            store: &crate::adapters::artifact::FileSystemArtifactStore,
+            label: &str,
+            producer: AgentId,
+            depends_on: Vec<ArtifactId>,
+        ) -> ArtifactRef {
+            store
+                .put(
+                    EvidenceArtifactDraft {
+                        kind: ArtifactKind::Evidence,
+                        producer,
+                        authority: crate::domain::models::CapabilityTokenId::root(),
+                        provenance: Vec::new(),
+                        depends_on,
+                        review: None,
+                        host: HostBinding::new("host-a", "diamond-test"),
+                    },
+                    label.as_bytes(),
+                )
+                .await
+                .unwrap()
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let store = crate::adapters::artifact::FileSystemArtifactStore::new(workspace.path());
+        let a1 = put(&store, "a-v1", AgentId::parse("a").unwrap(), vec![]).await;
+        let c = put(
+            &store,
+            "c",
+            AgentId::parse("c").unwrap(),
+            vec![a1.id.clone()],
+        )
+        .await;
+        let d = put(
+            &store,
+            "d",
+            AgentId::parse("d").unwrap(),
+            vec![a1.id.clone()],
+        )
+        .await;
+        let e = put(
+            &store,
+            "e",
+            AgentId::parse("e").unwrap(),
+            vec![c.id.clone(), d.id.clone()],
+        )
+        .await;
+        let unrelated = put(
+            &store,
+            "unrelated",
+            AgentId::parse("unrelated").unwrap(),
+            vec![],
+        )
+        .await;
+        let a2 = put(&store, "a-v2", AgentId::parse("a").unwrap(), vec![]).await;
+        assert_ne!(a1.id, a2.id, "rerun content must create a new version");
+
+        let artifacts = vec![
+            a1.clone(),
+            c.clone(),
+            d.clone(),
+            e.clone(),
+            unrelated.clone(),
+        ];
+        let affected = transitive_artifact_dependents(&artifacts, &a1.id)
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            affected,
+            [c.id, d.id, e.id].into_iter().collect(),
+            "diamond join is deduplicated and unrelated branch remains valid"
+        );
+        assert!(!affected.contains(&unrelated.id));
+    }
+
     // A no-op runner used only by the ambient-cost unit test (does not launch).
     struct NoopRunner;
     #[async_trait::async_trait]
@@ -1573,6 +3755,8 @@ mod tests {
             &self,
             _spec: AgentLaunchSpec,
             _cancel: CancellationToken,
+            _parent: Option<&crate::domain::models::TaskHandle>,
+            _agent_id: AgentId,
         ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
             Err(SubagentError::Internal("noop".into()))
         }

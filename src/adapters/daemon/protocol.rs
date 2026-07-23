@@ -31,16 +31,18 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::adapters::rap::AgentSigner;
 use crate::domain::models::tool_call::RequestId;
 use crate::domain::models::{
-    ApprovalOutcome, ChannelKind, ChatMessage, ImageAttachment, PermissionMode, ToolRisk,
+    AgentEnvelope, ApprovalOutcome, ChannelKind, ChatMessage, Ed25519Sig, ImageAttachment,
+    PeerIdentity, PermissionMode, ToolRisk,
 };
 use crate::infrastructure::runtime::event_bus::RawEvent;
 
 /// Current wire protocol version. Bump on ANY breaking frame-shape change so an
 /// older client/daemon is rejected with [`ProtocolError::VersionMismatch`]
 /// rather than mis-parsing (forward-compat for 12.3/12.4).
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -64,6 +66,25 @@ pub enum AttachMode {
     ReadWrite,
     /// Observe only — write frames are rejected with [`ProtocolError::ReadOnly`].
     ReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionTier {
+    #[default]
+    TrustedLocal,
+    Peer,
+}
+impl ConnectionTier {
+    /// The stable tag bound into an attach-proof transcript. The client signs
+    /// over this string and the server verifies against it, so a proof minted
+    /// for one tier cannot be replayed (or silently swapped) for another.
+    pub const fn proof_tag(self) -> &'static str {
+        match self {
+            ConnectionTier::TrustedLocal => "trusted-local",
+            ConnectionTier::Peer => "peer",
+        }
+    }
 }
 
 /// The initial state the daemon hands a freshly-attached client so it can render
@@ -97,8 +118,18 @@ pub enum ProtocolError {
     /// A write frame (`UserMessage`/`ApprovalResponse`) arrived on a read-only
     /// attachment (AC6 / multi-attach). Daemon-enforced, not client-honor.
     ReadOnly,
+    /// The Attach challenge-response proof was absent, malformed, or failed
+    /// verification (bad signature, nonce mismatch, identity not bound to its
+    /// key, or the transcript's tier/version/read-only did not match the claim).
+    /// Reported before any connection registration or mutable side effect.
+    AttachProof(String),
     /// The frame could not be decoded (bad JSON / unknown variant).
     Malformed(String),
+    /// A peer-mode frame failed signature, identity, TTL, hash, or replay verification.
+    PeerVerification(String),
+    /// A peer envelope's signed predecessor does not match the sender's
+    /// current single-session feed head.
+    FeedForkOrGap,
     /// An internal daemon error prevented servicing the request.
     Internal(String),
 }
@@ -117,6 +148,16 @@ impl std::fmt::Display for ProtocolError {
                 )
             }
             ProtocolError::Malformed(m) => write!(f, "malformed attach frame: {m}"),
+            ProtocolError::PeerVerification(m) => write!(f, "peer frame verification failed: {m}"),
+            ProtocolError::FeedForkOrGap => {
+                write!(
+                    f,
+                    "peer frame rejected: signed feed predecessor does not match"
+                )
+            }
+            ProtocolError::AttachProof(m) => {
+                write!(f, "attach proof verification failed: {m}")
+            }
             ProtocolError::Internal(m) => write!(f, "daemon error: {m}"),
         }
     }
@@ -151,11 +192,30 @@ pub struct ProposedFact {
 #[serde(rename_all = "camelCase")]
 pub enum ClientFrame {
     /// First frame after connect — negotiates version + declares whether the
-    /// client accepts a read-only grant (multi-attach). MUST precede all others.
+    /// client accepts a read-only grant (multi-attach). MUST precede all others,
+    /// and MUST answer the server's [`DaemonFrame::AttachChallenge`] with an
+    /// Ed25519 proof of identity possession (Story 17.1a). Required for BOTH
+    /// `TrustedLocal` and `Peer` tiers; TrustedLocal then keeps its existing
+    /// unsigned application frames, Peer continues to send only `PeerEnvelope`.
     Attach {
         protocol_version: u32,
         read_only_ok: bool,
+        #[serde(default)]
+        tier: ConnectionTier,
+        /// The server-issued challenge nonce this proof answers. Echoed back so
+        /// the daemon can bind the proof to the exact challenge it minted (a
+        /// proof captured elsewhere cannot satisfy a different connection's nonce).
+        challenge_nonce: Vec<u8>,
+        /// The identity whose private key produced `proof`. Verified to be
+        /// self-consistent (PeerId matches the public key) inside `verify_attach_proof`.
+        identity: PeerIdentity,
+        /// Ed25519 signature over the domain-separated attach-proof transcript
+        /// (nonce, version, tier tag, read-only flag) — supplied by
+        /// [`AgentSigner::attach_proof`].
+        proof: Ed25519Sig,
     },
+    /// Signed peer-mode envelope. Only valid after an Attach with `tier=Peer`.
+    PeerEnvelope(Box<AgentEnvelope<serde_json::Value>>),
     /// Submit a user turn (AC3). `images` are fresh attachments for this turn.
     UserMessage {
         text: String,
@@ -172,6 +232,15 @@ pub enum ClientFrame {
         request_id: RequestId,
         outcome: ApprovalOutcome,
     },
+    /// Answer a `Waiting` MCP-task node's elicitation ticket (17.5b / AC1, D2).
+    /// `node` is the task node id (from the room's `TicketAssigned` / node view);
+    /// `responses` is the raw `inputResponses` map (`{key: {action, content?}}`),
+    /// carried as JSON so the non-`mcp` daemon protocol never depends on the
+    /// `mcp`-gated `InputResponse` type. Gated on `AttachMode::ReadWrite`.
+    InputResponse {
+        node: String,
+        responses: serde_json::Value,
+    },
     /// Resolve a pending consolidation card — daemon-authoritative (Story 12.2d AC4).
     /// `accept: true` = promote all retained proposals; `false` = decline all.
     /// The token must match the daemon's retained entry (confused-deputy guard).
@@ -184,6 +253,12 @@ pub enum ClientFrame {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DaemonFrame {
+    /// Server-first: a fresh, one-use challenge nonce. Sent immediately on
+    /// connect; the client MUST echo it back (bound into its proof) in the
+    /// answering [`ClientFrame::Attach`]. A proof minted for any other nonce
+    /// fails verification, so a captured attach cannot be replayed on a new
+    /// connection (which receives its own fresh nonce).
+    AttachChallenge { nonce: Vec<u8> },
     /// Accept an attach: the granted mode + the initial render snapshot.
     AttachAck {
         granted_mode: AttachMode,
@@ -211,6 +286,8 @@ pub enum DaemonFrame {
         token: ProposalToken,
         proposals: Vec<ProposedFact>,
     },
+    /// Peer envelope was verified and accepted by the daemon wire boundary.
+    PeerAccepted { sequence: u64 },
     /// Acknowledge a clean [`ClientFrame::Detach`].
     Detached,
     /// A protocol-level error (e.g. version mismatch, read-only write attempt).
@@ -287,17 +364,82 @@ where
     Ok(Some(frame))
 }
 
+/// Client-side challenge-response for the attach handshake.
+///
+/// Reads the daemon's one-use [`DaemonFrame::AttachChallenge`], builds an
+/// Ed25519 proof over it with `signer`, and writes the proof-bearing
+/// [`ClientFrame::Attach`]. The proof binds the signer's identity to the server
+/// nonce, the negotiated [`PROTOCOL_VERSION`], `tier`'s [`proof_tag`](ConnectionTier::proof_tag),
+/// and `read_only_ok`, so it cannot be replayed across nonces, tiers, versions,
+/// or read-only grants.
+///
+/// Returns once the `Attach` is written; the caller reads the `AttachAck` (or
+/// `Error`) separately. Generic over `AsyncRead`/`AsyncWrite` so it runs over a
+/// `UnixStream::pair()` in tests with no disk or wall clock.
+pub async fn answer_attach_challenge<R, W>(
+    read_half: &mut R,
+    write_half: &mut W,
+    read_only_ok: bool,
+    tier: ConnectionTier,
+    signer: &AgentSigner,
+) -> Result<(), FrameError>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    let nonce = match read_frame::<_, DaemonFrame>(read_half).await? {
+        Some(DaemonFrame::AttachChallenge { nonce }) => nonce,
+        Some(other) => {
+            return Err(FrameError::Malformed(format!(
+                "expected AttachChallenge from daemon, got {other:?}"
+            )));
+        }
+        None => {
+            return Err(FrameError::Malformed(
+                "daemon closed the connection before issuing a challenge".into(),
+            ));
+        }
+    };
+    let proof = signer.attach_proof(&nonce, PROTOCOL_VERSION, tier.proof_tag(), read_only_ok);
+    write_frame(
+        write_half,
+        &ClientFrame::Attach {
+            protocol_version: PROTOCOL_VERSION,
+            read_only_ok,
+            tier,
+            challenge_nonce: nonce,
+            identity: signer.identity().clone(),
+            proof,
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::models::{NoticeLevel, StreamChunk};
     use crate::infrastructure::runtime::event_bus::RawEventKind;
 
+    /// A well-formed PeerIdentity for wire round-trip fixtures (correctness of
+    /// the proof itself is exercised by the daemon/server tests, not here).
+    fn sample_identity() -> PeerIdentity {
+        PeerIdentity::from_public_key(vec![1u8; 32]).expect("32-byte key is a valid identity")
+    }
+
+    fn sample_proof() -> Ed25519Sig {
+        Ed25519Sig(vec![0u8; 64])
+    }
+
     fn sample_client_frames() -> Vec<ClientFrame> {
         vec![
             ClientFrame::Attach {
                 protocol_version: PROTOCOL_VERSION,
                 read_only_ok: true,
+                tier: ConnectionTier::TrustedLocal,
+                challenge_nonce: b"server-challenge-nonce".to_vec(),
+                identity: sample_identity(),
+                proof: sample_proof(),
             },
             ClientFrame::UserMessage {
                 text: "hello".into(),
@@ -317,6 +459,9 @@ mod tests {
 
     fn sample_daemon_frames() -> Vec<DaemonFrame> {
         vec![
+            DaemonFrame::AttachChallenge {
+                nonce: b"server-challenge-nonce".to_vec(),
+            },
             DaemonFrame::AttachAck {
                 granted_mode: AttachMode::ReadWrite,
                 snapshot: AttachSnapshot {
@@ -355,10 +500,11 @@ mod tests {
             },
             DaemonFrame::Detached,
             DaemonFrame::Error(ProtocolError::VersionMismatch {
-                daemon: 1,
-                client: 2,
+                daemon: PROTOCOL_VERSION,
+                client: PROTOCOL_VERSION + 1,
             }),
             DaemonFrame::Error(ProtocolError::ReadOnly),
+            DaemonFrame::Error(ProtocolError::AttachProof("bad signature".into())),
         ]
     }
 

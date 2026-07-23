@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "id": 17,
+  "result": {
+    "resultType": "complete",
+    "taskId": "task-e2c7c05c32cbd85efc5370d9",
+    "status": "completed",
+    "createdAt": "2026-07-19T12:05:46Z",
+    "lastUpdatedAt": "2026-07-19T12:05:47Z",
+    "ttlMs": 300000,
+    "pollIntervalMs": 1000,
+    "result": {
+      "resultType": "complete",
+      "content": [
+        {
+          "type": "text",
+          "text": "tool \"failing_job\": simulated failure: job crashed"
+        }
+      ],
+      "isError": true
+    },
+    "requestState": "task-e2c7c05c32cbd85efc5370d9"
+  }
+}

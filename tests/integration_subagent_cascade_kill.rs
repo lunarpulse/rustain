@@ -97,7 +97,10 @@ async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
     let root_authority =
         rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
     let authority_ledger = Arc::new(
-        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(
+            root_authority.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        ),
     );
     let authority =
         Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
@@ -235,10 +238,19 @@ async fn status_bridge_registry_list_reflects_child_status() {
         sandbox_override: None,
         parent_trace: None,
         isolated: false,
+        delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
     };
 
     let cancel = CancellationToken::new();
-    let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+    let handle = runner
+        .launch(
+            spec,
+            cancel.clone(),
+            None,
+            rustain::domain::models::AgentId::new(),
+        )
+        .await
+        .unwrap();
 
     // Wait for child to emit Running and bridge to mirror it
     let reg = runner.registry();

@@ -58,6 +58,7 @@ fn compose_ctx(workspace: PathBuf, domain_tx: Option<UnboundedSender<AppEvent>>)
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     }
 }
 

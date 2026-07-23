@@ -19,6 +19,8 @@ use crate::domain::events::{AppEvent, CompactionPurpose};
 use crate::domain::ports::StreamingProvider;
 
 // By-feature submodules (Task 2 scaffolding — empty stubs until Phase 2/4).
+#[cfg(feature = "a2a")]
+pub mod a2a_catalog;
 pub mod adapter_override;
 pub mod bookmark;
 pub mod budget;

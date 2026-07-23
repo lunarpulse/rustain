@@ -113,6 +113,30 @@ pub async fn check_with_source(
     tools_port: &dyn ToolSetPort,
     source: Option<&crate::domain::models::tool_call::ApprovalSource>,
 ) -> PermissionDecision {
+    check_with_source_and_provenance(
+        security,
+        tool_name,
+        input,
+        active_skills,
+        plan_file,
+        tools_port,
+        source,
+        ProvenanceTag::UserOriginated,
+    )
+    .await
+}
+
+/// Permission check with the node-derived provenance tag.
+pub async fn check_with_source_and_provenance(
+    security: &dyn SecurityPort,
+    tool_name: &str,
+    input: &serde_json::Value,
+    active_skills: Option<&[ActiveSkill]>,
+    plan_file: Option<&std::path::Path>,
+    tools_port: &dyn ToolSetPort,
+    source: Option<&crate::domain::models::tool_call::ApprovalSource>,
+    provenance: ProvenanceTag,
+) -> PermissionDecision {
     // Step 0: exit_plan_mode short-circuit
     if tool_name == "exit_plan_mode" {
         return match security.current_mode() {
@@ -135,25 +159,28 @@ pub async fn check_with_source(
         }
     }
 
-    // Step 0.6: Provenance-taint gate (AC2).
-    // R1 is inert: passes the benign default provenance (`UserOriginated`) and
-    // the gate unconditionally Allows. R2 will propagate the subagent-envelope
-    // origin onto the tag and may RequireApproval for self-originated data.
-    // A non-Allow verdict hard-denies, so the seam is load-bearing — not a dead
-    // hook. The gate is decoupled from live revocation (DD5): it never revokes.
+    // Step 0.6: Provenance-taint gate. Taint is an additional approval
+    // requirement, never a bypass around the hard-deny checks below.
     let path_hint = derive_path_hint(tool_name, input);
     let server_id = derive_server_id(tool_name);
-    let taint = taint_gate(
+    let taint_requires_approval = match taint_gate_with_risk(
         tool_name,
         input,
         source,
         path_hint.as_deref(),
         server_id.as_deref(),
-        ProvenanceTag::default(),
-    );
-    if !matches!(taint, TaintDecision::Allow) {
-        return PermissionDecision::Deny("tainted data blocked by provenance policy".to_string());
-    }
+        provenance,
+        risk_for_tool(tool_name, tools_port),
+    ) {
+        TaintDecision::Allow => false,
+        TaintDecision::RequireApproval { .. } => true,
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        TaintDecision::Deny => {
+            return PermissionDecision::Deny(
+                "provenance-taint gate denied tool dispatch".to_string(),
+            );
+        }
+    };
 
     // Step 1: Tool restriction (active skill allowed_tools)
     // activate_skill is always allowed (carve-out for skill chaining)
@@ -179,19 +206,13 @@ pub async fn check_with_source(
         }
     }
 
+    let plan_file_exception = is_plan_file_write(tool_name, input, plan_file);
+
     // Step 3: Workspace restriction (file tools)
     if let Some((path_str, op)) = extract_file_path(tool_name, input) {
-        // Plan-file write exception: allow Write/Edit to the plan file when in Plan mode.
-        if let Some(plan) = plan_file {
-            if matches!(tool_name, "Write" | "Edit") {
-                if let Some(p) = input.get("file_path").and_then(|v| v.as_str()) {
-                    if std::path::Path::new(p) == plan {
-                        return PermissionDecision::Allow;
-                    }
-                }
-            }
-        }
-        if let Err(e) = security.check_workspace_access(std::path::Path::new(&path_str), op) {
+        if !plan_file_exception
+            && let Err(e) = security.check_workspace_access(std::path::Path::new(&path_str), op)
+        {
             return PermissionDecision::Deny(e.to_string());
         }
     } else if tool_name == "Read" {
@@ -200,20 +221,73 @@ pub async fn check_with_source(
                 "Read tool missing required 'file_path' field".to_string(),
             );
         }
-    } else if matches!(tool_name, "Write" | "Edit") {
-        if input.get("file_path").and_then(|v| v.as_str()).is_none() {
-            return PermissionDecision::Deny(format!(
-                "{} tool missing required 'file_path' field",
-                tool_name
-            ));
-        }
+    } else if matches!(tool_name, "Write" | "Edit")
+        && input
+            .get("file_path")
+            .and_then(|value| value.as_str())
+            .is_none()
+    {
+        return PermissionDecision::Deny(format!(
+            "{} tool missing required 'file_path' field",
+            tool_name
+        ));
     }
 
     // Step 3.5: Mode × risk gating (AC1, AC7)
     let risk = risk_for_tool(tool_name, tools_port);
     let mode = security.current_mode();
+    mode_risk_decision(
+        mode,
+        risk,
+        plan_file_exception,
+        taint_requires_approval,
+        tool_name,
+        server_id,
+        path_hint,
+    )
+}
+
+/// Whether this is the permitted Write/Edit operation for the active plan file.
+fn is_plan_file_write(
+    tool_name: &str,
+    input: &serde_json::Value,
+    plan_file: Option<&std::path::Path>,
+) -> bool {
+    plan_file.is_some_and(|plan| {
+        matches!(tool_name, "Write" | "Edit")
+            && input
+                .get("file_path")
+                .and_then(|value| value.as_str())
+                .is_some_and(|path| std::path::Path::new(path) == plan)
+    })
+}
+
+/// Resolve the mode and risk gate after all hard-deny checks have passed.
+fn mode_risk_decision(
+    mode: PermissionMode,
+    risk: ToolRisk,
+    plan_file_exception: bool,
+    taint_requires_approval: bool,
+    tool_name: &str,
+    server_id: Option<String>,
+    path_hint: Option<String>,
+) -> PermissionDecision {
     match mode_risk_outcome(mode, risk) {
-        Some(true) => return PermissionDecision::Allow,
+        Some(true) if taint_requires_approval => PermissionDecision::Prompt {
+            server_id,
+            path_hint,
+        },
+        Some(true) => PermissionDecision::Allow,
+        Some(false) if plan_file_exception && risk != ToolRisk::Blocked => {
+            if taint_requires_approval {
+                PermissionDecision::Prompt {
+                    server_id,
+                    path_hint,
+                }
+            } else {
+                PermissionDecision::Allow
+            }
+        }
         Some(false) => {
             let reason = match (mode, risk) {
                 (_, ToolRisk::Blocked) => format!("Tool '{}' is blocked", tool_name),
@@ -222,40 +296,25 @@ pub async fn check_with_source(
                 }
                 _ => format!("Mode {:?}: tool disallowed (risk: {:?})", mode, risk),
             };
-            return PermissionDecision::Deny(reason);
+            PermissionDecision::Deny(reason)
         }
-        None => {
-            // needs prompt — route to ApprovalRuntime
-            return PermissionDecision::Prompt {
-                server_id,
-                path_hint,
-            };
-        }
+        None => PermissionDecision::Prompt {
+            server_id,
+            path_hint,
+        },
     }
 }
 
-/// Provenance-taint gate (Story 14.6, AC2 — R1 inert seam).
+/// Provenance-taint gate (Story 17.1b, AC8).
 ///
-/// Inspects the *provenance* of the data driving a tool call and decides
-/// whether the provenance policy permits it. The signature mirrors the
-/// context (the fields mirror `ApprovalRequest` in `approval_runtime`) so R2
-/// can route tainted data through the approval runtime without reshaping the
-/// call site.
+/// Inspects the provenance driving a tool call. Self-originated data remains
+/// silent for safe reads but requires explicit approval for destructive or
+/// elevated sinks. The resulting approval requirement is applied only after
+/// active-skill, blocklist, workspace, and mode hard-deny checks.
 ///
-/// **R1 (this revision):** unconditionally returns [`TaintDecision::Allow`],
-/// UNLESS [`TAINT_GATE_FORCE_DENY`] is set (test/instrumentation builds
-/// only) — the load-bearing/non-theater proof (DD4, Murat) needs a way to
-/// prove a non-`Allow` verdict actually blocks dispatch through the real
-/// `ToolScheduler`, which requires flipping the gate's verdict without
-/// touching call sites.
-/// `check_with_source` passes [`ProvenanceTag::default()`] (`UserOriginated`),
-/// so the gate is inert yet **load-bearing** — it sits on the hot path and a
-/// non-`Allow` verdict denies the call, so R2 only has to *populate* the tag
-/// and add verdicts to activate the policy.
-///
-/// Intentionally decoupled from live revocation (DD5): this gate **never** calls
-/// revoke. Provenance tagging (DD4) and approval revocation (DD5) are
-/// independent mechanisms.
+/// The standalone gate uses builtin risk classification. The dispatch path
+/// calls [`taint_gate_with_risk`] with the composed tool registry's risk. Both
+/// paths share the same deterministic policy.
 pub fn taint_gate(
     tool: &str,
     input: &serde_json::Value,
@@ -264,15 +323,42 @@ pub fn taint_gate(
     server_id: Option<&str>,
     provenance: ProvenanceTag,
 ) -> TaintDecision {
-    let _ = (tool, input, source, path_hint, server_id, provenance);
+    taint_gate_with_risk(
+        tool,
+        input,
+        source,
+        path_hint,
+        server_id,
+        provenance,
+        crate::domain::models::risk_for_builtin(tool),
+    )
+}
+
+/// Model-D narrow policy: only self-originated data driving a destructive or
+/// elevated sink requires approval. Reads and benign/user data remain silent.
+pub fn taint_gate_with_risk(
+    tool: &str,
+    input: &serde_json::Value,
+    source: Option<&ApprovalSource>,
+    path_hint: Option<&str>,
+    server_id: Option<&str>,
+    provenance: ProvenanceTag,
+    risk: ToolRisk,
+) -> TaintDecision {
     #[cfg(any(test, feature = "test-instrumentation"))]
     TAINT_GATE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     #[cfg(any(test, feature = "test-instrumentation"))]
     if TAINT_GATE_FORCE_DENY.load(std::sync::atomic::Ordering::Relaxed) {
         return TaintDecision::Deny;
     }
-    // R1: inert. R2 will consult `provenance` (envelope-origin→tag propagation)
-    // and return `TaintDecision::RequireApproval { reason }` for tainted data.
+    let _ = (tool, input, source, path_hint, server_id);
+    if provenance == ProvenanceTag::SelfOriginated
+        && matches!(risk, ToolRisk::Standard | ToolRisk::Elevated)
+    {
+        return TaintDecision::RequireApproval {
+            reason: "tainted context requires approval for destructive tool".to_string(),
+        };
+    }
     TaintDecision::Allow
 }
 
@@ -283,11 +369,9 @@ pub fn taint_gate(
 #[cfg(any(test, feature = "test-instrumentation"))]
 pub static TAINT_GATE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Test-only override forcing `taint_gate` to return [`TaintDecision::Deny`]
-/// (DD4, Murat — proof (b), the "inert is indistinguishable from not-wired
-/// without a Deny-mutant" requirement). Never read outside
-/// `test`/`test-instrumentation` builds; the R1 production path never sets
-/// this, so R1 behavior is unaffected.
+/// Test-only override forcing `taint_gate` to return [`TaintDecision::Deny`].
+/// The real scheduler test proves a deny verdict blocks dispatch rather than
+/// acting as an inert hook. Production builds cannot read or set this flag.
 #[cfg(any(test, feature = "test-instrumentation"))]
 pub static TAINT_GATE_FORCE_DENY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -311,6 +395,15 @@ pub fn risk_for_tool(tool_name: &str, tools_port: &dyn ToolSetPort) -> ToolRisk 
             };
         }
         // Unknown MCP tool — fail-safe to Elevated
+        return ToolRisk::Elevated;
+    }
+    // Story 17.4b (R-D) — A2A delegations are remote, attacker-influenceable, and
+    // the wire name embeds a peer-CHOSEN skill id. Risk MUST NOT be derived from
+    // that name (a hostile peer naming its skill `Read` would otherwise resolve to
+    // `ToolRisk::Safe` and skip the taint gate). Fail safe to Elevated for every
+    // `a2a__` tool — mirrors the `mcp__` unknown-tool precedent, placed BEFORE the
+    // builtin fallthrough so a peer can never pick its own classification.
+    if tool_name.starts_with("a2a__") {
         return ToolRisk::Elevated;
     }
     risk_for_builtin(tool_name)
@@ -397,3 +490,62 @@ fn check_allowed_tools(tool_name: &str, active_skills: Option<&[ActiveSkill]>) -
 }
 
 // Tests moved to tests/security.rs to satisfy domain purity conformance test.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_file_write_decision_table_preserves_taint_and_blocked_denials() {
+        let plan_path = std::path::Path::new("/tmp/rustain-plan.md");
+        let input = serde_json::json!({
+            "file_path": plan_path.to_str().unwrap(),
+            "content": "updated plan",
+        });
+        let plan_file_exception = is_plan_file_write("Write", &input, Some(plan_path));
+        assert!(
+            plan_file_exception,
+            "the test input must target the plan file"
+        );
+
+        let cases = [
+            (
+                "untainted standard write",
+                ToolRisk::Standard,
+                false,
+                PermissionDecision::Allow,
+            ),
+            (
+                "tainted standard write",
+                ToolRisk::Standard,
+                true,
+                PermissionDecision::Prompt {
+                    server_id: None,
+                    path_hint: Some(plan_path.display().to_string()),
+                },
+            ),
+            (
+                "blocked file tool",
+                ToolRisk::Blocked,
+                false,
+                PermissionDecision::Deny("Tool 'Write' is blocked".to_string()),
+            ),
+        ];
+
+        for (name, risk, taint_requires_approval, expected) in cases {
+            assert_eq!(
+                mode_risk_decision(
+                    PermissionMode::Plan,
+                    risk,
+                    plan_file_exception,
+                    taint_requires_approval,
+                    "Write",
+                    None,
+                    Some(plan_path.display().to_string()),
+                ),
+                expected,
+                "{name}"
+            );
+        }
+    }
+}

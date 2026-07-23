@@ -9,9 +9,8 @@ static MCP_TOOL_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use rmcp::ServiceExt;
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{ListToolsResult, Tool};
+use rmcp::model::{ListToolsResult, Meta, Tool};
 use rmcp::service::{Peer, RoleClient, RunningService};
-use rmcp::transport::child_process::TokioChildProcess;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -19,6 +18,9 @@ use crate::domain::models::HealthSummary;
 use crate::domain::models::{McpConnectionState, McpServerSpec, McpTransport};
 
 use super::error::McpError;
+use super::task_driver::McpTaskRuntime;
+use super::task_transport::{PeerTaskTransport, TaskGuardTransport};
+use super::tasks::{self, CreateTaskReply};
 
 struct McpClientService {
     adapter: std::sync::Weak<McpClientAdapter>,
@@ -74,6 +76,11 @@ pub struct McpClientAdapter {
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>>,
     self_weak: std::sync::RwLock<Option<std::sync::Weak<McpClientAdapter>>>,
     last_refresh_ms: std::sync::atomic::AtomicU64,
+    /// 17.5a: the task runtime (domain seams + clock), injected once at the
+    /// composition root after the node tree/journal exist. Until set, a
+    /// `resultType: "task"` reply degrades to a text result (no node) —
+    /// observable, never a panic.
+    task_runtime: std::sync::OnceLock<Arc<McpTaskRuntime>>,
 }
 
 impl McpClientAdapter {
@@ -91,7 +98,13 @@ impl McpClientAdapter {
             event_tx,
             self_weak: std::sync::RwLock::new(None),
             last_refresh_ms: std::sync::atomic::AtomicU64::new(0),
+            task_runtime: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Inject the 17.5a task runtime (called once by the composition root).
+    pub fn set_task_runtime(&self, runtime: Arc<McpTaskRuntime>) {
+        let _ = self.task_runtime.set(runtime);
     }
 
     pub fn set_self_weak(&self, weak: std::sync::Weak<McpClientAdapter>) {
@@ -159,6 +172,15 @@ impl McpClientAdapter {
             }
         }
 
+        // 17.5a (D1/P2): mint a fresh owner token for THIS session. `disconnect`
+        // cancels the previous one and leaves it cancelled so a task that
+        // materializes mid-teardown is refused admission (`start_task` checks
+        // `owner_cancel.is_cancelled()`).
+        {
+            let mut ct = self.cancel_token.write().unwrap();
+            *ct = CancellationToken::new();
+        }
+
         let started = now_unix();
         self.set_state(McpConnectionState::Connecting {
             attempt: 1,
@@ -201,7 +223,13 @@ impl McpClientAdapter {
         }
         cmd.kill_on_drop(true);
 
-        let transport = TokioChildProcess::new(cmd).map_err(|e| {
+        // 17.5a (ADR-17-5-01 D1 amendment): the byte-level transport shim.
+        // rmcp's untagged `ServerResult` decode would silently parse
+        // task-shaped replies into its SUPERSEDED `GetTaskResult` shape,
+        // dropping the inlined result/error/inputRequests. The shim wraps
+        // task-shaped payloads so they arrive as `CustomResult` and decode
+        // through our own serde types. Non-task traffic is byte-identical.
+        let transport = TaskGuardTransport::spawn(&mut cmd).map_err(|e| {
             let reason = format!("failed to spawn {command}: {e}");
             self.handle_connection_failure(&reason);
             McpError::SpawnFailed(reason)
@@ -286,14 +314,21 @@ impl McpClientAdapter {
     }
 
     pub async fn disconnect(&self) -> Result<(), McpError> {
-        // P-11: Cancel the current token, then reset it so future connect() can succeed
+        // 17.5a (D1/AC5): terminalize in-flight task nodes through their
+        // ack-gated cooperative cancel FIRST — `kill_all_tasks` fires each
+        // driver's node cancel and the driver issues a real `tasks/cancel` over
+        // the STILL-LIVE peer, terminalizing on the ack. `tearing_down` (set
+        // inside `kill_all_tasks`) closes the admission window meanwhile.
+        if let Some(runtime) = self.task_runtime.get() {
+            runtime.kill_all_tasks().await;
+        }
+
+        // Only now cancel the owner token (tears the peer down) and leave it
+        // cancelled through teardown so a late admission is refused;
+        // `connect()` mints a fresh token for the next session.
         {
             let ct = self.cancel_token.read().unwrap();
             ct.cancel();
-        }
-        {
-            let mut ct = self.cancel_token.write().unwrap();
-            *ct = CancellationToken::new();
         }
 
         {
@@ -349,6 +384,17 @@ impl McpClientAdapter {
                 "arguments must be a JSON object".into(),
             ));
         };
+        // 17.5a (R-13): advertise the Tasks extension in per-request `_meta`.
+        // The server decides whether to create a task; there is NO client
+        // opt-in field (`CallToolRequestParams::with_task` is the deleted
+        // SEP-1686 knob and is never called).
+        let mut params = params;
+        params.meta = Some(Meta(
+            tasks::tasks_extension_meta()
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        ));
 
         let request = rmcp::model::CallToolRequest::new(params);
 
@@ -358,6 +404,20 @@ impl McpClientAdapter {
         let result = tokio::select! {
             r = tokio::time::timeout(timeout, call_fut) => match r {
                 Ok(Ok(rmcp::model::ServerResult::CallToolResult(res))) => res,
+                Ok(Ok(rmcp::model::ServerResult::CustomResult(value))) => {
+                    // A task-shaped reply survives the transport shim as a
+                    // wrapped CustomResult. Decode it through OUR types.
+                    let raw = tasks::unwrap_task_result(&value.0).unwrap_or(value.0);
+                    let reply: CreateTaskReply = serde_json::from_value(raw).map_err(|e| {
+                        McpError::TaskProtocol(format!("task creation reply decode: {e}"))
+                    })?;
+                    if !reply.is_task() {
+                        return Err(McpError::TaskProtocol(
+                            "custom result without resultType:task on tools/call".into(),
+                        ));
+                    }
+                    return self.materialize_task(peer, reply).await;
+                }
                 Ok(Ok(_other)) => return Err(McpError::CallToolFailed(
                     "unexpected server result type".into()
                 )),
@@ -380,6 +440,85 @@ impl McpClientAdapter {
             result,
             tool_use_id,
         ))
+    }
+
+    /// 17.5a (AC1): a `tools/call` reply with `resultType: "task"` becomes a
+    /// first-class durable node. With the runtime injected (production), the
+    /// node is materialized and its driver spawned; without it (doctor /
+    /// offline probes), degrade to a descriptive text result — observable,
+    /// never a panic, and the non-task path is untouched.
+    async fn materialize_task(
+        &self,
+        peer: Peer<RoleClient>,
+        reply: CreateTaskReply,
+    ) -> Result<crate::domain::models::ToolResult, McpError> {
+        let task_id = reply.task.task_id.clone();
+        let Some(runtime) = self.task_runtime.get() else {
+            tracing::warn!(
+                server = %self.spec.id,
+                %task_id,
+                "MCP server returned a task but no task runtime is wired; \
+                 returning a text result without a durable node"
+            );
+            let seq = MCP_TOOL_ID_SEQ.fetch_add(1, Ordering::SeqCst);
+            return Ok(crate::domain::models::ToolResult {
+                tool_use_id: format!("mcp-task-unwired-{seq}"),
+                content: format!(
+                    "MCP server '{}' created task {task_id} but this client has no \
+                     task runtime; the task runs untracked on the server.",
+                    self.spec.id
+                ),
+                is_error: false,
+            });
+        };
+        let transport = Arc::new(PeerTaskTransport::new(peer));
+        runtime
+            .start_task(&self.spec.id, reply, transport, self.cancel_token())
+            .await
+    }
+
+    /// Test hook: is a task runtime wired?
+    #[cfg(test)]
+    pub(crate) fn has_task_runtime(&self) -> bool {
+        self.task_runtime.get().is_some()
+    }
+
+    /// Send an arbitrary JSON-RPC method over the live connection as a
+    /// `CustomRequest`, advertising the Tasks extension in per-request
+    /// `_meta` (R-13). This is the test-arming seam ONLY: 17.5a's tests drive
+    /// the scripted fake through it. Production `tasks/update` rides
+    /// `McpTaskTransport::tasks_update` (task_transport.rs), NOT this path —
+    /// routing production here would bypass the driver's state machine.
+    /// Returns the raw result payload (transport-shim wrapper already removed).
+    pub async fn send_custom_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
+        let running_guard = self.running.lock().await;
+        let running = running_guard
+            .as_ref()
+            .ok_or(McpError::TransportClosed("not connected".into()))?;
+        let peer = running.peer().clone();
+        drop(running_guard);
+
+        let mut params = params;
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert("_meta".into(), tasks::tasks_extension_meta());
+        }
+        let request = rmcp::model::ClientRequest::CustomRequest(rmcp::model::CustomRequest::new(
+            method,
+            Some(params),
+        ));
+        match peer.send_request(request).await {
+            Ok(rmcp::model::ServerResult::CustomResult(value)) => {
+                Ok(tasks::unwrap_task_result(&value.0).unwrap_or(value.0))
+            }
+            Ok(_other) => Err(McpError::TaskProtocol(format!(
+                "{method}: server replied in a legacy typed shape"
+            ))),
+            Err(e) => Err(McpError::TaskProtocol(format!("{method}: {e}"))),
+        }
     }
 
     pub async fn refresh_cached_tools(&self) -> Result<(), McpError> {

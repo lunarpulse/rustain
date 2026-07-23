@@ -1,8 +1,10 @@
+pub mod a2a;
 pub mod acp;
 pub mod agent_activation;
 pub mod agent_registry;
 pub mod apply_patch;
 pub mod approval_persistence_toml;
+pub mod artifact;
 pub mod auth_store;
 pub mod authority;
 pub mod budget;
@@ -21,6 +23,7 @@ pub mod isolation;
 pub mod ledger;
 pub mod long_term_memory;
 pub mod memory_context;
+pub mod merge_back;
 pub mod model_catalog_cache;
 #[cfg(feature = "models-dev")]
 pub mod models_dev;
@@ -31,6 +34,7 @@ pub mod profile_resolver;
 pub mod project_context_loader;
 pub mod project_scoped_memory;
 pub mod provider;
+pub mod rap;
 pub mod sandbox;
 #[cfg(feature = "cron")]
 pub mod scheduler;
@@ -51,6 +55,13 @@ pub mod workspace_registry;
 // default build pulls neither fastembed/ort nor bincode (NFR9 preserved).
 #[cfg(feature = "vector-search")]
 pub mod vector_search;
+
+// Story 17.3a — WASM execution-sandbox backend (WasmIsolationBackend over the
+// wasmtime component model). Feature-gated: the default build pulls no wasmtime
+// runtime (NFR9). The `ExecutionSandbox` port + domain value types compile
+// unconditionally; only this adapter needs the feature.
+#[cfg(feature = "wasm-sandbox")]
+pub mod wasm;
 
 #[cfg(feature = "mcp")]
 pub mod mcp;

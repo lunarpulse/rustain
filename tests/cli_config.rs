@@ -38,6 +38,7 @@ impl ProfileResolver for TestProfileResolver {
             selection: Default::default(),
             overrides: self.defaults.clone(),
             mcp_servers: self.mcp_servers.clone(),
+            a2a_peers: Vec::new(),
             include_builtin_tools: true,
             preview: false,
         })

@@ -1,0 +1,37 @@
+{
+  "CASSETTE_completed_arc_jsonrpc.json": {
+    "sha256": "d0473183aa38d01ceacf733756006e3a55265e654a710daef3b537b9da2fffd2"
+  },
+  "CORPUS_141_live_cards_2026-07-17.json": {
+    "sha256": "881c581716986653cc7ef7706f73c6a68ba3dcfb788b3ae6b241d068e172f727"
+  },
+  "FIXTURE_moltrust_v1.0_agent-card.json": {
+    "sha256": "9ac25196b759538282f9d27d98e6b03b9816baa234efa1f062dabded5b20735c"
+  },
+  "FIXTURE_moltrust_v1.0_jwks.json": {
+    "sha256": "068c53ec5f743a29085a1d4d055dd2c53e17752ddb51244b8ea43c82473ba995"
+  },
+  "FIXTURE_planets_hybrid-v1.0-card.json": {
+    "sha256": "4bef96abe16e83b197d8e7d6e77a067801c8c5dba164096144555c620a0dbe77",
+    "provenance": {
+      "original_filename": "FIXTURE_planets_v0.3_agent-card.json",
+      "capture_date": "2026-07-17",
+      "fetch_path": "https://planets-agent.ai/.well-known/agent.json"
+    }
+  },
+  "FIXTURE_planets_v0.3_jwks.json": {
+    "sha256": "01e6107bdca417df03fcdd126b25f441fbef54d84c10563022e66aa3532b8dff"
+  },
+  "README.md": {
+    "sha256": "bd6b1694419ea883ee5882493196751384986229e295b6f164a614b76d7dd7f3"
+  },
+  "REPRODUCE_TEST_SIGNATURE.sh": {
+    "sha256": "f8027bc3a3bccbb6e421d55859218f846d324aad9095aca48c0cf9ff58fab635"
+  },
+  "REVERIFY_REAL_SIGNATURES.sh": {
+    "sha256": "504ecfc81c580da37c6cbf2e548148cedd457ed958d487542bd6ef619c873760"
+  },
+  "TEST_ONLY_ed25519_seed.hex": {
+    "sha256": "ec603c42bdb4804149c45620d4c7cc5b7d2b60932e5a182c4a63e0b3b71da435"
+  }
+}

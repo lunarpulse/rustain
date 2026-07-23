@@ -2,6 +2,7 @@
 //! Conformance tests for MCP lifecycle — Story 9.1 reconnect & shutdown.
 //!
 //! Uses the `fake-mcp-server` binary to exercise real stdio MCP sessions.
+mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -14,25 +15,7 @@ use rustain::domain::events::AppEvent;
 use rustain::domain::models::{McpConnectionState, McpServerSource, McpServerSpec, McpTransport};
 
 fn fake_spec(id: &str, env: BTreeMap<String, String>) -> McpServerSpec {
-    let binary_name = if cfg!(target_os = "windows") {
-        "fake-mcp-server.exe"
-    } else {
-        "fake-mcp-server"
-    };
-    let exe_dir = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    let mut candidates = vec![
-        exe_dir.join(binary_name),
-        exe_dir.parent().expect("deps parent").join(binary_name),
-    ];
-    let command = candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| candidates.remove(0));
+    let command = common::fake_mcp_binary();
     McpServerSpec {
         id: id.to_string(),
         transport: McpTransport::Stdio,

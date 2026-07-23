@@ -1,4 +1,4 @@
-use crate::domain::models::{AgentLaunchSpec, SubagentError, TaskHandle};
+use crate::domain::models::{AgentId, AgentLaunchSpec, SubagentError, TaskHandle};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
@@ -14,5 +14,7 @@ pub trait SubagentRunner: Send + Sync {
         &self,
         spec: AgentLaunchSpec,
         cancel: CancellationToken,
+        parent: Option<&TaskHandle>,
+        agent_id: AgentId,
     ) -> Result<TaskHandle, SubagentError>;
 }
