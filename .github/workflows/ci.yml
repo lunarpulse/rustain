@@ -105,6 +105,7 @@ jobs:
             --test a2a_lifecycle \
             --test a2a_jws \
             --test a2a_provider \
+            --test a2a_server \
             --test a2a_trust_registry \
             --test conformance_a2a_architecture
 

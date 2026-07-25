@@ -1,8 +1,130 @@
 //! Version-stable AgentCard discovery view.
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::error::A2aError;
+
+use crate::domain::models::capability_registry::CapabilityRegistry;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServedAgentCard {
+    name: String,
+    description: String,
+    version: String,
+    capabilities: ServedCapabilities,
+    default_input_modes: Vec<String>,
+    default_output_modes: Vec<String>,
+    skills: Vec<ServedAgentSkill>,
+    supported_interfaces: Vec<ServedInterface>,
+    #[serde(
+        rename = "x-rustain-ownership",
+        skip_serializing_if = "Option::is_none"
+    )]
+    ownership: Option<ServedOwnership>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    signatures: Vec<ServedSignature>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServedCapabilities {
+    streaming: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServedOwnership {
+    kind: &'static str,
+    peer_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServedAgentSkill {
+    id: String,
+    name: String,
+    description: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServedInterface {
+    url: String,
+    protocol_binding: &'static str,
+    protocol_version: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ServedSignature {
+    pub(crate) protected: String,
+    pub(crate) signature: String,
+}
+
+impl ServedAgentCard {
+    /// Project the live local capability registry into the intentionally narrow
+    /// A2A disclosure policy. AgentCard `skills` describe agent skills, not raw
+    /// built-in/MCP tools or recursively discovered remote A2A capabilities.
+    ///
+    /// Async because a signed card must never be built from a fabricated
+    /// catalog: `snapshot_consistent` awaits the read lock, whereas the
+    /// best-effort `snapshot()` yields an EMPTY vec under contention and would
+    /// have us sign "this agent has no skills" during a concurrent register.
+    ///
+    /// `description` is projected verbatim: capability text is by-design
+    /// disclosure (AC3a). The opacity boundary is *instance* state — workspace
+    /// root, input schemas, tool argv, system prompt — none of which appear in
+    /// any field of this struct.
+    pub async fn from_registry(registry: &CapabilityRegistry, endpoint_url: &str) -> Self {
+        let mut skills = registry
+            .snapshot_consistent()
+            .await
+            .into_iter()
+            .filter(|capability| capability.protocol == "skill")
+            .map(|capability| ServedAgentSkill {
+                id: capability.name.clone(),
+                name: capability.name,
+                description: capability.description,
+                tags: vec!["rustain".to_owned(), "skill".to_owned()],
+            })
+            .collect::<Vec<_>>();
+        skills.sort_by(|left, right| left.id.cmp(&right.id));
+
+        Self {
+            name: "rustain".to_owned(),
+            description: "Terminal-native AI coding agent".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            capabilities: ServedCapabilities { streaming: false },
+            default_input_modes: vec!["text/plain".to_owned()],
+            default_output_modes: vec!["text/plain".to_owned()],
+            skills,
+            supported_interfaces: vec![ServedInterface {
+                url: endpoint_url.to_owned(),
+                protocol_binding: "JSONRPC",
+                protocol_version: "1.0",
+            }],
+            ownership: None,
+            signatures: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_signature(mut self, protected: String, signature: String) -> Self {
+        self.signatures.push(ServedSignature {
+            protected,
+            signature,
+        });
+        self
+    }
+
+    pub(crate) fn with_ownership(mut self, peer_id: String) -> Self {
+        self.ownership = Some(ServedOwnership {
+            kind: "self",
+            peer_id,
+        });
+        self
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentCardView {

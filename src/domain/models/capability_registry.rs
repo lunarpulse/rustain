@@ -212,6 +212,18 @@ impl CapabilityRegistry {
         }
     }
 
+    /// Await a consistent snapshot of all currently registered capabilities.
+    ///
+    /// [`Self::snapshot`] is a best-effort `try_read` that substitutes an EMPTY
+    /// vec on contention — acceptable for a TUI panel that redraws next frame,
+    /// catastrophic for anything that treats the result as authoritative (the
+    /// A2A served AgentCard signs it). Async callers MUST use this method: it
+    /// waits for the read lock and can never fabricate an empty catalog.
+    pub async fn snapshot_consistent(&self) -> Vec<RegisteredCapability> {
+        let inner = self.inner.read().await;
+        inner.capabilities.values().cloned().collect()
+    }
+
     /// Subscribe to catalog deltas.
     ///
     /// Returns a `SubscriptionHandle` that, on `Drop`, unsubscribes the

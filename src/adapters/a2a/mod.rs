@@ -24,4 +24,6 @@ pub mod lifecycle;
 #[cfg(feature = "a2a")]
 pub mod provider;
 #[cfg(feature = "a2a")]
+pub mod server;
+#[cfg(feature = "a2a")]
 pub mod task;

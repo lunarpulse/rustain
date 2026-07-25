@@ -81,6 +81,8 @@ mod a2a_conformance {
         let domain = include_str!("../models/a2a_peer_spec.rs");
         for forbidden in [
             "reqwest",
+            "axum",
+            "JsonRpc",
             "serde_jcs",
             "ed25519_dalek",
             "base64::",
@@ -119,12 +121,14 @@ mod a2a_conformance {
         // NOT forbidden: pure crypto is allowed in domain (capability_token.rs,
         // authority_ledger.rs). Forbidden set is exactly AC4's: A2A adapter/wire
         // types plus reqwest/serde_jcs.
-        const FORBIDDEN: [&str; 5] = [
+        const FORBIDDEN: [&str; 7] = [
             "reqwest",
             "serde_jcs",
+            "axum",
             "adapters::a2a",
             "AgentCardView",
             "A2aClientAdapter",
+            "JsonRpc",
         ];
         fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else {

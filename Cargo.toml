@@ -75,6 +75,7 @@ tracing-appender = "0.2"
 
 # ── HTTP client (provider adapters) ─────────────────────────────
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], optional = true }
+axum = { version = "0.8", optional = true }
 
 # ── Encoding ─────────────────────────────────────────────────────
 base64 = "0.22"
@@ -211,7 +212,7 @@ models-dev = ["dep:reqwest"]
 mcp = ["dep:rmcp"]
 test-fake-mcp = ["mcp", "rmcp/server"]
 # DF-17-4a-6: composite_toolset_adapter remains MCP-gated across its lifecycle surface.
-a2a = ["mcp", "dep:reqwest", "dep:serde_jcs"]
+a2a = ["mcp", "dep:reqwest", "dep:serde_jcs", "dep:axum"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]

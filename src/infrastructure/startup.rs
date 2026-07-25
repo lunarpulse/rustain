@@ -49,20 +49,43 @@ impl std::fmt::Display for SubcommandExit {
 
 impl std::error::Error for SubcommandExit {}
 
-fn ensure_a2a_feature_enabled(peers: &[crate::domain::models::A2aPeerSpec]) -> Result<()> {
+fn ensure_a2a_feature_enabled(
+    peers: &[crate::domain::models::A2aPeerSpec],
+    serve_requested: bool,
+) -> Result<()> {
     #[cfg(feature = "a2a")]
     {
-        let _ = peers;
+        let _ = (peers, serve_requested);
         Ok(())
     }
     #[cfg(not(feature = "a2a"))]
     {
-        if peers.is_empty() {
+        if peers.is_empty() && !serve_requested {
             Ok(())
         } else {
-            anyhow::bail!("A2A peers are configured, but this build has the `a2a` feature disabled")
+            anyhow::bail!(
+                "A2A peers or serving are configured, but this build has the `a2a` feature disabled"
+            )
         }
     }
+}
+
+/// Decision-Core (Story 18.0 pattern): effect-free, value-returning.
+///
+/// In this cut `--serve-a2a` is a *standalone* front door. Command intercepts
+/// run in source order, so a combination is not "composable" — it silently
+/// drops one of the two modes (`daemon` returns before the serve intercept and
+/// wins; the serve intercept returns before `acp` and wins). Silently honouring
+/// one and discarding the other is worse than refusing. Story 18-1b owns real
+/// daemon composition.
+fn evaluate_serve_a2a_combination(serve_requested: bool, has_subcommand: bool) -> Result<()> {
+    if serve_requested && has_subcommand {
+        anyhow::bail!(
+            "--serve-a2a runs a standalone loopback A2A server and cannot be combined with a \
+             subcommand in this build; run it on its own (Story 18-1b adds daemon composition)"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -82,7 +105,7 @@ mod a2a_feature_tests {
     #[test]
     fn configured_peer_matches_the_compile_time_feature_policy() {
         let peer = configured_peer();
-        let result = ensure_a2a_feature_enabled(std::slice::from_ref(&peer));
+        let result = ensure_a2a_feature_enabled(std::slice::from_ref(&peer), false);
         #[cfg(feature = "a2a")]
         assert!(result.is_ok());
         #[cfg(not(feature = "a2a"))]
@@ -92,7 +115,26 @@ mod a2a_feature_tests {
                 .to_string()
                 .contains("feature disabled")
         );
-        assert!(ensure_a2a_feature_enabled(&[]).is_ok());
+        assert!(ensure_a2a_feature_enabled(&[], false).is_ok());
+        let serve_result = ensure_a2a_feature_enabled(&[], true);
+        #[cfg(feature = "a2a")]
+        assert!(serve_result.is_ok());
+        #[cfg(not(feature = "a2a"))]
+        assert!(serve_result.is_err());
+    }
+
+    #[test]
+    fn serve_a2a_refuses_to_silently_shadow_a_subcommand() {
+        use super::evaluate_serve_a2a_combination;
+        assert!(evaluate_serve_a2a_combination(false, false).is_ok());
+        assert!(evaluate_serve_a2a_combination(true, false).is_ok());
+        assert!(evaluate_serve_a2a_combination(false, true).is_ok());
+        assert!(
+            evaluate_serve_a2a_combination(true, true)
+                .expect_err("a combination silently drops one mode and must fail loud")
+                .to_string()
+                .contains("cannot be combined with a subcommand")
+        );
     }
 }
 
@@ -160,7 +202,14 @@ pub async fn run() -> Result<()> {
         tool_exposure: cli.tool_exposure.clone(),
         skill_exposure: cli.skill_exposure.clone(),
         sandbox_adapter: cli.sandbox_adapter.clone(),
+        serve_a2a: cli.serve_a2a.clone(),
     };
+
+    // Story 18.1a — refuse the combination BEFORE any command intercept runs.
+    // Placed here because the intercepts return in source order, so a check
+    // sited next to the serve intercept would already have been skipped by the
+    // daemon branch above it.
+    evaluate_serve_a2a_combination(cli.serve_a2a.is_some(), cli.command.is_some())?;
 
     // 3. Load config — two-pass for story 8.2 chicken-and-egg resolution (AC-15).
     //
@@ -810,6 +859,32 @@ pub async fn run() -> Result<()> {
         });
     }
 
+    // Story 18.1a — loopback A2A server intercept. The flag is global so Story
+    // 18.1b can compose it with daemon mode; this cut owns the standalone path.
+    if let Some(addr) = cli.serve_a2a.clone() {
+        ensure_a2a_feature_enabled(&[], true)?;
+        #[cfg(feature = "a2a")]
+        {
+            let workspace = std::env::current_dir()
+                .map_err(|e| anyhow::anyhow!("Failed to get current directory: {e}"))?;
+            return crate::adapters::a2a::server::run(addr, app_config, workspace)
+                .await
+                .map_err(|e| {
+                    tracing::error!("A2A server failed: {e:#}");
+                    // AC4a's refusal has to reach the operator, not just the
+                    // log: `SubcommandExit` carries only an exit code, so a
+                    // bare map would turn "non-loopback bind refused, see
+                    // 18-1b" into a silent exit 1.
+                    eprintln!("rustain: A2A server failed: {e:#}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
+        }
+        #[cfg(not(feature = "a2a"))]
+        {
+            let _ = addr;
+            unreachable!("ensure_a2a_feature_enabled rejects serving without the feature");
+        }
+    }
     // Story 14.7 — ACP server intercept. MUST run before provider construction
     // and terminal setup: stdout is the JSON-RPC transport.
     if let Some(Command::Acp { client }) = cli.command.clone() {
@@ -1332,7 +1407,7 @@ pub async fn run() -> Result<()> {
     let resolved = profile_resolver_arc
         .resolve_active()
         .expect("post-Pass-2 toml_resolver always has resolve_active populated");
-    ensure_a2a_feature_enabled(&resolved.a2a_peers)?;
+    ensure_a2a_feature_enabled(&resolved.a2a_peers, false)?;
     let compose_ctx = crate::infrastructure::composition::ComposeContext {
         workspace_path: workspace_path.clone(),
         project_context: project_context.clone(),

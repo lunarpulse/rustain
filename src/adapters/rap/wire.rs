@@ -45,6 +45,12 @@ impl AgentSigner {
         &self.identity
     }
 
+    /// Sign arbitrary domain-separated bytes for protocols that reuse the
+    /// instance identity without reusing RAP envelope framing.
+    pub(crate) fn sign_detached(&self, message: &[u8]) -> Ed25519Sig {
+        Ed25519Sig(self.key.sign(message).to_bytes().to_vec())
+    }
+
     pub fn sign<T: Serialize>(
         &self,
         sender: AgentId,

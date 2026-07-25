@@ -76,6 +76,17 @@ pub struct Cli {
     /// platforms) or `"landlock"` (Linux + `sandbox` cargo feature only).
     #[arg(long, global = true, value_parser = ["noop", "landlock"])]
     pub sandbox_adapter: Option<String>,
+    /// Serve this instance as a loopback-only A2A endpoint. An explicit address
+    /// uses `--serve-a2a=127.0.0.1:PORT`; the default is 127.0.0.1:8080.
+    #[arg(
+        long,
+        global = true,
+        value_name = "ADDR",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "127.0.0.1:8080"
+    )]
+    pub serve_a2a: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]

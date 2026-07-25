@@ -15,6 +15,8 @@ fn a2a_domain_types_are_wire_and_transport_free() {
     let domain = source("src/domain/models/a2a_peer_spec.rs");
     for forbidden in [
         "reqwest",
+        "axum",
+        "JsonRpc",
         "serde_jcs",
         "ed25519_dalek",
         "base64::",
@@ -50,7 +52,7 @@ fn a2a_feature_is_off_by_default_and_declares_the_documented_fallback() {
         .collect();
     assert_eq!(
         a2a,
-        BTreeSet::from(["dep:reqwest", "dep:serde_jcs", "mcp"]),
+        BTreeSet::from(["dep:axum", "dep:reqwest", "dep:serde_jcs", "mcp"]),
         "DF-17-4a-3 fallback must remain explicit until composite gating is separated"
     );
     assert_eq!(
@@ -59,6 +61,10 @@ fn a2a_feature_is_off_by_default_and_declares_the_documented_fallback() {
     );
     assert_eq!(
         manifest["dependencies"]["serde_jcs"]["optional"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        manifest["dependencies"]["axum"]["optional"].as_bool(),
         Some(true)
     );
     assert!(
@@ -72,7 +78,7 @@ fn only_config_parsing_compiles_without_the_a2a_feature() {
     let module = source("src/adapters/a2a/mod.rs");
     assert!(module.contains("pub mod config;"));
     assert!(!module.contains("#[cfg(feature = \"a2a\")]\npub mod config;"));
-    for adapter in ["card", "client", "error", "jws", "provider"] {
+    for adapter in ["card", "client", "error", "jws", "provider", "server"] {
         assert!(
             module.contains(&format!("#[cfg(feature = \"a2a\")]\npub mod {adapter};")),
             "{adapter} must be feature-gated"
