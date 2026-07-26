@@ -35,7 +35,7 @@ use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     AgentId, AgentMessage, ChannelKind, ChannelTurnRequest, ChatMessage, Conversation, MessageRole,
-    PeerId, StopReason, StreamChunk, ToolRisk, TurnOrigin, generate_message_id,
+    NodeState, PeerId, StopReason, StreamChunk, ToolRisk, TurnOrigin, generate_message_id,
 };
 use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntimeEvent};
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
@@ -160,6 +160,15 @@ pub struct AttachServer {
     /// unless they opt in.
     peer_delivery:
         Arc<tokio::sync::RwLock<Option<Arc<crate::adapters::rap::VerifiedPeerFrameHandler>>>>,
+    /// Story 18.1b — the assistant answer produced by each inbound A2A peer
+    /// node, captured at the moment its turn finished.
+    ///
+    /// Keyed by node id rather than read back off the shared conversation: the
+    /// daemon has ONE conversation and several origins push into it, so "the
+    /// last assistant message" is not reliably *this* task's answer. Capturing
+    /// at completion is; guessing later is how a peer ends up reading another
+    /// channel's reply.
+    inbound_results: Arc<Mutex<std::collections::HashMap<AgentId, String>>>,
 }
 
 struct DaemonPeerConsumer {
@@ -182,6 +191,28 @@ impl crate::adapters::rap::VerifiedPeerConsumer for DaemonPeerConsumer {
             .enqueue_verified_peer_turn(content.content, peer_id.clone())
             .await
     }
+}
+
+/// Subscribe and publish the approval gate as one ordered operation.
+///
+/// A broadcast receiver only receives requests emitted after it exists. Create
+/// it before publishing the once-only flag so a concurrent caller can never
+/// observe "started" while no receiver has been installed yet.
+fn ensure_approval_gate_once(
+    approval_gate_started: &std::sync::atomic::AtomicBool,
+    approval: Arc<ApprovalRuntime>,
+    registry: Arc<Mutex<ConnRegistry>>,
+    blocked: Arc<AtomicUsize>,
+    conversation: Arc<Mutex<Conversation>>,
+    storage: Arc<dyn crate::domain::ports::StoragePort>,
+) {
+    let events = approval.subscribe();
+    if approval_gate_started.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async move {
+        run_approval_gate(events, approval, registry, blocked, conversation, storage).await;
+    });
 }
 
 impl AttachServer {
@@ -272,6 +303,7 @@ impl AttachServer {
                 replay: Arc::new(Mutex::new(ReplayWindow::default())),
                 clock,
                 peer_delivery: Arc::new(tokio::sync::RwLock::new(Some(peer_delivery))),
+                inbound_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
             }
         })
     }
@@ -368,9 +400,17 @@ impl AttachServer {
             match chunk {
                 StreamChunk::Text { content, .. } => assistant_buf.push_str(content),
                 StreamChunk::TurnComplete { stop_reason } => {
-                    self.commit_assistant_turn(assistant_buf, stop_reason).await;
-                    assistant_buf.clear();
-                    self.turn_complete.notify_waiters();
+                    if *stop_reason == StopReason::Cancelled {
+                        // A cancelled turn has no committed assistant answer. In
+                        // particular, an aborted inbound turn can have already
+                        // streamed text, which must not become the prefix of the
+                        // next turn's answer.
+                        assistant_buf.clear();
+                    } else {
+                        self.commit_assistant_turn(assistant_buf, stop_reason).await;
+                        assistant_buf.clear();
+                        self.turn_complete.notify_waiters();
+                    }
                 }
                 StreamChunk::ToolUse { id, name, .. } => {
                     assistant_buf.push_str(&format!("\n[tool use: {name} (id: {id})]\n"));
@@ -1159,17 +1199,23 @@ impl AttachServer {
     }
 
     /// Spawn the headless approval gate exactly once (AC6).
+    ///
+    /// The subscription is taken **here**, synchronously, not inside the spawned
+    /// task: `broadcast` only delivers to receivers that already exist, so a
+    /// `request()` issued between the spawn and the task's first poll would be
+    /// broadcast into the void and its approval would hang until its own
+    /// timeout. Story 18.1b made that reachable — an inbound A2A admission
+    /// approval is raised immediately after the gate is armed, with no turn in
+    /// between to absorb the gap.
     fn ensure_approval_gate(&self, approval: Arc<ApprovalRuntime>) {
-        if self.approval_gate_started.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let registry = self.registry.clone();
-        let blocked = self.blocked_waiting.clone();
-        let conversation = self.conversation.clone();
-        let storage = self.core.storage.clone();
-        tokio::spawn(async move {
-            run_approval_gate(approval, registry, blocked, conversation, storage).await;
-        });
+        ensure_approval_gate_once(
+            self.approval_gate_started.as_ref(),
+            approval,
+            self.registry.clone(),
+            self.blocked_waiting.clone(),
+            self.conversation.clone(),
+            self.core.storage.clone(),
+        );
     }
 
     /// Story 12.2c AC7 + 12.2d AC1/AC2/AC6 — surface the 12.1c boundary queues to
@@ -1438,13 +1484,13 @@ impl AttachServer {
 /// timeout→deny), or — unattended — auto-proceed read-only/`Safe` tools and
 /// **deny** anything mutating, recording a durable, resumable transcript record.
 async fn run_approval_gate(
+    mut rx: tokio::sync::broadcast::Receiver<ApprovalRuntimeEvent>,
     approval: Arc<ApprovalRuntime>,
     registry: Arc<Mutex<ConnRegistry>>,
     blocked: Arc<AtomicUsize>,
     conversation: Arc<Mutex<Conversation>>,
     storage: Arc<dyn crate::domain::ports::StoragePort>,
 ) {
-    let mut rx = approval.subscribe();
     loop {
         match rx.recv().await {
             Ok(ApprovalRuntimeEvent::Requested {
@@ -1549,6 +1595,467 @@ async fn record_blocked_action(
     }
 }
 
+/// The owned slice of `AttachServer` an inbound peer turn needs after `start`
+/// has returned.
+///
+/// `AttachServer` is held as `Arc<Self>` by its own callers but the port's
+/// `start` takes `&self`, and the turn must outlive the call. Cloning the
+/// handles it genuinely uses is honest about the coupling; a `Weak<Self>`
+/// upgrade would hide it and add a failure mode nobody handles.
+struct InboundTurnContext {
+    core: Arc<DaemonCore>,
+    conversation: Arc<Mutex<Conversation>>,
+    domain_tx: mpsc::UnboundedSender<AppEvent>,
+    node_tree: crate::infrastructure::subagent::NodeTree,
+    /// The daemon has ONE conversation; turns must not interleave on it.
+    turn_serial: Arc<Mutex<()>>,
+    active_channel_origin: Arc<Mutex<ChannelKind>>,
+    inbound_results: Arc<Mutex<std::collections::HashMap<AgentId, String>>>,
+    registry: Arc<Mutex<ConnRegistry>>,
+    blocked_waiting: Arc<AtomicUsize>,
+    approval_gate_started: Arc<std::sync::atomic::AtomicBool>,
+    turn_complete: Arc<Notify>,
+}
+
+impl InboundTurnContext {
+    fn ensure_approval_gate(&self, approval: Arc<ApprovalRuntime>) {
+        ensure_approval_gate_once(
+            self.approval_gate_started.as_ref(),
+            approval,
+            self.registry.clone(),
+            self.blocked_waiting.clone(),
+            self.conversation.clone(),
+            self.core.storage.clone(),
+        );
+    }
+
+    /// Drive one inbound peer task to a terminal node state.
+    ///
+    /// This is the same origination primitive the Unix socket drives —
+    /// `drive_preloaded_turn` with `TurnOrigin::RemotePeer` — not a parallel
+    /// injection path. The only additions are the ones the front door owes the
+    /// node: a terminal transition that distinguishes cancel from failure, and
+    /// capture of the answer this task produced.
+    async fn run(self, node_id: AgentId, peer_id: PeerId, text: String, cancel: CancellationToken) {
+        let runtime = match self.core.ensure_runtime().await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::error!(%error, node = %node_id, "A2A inbound turn: runtime unavailable");
+                self.node_tree.set_state(&node_id, NodeState::Running).await;
+                self.node_tree.set_state(&node_id, NodeState::Failed).await;
+                self.node_tree.deregister(&node_id).await;
+                return;
+            }
+        };
+        self.ensure_approval_gate(runtime.approval.clone());
+
+        // Serialize on the same mutex every other daemon turn uses. Taken AFTER
+        // registration so the node — and therefore `tasks/get` — is live and
+        // reports `working` while the task waits its turn, rather than the
+        // submitter seeing nothing until the queue drains.
+        let _turn_guard = tokio::select! {
+            guard = self.turn_serial.lock() => guard,
+            () = cancel.cancelled() => {
+                self.node_tree.set_state(&node_id, NodeState::Running).await;
+                self.node_tree
+                    .set_state(&node_id, NodeState::Cancelled)
+                    .await;
+                self.node_tree.deregister(&node_id).await;
+                return;
+            }
+        };
+        if cancel.is_cancelled() {
+            self.node_tree.set_state(&node_id, NodeState::Running).await;
+            self.node_tree
+                .set_state(&node_id, NodeState::Cancelled)
+                .await;
+            self.node_tree.deregister(&node_id).await;
+            return;
+        }
+        *self.active_channel_origin.lock().await = ChannelKind::Terminal;
+
+        self.node_tree.set_state(&node_id, NodeState::Running).await;
+        // Register before driving: Notify is edge-triggered for a waiter
+        // created after completion, so this must exist before the provider can
+        // emit its terminal chunk.
+        let turn_complete = self.turn_complete.notified();
+        tokio::pin!(turn_complete);
+        turn_complete.as_mut().enable();
+
+        // Tee the turn's event stream. The assistant answer is committed to the
+        // shared `conversation` by the attach forwarder, which only runs when a
+        // client is attached — so reading the conversation afterwards would make
+        // "did the remote peer get its answer?" depend on whether an operator
+        // happened to be watching. Accumulating from the turn's own
+        // `ProviderChunk` stream does not.
+        //
+        // Every event is forwarded on to the real `domain_tx`, so the daemon bus,
+        // the forwarder, and every other consumer see exactly what they saw
+        // before.
+        let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let downstream = self.domain_tx.clone();
+        let collector = tokio::spawn(async move {
+            let mut answer = String::new();
+            let mut errored = false;
+            let mut completed = false;
+            while let Some(event) = tap_rx.recv().await {
+                // `run_turn`'s join handle resolves `Ok` whether the turn
+                // succeeded or died, because failure is reported on the event
+                // stream rather than by unwinding. This is therefore the ONLY
+                // place "the turn finished" and "the turn worked" are different
+                // questions — and there are three ways it can have not worked:
+                match &event {
+                    // (1) an in-stream error chunk (tool loop limit, stream
+                    //     disconnect);
+                    AppEvent::ProviderChunk {
+                        chunk: StreamChunk::Error { .. },
+                        ..
+                    } => errored = true,
+                    // (2) a provider call that never produced a stream at all —
+                    //     `run_turn` emits an error notice and returns;
+                    AppEvent::SystemNotice {
+                        level: crate::domain::models::NoticeLevel::Error,
+                        ..
+                    } => errored = true,
+                    AppEvent::ProviderChunk {
+                        chunk: StreamChunk::TurnComplete { stop_reason },
+                        ..
+                    } if *stop_reason != StopReason::ToolUse => completed = true,
+                    AppEvent::ProviderChunk {
+                        chunk: StreamChunk::Text { content, .. },
+                        ..
+                    } => answer.push_str(content),
+                    _ => {}
+                }
+                let _ = downstream.send(event);
+            }
+            // (3) …and the catch-all: a turn that never reached a final
+            // `TurnComplete` did not complete, whatever else it did or did not say.
+            (answer, errored, completed)
+        });
+
+        let (mut handle, conversation_id) = {
+            let mut conversation = self.conversation.lock().await;
+            let conversation_id = conversation.id.clone();
+            conversation.messages.push(ChatMessage {
+                id: generate_message_id(),
+                role: MessageRole::User,
+                content: text,
+                content_blocks: vec![],
+                tool_calls: vec![],
+                created_at: crate::domain::models::session_meta::now_unix(),
+                token_count: None,
+                stop_reason: None,
+                synthetic: false,
+                images: vec![],
+                origin: ChannelKind::Terminal,
+            });
+            (
+                runtime.drive_preloaded_turn(
+                    &mut conversation,
+                    &tap_tx,
+                    TurnOrigin::RemotePeer { peer_id },
+                    cancel.clone(),
+                ),
+                conversation_id,
+            )
+        };
+        drop(tap_tx);
+
+        // `run_turn`'s cancellation token reaches tool execution but NOT a
+        // provider stream that never yields, so awaiting the handle alone would
+        // make `tasks/cancel` take effect only once the model replied. Racing the
+        // token here — at the layer that owns the join handle — is what makes the
+        // cancel actually prompt.
+        let joined = tokio::select! {
+            outcome = &mut handle => Some(outcome.is_err()),
+            () = cancel.cancelled() => {
+                handle.abort();
+                let _ = handle.await;
+                None
+            }
+        };
+
+        let terminal = match joined {
+            None => {
+                let (_, _, completed) = collector.await.unwrap_or_default();
+                if !completed {
+                    // The abort drops `run_turn` before it can emit a terminal
+                    // chunk. Drain its tee first, then enqueue a cancelled
+                    // terminal event after every partial chunk. The forwarder
+                    // treats that event as a buffer reset, never an answer.
+                    // The reset must travel the daemon's own forwarder channel in stream order;
+                    // InboundTurnContext holds no event_bus handle, and every other chunk of this
+                    // turn tees through the same tx.
+                    let reset = AppEvent::ProviderChunk {
+                        conversation_id,
+                        chunk: StreamChunk::TurnComplete {
+                            stop_reason: StopReason::Cancelled,
+                        },
+                    };
+                    let _ = self.domain_tx.send(reset); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 18-1b AC6b — ordered cancel reset via the daemon forwarder channel
+                }
+                NodeState::Cancelled
+            }
+            Some(join_failed) => {
+                let (answer, errored, completed) = match collector.await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        tracing::warn!(?error, node = %node_id, "A2A inbound turn collector failed");
+                        (String::new(), true, false)
+                    }
+                };
+
+                let terminal = if join_failed || errored || !completed {
+                    // An unexpected join/runtime failure can leave streamed text
+                    // without a terminal chunk too. Reset it through the same
+                    // ordered path rather than allowing the next turn to own it.
+                    if !completed {
+                        // Same ordered-reset channel as the cancel path above; the forwarder
+                        // consumes domain_tx.
+                        let reset = AppEvent::ProviderChunk {
+                            conversation_id,
+                            chunk: StreamChunk::TurnComplete {
+                                stop_reason: StopReason::Cancelled,
+                            },
+                        };
+                        let _ = self.domain_tx.send(reset); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 18-1b AC6b — ordered cancel reset via the daemon forwarder channel
+                    }
+                    NodeState::Failed
+                } else {
+                    if !answer.trim().is_empty() {
+                        self.inbound_results
+                            .lock()
+                            .await
+                            .insert(node_id.clone(), answer);
+                    }
+                    NodeState::Completed
+                };
+
+                let folded =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete).await;
+                if folded.is_err() {
+                    tracing::warn!(
+                        "daemon inbound turn completed but assistant commit was not observed before timeout"
+                    );
+                }
+                terminal
+            }
+        };
+        self.node_tree.set_state(&node_id, terminal).await;
+        self.node_tree.deregister(&node_id).await;
+    }
+}
+
+fn disclosure_forbidden_fragments(system_prompt: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    system_prompt
+        .lines()
+        .map(str::trim)
+        .filter(|fragment| fragment.chars().count() >= 32)
+        .filter(|fragment| seen.insert(*fragment))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Story 18.1b — the daemon IS the inbound-peer execution core.
+///
+/// Implemented on `AttachServer` rather than on a new type because everything
+/// the seam needs is already here and already coordinated: the shared
+/// `NodeTree`, the one `DaemonCore`, the single `conversation`, the
+/// `turn_serial` mutex that keeps turns from interleaving on it, and the
+/// approval gate. A sibling struct would need clones of all five and a second
+/// serialization discipline to keep them consistent — a second core in
+/// everything but name.
+#[async_trait::async_trait]
+impl crate::domain::ports::InboundPeerRuntime for AttachServer {
+    async fn start(
+        &self,
+        task: crate::domain::ports::InboundPeerTask,
+        cancel: CancellationToken,
+    ) -> Result<tokio::sync::watch::Receiver<NodeState>, crate::domain::ports::InboundPeerError>
+    {
+        use crate::domain::models::{AgentMetrics, CapabilityTokenId, Op};
+        use crate::domain::ports::InboundPeerError;
+        use crate::infrastructure::subagent::{AgentHandle, MailboxBudget};
+
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let (status_tx, _) = tokio::sync::watch::channel(NodeState::Created);
+        let (_, metrics_rx) = tokio::sync::watch::channel(AgentMetrics::default());
+
+        // The handle stays LOCAL. The remote submitter never receives a live
+        // handle into our tree; its work runs as a node under OUR authority
+        // (`OwnershipKind::Peer` / `NodeOrigin::Remote`), which is what makes
+        // `relationship_disposition(Peer) == MayRefuse` apply to it.
+        self.node_tree
+            .register_peer(
+                task.node_id.clone(),
+                AgentHandle {
+                    agent_id: task.node_id.clone(),
+                    token: CapabilityTokenId::nil(),
+                    command_tx,
+                    cancel_token: cancel.clone(),
+                    depth: 0,
+                    subagent_type: task.subagent_type.clone(),
+                    spawned_at: self.clock.wall_now_ms(),
+                    status: status_tx,
+                    metrics: metrics_rx,
+                    isolated: false,
+                    mailbox_budget: MailboxBudget::new(),
+                },
+            )
+            .await
+            .map_err(|error| InboundPeerError::Register(error.to_string()))?;
+
+        let status = self
+            .node_tree
+            .status_rx(&task.node_id)
+            .await
+            .ok_or_else(|| {
+                InboundPeerError::Register("registered node has no status channel".to_owned())
+            })?;
+
+        // `Op::Kill` (cascade kill, teardown) must reach the running turn, and
+        // the only thing the turn selects on is this token.
+        {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                while let Some(op) = command_rx.recv().await {
+                    if matches!(op, Op::Kill) {
+                        cancel.cancel();
+                        break;
+                    }
+                }
+            });
+        }
+
+        let context = InboundTurnContext {
+            core: self.core.clone(),
+            conversation: self.conversation.clone(),
+            domain_tx: self.domain_tx.clone(),
+            node_tree: self.node_tree.clone(),
+            registry: self.registry.clone(),
+            blocked_waiting: self.blocked_waiting.clone(),
+            approval_gate_started: self.approval_gate_started.clone(),
+            turn_serial: self.turn_serial.clone(),
+            turn_complete: self.turn_complete.clone(),
+            active_channel_origin: self.active_channel_origin.clone(),
+            inbound_results: self.inbound_results.clone(),
+        };
+        tokio::spawn(context.run(
+            task.node_id.clone(),
+            task.peer_id.clone(),
+            task.text,
+            cancel,
+        ));
+
+        Ok(status)
+    }
+
+    async fn request_admission_approval(
+        &self,
+        peer_id: &PeerId,
+        summary: &str,
+    ) -> Result<crate::domain::ports::InboundApprovalTicket, crate::domain::ports::InboundPeerError>
+    {
+        use crate::domain::models::ApprovalOutcome;
+        use crate::domain::ports::{InboundApprovalTicket, InboundPeerError};
+
+        let rt = self
+            .core
+            .ensure_runtime()
+            .await
+            .map_err(|error| InboundPeerError::Unavailable(error.to_string()))?;
+        self.ensure_approval_gate(rt.approval.clone());
+
+        let conversation_id = self.conversation.lock().await.id.clone();
+        // `ApprovalRuntime::request` RAISES and returns; it never awaits the
+        // human. `request_id.is_some()` is precisely "a person must decide", and
+        // that is the flag the caller turns into `auth-required`.
+        let (request_id, resolved) = rt
+            .approval
+            .request(
+                crate::domain::models::tool_call::ApprovalSource::RemotePeer {
+                    conversation_id,
+                    peer_id: peer_id.clone(),
+                },
+                "a2a/message.send".to_owned(),
+                serde_json::json!({
+                    "peer": peer_id.as_str(),
+                    // A bounded preview: the prompt must be readable, and the
+                    // whole instruction could be 64 KiB of remote text.
+                    "instruction": summary.chars().take(400).collect::<String>(),
+                }),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+
+        let pending = request_id.is_some();
+        let (decision_tx, decision) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let granted = matches!(
+                resolved.await.map(|resolved| resolved.outcome),
+                Ok(ApprovalOutcome::Once
+                    | ApprovalOutcome::AlwaysTool { .. }
+                    | ApprovalOutcome::AlwaysServer { .. }
+                    | ApprovalOutcome::AlwaysAndSave { .. })
+            );
+            let _ = decision_tx.send(granted);
+        });
+
+        Ok(InboundApprovalTicket { pending, decision })
+    }
+
+    async fn take_result_text(&self, node_id: &AgentId) -> Option<String> {
+        self.inbound_results.lock().await.remove(node_id)
+    }
+
+    async fn disclosure_forbidden_fragments(&self) -> Vec<String> {
+        let system_prompt = crate::domain::ports::PersonaPort::system_prompt(
+            self.core.persona.as_ref(),
+            &self.core.workspace,
+        );
+        disclosure_forbidden_fragments(&system_prompt)
+    }
+
+    async fn reconcile_orphaned_tasks(&self, subagent_type: &str) -> Vec<AgentId> {
+        // A node left non-terminal by a previous process was rebuilt from the
+        // journal by `NodeRecovery::reconcile` (as `Suspended`) or never torn
+        // down. Either way nothing is driving it any more, so it is failed here
+        // and its id handed back for an honest wire answer.
+        let orphans: Vec<AgentId> = self
+            .node_tree
+            .list()
+            .await
+            .into_iter()
+            .filter(|entry| {
+                entry.subagent_type == subagent_type && !entry.current_status.is_terminal()
+            })
+            .map(|entry| entry.agent_id)
+            .collect();
+        for node_id in &orphans {
+            // `Suspended -> Failed` is not an edge in the node FSM (a suspended
+            // node resumes or is cancelled), so route through `Running`. Driving
+            // the shipped table rather than widening it keeps the FSM the single
+            // description of what a node may do.
+            let _ = self
+                .node_tree
+                .try_set_state(node_id, NodeState::Running)
+                .await;
+            if let Err(error) = self
+                .node_tree
+                .try_set_state(node_id, NodeState::Failed)
+                .await
+            {
+                tracing::warn!(%error, node = %node_id, "could not fail an orphaned inbound task");
+            }
+        }
+        orphans
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1561,10 +2068,12 @@ mod tests {
     };
     use crate::adapters::rap::AgentSigner;
     use crate::domain::errors::ProviderError;
-    use crate::domain::models::AgentEnvelope;
-    use crate::domain::models::provider::ModelDescriptor;
+    use crate::domain::models::{AgentEnvelope, ModelDescriptor};
     use crate::domain::models::{AppConfig, CompletionOptions, Message, StopReason};
-    use crate::domain::ports::{SecurityPort, StoragePort, StreamingProvider, ToolSetPort};
+    use crate::domain::ports::{
+        InboundPeerRuntime, InboundPeerTask, PersonaPort, SecurityPort, StoragePort,
+        StreamingProvider, ToolSetPort,
+    };
     use crate::infrastructure::runtime::event_bus::EventBus;
     use arc_swap::ArcSwap;
     use futures::stream::BoxStream;
@@ -1602,6 +2111,82 @@ mod tests {
             &self,
         ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
         {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    /// First call streams one text chunk and then stalls; the next call completes.
+    /// The stall lets an inbound cancellation exercise the `handle.abort()` path
+    /// after text has reached the daemon's forwarding tee.
+    struct AbortThenCompleteProvider {
+        calls: AtomicUsize,
+        partial_streamed: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for AbortThenCompleteProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+            use futures::StreamExt;
+
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let partial_streamed = self.partial_streamed.clone();
+                let stream = futures::stream::unfold(0_u8, move |state| {
+                    let partial_streamed = partial_streamed.clone();
+                    async move {
+                        if state == 0 {
+                            Some((
+                                StreamChunk::Text {
+                                    content: "partial cancelled output".to_owned(),
+                                    parent_tool_use_id: None,
+                                },
+                                1,
+                            ))
+                        } else {
+                            partial_streamed.notify_waiters();
+                            std::future::pending::<Option<(StreamChunk, u8)>>().await
+                        }
+                    }
+                });
+                Ok(stream.boxed())
+            } else {
+                Ok(futures::stream::iter(vec![
+                    StreamChunk::Text {
+                        content: "fresh output".to_owned(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed())
+            }
+        }
+
+        async fn abort(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
+        fn provider_id(&self) -> String {
+            "abort-then-complete".to_owned()
+        }
+
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+
+        async fn health_check(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
             Ok(crate::domain::ports::ProbeOutcome {
                 latency: std::time::Duration::ZERO,
             })
@@ -1654,6 +2239,34 @@ mod tests {
         mock_core_with_memory(workspace, chunks, Arc::new(NoOpMemory))
     }
 
+    fn mock_core_with_provider(
+        workspace: &Path,
+        provider: Arc<dyn StreamingProvider>,
+    ) -> (Arc<DaemonCore>, Arc<dyn StoragePort>) {
+        let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+            crate::infrastructure::paths::sessions_dir(workspace),
+            workspace.to_path_buf(),
+        ));
+        let workspace_for_factory = workspace.to_path_buf();
+        let storage_for_factory = storage.clone();
+        let core = DaemonCore::new(
+            workspace.to_path_buf(),
+            Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(NoOpMemory),
+            storage.clone(),
+            Arc::new(NoOpSecurity),
+            Arc::new(NoOpPersona),
+            Box::new(move || {
+                Ok(mock_runtime(
+                    provider.clone(),
+                    storage_for_factory.clone(),
+                    &workspace_for_factory,
+                ))
+            }),
+        );
+        (Arc::new(core), storage)
+    }
+
     /// Like [`mock_core`] but with an injectable [`MemoryPort`] — lets a test drive the
     /// consolidation-resolve apply path against a memory that errors on `remember_fact`
     /// (Story 12.2d review P2/G9 — write-failure must preserve the marker).
@@ -1698,6 +2311,94 @@ mod tests {
             }),
         );
         (Arc::new(core), storage)
+    }
+
+    fn inbound_task(peer_id: PeerId, text: impl Into<String>) -> InboundPeerTask {
+        InboundPeerTask {
+            node_id: AgentId::new(),
+            peer_id,
+            text: text.into(),
+            subagent_type: "a2a-test".to_owned(),
+        }
+    }
+
+    async fn wait_for_terminal(status: &mut tokio::sync::watch::Receiver<NodeState>) -> NodeState {
+        loop {
+            let state = *status.borrow_and_update();
+            if state.is_terminal() {
+                return state;
+            }
+            status
+                .changed()
+                .await
+                .expect("node sender remains alive until its terminal transition");
+        }
+    }
+
+    async fn wait_for_deregistration(server: &AttachServer, node_id: &AgentId) {
+        while server.node_tree().status_rx(node_id).await.is_some() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn spawn_inbound_forwarder(
+        workspace: &Path,
+        chunks: Vec<StreamChunk>,
+    ) -> (
+        Arc<AttachServer>,
+        Arc<Mutex<Conversation>>,
+        CancellationToken,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (core, _storage) = mock_core(workspace, chunks);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "inbound-forwarder".to_owned(),
+            ..Default::default()
+        }));
+        let (bus, domain_rx) = EventBus::new(64);
+        let listener = UnixListener::bind(workspace.join("inbound-forwarder.sock")).unwrap();
+        let server = AttachServer::new(core, conversation.clone(), bus.domain_tx.clone());
+        let shutdown = CancellationToken::new();
+        let srv = server.clone();
+        let shutdown_for_run = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            srv.run(listener, domain_rx, None, None, shutdown_for_run)
+                .await;
+        });
+        (server, conversation, shutdown, handle)
+    }
+
+    struct PromptPersona(String);
+
+    impl PersonaPort for PromptPersona {
+        fn system_prompt(&self, _workspace_path: &Path) -> String {
+            self.0.clone()
+        }
+    }
+
+    fn mock_core_with_persona(workspace: &Path, prompt: &str) -> Arc<DaemonCore> {
+        let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+            crate::infrastructure::paths::sessions_dir(workspace),
+            workspace.to_path_buf(),
+        ));
+        let provider: Arc<dyn StreamingProvider> = Arc::new(ScriptedProvider { chunks: vec![] });
+        let workspace_for_factory = workspace.to_path_buf();
+        let storage_for_factory = storage.clone();
+        Arc::new(DaemonCore::new(
+            workspace.to_path_buf(),
+            Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(NoOpMemory),
+            storage,
+            Arc::new(NoOpSecurity),
+            Arc::new(PromptPersona(prompt.to_owned())),
+            Box::new(move || {
+                Ok(mock_runtime(
+                    provider.clone(),
+                    storage_for_factory.clone(),
+                    &workspace_for_factory,
+                ))
+            }),
+        ))
     }
 
     // ── Story 17.1a attach-proof test helpers ────────────────────────────────
@@ -2308,7 +3009,8 @@ mod tests {
         let b = blocked.clone();
         let c = conversation.clone();
         let s = storage.clone();
-        let gate = tokio::spawn(async move { run_approval_gate(a, r, b, c, s).await });
+        let events = a.subscribe();
+        let gate = tokio::spawn(async move { run_approval_gate(events, a, r, b, c, s).await });
 
         let source = ApprovalSource::ForegroundTurn {
             conversation_id: "appr".into(),
@@ -2393,7 +3095,8 @@ mod tests {
         let b = blocked.clone();
         let c = conversation.clone();
         let s = storage.clone();
-        let gate = tokio::spawn(async move { run_approval_gate(a, r, b, c, s).await });
+        let events = a.subscribe();
+        let gate = tokio::spawn(async move { run_approval_gate(events, a, r, b, c, s).await });
 
         // Register a writer connection.
         let (tx, mut rx) = mpsc::channel::<DaemonFrame>(1);
@@ -2489,7 +3192,8 @@ mod tests {
         let b = blocked.clone();
         let c = conversation.clone();
         let s = storage.clone();
-        let gate = tokio::spawn(async move { run_approval_gate(a, r, b, c, s).await });
+        let events = a.subscribe();
+        let gate = tokio::spawn(async move { run_approval_gate(events, a, r, b, c, s).await });
 
         // Ensure the spawned approval gate has subscribed before issuing the
         // request; otherwise the broadcast event can be missed under full-suite
@@ -3937,5 +4641,369 @@ mod tests {
         }
         shutdown.cancel();
         handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_terminal_deregistration_frees_root_capacity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, _conversation, shutdown, handle) = spawn_inbound_forwarder(
+            tmp.path(),
+            vec![
+                StreamChunk::Text {
+                    content: "answer".to_owned(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        )
+        .await;
+        let peer_id = test_signer(80).identity().peer_id.clone();
+
+        for _ in 0..11 {
+            let task = inbound_task(peer_id.clone(), "repeat");
+            let node_id = task.node_id.clone();
+            let mut status = server
+                .start(task, CancellationToken::new())
+                .await
+                .expect("a terminal inbound task frees root capacity for the next task");
+            let terminal = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                wait_for_terminal(&mut status),
+            )
+            .await
+            .expect("inbound turn should reach a terminal state");
+            assert_eq!(terminal, NodeState::Completed);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                wait_for_deregistration(server.as_ref(), &node_id),
+            )
+            .await
+            .expect("terminal node must be deregistered before the next task");
+        }
+
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_inbound_cancellation_does_not_wait_for_turn_mutex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "queued-cancel".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation, domain_tx);
+        let blocked_turn = server.turn_serial.lock().await;
+        let cancel = CancellationToken::new();
+        let task = inbound_task(test_signer(81).identity().peer_id.clone(), "queued");
+        let node_id = task.node_id.clone();
+        let mut status = server.start(task, cancel.clone()).await.unwrap();
+
+        cancel.cancel();
+        let terminal = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_terminal(&mut status),
+        )
+        .await
+        .expect("cancellation must win while the turn mutex is still blocked");
+        assert_eq!(terminal, NodeState::Cancelled);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_deregistration(server.as_ref(), &node_id),
+        )
+        .await
+        .expect("queued cancellation must deregister after publishing Cancelled");
+        drop(blocked_turn);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_first_approval_gate_calls_install_exactly_one_receiver() {
+        use crate::domain::models::ApprovalOutcome;
+        use crate::domain::models::tool_call::ApprovalSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "approval-gate".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation, domain_tx);
+        let approval = ApprovalRuntime::new(64, Arc::new(NoOpApprovalPersistence));
+        let (writer_tx, mut writer_rx) = mpsc::channel(4);
+        server.registry.lock().await.conns.push(Conn {
+            id: 1,
+            tx: writer_tx,
+            mode: AttachMode::ReadWrite,
+        });
+
+        const CALLERS: usize = 8;
+        let barrier = Arc::new(tokio::sync::Barrier::new(CALLERS + 1));
+        let mut callers = Vec::with_capacity(CALLERS);
+        for _ in 0..CALLERS {
+            let server = server.clone();
+            let approval = approval.clone();
+            let barrier = barrier.clone();
+            callers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                server.ensure_approval_gate(approval);
+            }));
+        }
+        barrier.wait().await;
+        for caller in callers {
+            caller.await.unwrap();
+        }
+        assert!(server.approval_gate_started.load(Ordering::SeqCst));
+
+        let (request_id, decision) = approval
+            .request(
+                ApprovalSource::ForegroundTurn {
+                    conversation_id: "approval-gate".to_owned(),
+                },
+                "gate-test".to_owned(),
+                serde_json::json!({}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        let request_id = request_id.expect("elevated request needs a gate decision");
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), writer_rx.recv())
+            .await
+            .expect("the single gate forwards the request")
+            .expect("writer stays connected");
+        match received {
+            DaemonFrame::ApprovalRequest {
+                request_id: received_id,
+                ..
+            } => assert_eq!(received_id, request_id),
+            other => panic!("expected approval request, got {other:?}"),
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), writer_rx.recv())
+                .await
+                .is_err(),
+            "only the winning gate may forward the request"
+        );
+        approval.resolve(&request_id, ApprovalOutcome::Once).await;
+        assert!(matches!(
+            decision.await.unwrap().outcome,
+            ApprovalOutcome::Once
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborted_inbound_turn_cannot_prefix_next_committed_answer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(AbortThenCompleteProvider {
+            calls: AtomicUsize::new(0),
+            partial_streamed: Arc::new(Notify::new()),
+        });
+        let partial_streamed = provider.partial_streamed.notified();
+        tokio::pin!(partial_streamed);
+        partial_streamed.as_mut().enable();
+
+        let (core, _storage) = mock_core_with_provider(tmp.path(), provider.clone());
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "abort-reset".to_owned(),
+            ..Default::default()
+        }));
+        let (bus, domain_rx) = EventBus::new(64);
+        let listener = UnixListener::bind(tmp.path().join("abort-reset.sock")).unwrap();
+        let server = AttachServer::new(core, conversation.clone(), bus.domain_tx.clone());
+        let shutdown = CancellationToken::new();
+        let server_for_run = server.clone();
+        let shutdown_for_run = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            server_for_run
+                .run(listener, domain_rx, None, None, shutdown_for_run)
+                .await;
+        });
+
+        let peer_id = test_signer(82).identity().peer_id.clone();
+        let cancel = CancellationToken::new();
+        let first_task = inbound_task(peer_id.clone(), "first");
+        let first_node_id = first_task.node_id.clone();
+        let mut first_status = server.start(first_task, cancel.clone()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), partial_streamed)
+            .await
+            .expect("the first turn must stream partial text before cancellation");
+
+        cancel.cancel();
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                wait_for_terminal(&mut first_status),
+            )
+            .await
+            .expect("aborted inbound turn must become terminal"),
+            NodeState::Cancelled
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_deregistration(server.as_ref(), &first_node_id),
+        )
+        .await
+        .expect("aborted node must deregister after publishing Cancelled");
+
+        let second_task = inbound_task(peer_id, "second");
+        let second_node_id = second_task.node_id.clone();
+        let mut second_status = server
+            .start(second_task, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                wait_for_terminal(&mut second_status),
+            )
+            .await
+            .expect("second inbound turn must complete"),
+            NodeState::Completed
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_deregistration(server.as_ref(), &second_node_id),
+        )
+        .await
+        .expect("second terminal node must deregister");
+
+        let conversation = conversation.lock().await;
+        let assistant_messages: Vec<_> = conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::Assistant)
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(assistant_messages, vec!["fresh output"]);
+
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelled_terminal_discards_partial_forwarder_text_before_next_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "forwarder-reset".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation.clone(), domain_tx);
+        let mut assistant_buf = String::new();
+
+        server
+            .handle_bus_event(
+                &AppEvent::ProviderChunk {
+                    conversation_id: "forwarder-reset".to_owned(),
+                    chunk: StreamChunk::Text {
+                        content: "partial cancelled output".to_owned(),
+                        parent_tool_use_id: None,
+                    },
+                },
+                &mut assistant_buf,
+            )
+            .await;
+        server
+            .handle_bus_event(
+                &AppEvent::ProviderChunk {
+                    conversation_id: "forwarder-reset".to_owned(),
+                    chunk: StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled,
+                    },
+                },
+                &mut assistant_buf,
+            )
+            .await;
+        assert!(assistant_buf.is_empty());
+
+        server
+            .handle_bus_event(
+                &AppEvent::ProviderChunk {
+                    conversation_id: "forwarder-reset".to_owned(),
+                    chunk: StreamChunk::Text {
+                        content: "fresh output".to_owned(),
+                        parent_tool_use_id: None,
+                    },
+                },
+                &mut assistant_buf,
+            )
+            .await;
+        server
+            .handle_bus_event(
+                &AppEvent::ProviderChunk {
+                    conversation_id: "forwarder-reset".to_owned(),
+                    chunk: StreamChunk::TurnComplete {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                },
+                &mut assistant_buf,
+            )
+            .await;
+
+        let conversation = conversation.lock().await;
+        let assistant_messages: Vec<_> = conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::Assistant)
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(assistant_messages, vec!["fresh output"]);
+    }
+
+    #[tokio::test]
+    async fn taking_inbound_result_removes_it_from_daemon_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation, domain_tx);
+        let node_id = AgentId::new();
+        server
+            .inbound_results
+            .lock()
+            .await
+            .insert(node_id.clone(), "one-time answer".to_owned());
+
+        assert_eq!(
+            server.take_result_text(&node_id).await.as_deref(),
+            Some("one-time answer")
+        );
+        assert_eq!(server.take_result_text(&node_id).await, None);
+    }
+
+    #[tokio::test]
+    async fn disclosure_fragments_exclude_short_empty_and_duplicate_prompt_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long_line = "This host-sensitive system prompt line exceeds thirty-two characters.";
+        let prompt = format!("\n  \nshort\n  {long_line}  \n{long_line}\n\t\n");
+        let core = mock_core_with_persona(tmp.path(), &prompt);
+        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation, domain_tx);
+
+        assert_eq!(
+            server.disclosure_forbidden_fragments().await,
+            vec![long_line.to_owned()]
+        );
+
+        let empty_core = mock_core_with_persona(tmp.path(), "\n short \n");
+        let (empty_domain_tx, _empty_domain_rx) = mpsc::unbounded_channel();
+        let empty_server = AttachServer::new(
+            empty_core,
+            Arc::new(Mutex::new(Conversation::default())),
+            empty_domain_tx,
+        );
+        assert!(
+            empty_server
+                .disclosure_forbidden_fragments()
+                .await
+                .is_empty()
+        );
     }
 }

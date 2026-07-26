@@ -225,6 +225,50 @@ mod a2a_conformance {
         );
     }
 
+    /// Story 18.1b, R1 — the async-lock ratchet was never executed by CI.
+    ///
+    /// `MAX_KNOWN_STD_SYNC_LOCKS` lives in `tests/conformance.rs`, and until this
+    /// story **no workflow ran `--test conformance`**: the Check job runs
+    /// `cargo test --lib`, and every feature lane names its targets explicitly.
+    /// The policy the whole codebase is held to was a manual-only gate, and an
+    /// untagged `std::sync::Mutex` in `adapters/` or `infrastructure/` could
+    /// merge with all lanes green.
+    ///
+    /// This story adds a task map and per-request server state, so it owns the
+    /// subject matter and closes the gap. The guard runs under `cargo test --lib`
+    /// so it fails the DEFAULT lane if someone removes the wiring.
+    #[test]
+    fn the_async_lock_ratchet_is_executed_by_ci() {
+        let ci = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
+        )
+        .expect(".github/workflows/ci.yml must be readable");
+        assert!(
+            ci.contains("--test conformance\n") || ci.contains("--test conformance "),
+            "no CI job runs `--test conformance`, so MAX_KNOWN_STD_SYNC_LOCKS is a \
+             manual-only gate again and an untagged std::sync lock can merge green"
+        );
+    }
+
+    /// Story 18.1b — the zero-mutation ratchet (AC2b) and the card-signing
+    /// counter (AC7b) are both `#[cfg(any(test, feature = "test-instrumentation"))]`.
+    /// In an *integration* target the `test` cfg applies to the test crate, not to
+    /// the library, so without the feature those keystones silently degrade to
+    /// their behavioural halves — green, and no longer proving the structural
+    /// invariant they exist for.
+    #[test]
+    fn the_ci_a2a_lane_enables_the_zero_mutation_ratchet() {
+        let ci = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
+        )
+        .expect(".github/workflows/ci.yml must be readable");
+        assert!(
+            ci.contains("--features a2a,test-instrumentation"),
+            "the CI a2a lane must run with `test-instrumentation`, or AC2b's \
+             zero-mutation ratchet and AC7b's signing counter are compiled out"
+        );
+    }
+
     #[test]
     fn every_mcp_integration_test_is_wired_into_the_ci_mcp_lane() {
         // Story 17.5a. The default CI job runs only `cargo test --lib`, which

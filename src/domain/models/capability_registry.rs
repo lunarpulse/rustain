@@ -34,6 +34,8 @@ pub struct CapabilityRegistry {
     inner: Arc<RwLock<RegistryInner>>,
     event_tx: Option<mpsc::UnboundedSender<AppEvent>>,
     next_subscription_id: Arc<std::sync::atomic::AtomicU64>,
+    /// Monotonic catalogue version — see [`CapabilityRegistry::generation`].
+    generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -124,7 +126,31 @@ impl CapabilityRegistry {
             })),
             event_tx,
             next_subscription_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Monotonic catalogue version, bumped once per accepted mutation
+    /// (`register`, `deregister`).
+    ///
+    /// Story 18.1b (R2): the served AgentCard is expensive to build — snapshot,
+    /// project, sort, JCS-canonicalize, base64url, Ed25519-sign, canonicalize
+    /// again — and off-host it is served **unauthenticated**. Caching it needs
+    /// an invalidation signal that is cheaper than the work it guards; hashing a
+    /// snapshot is not, because taking the snapshot is already most of the cost.
+    /// This counter is that signal: one relaxed atomic load per card GET.
+    ///
+    /// Relaxed ordering is sufficient. The counter is a cache *key*, not a lock:
+    /// a reader that observes a stale generation serves a card that was valid
+    /// microseconds ago, and the next GET after the write lands serves the new
+    /// one. Nothing is ordered against it.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn bump_generation(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Look up a capability by id.
@@ -161,6 +187,10 @@ impl CapabilityRegistry {
                 }
             }
         }; // write guard dropped here
+        // Bump BEFORE the (async) event emit, while the mutation is the most
+        // recent thing that happened: a card cache that samples the generation
+        // after this point can never miss this write.
+        self.bump_generation();
 
         self.emit_event(event);
 
@@ -185,6 +215,7 @@ impl CapabilityRegistry {
                 capability: removed,
             }
         }; // write guard dropped here
+        self.bump_generation();
 
         self.emit_event(event);
         Ok(())

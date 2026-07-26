@@ -5,6 +5,7 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::header::CONTENT_TYPE;
+use rustain::adapters::a2a::auth::{BindDecision, BindEvidence, evaluate_bind_safety};
 use rustain::adapters::a2a::card::decode_and_validate;
 use rustain::adapters::a2a::jsonrpc::{
     CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND, CODE_PARSE_ERROR,
@@ -12,7 +13,7 @@ use rustain::adapters::a2a::jsonrpc::{
 };
 use rustain::adapters::a2a::jws::verify_card;
 use rustain::adapters::a2a::lifecycle::TaskSnapshot;
-use rustain::adapters::a2a::server::{BindDecision, evaluate_bind_safety, serve};
+use rustain::adapters::a2a::server::{ServeConfig, serve};
 use rustain::adapters::a2a::task::A2aTaskState;
 use rustain::adapters::rap::IdentityKeyStore;
 use rustain::domain::models::capability_id::CapabilityId;
@@ -57,7 +58,13 @@ async fn start_server(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let cancel = CancellationToken::new();
-    let task = tokio::spawn(serve(listener, registry, signer, cancel.child_token()));
+    // Story 18.1a's posture, still exercised end to end: loopback, plaintext,
+    // no execution core. Story 18.1b's execution keystones live in
+    // `tests/a2a_server_exec.rs`, which composes a real core behind the same
+    // `serve`.
+    let config =
+        ServeConfig::discovery_only(registry, signer, std::env::current_dir().expect("cwd"));
+    let task = tokio::spawn(serve(listener, config, cancel.child_token()));
     (addr, cancel, task)
 }
 
@@ -74,8 +81,17 @@ async fn stop_server(cancel: CancellationToken, task: tokio::task::JoinHandle<an
     task.await.unwrap().unwrap();
 }
 
+/// The decision core over the address STRING. Non-loopback is no longer a flat
+/// refusal (Story 18.1b): it binds if — and only if — the whole TLS + API-key +
+/// signed-identity unit is present.
 #[test]
-fn bind_decision_refuses_every_non_loopback_authority() {
+fn bind_decision_gates_non_loopback_on_the_whole_security_unit() {
+    let none = BindEvidence::default();
+    let full = BindEvidence {
+        tls: true,
+        api_key_auth: true,
+        signed_identity: true,
+    };
     for allowed in [
         "localhost:8080",
         "127.0.0.1:0",
@@ -83,8 +99,8 @@ fn bind_decision_refuses_every_non_loopback_authority() {
         "[::1]:8080",
     ] {
         assert!(
-            matches!(evaluate_bind_safety(allowed), BindDecision::Bind),
-            "{allowed} must bind"
+            matches!(evaluate_bind_safety(allowed, none), BindDecision::Bind),
+            "{allowed} must bind on loopback with no evidence at all"
         );
     }
     for refused in [
@@ -95,10 +111,14 @@ fn bind_decision_refuses_every_non_loopback_authority() {
     ] {
         assert!(
             matches!(
-                evaluate_bind_safety(refused),
+                evaluate_bind_safety(refused, none),
                 BindDecision::RefuseWithReason(_)
             ),
-            "{refused} must be refused"
+            "{refused} must be refused without TLS + auth"
+        );
+        assert!(
+            matches!(evaluate_bind_safety(refused, full), BindDecision::Bind),
+            "{refused} must bind once the whole unit is configured"
         );
     }
 }
@@ -198,8 +218,11 @@ async fn real_listener_serves_a_signed_live_opaque_card() {
     stop_server(cancel, task).await;
 }
 
+/// Story 18.1a proved the `rejected` wire channel; Story 18.1b swaps the reason
+/// from a build-capability statement to a **policy verdict**. The channel
+/// assertion is unchanged — the reason is what moved.
 #[tokio::test]
-async fn message_send_returns_the_real_rejected_task_wire_state() {
+async fn message_send_on_a_discovery_only_listener_returns_a_policy_rejection() {
     let registry = Arc::new(CapabilityRegistry::new(None));
     let key_dir = tempfile::tempdir().unwrap();
     let signer = IdentityKeyStore::new(key_dir.path())
@@ -223,10 +246,14 @@ async fn message_send_returns_the_real_rejected_task_wire_state() {
     let task_snapshot = TaskSnapshot::from_result(result.clone()).expect("real task shape");
     assert!(matches!(task_snapshot.state, A2aTaskState::Rejected));
     assert_eq!(result["status"]["state"], "rejected");
-    assert_eq!(
-        result["status"]["message"]["parts"][0]["text"],
-        "task acceptance not enabled in this build"
-    );
+    let reason = result["status"]["message"]["parts"][0]["text"]
+        .as_str()
+        .expect("a refusal carries a human-readable reason");
+    assert!(reason.contains("discovery only"), "reason={reason}");
+    // The reason must tell the operator how to enable execution, not just that
+    // it is off.
+    assert!(reason.contains("--serve-a2a"), "reason={reason}");
+    // A2A has no `refused` state; the policy decline is `rejected`.
     assert!(!raw.contains("refused"));
 
     stop_server(cancel, task).await;
@@ -272,6 +299,14 @@ async fn malformed_unknown_and_invalid_requests_return_standard_jsonrpc_errors()
             r#"{"jsonrpc":"2.0","id":6,"method":"message/send","params":{"message":{"role":"user","parts":[]}}}"#,
             CODE_INVALID_PARAMS,
         ),
+        (
+            r#"{"jsonrpc":"2.0","id":7,"method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":7}]}}}"#,
+            CODE_INVALID_PARAMS,
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":8,"method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"file","file":{}}]}}}"#,
+            CODE_INVALID_PARAMS,
+        ),
     ];
     for (body, expected) in cases {
         let value: serde_json::Value = client
@@ -286,6 +321,54 @@ async fn malformed_unknown_and_invalid_requests_return_standard_jsonrpc_errors()
             .unwrap();
         assert_eq!(value["error"]["code"], expected, "body={body}");
     }
+
+    let oversized_message_id = "x".repeat(257);
+    let oversized_id: serde_json::Value = client
+        .post(&endpoint)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "messageId": oversized_message_id,
+                    "role": "user",
+                    "parts": [{ "kind": "text", "text": "hello" }],
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(oversized_id["error"]["code"], CODE_INVALID_PARAMS);
+
+    let oversized_fallback_id = "y".repeat(257);
+    let oversized_fallback: serde_json::Value = client
+        .post(&endpoint)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": oversized_fallback_id,
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{ "kind": "text", "text": "hello" }],
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        oversized_fallback["error"]["code"], CODE_INVALID_PARAMS,
+        "a fallback task id derived from a call id is bounded too"
+    );
 
     let non_json: serde_json::Value = client
         .post(&endpoint)
@@ -311,23 +394,32 @@ async fn malformed_unknown_and_invalid_requests_return_standard_jsonrpc_errors()
     stop_server(cancel, task).await;
 }
 
-/// AC4a's guard has to hold at the socket, not only over the address string.
-/// `evaluate_bind_safety` is effect-free and never sees what the kernel bound,
-/// so `serve` is the last line of defence — and it is `pub`, which is exactly
-/// how a caller could otherwise hand it a routable listener.
+/// **[K3b-c]** — the R3 keystone. The guard has to hold at the SOCKET, not only
+/// over the address string: `evaluate_bind_safety` is effect-free and never sees
+/// what the kernel bound, and `serve` is `pub`, which is exactly how a caller
+/// could hand it a routable listener it bound itself.
+///
+/// This test does not route through the CLI. It is the only proof that Story
+/// 18.1a's last line of defence survived Story 18.1b — which *conditions* it on
+/// TLS + auth evidence rather than deleting it. Deleting the `ensure!` turns
+/// this RED; leaving it unconditional turns every non-loopback keystone RED.
 #[tokio::test]
-async fn serve_refuses_a_listener_bound_to_a_non_loopback_address() {
+async fn serve_refuses_a_self_bound_non_loopback_listener_without_tls_and_auth() {
     let registry = Arc::new(CapabilityRegistry::new(None));
     let key_dir = tempfile::tempdir().unwrap();
     let signer = IdentityKeyStore::new(key_dir.path())
         .load_or_generate()
         .unwrap();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let error = serve(listener, registry, signer, CancellationToken::new())
+    let config =
+        ServeConfig::discovery_only(registry, signer, std::env::current_dir().expect("cwd"));
+    let error = serve(listener, config, CancellationToken::new())
         .await
-        .expect_err("a non-loopback listener must never be served");
+        .expect_err("a non-loopback listener without TLS + auth must never be served");
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("non-loopback"),
-        "unexpected error: {error}"
+        message.contains("non-loopback"),
+        "unexpected error: {message}"
     );
+    assert!(message.contains("TLS"), "unexpected error: {message}");
 }

@@ -108,6 +108,11 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     let (files, count) = scan_src_for_pattern(".expose_secret()");
 
     let expected: BTreeSet<String> = [
+        // Story 18.1b — the ONE place the served API key is read, and it reads
+        // it only to hash it: `constant_time_secret_eq` feeds both sides through
+        // SHA-256 before comparing with `subtle::ConstantTimeEq`, so the
+        // plaintext never reaches a comparison, a log line, or a `Debug`.
+        "adapters/a2a/auth.rs",
         "adapters/auth_store.rs",
         "adapters/anthropic/mod.rs",
         "adapters/openai/mod.rs",
@@ -131,8 +136,8 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 13,
-        "expose_secret() pinned count changed: got {count}, expected 13. \
+        count, 14,
+        "expose_secret() pinned count changed: got {count}, expected 14. \
          If you added a legitimate call site, update the allowlist AND this count."
     );
 }

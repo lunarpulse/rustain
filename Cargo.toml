@@ -76,6 +76,15 @@ tracing-appender = "0.2"
 # ── HTTP client (provider adapters) ─────────────────────────────
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], optional = true }
 axum = { version = "0.8", optional = true }
+# Story 18.1b — server-side TLS for the non-loopback A2A listener. Direct (not
+# via reqwest's `rustls-tls`, which is a *client* config) and `a2a`-gated.
+# Pinned to the versions reqwest already resolves so one rustls links.
+rustls = { version = "0.23", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+# Constant-time credential comparison (Story 18.1b, R6). A naive `==` over a
+# shared secret reachable from a network socket is a timing oracle.
+subtle = { version = "2", optional = true }
 
 # ── Encoding ─────────────────────────────────────────────────────
 base64 = "0.22"
@@ -195,6 +204,11 @@ trybuild = "1"  # Story 14.3 AC5: Window<Handle> inlining-mutant compile_fail + 
 minisign = "0.7"  # Story 13.3a: test-signing fixtures with ephemeral keys (NOT shipped in binary)
 parking_lot = "0.12"  # Story 17.4b: scripted A2A transport mocks (rs-parking-lot rule)
 
+# Story 18.1b — self-signed certificates for the non-loopback TLS keystone.
+# Dev-only: the production TLS path loads operator-supplied PEM files, and a
+# TLS test that never completes a handshake proves nothing.
+rcgen = "0.14"
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 procfs = "0.17"
 
@@ -212,7 +226,16 @@ models-dev = ["dep:reqwest"]
 mcp = ["dep:rmcp"]
 test-fake-mcp = ["mcp", "rmcp/server"]
 # DF-17-4a-6: composite_toolset_adapter remains MCP-gated across its lifecycle surface.
-a2a = ["mcp", "dep:reqwest", "dep:serde_jcs", "dep:axum"]
+a2a = [
+    "mcp",
+    "dep:reqwest",
+    "dep:serde_jcs",
+    "dep:axum",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-pemfile",
+    "dep:subtle",
+]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]

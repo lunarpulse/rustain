@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
-use crate::adapters::cli::commands::{AuthAction, Cli, Command, ConfigAction, ProfileAction};
+use crate::adapters::cli::commands::{
+    AuthAction, Cli, Command, ConfigAction, DaemonAction, ProfileAction,
+};
 use crate::adapters::cli::session::SessionAction;
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::ledger::FileUsageLedger;
@@ -72,20 +74,30 @@ fn ensure_a2a_feature_enabled(
 
 /// Decision-Core (Story 18.0 pattern): effect-free, value-returning.
 ///
-/// In this cut `--serve-a2a` is a *standalone* front door. Command intercepts
-/// run in source order, so a combination is not "composable" — it silently
-/// drops one of the two modes (`daemon` returns before the serve intercept and
-/// wins; the serve intercept returns before `acp` and wins). Silently honouring
-/// one and discarding the other is worse than refusing. Story 18-1b owns real
-/// daemon composition.
-fn evaluate_serve_a2a_combination(serve_requested: bool, has_subcommand: bool) -> Result<()> {
-    if serve_requested && has_subcommand {
-        anyhow::bail!(
-            "--serve-a2a runs a standalone loopback A2A server and cannot be combined with a \
-             subcommand in this build; run it on its own (Story 18-1b adds daemon composition)"
-        );
+/// Command intercepts run in source order, so a combination that both branches
+/// would claim silently drops one of the two modes. Story 18.1a refused every
+/// combination for exactly that reason. Story 18.1b makes ONE of them real:
+/// `daemon` composes the A2A listener as a sibling task inside its own
+/// lifecycle, so the pair is genuinely served, not silently halved. Every other
+/// subcommand is still refused.
+fn evaluate_serve_a2a_combination(
+    serve_requested: bool,
+    subcommand: Option<&Command>,
+) -> Result<()> {
+    if !serve_requested {
+        return Ok(());
     }
-    Ok(())
+    match subcommand {
+        None
+        | Some(Command::Daemon {
+            action: DaemonAction::Start { .. } | DaemonAction::Run,
+        }) => Ok(()),
+        Some(_) => anyhow::bail!(
+            "--serve-a2a can run standalone or combined with `rustain daemon`, but not with \
+             this subcommand: the command intercepts run in source order, so one of the two \
+             modes would be silently discarded"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -124,16 +136,45 @@ mod a2a_feature_tests {
     }
 
     #[test]
-    fn serve_a2a_refuses_to_silently_shadow_a_subcommand() {
-        use super::evaluate_serve_a2a_combination;
-        assert!(evaluate_serve_a2a_combination(false, false).is_ok());
-        assert!(evaluate_serve_a2a_combination(true, false).is_ok());
-        assert!(evaluate_serve_a2a_combination(false, true).is_ok());
+    fn serve_a2a_pairs_with_daemon_and_refuses_to_shadow_anything_else() {
+        use super::{Command, evaluate_serve_a2a_combination};
+        use crate::adapters::cli::commands::DaemonAction;
+
+        let start = Command::Daemon {
+            action: DaemonAction::Start { foreground: true },
+        };
+        let run = Command::Daemon {
+            action: DaemonAction::Run,
+        };
+        assert!(evaluate_serve_a2a_combination(false, None).is_ok());
+        assert!(evaluate_serve_a2a_combination(true, None).is_ok());
+        assert!(evaluate_serve_a2a_combination(false, Some(&start)).is_ok());
+        // These are the only daemon actions that compose the sibling listener.
+        assert!(evaluate_serve_a2a_combination(true, Some(&start)).is_ok());
+        assert!(evaluate_serve_a2a_combination(true, Some(&run)).is_ok());
+        for action in [
+            DaemonAction::Stop,
+            DaemonAction::Status { json: false },
+            DaemonAction::Attach { plain: false },
+            DaemonAction::Install {
+                print: false,
+                system: false,
+            },
+            DaemonAction::Uninstall { system: false },
+        ] {
+            let daemon = Command::Daemon { action };
+            assert!(
+                evaluate_serve_a2a_combination(true, Some(&daemon))
+                    .expect_err("a daemon action that does not start the listener must fail loud")
+                    .to_string()
+                    .contains("not with this subcommand")
+            );
+        }
         assert!(
-            evaluate_serve_a2a_combination(true, true)
-                .expect_err("a combination silently drops one mode and must fail loud")
+            evaluate_serve_a2a_combination(true, Some(&Command::Init))
+                .expect_err("a combination that drops one mode must fail loud")
                 .to_string()
-                .contains("cannot be combined with a subcommand")
+                .contains("not with this subcommand")
         );
     }
 }
@@ -205,11 +246,11 @@ pub async fn run() -> Result<()> {
         serve_a2a: cli.serve_a2a.clone(),
     };
 
-    // Story 18.1a — refuse the combination BEFORE any command intercept runs.
-    // Placed here because the intercepts return in source order, so a check
-    // sited next to the serve intercept would already have been skipped by the
-    // daemon branch above it.
-    evaluate_serve_a2a_combination(cli.serve_a2a.is_some(), cli.command.is_some())?;
+    // Story 18.1a — refuse an unserveable combination BEFORE any command
+    // intercept runs. Placed here because the intercepts return in source order,
+    // so a check sited next to the serve intercept would already have been
+    // skipped by the daemon branch above it. Story 18.1b permits `daemon`.
+    evaluate_serve_a2a_combination(cli.serve_a2a.is_some(), cli.command.as_ref())?;
 
     // 3. Load config — two-pass for story 8.2 chicken-and-egg resolution (AC-15).
     //
@@ -828,8 +869,14 @@ pub async fn run() -> Result<()> {
     // construction + terminal setup: the daemon is headless (no TUI, no
     // provider layer in 12.1a) and `start` re-execs a detached child. The memory
     // adapter name is resolved from the active profile so the headless daemon
-    // body composes the SAME memory sink the TUI would (build_daemon_memory).
     if let Some(Command::Daemon { action }) = cli.command.clone() {
+        // Story 18.1b — `--serve-a2a` is honoured HERE, inside daemon mode: the
+        // listener becomes a sibling task sharing the daemon's node tree, core
+        // and event bus, which is the only composition that can execute inbound
+        // tasks. `evaluate_serve_a2a_combination` already cleared the pair.
+        if cli.serve_a2a.is_some() {
+            ensure_a2a_feature_enabled(&[], true)?;
+        }
         use crate::domain::models::profile::PortDimension;
         let workspace = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
@@ -851,6 +898,7 @@ pub async fn run() -> Result<()> {
             app_config,
             memory_adapter,
             selection,
+            cli.serve_a2a.clone(),
         )
         .await
         .map_err(|e| {
@@ -859,25 +907,50 @@ pub async fn run() -> Result<()> {
         });
     }
 
-    // Story 18.1a — loopback A2A server intercept. The flag is global so Story
-    // 18.1b can compose it with daemon mode; this cut owns the standalone path.
+    // Story 18.1a — loopback A2A server intercept, standalone. Reached only when
+    // there is no subcommand: `daemon` handles the combined form above.
+    //
+    // Standalone serves DISCOVERY only. It has no `DaemonCore`, so it has no
+    // peer-turn path to run an inbound task on, and admission answers a policy
+    // verdict naming `rustain daemon start --serve-a2a=<addr>` rather than
+    // pretending a capability it does not have.
     if let Some(addr) = cli.serve_a2a.clone() {
         ensure_a2a_feature_enabled(&[], true)?;
         #[cfg(feature = "a2a")]
         {
             let workspace = std::env::current_dir()
                 .map_err(|e| anyhow::anyhow!("Failed to get current directory: {e}"))?;
-            return crate::adapters::a2a::server::run(addr, app_config, workspace)
-                .await
-                .map_err(|e| {
-                    tracing::error!("A2A server failed: {e:#}");
-                    // AC4a's refusal has to reach the operator, not just the
-                    // log: `SubcommandExit` carries only an exit code, so a
-                    // bare map would turn "non-loopback bind refused, see
-                    // 18-1b" into a silent exit 1.
-                    eprintln!("rustain: A2A server failed: {e:#}");
-                    SubcommandExit(SubcommandExit::GENERIC).into()
-                });
+            let node_journal = std::sync::Arc::new(
+                crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("opening node journal for standalone A2A: {error}")
+                    })?,
+            );
+            let room: std::sync::Arc<dyn crate::domain::ports::RoomJournal> = std::sync::Arc::new(
+                crate::infrastructure::subagent::NodeRoomJournal::new(node_journal, None),
+            );
+            let transparency = std::sync::Arc::new(
+                crate::adapters::a2a::transparency::TransparencySink::new(room),
+            );
+            return crate::adapters::a2a::server::run(
+                addr,
+                app_config,
+                workspace,
+                None,
+                transparency,
+                None,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("A2A server failed: {e:#}");
+                // AC4a's refusal has to reach the operator, not just the
+                // log: `SubcommandExit` carries only an exit code, so a
+                // bare map would turn "non-loopback bind refused, see
+                // 18-1b" into a silent exit 1.
+                eprintln!("rustain: A2A server failed: {e:#}");
+                SubcommandExit(SubcommandExit::GENERIC).into()
+            });
         }
         #[cfg(not(feature = "a2a"))]
         {

@@ -93,10 +93,22 @@ jobs:
       # `every_a2a_integration_test_is_wired_into_the_ci_a2a_lane`
       # (src/domain/ports/capability_provider.rs) — adding a tests/*a2a*.rs file without
       # adding it here fails the DEFAULT lane.
+      #
+      # Story 18.1b, R1: `--test conformance` is added here. It was in NO workflow, so
+      # `MAX_KNOWN_STD_SYNC_LOCKS` — the async-lock ratchet the whole codebase is
+      # supposed to be held to — was a manual-only gate and an untagged
+      # `std::sync::Mutex` could merge with every lane green. This story adds a task
+      # map and a server state holding locks, so it owns the gap it would otherwise
+      # widen.
+      #
+      # `test-instrumentation` is REQUIRED, not incidental: AC2b's zero-mutation
+      # ratchet and AC7b's card-signing counter are both cfg'd behind it, and without
+      # it those keystones would silently degrade to their behavioural halves. Pinned
+      # by `the_ci_a2a_lane_enables_the_zero_mutation_ratchet`.
       - name: Test with a2a feature (lib + every A2A integration target)
         run: |
-          cargo test --lib --features a2a
-          cargo test --features a2a \
+          cargo test --lib --features a2a,test-instrumentation
+          cargo test --features a2a,test-instrumentation \
             --test a2a_card \
             --test a2a_client \
             --test a2a_composition \
@@ -106,7 +118,9 @@ jobs:
             --test a2a_jws \
             --test a2a_provider \
             --test a2a_server \
+            --test a2a_server_exec \
             --test a2a_trust_registry \
+            --test conformance \
             --test conformance_a2a_architecture
 
       # The other half of the contract: the ungated guards assert that A2A is OFF by

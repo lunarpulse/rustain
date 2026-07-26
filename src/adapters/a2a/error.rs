@@ -55,4 +55,6 @@ pub enum A2aError {
     MalformedResponse { reason: String },
     #[error("A2A JSON-RPC response id {actual:?} does not correlate with request id {expected}")]
     CorrelationMismatch { expected: u64, actual: String },
+    #[error("A2A server configuration is invalid: {0}")]
+    Config(String),
 }

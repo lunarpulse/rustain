@@ -120,6 +120,9 @@ pub struct NodeTree {
     /// subsequent `validate` calls — once revoke completes, no later validate
     /// may observe the pre-revoke state (Story 14.6 AC5 TOCTOU probe).
     on_cascade_kill: Arc<dyn Fn(&AgentId) + Send + Sync>,
+    /// Story 18.1b, AC2b — see [`MutationCounters`].
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    mutations: Arc<MutationCounters>,
 }
 
 struct NodeTreeInner {
@@ -196,6 +199,19 @@ pub struct AgentHandle {
     /// self-released on failed `try_send`. Every `AgentHandle` for the same
     /// agent shares the same `Arc`.
     pub mailbox_budget: MailboxBudget,
+}
+
+/// Per-tree mutation counters (Story 18.1b, AC2b).
+///
+/// Deliberately **per instance**, not a process-global static: the integration
+/// suite runs several servers concurrently in one process, and a global counter
+/// would make "this refusal mutated nothing" read another test's registrations.
+/// A ratchet that can be tripped by an unrelated test is not a ratchet.
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Debug, Default)]
+pub struct MutationCounters {
+    registrations: std::sync::atomic::AtomicU64,
+    state_mutations: std::sync::atomic::AtomicU64,
 }
 
 /// Snapshot DTO for the TUI panel. Deterministic sort by agent_id.
@@ -442,6 +458,8 @@ impl NodeTree {
             journal: None,
             host_binding: HostBinding::new("local", "unknown"),
             on_cascade_kill: Arc::new(|_| {}),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            mutations: Arc::new(MutationCounters::default()),
         }
     }
 
@@ -453,6 +471,8 @@ impl NodeTree {
             journal: None,
             host_binding: HostBinding::new("local", "unknown"),
             on_cascade_kill: Arc::new(|_| {}),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            mutations: Arc::new(MutationCounters::default()),
         }
     }
 
@@ -467,6 +487,8 @@ impl NodeTree {
             journal: None,
             host_binding: HostBinding::new("local", "unknown"),
             on_cascade_kill: Arc::new(|_| {}),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            mutations: Arc::new(MutationCounters::default()),
         }
     }
 
@@ -776,6 +798,31 @@ impl NodeTree {
         .await
     }
 
+    /// Story 18.1b, AC2b (Rule 4). "A refused inbound task mutates nothing" is a
+    /// *structural* property: correct code simply never reaches these entries, so
+    /// no behavioural test can force the mutant RED — a refusal that also
+    /// registered a node would still answer `rejected` on the wire and stay
+    /// green. The proof is therefore a deterministic counter on the two mutation
+    /// entries themselves, never a timing window.
+    ///
+    /// Placed HERE rather than in the A2A adapter on purpose: a counter that the
+    /// adapter increments only proves the adapter's own call site behaved, and a
+    /// mutant that reaches `register_peer` by another route would sail past it.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn registration_count(&self) -> u64 {
+        self.mutations
+            .registrations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Node state mutations attempted against THIS tree.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn state_mutation_count(&self) -> u64 {
+        self.mutations
+            .state_mutations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn register_with_identity(
         &self,
         agent_id: AgentId,
@@ -784,6 +831,10 @@ impl NodeTree {
         ownership: OwnershipKind,
         origin: NodeOrigin,
     ) -> Result<(), SubagentError> {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        self.mutations
+            .registrations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self.inner.write().await;
         if guard.tearing_down.contains(&parent) {
             return Err(SubagentError::Internal(format!(
@@ -1832,6 +1883,10 @@ impl NodeTree {
         agent_id: &AgentId,
         target: NodeState,
     ) -> Result<(), SetStateError> {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        self.mutations
+            .state_mutations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self.inner.write().await;
         let idempotent_sender = guard.status_senders.get(agent_id).cloned();
         let current;

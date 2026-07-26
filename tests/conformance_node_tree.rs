@@ -554,7 +554,19 @@ fn test_import_site_count_pinned() {
     // textual site is a `#[cfg(test)]` constructor binding an in-memory
     // `NodeTree` as the seam in unit tests. The real boundary is unchanged
     // (proven by `test_domain_no_adapter_or_infra_imports`).
-    const EXPECTED: usize = 23;
+    // 23 -> 25 (Story 18.1b): TWO new textual sites, both DOC-COMMENT ONLY —
+    // neither file imports or holds a `NodeTree`. (1) `adapters/a2a/admission.rs`
+    // — the admission decision core's doc names `NodeTree` in the list of things
+    // it does NOT touch (that "no NodeTree mutation" claim is the whole point of
+    // the Decision-Core split, so naming it is load-bearing documentation).
+    // (2) `adapters/a2a/exec.rs` — names `NodeTree::list()` when explaining why
+    // inbound and outbound peer nodes carry different `subagent_type` markers.
+    //
+    // The inbound execution seam itself adds NO concrete coupling: the A2A
+    // adapter reaches execution only through the `InboundPeerRuntime` port
+    // (`domain/ports/inbound_peer_runtime.rs`, which names no `NodeTree`), and
+    // the only implementor is `adapters/daemon/server.rs` — already counted.
+    const EXPECTED: usize = 25;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

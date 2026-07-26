@@ -52,21 +52,36 @@ fn a2a_feature_is_off_by_default_and_declares_the_documented_fallback() {
         .collect();
     assert_eq!(
         a2a,
-        BTreeSet::from(["dep:axum", "dep:reqwest", "dep:serde_jcs", "mcp"]),
-        "DF-17-4a-3 fallback must remain explicit until composite gating is separated"
+        BTreeSet::from([
+            "dep:axum",
+            "dep:reqwest",
+            "dep:rustls",
+            "dep:rustls-pemfile",
+            "dep:serde_jcs",
+            "dep:subtle",
+            "dep:tokio-rustls",
+            "mcp",
+        ]),
+        "DF-17-4a-3 fallback must remain explicit until composite gating is separated. \
+         Story 18.1b adds the server-side TLS stack (rustls/tokio-rustls/rustls-pemfile) \
+         and the constant-time credential comparison (subtle) — all `a2a`-gated, none \
+         reachable from a default build."
     );
-    assert_eq!(
-        manifest["dependencies"]["reqwest"]["optional"].as_bool(),
-        Some(true)
-    );
-    assert_eq!(
-        manifest["dependencies"]["serde_jcs"]["optional"].as_bool(),
-        Some(true)
-    );
-    assert_eq!(
-        manifest["dependencies"]["axum"]["optional"].as_bool(),
-        Some(true)
-    );
+    for dependency in [
+        "reqwest",
+        "serde_jcs",
+        "axum",
+        "rustls",
+        "tokio-rustls",
+        "rustls-pemfile",
+        "subtle",
+    ] {
+        assert_eq!(
+            manifest["dependencies"][dependency]["optional"].as_bool(),
+            Some(true),
+            "{dependency} must stay optional so a default build links none of it"
+        );
+    }
     assert!(
         !source("Cargo.toml").contains("a2a-lf"),
         "R11 fired the a2a-lf drop-trigger"
@@ -78,7 +93,21 @@ fn only_config_parsing_compiles_without_the_a2a_feature() {
     let module = source("src/adapters/a2a/mod.rs");
     assert!(module.contains("pub mod config;"));
     assert!(!module.contains("#[cfg(feature = \"a2a\")]\npub mod config;"));
-    for adapter in ["card", "client", "error", "jws", "provider", "server"] {
+    for adapter in [
+        "admission",
+        "auth",
+        "card",
+        "card_cache",
+        "client",
+        "error",
+        "exec",
+        "jws",
+        "projection",
+        "provider",
+        "server",
+        "tls",
+        "transparency",
+    ] {
         assert!(
             module.contains(&format!("#[cfg(feature = \"a2a\")]\npub mod {adapter};")),
             "{adapter} must be feature-gated"
@@ -106,8 +135,13 @@ fn concrete_a2a_client_and_provider_are_named_only_at_the_startup_boundary() {
 #[test]
 fn every_public_a2a_enum_is_non_exhaustive() {
     let files = [
+        "src/adapters/a2a/admission.rs",
+        "src/adapters/a2a/auth.rs",
         "src/adapters/a2a/config.rs",
         "src/adapters/a2a/error.rs",
+        "src/adapters/a2a/exec.rs",
+        "src/adapters/a2a/projection.rs",
+        "src/adapters/a2a/transparency.rs",
         "src/domain/models/a2a_peer_spec.rs",
     ];
     let mut enums = BTreeSet::new();
@@ -131,11 +165,20 @@ fn every_public_a2a_enum_is_non_exhaustive() {
     assert_eq!(
         enums,
         BTreeSet::from([
+            "A2aAdmissionPolicy".to_owned(),
             "A2aConfigError".to_owned(),
             "A2aError".to_owned(),
             "A2aPeerSource".to_owned(),
             "A2aPeerSpecError".to_owned(),
+            "A2aServerAuth".to_owned(),
+            "AdmissionVerdict".to_owned(),
+            "AuthOutcome".to_owned(),
+            "BindDecision".to_owned(),
+            "Disclosure".to_owned(),
+            "InboundOutcome".to_owned(),
+            "PendingAuth".to_owned(),
             "PinnedKeyAlgorithm".to_owned(),
+            "SubmitterTrust".to_owned(),
             "TrustTier".to_owned(),
         ])
     );
