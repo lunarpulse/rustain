@@ -8,12 +8,12 @@
 //! (`MAX_KNOWN_STD_SYNC_LOCKS`), and this module holds state touched from inside
 //! an axum handler and from a spawned lifecycle watcher at the same time.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -135,6 +135,10 @@ pub struct InboundTask {
     pub submitter: SubmitterKey,
     /// The token `drive_preloaded_turn` selects on. `tasks/cancel` cancels it.
     pub cancel: CancellationToken,
+    /// State of the first `tasks/get` journal record. Lives on the existing
+    /// submitter-scoped record — which is already evicted on terminal — rather
+    /// than in a new `(peer, task)` map that would need an eviction path.
+    query_state: AtomicU8,
     /// Wakes a durable-cancel request once a lifecycle watcher terminalizes the
     /// task. This is task-local async coordination, never a host-thread lock.
     terminal: Notify,
@@ -160,12 +164,17 @@ pub struct TaskSnapshot {
 }
 
 impl InboundTask {
+    const QUERY_UNSEEN: u8 = 0;
+    const QUERY_RECORDING: u8 = 1;
+    const QUERY_RECORDED: u8 = 2;
+
     fn new(id: String, node_id: AgentId, submitter: SubmitterKey, initial: RapTaskState) -> Self {
         Self {
             id,
             node_id,
             submitter,
             cancel: CancellationToken::new(),
+            query_state: AtomicU8::new(Self::QUERY_UNSEEN),
             terminal: Notify::new(),
             state: RwLock::new(TaskState {
                 rap: initial,
@@ -174,6 +183,42 @@ impl InboundTask {
                 detail: None,
             }),
         }
+    }
+
+    /// Claim the one in-flight attempt to record the first observed
+    /// `tasks/get`. The claim remains retryable if the append fails; otherwise
+    /// an outage at the first poll would erase the only observation forever.
+    pub fn claim_status_query(&self) -> bool {
+        self.query_state
+            .compare_exchange(
+                Self::QUERY_UNSEEN,
+                Self::QUERY_RECORDING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Commit a successfully durable first-query record.
+    pub fn commit_status_query(&self) {
+        self.query_state
+            .store(Self::QUERY_RECORDED, Ordering::Release);
+    }
+
+    /// Release a failed record attempt so a later status query can retry it.
+    pub fn release_status_query(&self) {
+        let _ = self.query_state.compare_exchange(
+            Self::QUERY_RECORDING,
+            Self::QUERY_UNSEEN,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    /// Restore the one-way state from the canonical journal during startup.
+    pub fn restore_status_query(&self) {
+        self.query_state
+            .store(Self::QUERY_RECORDED, Ordering::Release);
     }
 
     pub async fn snapshot(&self) -> TaskSnapshot {
@@ -202,6 +247,32 @@ impl InboundTask {
             self.terminal.notify_waiters();
         }
         transitioned
+    }
+
+    /// Terminalize a task whose accepted outcome could not be persisted,
+    /// without exposing the FSM's required intermediate `Working` hop.
+    pub async fn fail_without_execution(&self, detail: impl Into<String>) -> bool {
+        let mut state = self.state.write().await;
+        if state.rap.is_terminal() {
+            return false;
+        }
+        if matches!(
+            state.rap,
+            RapTaskState::Submitted | RapTaskState::AuthRequired
+        ) && state.rap.transition_or_err(RapTaskState::Working).is_err()
+        {
+            return false;
+        }
+        if state.rap != RapTaskState::Working
+            || state.rap.transition_or_err(RapTaskState::Failed).is_err()
+        {
+            return false;
+        }
+        state.pending = PendingAuth::None;
+        state.detail = Some(detail.into());
+        drop(state);
+        self.terminal.notify_waiters();
+        true
     }
 
     pub async fn set_pending_auth(&self, pending: PendingAuth) {
@@ -429,6 +500,17 @@ pub const CANCEL_DETAIL: &str = "canceled at the submitter's request via tasks/c
 /// all three to whoever submitted the task.
 pub const FAILURE_DETAIL: &str =
     "the local agent turn failed; see the host operator's logs for the cause";
+
+/// The reason a task resolves `failed` because its acceptance could not be
+/// made durable (Story 18.2, AC1).
+///
+/// Textually distinct from [`START_FAILURE_DETAIL`] on purpose: "your task
+/// could not start" and "this host cannot record what it does" are different
+/// facts, and only the second tells the submitter that retrying will keep
+/// failing until the operator fixes the disk. Naming the transparency log is
+/// the disclosure NFR67 wants; it reveals nothing about host state.
+pub const UNRECORDED_ACCEPT_DETAIL: &str = "refused: this host could not durably record the task in its transparency log, and it does \
+     not execute work it cannot account for";
 
 #[cfg(test)]
 mod tests {

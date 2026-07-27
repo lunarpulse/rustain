@@ -180,9 +180,9 @@ pub use orchestration::{
 };
 #[allow(unused_imports)]
 pub use orchestration_room::{
-    ApprovalView, HostBinding, NodeView, OrchestrationRoom, OrchestrationRoomId, RejectReason,
-    RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution, WaveId,
-    WaveOutcome, WaveView,
+    ApprovalView, Direction, HostBinding, NodeView, OrchestrationRoom, OrchestrationRoomId,
+    RejectReason, RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution,
+    WaveId, WaveOutcome, WaveView,
 };
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};

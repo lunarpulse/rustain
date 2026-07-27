@@ -4886,6 +4886,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transparency_room_event_fans_out_to_attached_client_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation, domain_tx);
+        let (tx, mut rx) = mpsc::channel(1);
+        server.registry.lock().await.conns.push(Conn {
+            id: 1,
+            tx,
+            mode: AttachMode::ReadWrite,
+        });
+
+        let mut assistant_buf = String::new();
+        server
+            .handle_bus_event(
+                &AppEvent::DomainEvent(crate::domain::events::DomainEventPayload::Room(
+                    crate::domain::models::RoomEvent::RemoteEnvelopeRejected {
+                        peer: crate::domain::models::PeerId::from_public_key(&[9; 32])
+                            .expect("valid test peer"),
+                        reason: crate::domain::models::RejectReason::Policy {
+                            detail: "policy rejection".to_owned(),
+                        },
+                        task: Some("remote-task-9".to_owned()),
+                        direction: crate::domain::models::Direction::Inbound,
+                    },
+                )),
+                &mut assistant_buf,
+            )
+            .await;
+
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("domain event reaches attached client queue")
+            .expect("attached client queue remains open");
+        match frame {
+            DaemonFrame::Event(RawEvent {
+                kind:
+                    RawEventKind::DomainEvent(crate::domain::events::DomainEventPayload::Room(
+                        crate::domain::models::RoomEvent::RemoteEnvelopeRejected {
+                            task: Some(task),
+                            ..
+                        },
+                    )),
+                ..
+            }) => assert_eq!(task, "remote-task-9"),
+            other => panic!("expected forwarded transparency room event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn cancelled_terminal_discards_partial_forwarder_text_before_next_turn() {
         let tmp = tempfile::tempdir().unwrap();
         let (core, _storage) = mock_core(tmp.path(), vec![]);

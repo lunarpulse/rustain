@@ -548,6 +548,7 @@ mod tests {
                     spec: spec_a.clone(),
                     concurrency: 2,
                 },
+                10,
             ),
             JournalEntry::new(
                 2,
@@ -557,12 +558,14 @@ mod tests {
                     spec: spec_b.clone(),
                     concurrency: 1,
                 },
+                11,
             ),
             JournalEntry::new(
                 3,
                 JournalRecord::Unparked {
                     node: node_a.clone(),
                 },
+                12,
             ),
             // Duplicate Unparked is a no-op (idempotent replay).
             JournalEntry::new(
@@ -570,6 +573,7 @@ mod tests {
                 JournalRecord::Unparked {
                     node: node_a.clone(),
                 },
+                13,
             ),
         ];
         let folded = fold_parked_records(&entries);

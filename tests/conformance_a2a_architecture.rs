@@ -208,3 +208,68 @@ fn visit_rs(dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
         }
     }
 }
+
+/// ADR-17-CC-05: `transparency.jsonl` is a **regenerable export**, never a
+/// second source of truth.
+///
+/// Structural, not behavioural, because the failure mode is a *future* edit:
+/// someone adds a read of the export file "just for the panel" and the product
+/// quietly grows a second log to keep consistent — the one that drifts is the
+/// one nobody is looking at. The only permitted mentions are the path helper
+/// that mints it, the export shell that writes it, and documentation.
+#[test]
+fn no_code_path_reads_the_transparency_export() {
+    const WRITER: &str = "src/infrastructure/transparency.rs";
+    const PATH_OWNER: &str = "src/infrastructure/paths.rs";
+
+    let mut mentions: Vec<String> = Vec::new();
+    visit_rs(&root().join("src"), &mut |path, text| {
+        let relative = path
+            .strip_prefix(root())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative == WRITER || relative == PATH_OWNER {
+            return;
+        }
+        for (index, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            // Doc and ordinary comments are how the invariant is explained;
+            // they are not a read.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if line.contains("transparency.jsonl") {
+                mentions.push(format!("{relative}:{}", index + 1));
+            }
+        }
+    });
+    assert!(
+        mentions.is_empty(),
+        "`transparency.jsonl` may only be named by the export shell ({WRITER}) and the path \
+         helper ({PATH_OWNER}). Every transparency fact is read from the room journal.\n\
+         Offending sites:\n{}",
+        mentions.join("\n")
+    );
+}
+
+/// The export path is owned by `infrastructure::paths`, which declares itself
+/// the single source of truth for paths. An inline `join(".rustain")` is how a
+/// second, subtly different location gets created.
+#[test]
+fn the_transparency_export_path_is_minted_only_by_the_paths_module() {
+    let paths = source("src/infrastructure/paths.rs");
+    assert!(
+        paths.contains("pub fn transparency_export_path("),
+        "the export path helper must live in infrastructure::paths"
+    );
+    let writer = source("src/infrastructure/transparency.rs");
+    assert!(
+        writer.contains("paths::transparency_export_path"),
+        "the export shell must resolve its path through the paths module"
+    );
+    assert!(
+        !writer.contains("join(\".rustain\")"),
+        "the export shell must not inline the workspace runtime directory"
+    );
+}

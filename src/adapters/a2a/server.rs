@@ -65,8 +65,8 @@ use super::card_cache::SignedCardCache;
 use super::client::is_json_content_type;
 use super::exec::{
     CANCEL_DETAIL, FAILURE_DETAIL, INBOUND_SUBAGENT_TYPE, InboundTaskStore, PendingAuth,
-    RESTART_DETAIL, START_FAILURE_DETAIL, SubmitterKey, mint_inbound_node_id,
-    parse_inbound_node_id, project_node_to_rap,
+    RESTART_DETAIL, START_FAILURE_DETAIL, SubmitterKey, UNRECORDED_ACCEPT_DETAIL,
+    mint_inbound_node_id, parse_inbound_node_id, project_node_to_rap,
 };
 use super::jsonrpc::{
     CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND,
@@ -267,6 +267,7 @@ async fn reconcile_after_restart(state: &ServerState) {
         let Some((submitter, task_id)) = parse_inbound_node_id(&node_id) else {
             continue;
         };
+        let peer_id = submitter.pseudonymous_peer_id();
         let Some(task) = state
             .tasks
             .insert(
@@ -279,6 +280,13 @@ async fn reconcile_after_restart(state: &ServerState) {
         else {
             continue;
         };
+        if state
+            .transparency
+            .has_recorded_status_query(&peer_id, &task_id)
+            .await
+        {
+            task.restore_status_query();
+        }
         task.advance(RapTaskState::Working).await;
         task.set_detail(RESTART_DETAIL).await;
         task.advance(RapTaskState::Failed).await;
@@ -403,11 +411,15 @@ async fn reconcile_pending_after_restart(state: &ServerState) {
     };
 
     for record in &records {
-        if record.task_id.is_empty() || record.submitter.is_empty() {
+        if record.task_id.is_empty()
+            || record.task_id.len() > MAX_TASK_ID_BYTES
+            || record.submitter.is_empty()
+        {
             tracing::warn!(path = %path.display(), "skipping malformed A2A pending task record");
             continue;
         }
         let submitter = SubmitterKey::from_encoded(record.submitter.clone());
+        let peer_id = submitter.pseudonymous_peer_id();
         let Some(task) = state
             .tasks
             .insert(
@@ -420,6 +432,13 @@ async fn reconcile_pending_after_restart(state: &ServerState) {
         else {
             continue;
         };
+        if state
+            .transparency
+            .has_recorded_status_query(&peer_id, &record.task_id)
+            .await
+        {
+            task.restore_status_query();
+        }
         task.advance(RapTaskState::Working).await;
         task.set_detail(RESTART_DETAIL).await;
         task.advance(RapTaskState::Failed).await;
@@ -749,10 +768,15 @@ async fn message_send(
             // NFR70: the refusal path performs ZERO core mutation — no
             // `register_peer`, no `set_state`. The transparency record below is
             // a durable room event, which AC2b *requires*; it is not core state.
-            state
+            //
+            // AC1: a journal failure must NOT convert this refusal into an
+            // accept. The refusal still goes back to the peer; the operator
+            // learns about the missing record through the sink's latch.
+            let _ = state
                 .transparency
                 .record(InboundOutcome::Refused {
                     peer: peer_id,
+                    task_id: task_id.clone(),
                     reason: reason.clone(),
                 })
                 .await;
@@ -840,10 +864,6 @@ async fn setup_task(
     peer_id: PeerId,
     needs_approval: bool,
 ) -> serde_json::Value {
-    // Submitted → Working is the first legal hop of the shipped FSM; the story's
-    // approval arc is Submitted → Working → AuthRequired.
-    task.advance(RapTaskState::Working).await;
-
     if needs_approval {
         let ticket = match runtime.request_admission_approval(&peer_id, &text).await {
             Ok(ticket) => ticket,
@@ -855,20 +875,22 @@ async fn setup_task(
         };
 
         if ticket.pending {
-            task.advance(RapTaskState::AuthRequired).await;
-            task.set_pending_auth(PendingAuth::Approval).await;
             let pending = PendingTaskRecord {
                 task_id: task_id.clone(),
                 submitter: task.submitter.as_str().to_owned(),
             };
-            append_pending_task(&state, pending.clone()).await;
-            state
+            // Persist the admission outcome before exposing AuthRequired.
+            let _ = state
                 .transparency
                 .record(InboundOutcome::AwaitingApproval {
                     peer: peer_id.clone(),
                     task_id: task_id.clone(),
                 })
                 .await;
+            task.advance(RapTaskState::Working).await;
+            task.advance(RapTaskState::AuthRequired).await;
+            task.set_pending_auth(PendingAuth::Approval).await;
+            append_pending_task(&state, pending.clone()).await;
 
             // Detached: the HTTP response is already decided. This watcher owns
             // every resolution of the auth-required state, including cancel.
@@ -896,15 +918,17 @@ async fn setup_task(
         };
         if !granted {
             let reason = "admission policy declined this task".to_owned();
-            task.set_detail(reason.clone()).await;
-            task.advance(RapTaskState::Rejected).await;
-            state
+            let _ = state
                 .transparency
                 .record(InboundOutcome::Refused {
                     peer: peer_id.clone(),
-                    reason,
+                    task_id: task.id.clone(),
+                    reason: reason.clone(),
                 })
                 .await;
+            task.advance(RapTaskState::Working).await;
+            task.set_detail(reason).await;
+            task.advance(RapTaskState::Rejected).await;
             return task_projection(&state, &task).await;
         }
     }
@@ -935,10 +959,11 @@ async fn terminalize_start_failure(
     task.set_pending_auth(PendingAuth::None).await;
     task.set_detail(START_FAILURE_DETAIL).await;
     task.advance(RapTaskState::Failed).await;
-    state
+    let _ = state
         .transparency
         .record(InboundOutcome::Refused {
             peer: peer_id.clone(),
+            task_id: task.id.clone(),
             reason: START_FAILURE_DETAIL.to_owned(),
         })
         .await;
@@ -956,10 +981,11 @@ async fn terminalize_canceled(
     task.set_pending_auth(PendingAuth::None).await;
     task.set_detail(CANCEL_DETAIL).await;
     task.advance(RapTaskState::Canceled).await;
-    state
+    let _ = state
         .transparency
         .record(InboundOutcome::Refused {
             peer: peer_id.clone(),
+            task_id: task.id.clone(),
             reason: CANCEL_DETAIL.to_owned(),
         })
         .await;
@@ -993,10 +1019,11 @@ async fn watch_pending_approval(
         let reason = "the operator declined this task".to_owned();
         task.set_detail(reason.clone()).await;
         task.advance(RapTaskState::Rejected).await;
-        state
+        let _ = state
             .transparency
             .record(InboundOutcome::Refused {
                 peer: peer_id,
+                task_id: task.id.clone(),
                 reason,
             })
             .await;
@@ -1007,12 +1034,11 @@ async fn watch_pending_approval(
         terminalize_canceled(&state, &task, &peer_id, Some(&pending)).await;
         return;
     }
-    task.advance(RapTaskState::Working).await;
     launch(&state, &runtime, &task, text, peer_id, Some(pending)).await;
 }
 
-/// Register the peer node, drive the turn, and watch the node's lifecycle back
-/// onto the task's wire state.
+/// Record acceptance durably, then register the peer node, drive the turn, and
+/// watch the node's lifecycle back onto the task's wire state.
 async fn launch(
     state: &ServerState,
     runtime: &Arc<dyn InboundPeerRuntime>,
@@ -1021,6 +1047,41 @@ async fn launch(
     peer_id: PeerId,
     pending: Option<PendingTaskRecord>,
 ) {
+    // ── AC1 fail-closed keystone ────────────────────────────────────────────
+    // The canonical acceptance must exist before `InboundPeerRuntime::start`
+    // can register a node or spawn provider/tool work. A failed append therefore
+    // reaches only task-local bookkeeping and a refusal response.
+    if let Err(error) = state
+        .transparency
+        .record(InboundOutcome::Accepted {
+            peer: peer_id.clone(),
+            node: task.node_id.clone(),
+            task_id: task.id.clone(),
+        })
+        .await
+    {
+        tracing::error!(
+            %error,
+            task = %task.id,
+            "refusing an admitted A2A task: its acceptance could not be journaled"
+        );
+        task.fail_without_execution(UNRECORDED_ACCEPT_DETAIL).await;
+        if let Some(record) = pending.as_ref() {
+            remove_pending_task(state, record).await;
+        }
+        // Journaling the refusal is best-effort by construction: the journal
+        // is the thing that just failed. The sink latches the condition.
+        let _ = state
+            .transparency
+            .record(InboundOutcome::Refused {
+                peer: peer_id.clone(),
+                task_id: task.id.clone(),
+                reason: UNRECORDED_ACCEPT_DETAIL.to_owned(),
+            })
+            .await;
+        return;
+    }
+    task.advance(RapTaskState::Working).await;
     let started = runtime
         .start(
             InboundPeerTask {
@@ -1042,14 +1103,6 @@ async fn launch(
         }
     };
 
-    state
-        .transparency
-        .record(InboundOutcome::Accepted {
-            peer: peer_id.clone(),
-            node: task.node_id.clone(),
-        })
-        .await;
-
     let state = ServerState::clone(state);
     let task = task.clone();
     let runtime = runtime.clone();
@@ -1061,10 +1114,11 @@ async fn launch(
             if projected.is_terminal() {
                 if projected == RapTaskState::Canceled {
                     task.set_detail(CANCEL_DETAIL).await;
-                    state
+                    let _ = state
                         .transparency
                         .record(InboundOutcome::Refused {
                             peer: peer_id.clone(),
+                            task_id: task.id.clone(),
                             reason: CANCEL_DETAIL.to_owned(),
                         })
                         .await;
@@ -1136,6 +1190,24 @@ async fn tasks_get(
     echo: serde_json::Value,
 ) -> Result<serde_json::Value, JsonRpcErrorResponse> {
     let task = scoped_task(state, caller, params, &echo).await?;
+    // FR92 (P-5): journal the FIRST status query observed for a task and
+    // nothing thereafter. The task-local state has an in-flight claim, not a
+    // boolean: a failed append releases the claim so a later poll can retry
+    // rather than permanently hiding the observation.
+    if task.claim_status_query() {
+        let recorded = state
+            .transparency
+            .record(InboundOutcome::StatusQueried {
+                peer: caller.key.pseudonymous_peer_id(),
+                task_id: task.id.clone(),
+            })
+            .await;
+        if recorded.is_ok() {
+            task.commit_status_query();
+        } else {
+            task.release_status_query();
+        }
+    }
     let snapshot = task.snapshot().await;
     let text = snapshot
         .result

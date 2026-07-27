@@ -246,6 +246,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     description: "Toggle Plan mode",
                     available: true,
                 },
+                HelpBinding {
+                    key: "/team log",
+                    description: "A2A transparency log (also Ctrl+X, L)",
+                    available: true,
+                },
             ],
         },
         HelpCategory {
@@ -273,7 +278,7 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "Ctrl+X, L",
-                    description: "Log panel",
+                    description: "Transparency Log panel",
                     available: true,
                 },
                 HelpBinding {

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::adapters::cli::session::SessionAction;
+use crate::adapters::cli::team::TeamAction;
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// Rustain — terminal-native AI coding agent.
@@ -221,6 +222,14 @@ pub enum Command {
     Session {
         #[command(subcommand)]
         action: SessionAction,
+    },
+    /// Inspect A2A team activity (Story 18.2, FR95 / NFR67).
+    /// `team log` prints every recorded inbound and outbound A2A interaction
+    /// for this workspace, folded from the durable room journal. Read-only,
+    /// offline-safe, and non-billable.
+    Team {
+        #[command(subcommand)]
+        action: TeamAction,
     },
 }
 

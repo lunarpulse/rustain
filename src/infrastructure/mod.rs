@@ -20,4 +20,5 @@ pub mod subagent;
 pub mod supervisor;
 pub mod telemetry;
 pub mod terminal_info;
+pub mod transparency;
 pub mod utils;

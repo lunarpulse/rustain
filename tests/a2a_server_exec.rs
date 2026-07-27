@@ -321,6 +321,21 @@ async fn harness_with(
     security: A2aServerSecurity,
     with_runtime: bool,
 ) -> Harness {
+    harness_full(policy, provider, security, with_runtime, None).await
+}
+
+/// Story 18.2 (AC1): same production listener, with the transparency sink's
+/// journal replaceable so a durable-write failure can be driven through the
+/// real front door. Seeding the composition is not a bypass — every assertion
+/// still enters over HTTP, and `TransparencySink::record` is never called from
+/// a test body.
+async fn harness_full(
+    policy: A2aAdmissionPolicy,
+    provider: Arc<dyn StreamingProvider>,
+    security: A2aServerSecurity,
+    with_runtime: bool,
+    transparency_journal: Option<Arc<dyn RoomJournal>>,
+) -> Harness {
     let workspace = tempfile::tempdir().expect("workspace");
     let keys = tempfile::tempdir().expect("keys");
     let ws = workspace.path().to_path_buf();
@@ -387,7 +402,9 @@ async fn harness_with(
             signer,
             security,
             runtime,
-            transparency: Arc::new(TransparencySink::new(journal)),
+            transparency: Arc::new(TransparencySink::new(
+                transparency_journal.unwrap_or(journal),
+            )),
             policy,
             workspace: ws,
             advertised_host: None,
@@ -491,6 +508,10 @@ async fn poll_until(
     }
 }
 
+/// Pre-existing helper with no current caller (dead at `6ca43eb` too). Kept
+/// rather than deleted: it is the canonical way to read a node's state in this
+/// harness, and the next lifecycle keystone will want it.
+#[allow(dead_code)]
 async fn node_state(tree: &NodeTree, subagent_type: &str) -> Option<NodeState> {
     tree.list()
         .await
@@ -778,6 +799,14 @@ async fn an_approval_gated_task_answers_auth_required_inside_the_deadline_then_r
     // The multiword state is what makes the camelCase mutant falsifiable at all.
     assert_ne!(accepted["result"]["status"]["state"], "authRequired");
 
+    // Observe the parked state through `tasks/get` BEFORE granting. Polling
+    // for it *after* the grant was a timing window — the task can resolve
+    // between the grant frame and the first poll — and Story 18.2's
+    // first-observation journal append widened it enough to fail. The arc is
+    // the same; the observation is now ordered rather than raced.
+    let (parked, _) = poll_until(&client, &endpoint, "t-1", None, "auth-required").await;
+    assert_eq!(parked["result"]["status"]["state"], "auth-required");
+
     // The operator grants, through the real forwarded frame.
     let request_id = next_approval(&mut operator).await;
     write_frame(
@@ -790,11 +819,7 @@ async fn an_approval_gated_task_answers_auth_required_inside_the_deadline_then_r
     .await
     .expect("grant");
 
-    let (completed, seen) = poll_until(&client, &endpoint, "t-1", None, "completed").await;
-    assert!(
-        seen.first().is_some_and(|state| state == "auth-required"),
-        "the arc must start parked on the human; saw {seen:?}"
-    );
+    let (completed, _) = poll_until(&client, &endpoint, "t-1", None, "completed").await;
     assert_eq!(
         completed["result"]["status"]["message"]["parts"][0]["text"],
         ANSWER
@@ -1790,6 +1815,299 @@ async fn an_acceptance_emits_a_durable_transparency_record_naming_the_node() {
             RoomEvent::NodeStateChanged { to, .. } if *to == NodeState::Completed
         )),
         "the executed node's terminal transition must be journalled too: {events:?}"
+    );
+
+    h.stop().await;
+}
+
+// ── Story 18.2 AC1 — fail-closed transparency, first-observation status query ─
+
+/// A `RoomJournal` that appends nothing and says so. Models a full disk / EIO
+/// / lock contention: the class of failure that made the pre-18.2 swallow
+/// (`if let Err(..) { tracing::error!(..) }`) produce an **accept with no
+/// canonical record**.
+struct RefusingRoomJournal;
+
+#[async_trait::async_trait]
+impl RoomJournal for RefusingRoomJournal {
+    async fn record_event(
+        &self,
+        _event: rustain::domain::models::RoomEvent,
+    ) -> Result<(), rustain::domain::ports::RoomJournalError> {
+        Err(rustain::domain::ports::RoomJournalError::Append(
+            "no space left on device".to_owned(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn an_accept_whose_record_cannot_be_journaled_is_refused_and_never_completes() {
+    use rustain::domain::models::RoomEvent;
+
+    let h = harness_full(
+        A2aAdmissionPolicy::Allow,
+        Arc::new(ScriptedProvider {
+            chunks: answer_chunks(ANSWER),
+            gate: None,
+        }),
+        A2aServerSecurity::default(),
+        true,
+        Some(Arc::new(RefusingRoomJournal)),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let endpoint = h.endpoint();
+    let accepted = rpc(&client, &endpoint, &send_body(1, "summarize", "t-1"), None).await;
+
+    // The task must reach a terminal NON-success state. An accept the audit
+    // log never recorded is the one outcome NFR67 forbids outright, so the
+    // work is cancelled and the submitter is told the truth.
+    let (state, _) = poll_until(&client, &endpoint, "t-1", None, "failed").await;
+    assert_eq!(
+        state["result"]["status"]["state"], "failed",
+        "an unjournalable accept must not resolve completed: {state}"
+    );
+    let detail = state["result"]["status"]["message"]["parts"][0]["text"]
+        .as_str()
+        .expect("a failure carries a reason");
+    assert!(
+        detail.contains("transparency"),
+        "the reason must name the missing record, not a generic start failure: {detail}"
+    );
+
+    // And the answer never reaches the peer. This is the half a status-only
+    // assertion would miss: a completed-but-unrecorded turn could still leak
+    // its result through `message/send`'s own projection.
+    for rendered in [accepted.to_string(), state.to_string()] {
+        assert!(
+            !rendered.contains(ANSWER),
+            "the scripted answer must never be disclosed for an unrecorded accept: {rendered}"
+        );
+    }
+
+    // Nothing accepted was journaled either — the sink's journal is the broken
+    // one, but the harness's real journal is what a viewer would read.
+    let events = journalled_room_events(&h.node_journal).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RoomEvent::RemoteEnvelopeAccepted { .. })),
+        "no acceptance record exists, so no acceptance may be claimed: {events:?}"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_refusal_survives_a_broken_journal_and_is_still_returned_to_the_peer() {
+    let h = harness_full(
+        A2aAdmissionPolicy::Deny,
+        Arc::new(ScriptedProvider {
+            chunks: answer_chunks(ANSWER),
+            gate: None,
+        }),
+        A2aServerSecurity::default(),
+        true,
+        Some(Arc::new(RefusingRoomJournal)),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let response = rpc(
+        &client,
+        &h.endpoint(),
+        &send_body(1, "summarize", "t-1"),
+        None,
+    )
+    .await;
+
+    // A failed journal must NEVER convert a refusal into an accept — that
+    // would be strictly worse than the missing record it is reacting to.
+    let state = response["result"]["status"]["state"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(
+        state, "rejected",
+        "refusal must survive the journal: {response}"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn only_the_first_status_query_for_a_task_is_journaled() {
+    use rustain::adapters::a2a::transparency::STATUS_QUERY_GATE_PREFIX;
+    use rustain::domain::models::RoomEvent;
+
+    let h = harness(
+        A2aAdmissionPolicy::Allow,
+        Arc::new(ScriptedProvider {
+            chunks: answer_chunks(ANSWER),
+            gate: None,
+        }),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let endpoint = h.endpoint();
+    rpc(&client, &endpoint, &send_body(1, "summarize", "t-1"), None).await;
+
+    // Poll hard. FR92 says a status query is disclosable; journaling every one
+    // would write a row per poll, which is why only the first is recorded.
+    let (_, _) = poll_until(&client, &endpoint, "t-1", None, "completed").await;
+    for id in 2..8 {
+        rpc(&client, &endpoint, &task_body(id, "tasks/get", "t-1"), None).await;
+    }
+
+    let queries: Vec<_> = journalled_room_events(&h.node_journal)
+        .await
+        .into_iter()
+        .filter(|event| {
+            matches!(event, RoomEvent::AdmissionDeferred { gate, .. }
+                if gate.starts_with(STATUS_QUERY_GATE_PREFIX))
+        })
+        .collect();
+    assert_eq!(
+        queries.len(),
+        1,
+        "a task is journaled on FIRST observation only, however hard the peer polls: {queries:?}"
+    );
+    let RoomEvent::AdmissionDeferred { gate, .. } = &queries[0] else {
+        unreachable!()
+    };
+    assert_eq!(gate, &format!("{STATUS_QUERY_GATE_PREFIX}t-1"));
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn inbound_records_carry_an_inbound_direction_and_a_wall_clock_stamp() {
+    use rustain::domain::models::node_journal::JournalRecord;
+    use rustain::domain::models::{Direction, RoomEvent};
+
+    let h = harness(
+        A2aAdmissionPolicy::Deny,
+        Arc::new(ScriptedProvider {
+            chunks: answer_chunks(ANSWER),
+            gate: None,
+        }),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    rpc(
+        &client,
+        &h.endpoint(),
+        &send_body(1, "summarize", "t-1"),
+        None,
+    )
+    .await;
+
+    // Read back through the real journal bytes, never a hand-built entry.
+    let entries = h.node_journal.load().await.expect("journal loads");
+    let rejection = entries
+        .iter()
+        .find(|entry| {
+            matches!(
+                &entry.record,
+                JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected { .. })
+            )
+        })
+        .expect("the refusal is journaled");
+    let JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected { direction, .. }) =
+        &rejection.record
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        *direction,
+        Direction::Inbound,
+        "a rejection carries no node, so direction is unrecoverable unless persisted"
+    );
+    assert!(
+        rejection.has_timestamp(),
+        "every 18.2-era line carries a wall-clock stamp"
+    );
+
+    // Structural ratchet (Rule 4): seq order must never contradict time order.
+    // Proven by a deterministic invariant over the real stream, never a race.
+    assert!(
+        rustain::domain::services::transparency::validate_replay_structure(&entries).is_empty(),
+        "the journal this server just wrote must be structurally replayable: {entries:?}"
+    );
+
+    h.stop().await;
+}
+
+/// AC4 / NFR62 — a journaled record reaches the transcript within 500 ms.
+///
+/// Measured from `recorded_at_ms` on the durable entry to the moment the
+/// `FeedbackBlock` exists in `TuiState`, exactly as the AC specifies. Awaited
+/// with a correlation-keyed receive against a budget — never `sleep`-and-assert,
+/// which measures the sleep rather than the system.
+#[tokio::test]
+async fn a_refusal_reaches_the_transcript_within_the_nfr62_budget() {
+    use rustain::domain::events::DomainEventPayload;
+
+    let mut h = harness(
+        A2aAdmissionPolicy::Deny,
+        Arc::new(ScriptedProvider {
+            chunks: answer_chunks(ANSWER),
+            gate: None,
+        }),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    rpc(
+        &client,
+        &h.endpoint(),
+        &send_body(1, "summarize", "t-1"),
+        None,
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    let event = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "no transparency room event reached the bus inside the NFR62 budget"
+        );
+        match tokio::time::timeout(remaining, h._domain_rx.recv()).await {
+            Ok(Some(AppEvent::DomainEvent(DomainEventPayload::Room(event))))
+                if matches!(
+                    event,
+                    rustain::domain::models::RoomEvent::RemoteEnvelopeRejected { .. }
+                ) =>
+            {
+                break event;
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => panic!("domain bus closed before the record arrived"),
+        }
+    };
+
+    // Through the PRODUCTION handler — the same function the `event_loop.rs`
+    // `AppEvent::DomainEvent` arm calls. Hand-rendering here would prove the
+    // renderer works while the wiring stayed dead.
+    let mut tui = rustain::adapters::tui::state::TuiState::new(120, 24);
+    assert!(
+        rustain::adapters::tui::handlers::transparency::apply_domain_event(
+            &mut tui,
+            &DomainEventPayload::Room(event),
+        ),
+        "a refusal is decision-bearing and must surface"
+    );
+    assert_eq!(tui.feedback_blocks.len(), 1, "exactly one line, not two");
+
+    // The measurement point the AC names: `recorded_at_ms` on the durable
+    // entry → the block existing. Both ends are real.
+    let entries = h.node_journal.load().await.expect("journal loads");
+    let stamped = entries
+        .iter()
+        .find(|entry| entry.has_timestamp())
+        .expect("the record carries a wall-clock stamp");
+    let elapsed = chrono::Utc::now().timestamp_millis() - stamped.recorded_at_ms;
+    assert!(
+        (0..500).contains(&elapsed),
+        "NFR62: {elapsed}ms from durable record to transcript line, budget 500ms"
     );
 
     h.stop().await;

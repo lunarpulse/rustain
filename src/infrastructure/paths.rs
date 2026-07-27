@@ -244,6 +244,17 @@ pub fn daemon_purge_notice_path(workspace: &std::path::Path) -> Result<PathBuf> 
     Ok(rustain_workspace_dir(workspace)?.join("memory-md-purge-notice.json"))
 }
 
+/// Path to the regenerable A2A transparency export (Story 18.2, AC3).
+/// `{workspace}/.rustain/transparency.jsonl`.
+///
+/// **Not a log.** This file is rendered whole from the room journal on demand
+/// and holds no fact that does not live there; nothing in the product ever
+/// reads it back. A continuous writer here would be a second source of truth,
+/// and the one that drifts is the one nobody is looking at (ADR-17-CC-05).
+pub fn transparency_export_path(workspace: &std::path::Path) -> Result<PathBuf> {
+    Ok(rustain_workspace_dir(workspace)?.join("transparency.jsonl"))
+}
+
 /// Path to a crash log file with timestamp.
 pub fn crash_log_path() -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()

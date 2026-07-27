@@ -25,16 +25,19 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::events::AppEvent;
+use crate::domain::events::{AppEvent, DomainEventPayload};
 use crate::domain::models::{
-    A2aPeerSpec, AgentId, AgentMetrics, CapabilityTokenId, ContentHash, CorrelationId, MessageKind,
-    NodeState, Op, PeerId, RapTaskState, RefuseReason, RejectReason, RoomEvent, SubagentEnvelope,
-    SubagentEvent, TrustTier,
+    A2aPeerSpec, AgentId, AgentMetrics, CapabilityTokenId, ContentHash, CorrelationId, Direction,
+    MessageKind, NodeState, Op, PeerId, RapTaskState, RefuseReason, RejectReason, RoomEvent,
+    SubagentEnvelope, SubagentEvent, TrustTier,
 };
-use crate::infrastructure::subagent::node_journal::NodeJournal;
+use crate::domain::ports::{RoomJournal, RoomJournalError};
+use crate::domain::services::transparency::{
+    MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, TRUNCATION_MARKER, sanitize_disclosable,
+};
 use crate::infrastructure::subagent::{AgentHandle, MailboxBudget, NodeTree};
 
 use super::client::A2aClientAdapter;
@@ -43,6 +46,7 @@ use super::jsonrpc::JsonRpcRequest;
 use super::lifecycle::{
     A2aTaskTransport, LifecycleOutcome, PollConfig, TaskSnapshot, poll_from_snapshot,
 };
+use super::task::A2aTaskState;
 
 /// A live JSON-RPC transport bound to one resolved endpoint. Generates a
 /// monotonic correlation id per call.
@@ -109,6 +113,8 @@ pub enum DelegationError {
     State(String),
     /// The owned A2A driver task failed before producing an outcome.
     Driver(String),
+    /// The canonical room-event record could not be made durable.
+    Journal(RoomJournalError),
     /// The peer/task terminated as failed/rejected.
     Refused { reason: String },
     /// The peer asked for input/auth — multi-turn is not supported (R-C). The
@@ -129,6 +135,7 @@ impl std::fmt::Display for DelegationError {
             Self::Register(reason) => write!(f, "could not materialize peer node: {reason}"),
             Self::State(reason) => write!(f, "A2A node state failure: {reason}"),
             Self::Driver(reason) => write!(f, "A2A driver task failure: {reason}"),
+            Self::Journal(error) => write!(f, "could not record A2A room event: {error}"),
             Self::Refused { reason } => write!(f, "remote task refused/failed: {reason}"),
             Self::InputRequired { task_id, .. } => write!(
                 f,
@@ -145,20 +152,39 @@ impl std::fmt::Display for DelegationError {
 #[derive(Clone)]
 pub struct A2aDelegationRuntime {
     node_tree: NodeTree,
-    journal: Option<Arc<NodeJournal>>,
+    journal: Arc<dyn RoomJournal>,
     event_tx: mpsc::UnboundedSender<AppEvent>,
+    journal_failure_latch: Arc<JournalFailureLatch>,
+}
+
+/// Serializes the running failure count with its notification. Concurrent
+/// failed appends can otherwise deliver `2` before `1` to the display even
+/// though the counter itself is atomic.
+struct JournalFailureLatch {
+    failures: AtomicU64,
+    emit_lock: Mutex<()>,
+}
+
+impl JournalFailureLatch {
+    fn new() -> Self {
+        Self {
+            failures: AtomicU64::new(0),
+            emit_lock: Mutex::new(()),
+        }
+    }
 }
 
 impl A2aDelegationRuntime {
     pub fn new(
         node_tree: NodeTree,
-        journal: Option<Arc<NodeJournal>>,
+        journal: Arc<dyn RoomJournal>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Self {
         Self {
             node_tree,
             journal,
             event_tx,
+            journal_failure_latch: Arc::new(JournalFailureLatch::new()),
         }
     }
 
@@ -213,7 +239,36 @@ impl A2aDelegationRuntime {
                 .map_err(DelegationError::Transport)?,
         )
         .map_err(DelegationError::Transport)?;
-        let node_id = mint_node_id(&spec.id, &first.id);
+        let raw_task_id = first.id.clone();
+        if raw_task_id.len() > MAX_PEER_ID_BYTES {
+            let reason = "remote task id exceeds the supported size".to_owned();
+            self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+                peer,
+                reason: RejectReason::Policy {
+                    detail: reason.clone(),
+                },
+                direction: Direction::Outbound,
+                task: Some(disclosable_task_id(&raw_task_id)),
+            })
+            .await?;
+            // The raw id never enters a node id or a room event, but it remains
+            // available for wire cleanup. A remote non-terminal task must not
+            // be stranded merely because its identifier is too large to retain.
+            if !matches!(
+                first.state,
+                A2aTaskState::Completed
+                    | A2aTaskState::Failed
+                    | A2aTaskState::Canceled
+                    | A2aTaskState::Rejected
+            ) {
+                transport
+                    .tasks_cancel(&raw_task_id)
+                    .await
+                    .map_err(DelegationError::Transport)?;
+            }
+            return Err(DelegationError::Refused { reason });
+        }
+        let node_id = mint_node_id(&spec.id, &raw_task_id);
         tracing::info!(node = %node_id, ?trust, "A2A task dispatched");
 
         let (node_cancel, command_rx) = self.materialize(&node_id).await?;
@@ -357,6 +412,7 @@ impl A2aDelegationRuntime {
             Ok::<(), String>(())
         });
 
+        let dispatched_task_id = first.id.clone();
         let config = PollConfig::default();
         let outcome = poll_from_snapshot(transport, first, &config, &cancel, |rap| {
             let _ = proj_tx.send(rap);
@@ -373,13 +429,15 @@ impl A2aDelegationRuntime {
                 RapTaskState::Completed => {
                     // Remote content enters local context: taint it (never trust a
                     // peer's answer) and record the accepted envelope durably.
-                    self.node_tree.mark_tainted(node_id).await;
                     self.emit_room(RoomEvent::RemoteEnvelopeAccepted {
                         peer: peer.clone(),
                         node: node_id.clone(),
                         content_hash: content_hash(&task.result),
+                        direction: Direction::Outbound,
+                        task: Some(disclosable_task_id(&task.id)),
                     })
-                    .await;
+                    .await?;
+                    self.node_tree.mark_tainted(node_id).await;
                     Ok(task.result)
                 }
                 RapTaskState::Canceled => Err(DelegationError::Cancelled),
@@ -398,16 +456,33 @@ impl A2aDelegationRuntime {
                     .try_set_state(node_id, NodeState::Failed)
                     .await
                     .map_err(|error| DelegationError::State(error.to_string()))?;
+                // AC8 — `task.id` and `task.context_id` are chosen by the
+                // REMOTE agent and this string reaches the journal, the chat
+                // transcript, and `rustain team log`'s stdout. Strip control
+                // bytes and cap length before any of that: the inbound side
+                // has bounded ids since 18.1b, the outbound side had nothing.
+                let task_correlation = disclosable_task_id(&task.id);
                 let detail = format!(
-                    "remote agent requested input (task {}, context {:?}); multi-turn not supported",
-                    task.id, task.context_id
+                    "remote agent requested input (task {}, context {}); multi-turn not supported",
+                    task_correlation,
+                    task.context_id
+                        .as_deref()
+                        .map(|id| sanitize_disclosable(id, MAX_PEER_ID_BYTES))
+                        .unwrap_or_else(|| "—".to_owned()),
                 );
                 self.emit_room(RoomEvent::RemoteEnvelopeRejected {
                     peer: peer.clone(),
                     reason: RejectReason::Policy { detail },
+                    direction: Direction::Outbound,
+                    task: Some(task_correlation.clone()),
                 })
-                .await;
-                self.emit_refused(node_id, parent_tool_call_id, &task.id, RefuseReason::Policy);
+                .await?;
+                self.emit_refused(
+                    node_id,
+                    parent_tool_call_id,
+                    &task_correlation,
+                    RefuseReason::Policy,
+                );
                 Err(DelegationError::InputRequired {
                     task_id: task.id,
                     context_id: task.context_id,
@@ -415,8 +490,14 @@ impl A2aDelegationRuntime {
             }
             Err(error) => {
                 let reason = error.to_string();
-                self.reject(node_id, peer, parent_tool_call_id, "unknown", &reason)
-                    .await?;
+                self.reject(
+                    node_id,
+                    peer,
+                    parent_tool_call_id,
+                    &dispatched_task_id,
+                    &reason,
+                )
+                .await?;
                 Err(DelegationError::Transport(error))
             }
         }
@@ -464,36 +545,56 @@ impl A2aDelegationRuntime {
             .try_set_state(node_id, NodeState::Failed)
             .await
             .map_err(|error| DelegationError::State(error.to_string()))?;
+        let task_correlation = disclosable_task_id(task_id);
         self.emit_room(RoomEvent::RemoteEnvelopeRejected {
             peer: peer.clone(),
             reason: RejectReason::Policy {
-                detail: reason.to_owned(),
+                // AC8 — `reason` reaches here from `error.to_string()` on the
+                // transport path, which carries remote-influenced content.
+                detail: sanitize_disclosable(reason, MAX_SUMMARY_BYTES),
             },
+            direction: Direction::Outbound,
+            task: Some(task_correlation.clone()),
         })
-        .await;
-        self.emit_refused(node_id, parent_tool_call_id, task_id, RefuseReason::Policy);
+        .await?;
+        self.emit_refused(
+            node_id,
+            parent_tool_call_id,
+            &task_correlation,
+            RefuseReason::Policy,
+        );
         Ok(())
     }
 
-    /// Durable-first room emission: append to the journal, then publish on the
-    /// bus. Never the reverse (Ruling 6).
-    async fn emit_room(&self, event: RoomEvent) {
-        // Build the bus event before sending (the peer-delivery precedent) so the
-        // send site routes a variable, not an inline `AppEvent::` — consistent
-        // with `rap/peer_delivery.rs`'s `domain_tx.send(receipt)` bridge.
-        let bus_event = AppEvent::DomainEvent(event.clone().into());
-        if let Some(journal) = &self.journal {
-            match journal.append_room(event).await {
-                Ok(_) => {
-                    let _ = self.event_tx.send(bus_event);
-                }
-                Err(error) => {
-                    tracing::error!(%error, "failed to journal A2A room event; dropping bus emit");
-                }
-            }
-        } else {
-            let _ = self.event_tx.send(bus_event);
+    /// Durable-first room emission. `RoomJournal` owns the append-then-bus
+    /// ordering; a failed append is surfaced to both the delegation caller and
+    /// the same latched operator condition used by inbound transparency.
+    async fn emit_room(&self, event: RoomEvent) -> Result<(), DelegationError> {
+        if let Err(error) = self.journal.record_event(event).await {
+            self.latch_journal_failure(&error).await;
+            return Err(DelegationError::Journal(error));
         }
+        Ok(())
+    }
+
+    async fn latch_journal_failure(&self, error: &RoomJournalError) {
+        let _emit_guard = self.journal_failure_latch.emit_lock.lock().await;
+        let failures = self
+            .journal_failure_latch
+            .failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        tracing::error!(
+            %error,
+            failures,
+            "failed to journal outbound A2A transparency record; records are missing from the audit log"
+        );
+        let _ = self.event_tx.send(AppEvent::DomainEvent(
+            DomainEventPayload::TransparencyJournalFailed {
+                failures,
+                detail: error.to_string(),
+            },
+        ));
     }
 
     fn emit_refused(
@@ -525,6 +626,19 @@ fn mint_node_id(peer: &str, task_id: &str) -> AgentId {
     let peer = URL_SAFE_NO_PAD.encode(peer.as_bytes());
     let task = URL_SAFE_NO_PAD.encode(task_id.as_bytes());
     AgentId::from_validated(format!("a2a/p-{peer}/t-{task}"))
+}
+
+/// The only form of a remote task id that can reach a room event or a local
+/// refusal receipt. The unmodified id remains in [`TaskSnapshot`] for wire
+/// polling and cancellation. Reserve the truncation marker inside the bound
+/// when rejecting an oversized remote id.
+fn disclosable_task_id(task_id: &str) -> String {
+    let limit = if task_id.len() > MAX_PEER_ID_BYTES {
+        MAX_PEER_ID_BYTES.saturating_sub(TRUNCATION_MARKER.len())
+    } else {
+        MAX_PEER_ID_BYTES
+    };
+    sanitize_disclosable(task_id, limit)
 }
 
 /// Recover `(peer, task_id)` from a node id minted by [`mint_node_id`]. Returns
@@ -610,6 +724,7 @@ mod tests {
 
     use super::*;
     use crate::domain::models::{JournalRecord, RedactedUrl};
+    use crate::infrastructure::subagent::{NodeJournal, NodeRoomJournal};
 
     fn spec(id: &str, verified: bool) -> A2aPeerSpec {
         use crate::domain::models::{A2aPeerSource, PinnedKey, PinnedKeyAlgorithm};
@@ -634,12 +749,17 @@ mod tests {
 
     impl Scripted {
         fn new(states: &[&str]) -> Self {
+            Self::with_task_id("task-1", states)
+        }
+
+        fn with_task_id(task_id: impl Into<String>, states: &[&str]) -> Self {
+            let task_id = task_id.into();
             let script = states
                 .iter()
                 .map(|state| {
                     serde_json::json!({
                         "kind": "task",
-                        "id": "task-1",
+                        "id": task_id.clone(),
                         "contextId": "ctx-1",
                         "status": {"state": state},
                         "artifacts": [{"parts": [{"kind": "text", "text": "result"}]}]
@@ -670,6 +790,32 @@ mod tests {
         }
     }
 
+    /// In-memory room-journal port for driver tests that need the same
+    /// durable-first bus contract without a filesystem fixture.
+    struct TestRoomJournal {
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    }
+
+    #[async_trait]
+    impl RoomJournal for TestRoomJournal {
+        async fn record_event(&self, event: RoomEvent) -> Result<(), RoomJournalError> {
+            let _ = self.event_tx.send(AppEvent::DomainEvent(event.into()));
+            Ok(())
+        }
+    }
+
+    /// Models a failed append after scheduling, so concurrent driver futures
+    /// contend at the failure latch rather than completing serially.
+    struct BrokenRoomJournal;
+
+    #[async_trait]
+    impl RoomJournal for BrokenRoomJournal {
+        async fn record_event(&self, _event: RoomEvent) -> Result<(), RoomJournalError> {
+            tokio::task::yield_now().await;
+            Err(RoomJournalError::Append("disk full".to_owned()))
+        }
+    }
+
     fn runtime() -> (
         A2aDelegationRuntime,
         NodeTree,
@@ -677,7 +823,10 @@ mod tests {
     ) {
         let tree = NodeTree::new();
         let (tx, rx) = mpsc::unbounded_channel();
-        (A2aDelegationRuntime::new(tree.clone(), None, tx), tree, rx)
+        let room: Arc<dyn RoomJournal> = Arc::new(TestRoomJournal {
+            event_tx: tx.clone(),
+        });
+        (A2aDelegationRuntime::new(tree.clone(), room, tx), tree, rx)
     }
     async fn wait_for_peer_node(tree: &NodeTree) -> AgentId {
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -723,16 +872,138 @@ mod tests {
         assert_eq!(entry.current_status, NodeState::Completed);
         assert_eq!(entry.ownership, crate::domain::models::OwnershipKind::Peer);
 
-        // A RemoteEnvelopeAccepted DomainEvent was emitted on the bus.
-        let mut saw_accepted = false;
-        while let Ok(event) = rx.try_recv() {
-            if let AppEvent::DomainEvent(payload) = event
-                && format!("{payload:?}").contains("RemoteEnvelopeAccepted")
-            {
-                saw_accepted = true;
-            }
-        }
-        assert!(saw_accepted, "RemoteEnvelopeAccepted must be emitted");
+        // The production event carries the original (bounded) remote task id,
+        // rather than forcing projection to reverse an internal node id.
+        let accepted_task = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| {
+            let AppEvent::DomainEvent(DomainEventPayload::Room(
+                RoomEvent::RemoteEnvelopeAccepted { task, .. },
+            )) = event
+            else {
+                return None;
+            };
+            task
+        });
+        assert_eq!(accepted_task.as_deref(), Some("task-1"));
+    }
+
+    #[tokio::test]
+    async fn outbound_success_does_not_escape_after_room_append_failure() {
+        let tree = NodeTree::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let rt = A2aDelegationRuntime::new(tree, Arc::new(BrokenRoomJournal), tx);
+
+        let result = rt
+            .delegate(
+                &spec("planets", false),
+                TrustTier::Unverified,
+                "call-journal-failure",
+                Arc::new(Scripted::new(&["working", "completed"])),
+                serde_json::json!({}),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(DelegationError::Journal(RoomJournalError::Append(_)))
+        ));
+
+        let failure_counts: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::DomainEvent(DomainEventPayload::TransparencyJournalFailed {
+                    failures,
+                    ..
+                }) => Some(failures),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failure_counts, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn oversized_outbound_task_id_is_not_materialized_and_is_cancelled_raw() {
+        let (rt, tree, mut rx) = runtime();
+        let raw_task_id = "x".repeat(MAX_PEER_ID_BYTES + 1);
+        let transport = Arc::new(Scripted::with_task_id(raw_task_id.clone(), &["working"]));
+
+        let error = rt
+            .delegate(
+                &spec("planets", false),
+                TrustTier::Unverified,
+                "call-oversized-id",
+                transport.clone(),
+                serde_json::json!({}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("an oversized remote task id is refused before materialization");
+        assert!(matches!(error, DelegationError::Refused { .. }));
+        assert_eq!(transport.cancels.lock().as_slice(), [raw_task_id.as_str()]);
+        assert!(
+            tree.list()
+                .await
+                .into_iter()
+                .all(|entry| entry.subagent_type != "a2a-peer"),
+            "the oversized id must not become a local node"
+        );
+
+        let recorded_task = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| {
+            let AppEvent::DomainEvent(DomainEventPayload::Room(
+                RoomEvent::RemoteEnvelopeRejected { task, .. },
+            )) = event
+            else {
+                return None;
+            };
+            task
+        });
+        let recorded_task = recorded_task.expect("the refusal has canonical task correlation");
+        assert_eq!(recorded_task, disclosable_task_id(&raw_task_id));
+        assert!(recorded_task.len() <= MAX_PEER_ID_BYTES);
+    }
+
+    #[tokio::test]
+    async fn concurrent_outbound_journal_failures_emit_monotonic_latch_counts() {
+        let tree = NodeTree::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let rt = A2aDelegationRuntime::new(tree, Arc::new(BrokenRoomJournal), tx);
+
+        let left_spec = spec("left", false);
+        let right_spec = spec("right", false);
+        let left = rt.delegate(
+            &left_spec,
+            TrustTier::Unverified,
+            "call-left",
+            Arc::new(Scripted::new(&["working", "completed"])),
+            serde_json::json!({}),
+            CancellationToken::new(),
+        );
+        let right = rt.delegate(
+            &right_spec,
+            TrustTier::Unverified,
+            "call-right",
+            Arc::new(Scripted::new(&["working", "completed"])),
+            serde_json::json!({}),
+            CancellationToken::new(),
+        );
+        let (left, right) = tokio::join!(left, right);
+        assert!(matches!(
+            left,
+            Err(DelegationError::Journal(RoomJournalError::Append(_)))
+        ));
+        assert!(matches!(
+            right,
+            Err(DelegationError::Journal(RoomJournalError::Append(_)))
+        ));
+
+        let failure_counts: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::DomainEvent(DomainEventPayload::TransparencyJournalFailed {
+                    failures,
+                    ..
+                }) => Some(failures),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failure_counts, vec![1, 2]);
     }
     #[tokio::test]
     async fn dropped_caller_still_cancels_remote_task_and_terminalizes_node() {
@@ -843,7 +1114,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = Arc::new(NodeJournal::open_workspace(dir.path()).await.unwrap());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let rt = A2aDelegationRuntime::new(tree.clone(), Some(journal.clone()), tx);
+        let room: Arc<dyn RoomJournal> =
+            Arc::new(NodeRoomJournal::new(journal.clone(), Some(tx.clone())));
+        let rt = A2aDelegationRuntime::new(tree.clone(), room, tx);
         let transport = Arc::new(Scripted::new(&["working", "input-required"]));
 
         let error = rt
@@ -872,15 +1145,17 @@ mod tests {
             .unwrap();
         assert_eq!(node.current_status, NodeState::Failed);
 
-        // taskId/contextId journaled as a durable rejection.
+        // taskId/contextId journaled as a durable rejection, including the
+        // original task correlation rather than a shared placeholder.
         let records = journal.load().await.unwrap();
-        let saw_rejected = records.iter().any(|entry| {
-            matches!(
-                &entry.record,
-                JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected { .. })
-            )
+        let recorded_task = records.iter().find_map(|entry| {
+            let JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected { task, .. }) = &entry.record
+            else {
+                return None;
+            };
+            task.as_deref()
         });
-        assert!(saw_rejected, "RemoteEnvelopeRejected must be journaled");
+        assert_eq!(recorded_task, Some("task-1"));
 
         // A MessageRefused receipt reached the bus.
         let mut saw_refused = false;
@@ -892,6 +1167,145 @@ mod tests {
             }
         }
         assert!(saw_refused, "MessageRefused receipt must be emitted");
+    }
+
+    /// A peer whose task/context ids carry terminal escape sequences.
+    ///
+    /// Both ids are **remote-chosen** and both land in
+    /// `RejectReason::Policy { detail }`, which Story 18.2 renders into the
+    /// chat transcript and prints to stdout via `rustain team log`. That last
+    /// one is a `println!` — a genuine escape-injection sink that this story
+    /// creates.
+    struct HostileIds {
+        script: Mutex<VecDeque<serde_json::Value>>,
+    }
+
+    impl HostileIds {
+        fn new() -> Self {
+            let make = |state: &str| {
+                serde_json::json!({
+                    "kind": "task",
+                    "id": "task-\u{1b}[2K\rEVIL",
+                    "contextId": "ctx-\u{9b}31m\u{7}",
+                    "status": {"state": state},
+                    "artifacts": [{"parts": [{"kind": "text", "text": "result"}]}]
+                })
+            };
+            Self {
+                script: Mutex::new(VecDeque::from([make("working"), make("input-required")])),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl A2aTaskTransport for HostileIds {
+        async fn message_send(
+            &self,
+            _message: serde_json::Value,
+        ) -> Result<serde_json::Value, A2aError> {
+            Ok(self.script.lock().pop_front().expect("script exhausted"))
+        }
+        async fn tasks_get(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
+            Ok(self.script.lock().pop_front().expect("script exhausted"))
+        }
+        async fn tasks_cancel(&self, task_id: &str) -> Result<serde_json::Value, A2aError> {
+            Ok(serde_json::json!({"kind":"task","id":task_id,"status":{"state":"canceled"}}))
+        }
+    }
+
+    /// AC8 — the outbound sink, entered through the production front door
+    /// (`delegate`), asserted on the JOURNAL BYTES.
+    #[tokio::test]
+    async fn a_hostile_peer_task_id_reaches_the_journal_stripped_and_bounded() {
+        use crate::domain::services::transparency::transparency_row;
+
+        let tree = NodeTree::new();
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(dir.path()).await.unwrap());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let room: Arc<dyn RoomJournal> =
+            Arc::new(NodeRoomJournal::new(journal.clone(), Some(tx.clone())));
+        let rt = A2aDelegationRuntime::new(tree, room, tx);
+
+        let error = rt
+            .delegate(
+                &spec("planets", false),
+                TrustTier::Unverified,
+                "call-hostile",
+                Arc::new(HostileIds::new()),
+                serde_json::json!({}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("input-required is a refusal");
+        assert!(matches!(error, DelegationError::InputRequired { .. }));
+
+        let entries = journal.load().await.unwrap();
+        let rejection = entries
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.record,
+                    JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected { .. })
+                )
+            })
+            .expect("the refusal is journaled");
+        let JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected {
+            reason: RejectReason::Policy { detail },
+            direction,
+            task,
+            ..
+        }) = &rejection.record
+        else {
+            unreachable!()
+        };
+
+        // Strip-on-WRITE: the bytes on disk are already clean.
+        assert!(
+            !detail
+                .chars()
+                .any(|ch| ch.is_control() || ('\u{80}'..='\u{9f}').contains(&ch)),
+            "no C0/C1 byte may be journaled: {detail:?}"
+        );
+        assert!(
+            detail.contains("EVIL") && detail.contains("31m"),
+            "only the control bytes are removed — the text itself is evidence: {detail}"
+        );
+        // AC2: this is the outbound half of the direction field.
+        assert_eq!(*direction, Direction::Outbound);
+        let task = task
+            .as_deref()
+            .expect("production rejection carries the remote task id");
+        assert!(task.len() <= MAX_PEER_ID_BYTES);
+        assert!(
+            !task
+                .chars()
+                .any(|ch| ch.is_control() || ('\u{80}'..='\u{9f}').contains(&ch)),
+            "task correlation is sanitized before journaling: {task:?}"
+        );
+
+        // Strip-on-READ too: a record written by 18.1b would not have been
+        // sanitized on the way in, so the projection cleans it again.
+        let row = transparency_row(rejection).expect("a rejection projects");
+        assert!(
+            !row.one_line()
+                .chars()
+                .any(|ch| ch.is_control() || ('\u{80}'..='\u{9f}').contains(&ch))
+        );
+        assert_eq!(row.direction, Direction::Outbound);
+    }
+
+    /// Positive control for the strip: legitimate text must survive intact.
+    /// A sanitizer that mangles unicode is a different bug wearing the fix.
+    #[tokio::test]
+    async fn ordinary_unicode_survives_the_outbound_strip_unchanged() {
+        use crate::domain::services::transparency::{MAX_SUMMARY_BYTES, sanitize_disclosable};
+
+        let legitimate = "تقرير \u{200f}RTL\u{200e} · e\u{301} · 日本語 · 🚀";
+        assert_eq!(
+            sanitize_disclosable(legitimate, MAX_SUMMARY_BYTES),
+            legitimate
+        );
     }
 
     #[tokio::test]

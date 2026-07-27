@@ -137,6 +137,7 @@ async fn pre_watermark_conservation_record_remains_readable() {
             revoked: false,
             authority_time_ms: 900,
         }),
+        0,
     );
     let mut legacy = serde_json::to_value(entry).expect("serialize current record");
     legacy
@@ -601,6 +602,114 @@ async fn concurrent_writers_share_one_ordered_sequence() {
         loaded.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
         vec![1, 2],
         "the shared log stays contiguous"
+    );
+}
+
+/// Story 18.2 (AC2, P-2) — **structural ratchet, not a race** (Rule 4).
+///
+/// The invariant is "`seq` order never contradicts `recorded_at_ms` order".
+/// Correct code cannot violate it: the stamp is read inside the same `flock`
+/// that derives `seq` from the durable tail, so a behavioural race can never
+/// force the mutant RED — `flock` serializes the writers. Prove it by counting
+/// instead: **exactly one clock read per append batch**. A mutant that stamps
+/// per record, or that hoists the read outside the lock, changes the count or
+/// breaks the ordering assertion below.
+#[tokio::test]
+#[cfg(feature = "test-instrumentation")]
+async fn the_wall_clock_is_read_exactly_once_per_append_inside_the_lock() {
+    use rustain::domain::clock::MockClock;
+    use rustain::domain::services::transparency::validate_replay_structure;
+
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let clock = Arc::new(MockClock::at_wall_ms(1_700_000_000_000));
+    let journal = NodeJournal::open_workspace(workspace.path())
+        .await
+        .expect("open journal")
+        .with_clock(clock.clone());
+
+    // A three-record BATCH is one append: one line-group, one lock, one stamp.
+    journal
+        .append_batch(vec![
+            JournalRecord::Checkpoint(checkpoint("node-a", NodeState::Running)),
+            JournalRecord::Checkpoint(checkpoint("node-b", NodeState::Running)),
+            JournalRecord::Checkpoint(checkpoint("node-c", NodeState::Running)),
+        ])
+        .await
+        .expect("batch append");
+    assert_eq!(
+        journal.stamp_reads(),
+        1,
+        "three records in one batch share ONE stamp — an emitter-supplied \
+         timestamp, or a per-record read, breaks this"
+    );
+
+    // Time advances; a second append takes exactly one more stamp.
+    clock.advance(std::time::Duration::from_millis(500));
+    journal
+        .append_checkpoint(checkpoint("node-d", NodeState::Running))
+        .await
+        .expect("second append");
+    assert_eq!(journal.stamp_reads(), 2);
+
+    let loaded = journal.load().await.expect("load");
+    assert_eq!(
+        loaded
+            .iter()
+            .map(|entry| (entry.seq, entry.recorded_at_ms))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, 1_700_000_000_000),
+            (2, 1_700_000_000_000),
+            (3, 1_700_000_000_000),
+            (4, 1_700_000_000_500),
+        ],
+        "equal milliseconds within a batch are legal; time must never go backwards"
+    );
+    assert!(
+        validate_replay_structure(&loaded).is_empty(),
+        "seq order and time order must agree: {loaded:?}"
+    );
+}
+
+/// A rollback is a normal wall-clock failure mode, not evidence of a changed
+/// journal. The writer must clamp while holding the same lock that derives the
+/// next sequence number, leaving replay structure clean.
+#[tokio::test]
+#[cfg(feature = "test-instrumentation")]
+async fn wall_clock_rollback_is_clamped_to_the_durable_nonlegacy_tail() {
+    use rustain::domain::clock::MockClock;
+    use rustain::domain::services::transparency::validate_replay_structure;
+
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let clock = Arc::new(MockClock::at_wall_ms(1_700_000_000_000));
+    let journal = NodeJournal::open_workspace(workspace.path())
+        .await
+        .expect("open journal")
+        .with_clock(clock.clone());
+
+    journal
+        .append_checkpoint(checkpoint("node-a", NodeState::Running))
+        .await
+        .expect("first append");
+    clock.set_wall_anchor_ms(1_699_999_999_000);
+    journal
+        .append_checkpoint(checkpoint("node-b", NodeState::Running))
+        .await
+        .expect("rollback append");
+
+    let loaded = journal.load().await.expect("load");
+    assert_eq!(
+        loaded
+            .iter()
+            .map(|entry| entry.recorded_at_ms)
+            .collect::<Vec<_>>(),
+        vec![1_700_000_000_000, 1_700_000_000_000],
+        "a rolled-back wall clock cannot create descending persisted time"
+    );
+    assert_eq!(journal.stamp_reads(), 2, "one clock read per append");
+    assert!(
+        validate_replay_structure(&loaded).is_empty(),
+        "clamped persisted timestamps remain structurally replayable: {loaded:?}"
     );
 }
 

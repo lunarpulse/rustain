@@ -112,6 +112,14 @@ pub enum PanelType {
     Tasks,
     Agents,
     Adapters,
+    /// Story 18.2 (AC5) — `Ctrl+X, L`. Chronological A2A transparency rows
+    /// folded from the durable room journal.
+    ///
+    /// Deliberately a `PanelType` and not an `OverlayType`: every persistent
+    /// view lives in the sidebar slot, and `PanelType` is matched exhaustively
+    /// in the render dispatch, so a missed site fails to compile.
+    /// `OverlayType` has `_` arms everywhere and would silently do nothing.
+    TransparencyLog,
 }
 
 /// Target of a delete confirmation dialog.

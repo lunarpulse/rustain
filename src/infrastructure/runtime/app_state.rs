@@ -83,6 +83,11 @@ pub struct AppState {
     pub catalog_registry: Option<
         Arc<crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry>,
     >,
+    /// Story 18.2 (AC3) — read seam over the durable room journal plus the
+    /// `transparency.jsonl` export shell. `None` when the workspace has no
+    /// journal (a non-subagent composition). Set at the composition root
+    /// rather than passed positionally: `new` already takes 19 arguments.
+    pub transparency: Option<Arc<crate::infrastructure::transparency::TransparencyService>>,
 }
 
 impl AppState {
@@ -138,6 +143,7 @@ impl AppState {
                 telemetry,
                 #[cfg(feature = "meta-search")]
                 catalog_registry,
+                transparency: None,
             },
             domain_rx,
         )

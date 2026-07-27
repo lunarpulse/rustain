@@ -117,7 +117,7 @@ pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};
 pub use provider_info::ProviderInfoPort;
 pub use recall_provider::RecallProviderPort;
-pub use room_journal::{RoomJournal, RoomJournalError};
+pub use room_journal::{RoomJournal, RoomJournalError, RoomJournalReader};
 pub use sandbox::SandboxManager;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;

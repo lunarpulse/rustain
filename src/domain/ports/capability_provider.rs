@@ -198,7 +198,12 @@ mod a2a_conformance {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "rs")
                 && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                && stem.contains("a2a")
+                // Story 18.2: transparency targets ride the same contract. They
+                // are feature-independent, but CI's default lane runs
+                // `cargo test --lib` only — an integration target named in no
+                // lane never executes, which is the false green this guard
+                // exists to prevent.
+                && (stem.contains("a2a") || stem.contains("transparency"))
             {
                 targets.push(stem.to_owned());
             }

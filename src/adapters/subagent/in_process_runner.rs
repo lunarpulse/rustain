@@ -7654,15 +7654,22 @@ mod tests {
                     peer,
                     node,
                     content_hash,
+                    direction,
+                    ..
                 } => {
                     let n = it.sym(node.as_str());
                     lines.push(format!(
-                        "journal RemoteEnvelopeAccepted peer={peer:?} node={n} content_hash={content_hash:?}"
+                        "journal RemoteEnvelopeAccepted peer={peer:?} node={n} content_hash={content_hash:?} direction={direction:?}"
                     ));
                 }
-                RoomEvent::RemoteEnvelopeRejected { peer, reason } => {
+                RoomEvent::RemoteEnvelopeRejected {
+                    peer,
+                    reason,
+                    direction,
+                    ..
+                } => {
                     lines.push(format!(
-                        "journal RemoteEnvelopeRejected peer={peer:?} reason={reason:?}"
+                        "journal RemoteEnvelopeRejected peer={peer:?} reason={reason:?} direction={direction:?}"
                     ));
                 }
                 RoomEvent::HostBoundUnavailable { node, host } => {
@@ -7692,6 +7699,9 @@ mod tests {
                     lines.push(format!(
                         "journal TicketResolved node={n} artifact={artifact} outcome={outcome:?}"
                     ));
+                }
+                RoomEvent::Unrecognized => {
+                    lines.push("journal Unrecognized".to_owned());
                 }
             }
         }

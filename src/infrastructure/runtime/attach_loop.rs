@@ -36,7 +36,9 @@
 
 #![cfg(unix)]
 
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -353,7 +355,7 @@ pub fn apply_client_event(
     conversation: &mut Conversation,
     streaming: &mut StreamingState,
     reducer: &mut ReducerState,
-    status: &mut StatusState,
+    state: &mut TuiState,
     permission_mode: &mut PermissionMode,
     clock: &dyn Clock,
 ) -> bool {
@@ -369,9 +371,9 @@ pub fn apply_client_event(
                 conversation.messages.push(turn_to_chat_message(&committed));
             }
             if let ChunkAction::TurnComplete { .. } = action {
-                *status = StatusState::Idle;
+                state.status = StatusState::Idle;
             } else {
-                *status = StatusState::Streaming;
+                state.status = StatusState::Streaming;
             }
             true
         }
@@ -400,9 +402,12 @@ pub fn apply_client_event(
             }
             true
         }
-        // ModeChanged/SystemNotice/Tool handled above; everything else
-        // (Approval/Mcp*/Capability/ConfigReloaded + any future variant) is not
-        // acted on by the thin client — ignore gracefully, never panic.
+        RawEventKind::DomainEvent(payload) => {
+            crate::adapters::tui::handlers::transparency::apply_domain_event(state, &payload)
+        }
+        // ModeChanged/SystemNotice/Tool/DomainEvent handled above; everything
+        // else (Approval/Mcp*/Capability/ConfigReloaded + any future variant)
+        // is not acted on by the thin client — ignore gracefully, never panic.
         _ => false,
     }
 }
@@ -479,7 +484,8 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
         String,
         crate::adapters::tui::widgets::tool_block::ToolBlockState,
     > = HashMap::new();
-    let feedback_blocks: BTreeMap<String, crate::domain::models::FeedbackBlock> = BTreeMap::new();
+    // Attached clients render the same feedback blocks as the local TUI so
+    // forwarded transparency room/failure events have the same visible result.
 
     use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
     use futures::StreamExt;
@@ -508,7 +514,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 &state.theme,
                 &mut tab_render_state,
                 &tool_block_states,
-                &feedback_blocks,
+                &state.feedback_blocks,
             );
             // Story 12.2d AC3 — render the consolidation card with the IDENTICAL
             // bottom-anchored inline grammar the local TUI uses (bordered + accent,
@@ -686,7 +692,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             &mut conversation,
                             &mut streaming,
                             &mut reducer,
-                            &mut state.status,
+                            &mut state,
                             &mut permission_mode,
                             &clock,
                         );
@@ -948,7 +954,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Streaming;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Streaming;
         let mut mode = PermissionMode::Normal;
 
         apply_client_event(
@@ -959,7 +966,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -973,11 +980,11 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
-        assert_eq!(status, StatusState::Idle);
+        assert_eq!(state.status, StatusState::Idle);
         let last = conversation
             .messages
             .last()
@@ -992,7 +999,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Streaming;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Streaming;
         let mut mode = PermissionMode::Normal;
 
         apply_client_event(
@@ -1015,7 +1023,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1092,7 +1100,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Idle;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Idle;
         let mut mode = PermissionMode::Normal;
 
         let before = conversation.messages.len();
@@ -1108,7 +1117,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1124,7 +1133,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1135,11 +1144,61 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
         assert_eq!(conversation.messages.last().unwrap().content, "after");
+    }
+
+    #[test]
+    fn forwarded_room_event_reaches_attached_tui_feedback() {
+        let clock = SystemClock::default();
+        let mut conversation = Conversation::default();
+        let mut streaming = StreamingState::default();
+        let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
+        let mut state = TuiState::new(80, 24);
+        let mut mode = PermissionMode::Normal;
+
+        let redraw = apply_client_event(
+            RawEvent {
+                conversation_id: None,
+                timestamp_ms: 0,
+                kind: RawEventKind::DomainEvent(crate::domain::events::DomainEventPayload::Room(
+                    crate::domain::models::RoomEvent::RemoteEnvelopeRejected {
+                        peer: crate::domain::models::PeerId::from_public_key(&[7; 32])
+                            .expect("valid test peer"),
+                        reason: crate::domain::models::RejectReason::Policy {
+                            detail: "blocked by policy".to_owned(),
+                        },
+                        task: Some("remote-task-7".to_owned()),
+                        direction: crate::domain::models::Direction::Inbound,
+                    },
+                )),
+            },
+            &mut conversation,
+            &mut streaming,
+            &mut reducer,
+            &mut state,
+            &mut mode,
+            &clock,
+        );
+
+        assert!(
+            redraw,
+            "a forwarded room refusal changes attached TUI feedback"
+        );
+        let block = state
+            .feedback_blocks
+            .values()
+            .next()
+            .expect("attached TUI renders a transparency feedback block");
+        assert!(
+            block.message.contains("blocked by policy"),
+            "{}",
+            block.message
+        );
+        assert!(block.id.contains("remote-task-7"), "{}", block.id);
     }
 
     /// Test 6a (read-only true-by-absence) — the client→daemon protocol has NO
@@ -1282,7 +1341,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Idle;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Idle;
         let mut mode = PermissionMode::Normal;
 
         apply_client_event(
@@ -1297,7 +1357,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );

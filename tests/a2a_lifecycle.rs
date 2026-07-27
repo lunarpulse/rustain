@@ -20,8 +20,8 @@ use rustain::adapters::a2a::driver::A2aDelegationRuntime;
 use rustain::adapters::a2a::provider::A2aProvider;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{A2aPeerSource, A2aPeerSpec, CapabilityId, NodeState, RedactedUrl};
-use rustain::domain::ports::CapabilityProvider;
-use rustain::infrastructure::subagent::NodeTree;
+use rustain::domain::ports::{CapabilityProvider, RoomJournal};
+use rustain::infrastructure::subagent::{NodeJournal, NodeRoomJournal, NodeTree};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -135,8 +135,15 @@ async fn cassette_drives_message_send_then_ordered_tasks_get_to_completed() {
     client.refresh_agent_card(&peer).await.unwrap();
 
     let tree = NodeTree::new();
+    let journal_dir = tempfile::tempdir().expect("journal directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(journal_dir.path())
+            .await
+            .expect("open room journal"),
+    );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let runtime = Arc::new(A2aDelegationRuntime::new(tree.clone(), None, tx));
+    let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(journal, Some(tx.clone())));
+    let runtime = Arc::new(A2aDelegationRuntime::new(tree.clone(), room, tx));
     let provider = A2aProvider::new(vec![(peer.clone(), client)]);
     provider.set_delegation_runtime(runtime);
 

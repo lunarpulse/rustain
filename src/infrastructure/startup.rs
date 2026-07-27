@@ -517,6 +517,46 @@ pub async fn run() -> Result<()> {
             }
         }
     }
+
+    // Story 18.2 (AC6) — `rustain team log`. Intercepted here, BEFORE provider
+    // construction: reading the transparency log is offline-safe, read-only
+    // and non-billable, exactly like `session list`.
+    if let Some(Command::Team { action }) = &cli.command {
+        let crate::adapters::cli::team::TeamAction::Log {
+            filter,
+            json,
+            export,
+        } = action;
+        let workspace = paths::workspace_dir()?;
+        let reader: Arc<dyn crate::domain::ports::RoomJournalReader> = Arc::new(
+            crate::infrastructure::subagent::WorkspaceJournalReader::open_workspace(&workspace),
+        );
+        let service = crate::infrastructure::transparency::TransparencyService::new(
+            reader,
+            workspace.clone(),
+        );
+        let result: anyhow::Result<()> = async {
+            let report = service.report().await?;
+            let export_summary = if *export {
+                Some(service.export_report(&report).await?)
+            } else {
+                None
+            };
+            let mut stdout = std::io::stdout();
+            crate::adapters::cli::team::log::render_team_log(
+                filter.as_deref(),
+                *json,
+                &report,
+                export_summary.as_ref(),
+                &mut stdout,
+            )
+        }
+        .await;
+        return result.map_err(|e| {
+            eprintln!("rustain: team log failed: {e}");
+            SubcommandExit(SubcommandExit::GENERIC).into()
+        });
+    }
     if let Some(Command::Doctor {
         terminal,
         adapters,
@@ -930,6 +970,10 @@ pub async fn run() -> Result<()> {
             let room: std::sync::Arc<dyn crate::domain::ports::RoomJournal> = std::sync::Arc::new(
                 crate::infrastructure::subagent::NodeRoomJournal::new(node_journal, None),
             );
+            // Standalone discovery-only serve has no event loop, so the
+            // latched journal-failure condition has nowhere to surface: the
+            // sink still fails closed and logs at `error!`. It also admits no
+            // tasks, so the only records it could lose are refusals.
             let transparency = std::sync::Arc::new(
                 crate::adapters::a2a::transparency::TransparencySink::new(room),
             );
@@ -1610,6 +1654,11 @@ pub async fn run() -> Result<()> {
     // out of the subagent subsystem entirely, so `/fanout` is unavailable there
     // by construction.
     let mut orchestrator: Option<Arc<dyn crate::domain::ports::Orchestrator>> = None;
+    // Story 18.2 (AC3) — the TUI's read seam onto the durable room journal.
+    // Captured here because the journal is opened inside the composite-toolset
+    // branch below; the TUI receives the domain port, never the concrete
+    // `NodeJournal`.
+    let mut journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>> = None;
     // Story 10.2 — wire subagent provider into CompositeToolsetAdapter
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
@@ -1681,6 +1730,8 @@ pub async fn run() -> Result<()> {
                     .await
                     .expect("NodeJournal creation failed"),
             );
+            journal_reader =
+                Some(node_journal.clone() as Arc<dyn crate::domain::ports::RoomJournalReader>);
             let orchestration_clock = Arc::new(crate::domain::clock::SystemClock::default())
                 as Arc<dyn crate::domain::clock::Clock>;
             let authority_ledger = Arc::new(
@@ -1781,7 +1832,12 @@ pub async fn run() -> Result<()> {
                 provider.set_delegation_runtime(Arc::new(
                     crate::adapters::a2a::driver::A2aDelegationRuntime::new(
                         subagent_registry.as_ref().clone(),
-                        Some(node_journal.clone()),
+                        Arc::new(
+                            crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
+                                node_journal.clone(),
+                                Some(domain_tx.clone()),
+                            ),
+                        ),
                         domain_tx.clone(),
                     ),
                 ));
@@ -2143,7 +2199,7 @@ pub async fn run() -> Result<()> {
     #[cfg(feature = "meta-search")]
     let catalog_registry_for_app_state = _catalog_registry.clone();
 
-    let (app_state, domain_rx) = AppState::new(
+    let (mut app_state, domain_rx) = AppState::new(
         event_bus,
         domain_rx,
         approval_runtime.clone(),
@@ -2165,6 +2221,17 @@ pub async fn run() -> Result<()> {
         #[cfg(feature = "meta-search")]
         catalog_registry_for_app_state,
     );
+    // Story 18.2 (AC3): the transparency read seam. Assigned after
+    // construction rather than passed positionally — `AppState::new` already
+    // takes 19 arguments and a 20th buys nothing.
+    app_state.transparency = journal_reader.map(|reader| {
+        Arc::new(
+            crate::infrastructure::transparency::TransparencyService::new(
+                reader,
+                workspace_path.clone(),
+            ),
+        )
+    });
 
     // 5d. Use the same storage adapter constructed above for session management.
     // Both tools and the event loop share one FileSystemStorage instance pointing

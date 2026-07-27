@@ -54,6 +54,10 @@ pub enum RawEventKind {
         message: String,
     },
     Tool(ToolCallTransition),
+    /// Durable-room event or transparency journal failure forwarded to attached
+    /// clients. Unlike `AppEvent`, this payload has no runtime-only handles and
+    /// is safe to serialize on the daemon IPC wire.
+    DomainEvent(crate::domain::events::DomainEventPayload),
     Approval(crate::domain::services::approval_runtime::ApprovalRuntimeEvent),
     /// Story 8.1 AC-10 — config reload result for daemon/telemetry subscribers.
     ConfigReloaded {
@@ -93,6 +97,28 @@ impl crate::domain::ports::EventEmitter for EventBus {
         // Story 14-4a (F10): emit_domain now surfaces the domain-send result;
         // ignore it here (trait contract returns ()).
         let _ = self.emit_domain(event);
+    }
+}
+
+/// [`EventEmitter`](crate::domain::ports::EventEmitter) over a bare domain
+/// sender, for composition sites that hold the channel rather than the bus —
+/// the daemon's A2A wiring passes `domain_tx` down, not `Arc<EventBus>`.
+///
+/// Lives in `event_bus.rs` deliberately: this file is the canonical channel
+/// and the one place a direct `domain_tx.send` is sanctioned. Anywhere else it
+/// would be an `emit_domain` bypass.
+pub struct ChannelEmitter(mpsc::UnboundedSender<AppEvent>);
+
+impl ChannelEmitter {
+    #[must_use]
+    pub fn new(domain_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+        Self(domain_tx)
+    }
+}
+
+impl crate::domain::ports::EventEmitter for ChannelEmitter {
+    fn emit(&self, event: AppEvent) {
+        let _ = self.0.send(event);
     }
 }
 
@@ -229,11 +255,15 @@ impl RawEvent {
                 timestamp_ms: now,
                 kind: RawEventKind::Subagent(envelope.clone()),
             },
+            AppEvent::DomainEvent(payload) => RawEvent {
+                conversation_id: None,
+                timestamp_ms: now,
+                kind: RawEventKind::DomainEvent(payload.clone()),
+            },
             AppEvent::Tick
             | AppEvent::ConfigReload
             | AppEvent::Resize(..)
-            | AppEvent::InputEvent(..)
-            | AppEvent::DomainEvent(..) => return None,
+            | AppEvent::InputEvent(..) => return None,
             _ => return None,
         })
     }
@@ -392,6 +422,31 @@ mod tests {
             }
             other => panic!("expected SystemNotice, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn domain_event_projects_to_serializable_raw_ipc() {
+        let event = AppEvent::DomainEvent(
+            crate::domain::events::DomainEventPayload::TransparencyJournalFailed {
+                failures: 2,
+                detail: "journal fsync failed".to_owned(),
+            },
+        );
+
+        let raw = RawEvent::from_app_event(&event).expect("domain event is forwarded");
+        let decoded: RawEvent =
+            serde_json::from_str(&serde_json::to_string(&raw).expect("serialize raw event"))
+                .expect("deserialize raw event");
+
+        assert!(matches!(
+            decoded.kind,
+            RawEventKind::DomainEvent(
+                crate::domain::events::DomainEventPayload::TransparencyJournalFailed {
+                    failures: 2,
+                    ref detail
+                }
+            ) if detail == "journal fsync failed"
+        ));
     }
 
     #[test]

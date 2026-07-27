@@ -352,13 +352,19 @@ mod tests {
     /// This test exercises `find_api_key_var` with no API keys set, confirming it returns
     /// `None` without any network call, satisfying AC4's offline guard.
     #[test]
+    // Shares the `ANTHROPIC_*` process-global env with
+    // `test_find_api_key_var_prefers_auth_token`, which was already
+    // `#[serial]`. Without the pair being serialized, whichever ran first
+    // cleared the other's fixture — a pre-existing race the test itself
+    // documented as "accept potential flakiness". `#[serial]` removes it
+    // instead of accepting it.
+    #[serial]
     fn test_init_completes_offline_guard() {
         // Save originals
         let orig_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok(); // CONFORMANCE_EXCEPTION: test backup/restore
         let orig_key = std::env::var("ANTHROPIC_API_KEY").ok(); // CONFORMANCE_EXCEPTION: test backup/restore
 
-        // SAFETY: Test-only env manipulation. Tests using env vars must run
-        // with --test-threads=1 or accept potential flakiness.
+        // SAFETY: Test-only env manipulation, serialized against its twin above.
         unsafe {
             std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
             std::env::remove_var("ANTHROPIC_API_KEY");

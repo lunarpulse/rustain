@@ -125,6 +125,59 @@ pub enum RejectReason {
     Malformed,
 }
 
+/// Which way an A2A interaction crossed this instance's boundary.
+///
+/// **Why this is persisted rather than derived.** For
+/// [`RoomEvent::RemoteEnvelopeAccepted`] the node id still carries the
+/// direction as a prefix (`a2a-in/` inbound vs `a2a/` outbound), but
+/// [`RoomEvent::RemoteEnvelopeRejected`] carries `{ peer, reason }` and **no
+/// node** — the direction is destroyed at the emit boundary and there is
+/// nothing left to derive from at replay time. The field is therefore load
+/// bearing, not stylistic: do not "optimise" it away in favour of the node
+/// prefix. Tests may use the prefix as a cross-check, never as the source.
+///
+/// `Unknown` is the serde default for missing fields in journals written before
+/// Story 18.2, and serde's future-value fallback for direction strings this
+/// build does not yet recognise. Both cases render as an explicit unknown
+/// rather than a fabricated direction.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// A peer asked this instance to do something.
+    Inbound,
+    /// This instance asked a peer to do something.
+    Outbound,
+    /// Journaled before direction was recorded, or a future direction this
+    /// build does not understand. Rendered explicitly; never silently coerced.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl Direction {
+    /// Stable, monochrome-safe label. Paired with a glyph at every render
+    /// surface (UX monochrome rule) — this is the text half.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+            _ => "unknown",
+        }
+    }
+
+    /// Glyph half of the monochrome pair.
+    #[must_use]
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Inbound => "←",
+            Self::Outbound => "→",
+            _ => "?",
+        }
+    }
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
@@ -183,12 +236,28 @@ pub enum RoomEvent {
         peer: PeerId,
         node: AgentId,
         content_hash: ContentHash,
+        /// Story 18.2 (AC2). `#[serde(default)]` so pre-18.2 journals replay
+        /// as [`Direction::Unknown`] instead of a fabricated direction.
+        #[serde(default)]
+        direction: Direction,
+        /// Original remote task id, if the emitting protocol supplied one.
+        /// `None` preserves replay of pre-18.2 journal entries.
+        #[serde(default)]
+        task: Option<String>,
     },
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.
     RemoteEnvelopeRejected {
         peer: PeerId,
         reason: RejectReason,
+        /// Story 18.2 (AC2). This variant carries no node, so direction is
+        /// **unrecoverable** at replay time unless it is persisted here.
+        #[serde(default)]
+        direction: Direction,
+        /// Original remote task id, if the emitting protocol supplied one.
+        /// `None` preserves replay of pre-18.2 journal entries.
+        #[serde(default)]
+        task: Option<String>,
     },
     HostBoundUnavailable {
         node: AgentId,
@@ -222,6 +291,19 @@ pub enum RoomEvent {
         artifact: ArtifactId,
         outcome: TicketResolution,
     },
+    /// An `event` tag this build does not recognise.
+    ///
+    /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
+    /// forward-compatible format: a newer build may append a variant this one
+    /// has never heard of. Without `#[serde(other)]` that line would fail
+    /// `parse_entries` and take the **whole journal** with it. Catching it
+    /// here is what lets UX-DR-ROOM-01 hold — an unrecognised record renders
+    /// as an explicit unknown row instead of vanishing or failing the load.
+    ///
+    /// The payload is deliberately discarded: the journal is append-only and
+    /// never rewritten, so nothing round-trips this variant back to disk.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,6 +349,10 @@ pub struct ApprovalView {
 pub struct RemoteRejectionView {
     pub peer: PeerId,
     pub reason: RejectReason,
+    /// Story 18.2 (AC2, P-3). Carried into the read model deliberately: a
+    /// projection that drops a field it was just told to record is the exact
+    /// drift this story exists to prevent.
+    pub direction: Direction,
 }
 
 /// Immutable read model reconstructed from the canonical event stream.
@@ -428,9 +514,17 @@ impl OrchestrationRoom {
                     view.last_remote_content = Some(content_hash);
                 }
             }
-            RoomEvent::RemoteEnvelopeRejected { peer, reason } => {
-                self.remote_rejections
-                    .push(RemoteRejectionView { peer, reason });
+            RoomEvent::RemoteEnvelopeRejected {
+                peer,
+                reason,
+                direction,
+                ..
+            } => {
+                self.remote_rejections.push(RemoteRejectionView {
+                    peer,
+                    reason,
+                    direction,
+                });
             }
             RoomEvent::HostBoundUnavailable { node, host } => {
                 if let Some(view) = self.nodes.get_mut(&node) {
@@ -461,6 +555,11 @@ impl OrchestrationRoom {
                     view.resolved_tickets.entry(artifact).or_insert(outcome);
                 }
             }
+            // The room read model has nothing to fold an unknown tag into.
+            // The transparency projection renders it as an explicit unknown
+            // row instead (UX-DR-ROOM-01); dropping it here is not a silent
+            // loss, it is the absence of a node/wave/artifact to attach to.
+            RoomEvent::Unrecognized => {}
         }
     }
 }
@@ -482,6 +581,14 @@ mod tests {
 
     fn sample_artifact_id() -> ArtifactId {
         ArtifactId::from(ContentHash::from_bytes([0x11; 32]))
+    }
+
+    #[test]
+    fn direction_defaults_for_legacy_fields_and_absorbs_future_values() {
+        assert_eq!(Direction::default(), Direction::Unknown);
+        let future: Direction =
+            serde_json::from_str(r#""sideways""#).expect("future direction parses");
+        assert_eq!(future, Direction::Unknown);
     }
 
     /// NFR70(d) / AC3: replaying the journal twice yields the identical room,

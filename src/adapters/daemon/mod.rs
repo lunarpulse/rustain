@@ -616,14 +616,25 @@ async fn spawn_a2a_listener(
         use crate::adapters::a2a::transparency::TransparencySink;
         use crate::domain::ports::InboundPeerRuntime;
 
+        let reader: std::sync::Arc<dyn crate::domain::ports::RoomJournalReader> =
+            node_journal.clone();
         let journal: std::sync::Arc<dyn crate::domain::ports::RoomJournal> = std::sync::Arc::new(
             crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
                 node_journal,
-                Some(domain_tx),
+                Some(domain_tx.clone()),
             ),
         );
         let runtime: std::sync::Arc<dyn InboundPeerRuntime> = server;
-        let transparency = std::sync::Arc::new(TransparencySink::new(journal));
+        // AC1: a journal-append failure must reach the operator, latched. The
+        // daemon holds the sender rather than the bus, so it wraps it.
+        let notices: std::sync::Arc<dyn crate::domain::ports::EventEmitter> = std::sync::Arc::new(
+            crate::infrastructure::runtime::event_bus::ChannelEmitter::new(domain_tx),
+        );
+        let transparency = std::sync::Arc::new(
+            TransparencySink::new(journal)
+                .with_reader(reader)
+                .with_notices(notices),
+        );
         let workspace = workspace.to_path_buf();
         let config = config.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

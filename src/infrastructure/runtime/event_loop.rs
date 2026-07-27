@@ -46,6 +46,7 @@ use crate::adapters::tui::widgets::{
     which_key_bar,
 };
 use crate::domain::services::session_index::SessionIndex;
+use crate::infrastructure::runtime::transparency_bridge;
 use ratatui::layout::Rect;
 
 /// Timeout for background tasks (title generation, session save).
@@ -2486,6 +2487,12 @@ pub async fn run(
                                                 }
                                             }
                                         }
+                                    } else if cmd_name == "team" {
+                                        // Story 18.2 (AC6) — `/team log`. Intercepted BEFORE
+                                        // the adapter-override path; logic in the handler.
+                                        for ev in transparency_bridge::team_command(&mut state, &conversation.id, cmd_arg, &app_state).await {
+                                            let _ = app_state.event_bus.emit_domain(ev);
+                                        }
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
                                         match cmd_arg.map(str::trim).filter(|s: &&str| !s.is_empty()) {
@@ -3967,6 +3974,13 @@ pub async fn run(
                                             if state.sidebar_selected >= state.sidebar_entry_count && state.sidebar_entry_count > 0 {
                                                 state.sidebar_selected = state.sidebar_entry_count - 1;
                                             }
+                                        } else if panel_type == PanelType::TransparencyLog {
+                                            transparency_bridge::refresh_panel(&app_state, &mut state).await;
+                                            state
+                                                .transparency_panel
+                                                .open_at_tail(&mut state.sidebar_selected);
+                                            state.sidebar_entry_count =
+                                                state.transparency_panel.visible_len();
                                         }
                                         state.focus = FocusState::Sidebar {
                                             panel: panel_type,
@@ -3987,6 +4001,37 @@ pub async fn run(
                                             message: narrow_msg,
                                         });
                                     }
+                                }
+                                InputAction::ExportTransparency => {
+                                    let export = match state.transparency_panel.report.as_ref() {
+                                        Some(report) => {
+                                            transparency_bridge::export_report(&app_state, report).await
+                                        }
+                                        None => Err(
+                                            "open the Transparency Log before exporting its snapshot"
+                                                .to_owned(),
+                                        ),
+                                    };
+                                    let (level, message) = match export {
+                                        Ok(export) => (
+                                            NoticeLevel::Warning,
+                                            format!(
+                                                "Transparency export written to {} ({} unfiltered rows).",
+                                                export.path.display(),
+                                                export.rows
+                                            ),
+                                        ),
+                                        Err(error) => (
+                                            NoticeLevel::Error,
+                                            format!("Transparency export failed: {error}"),
+                                        ),
+                                    };
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation.id.clone()),
+                                        level,
+                                        message,
+                                    });
+                                    state.needs_redraw = true;
                                 }
                                 InputAction::OpenSidebarConversation => {
                                     if state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents) {
@@ -8253,6 +8298,12 @@ pub async fn run(
                         });
                         state.needs_redraw = true;
                     }
+                    // Story 18.2 (AC4) — first `DomainEvent` consumer: room
+                    // events reached nothing before this arm.
+                    AppEvent::DomainEvent(payload) => {
+                        handlers::transparency::apply_domain_event(&mut state, &payload);
+                        state.needs_redraw = true;
+                    }
                     _ => {
                         state.needs_redraw = true;
                     }
@@ -9248,6 +9299,12 @@ fn render(
                                 is_focused,
                                 state.sidebar_selected,
                                 theme,
+                            );
+                        }
+                        Some(crate::domain::models::visual::PanelType::TransparencyLog) => {
+                            crate::adapters::tui::widgets::transparency_panel::render(
+                                sidebar_area, frame.buffer_mut(), &mut state.transparency_panel,
+                                state.sidebar_selected, &state.focus, theme,
                             );
                         }
                     }
