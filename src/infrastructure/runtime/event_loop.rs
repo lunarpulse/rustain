@@ -2488,11 +2488,7 @@ pub async fn run(
                                             }
                                         }
                                     } else if cmd_name == "team" {
-                                        // Story 18.2 (AC6) — `/team log`. Intercepted BEFORE
-                                        // the adapter-override path; logic in the handler.
-                                        for ev in transparency_bridge::team_command(&mut state, &conversation.id, cmd_arg, &app_state).await {
-                                            let _ = app_state.event_bus.emit_domain(ev);
-                                        }
+                                        transparency_bridge::team_command(&mut state, &conversation.id, cmd_arg, &app_state).await;
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
                                         match cmd_arg.map(str::trim).filter(|s: &&str| !s.is_empty()) {
@@ -3975,12 +3971,7 @@ pub async fn run(
                                                 state.sidebar_selected = state.sidebar_entry_count - 1;
                                             }
                                         } else if panel_type == PanelType::TransparencyLog {
-                                            transparency_bridge::refresh_panel(&app_state, &mut state).await;
-                                            state
-                                                .transparency_panel
-                                                .open_at_tail(&mut state.sidebar_selected);
-                                            state.sidebar_entry_count =
-                                                state.transparency_panel.visible_len();
+                                            transparency_bridge::open_panel(&app_state, &mut state).await;
                                         }
                                         state.focus = FocusState::Sidebar {
                                             panel: panel_type,
@@ -4003,35 +3994,7 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::ExportTransparency => {
-                                    let export = match state.transparency_panel.report.as_ref() {
-                                        Some(report) => {
-                                            transparency_bridge::export_report(&app_state, report).await
-                                        }
-                                        None => Err(
-                                            "open the Transparency Log before exporting its snapshot"
-                                                .to_owned(),
-                                        ),
-                                    };
-                                    let (level, message) = match export {
-                                        Ok(export) => (
-                                            NoticeLevel::Warning,
-                                            format!(
-                                                "Transparency export written to {} ({} unfiltered rows).",
-                                                export.path.display(),
-                                                export.rows
-                                            ),
-                                        ),
-                                        Err(error) => (
-                                            NoticeLevel::Error,
-                                            format!("Transparency export failed: {error}"),
-                                        ),
-                                    };
-                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                        conversation_id: Some(conversation.id.clone()),
-                                        level,
-                                        message,
-                                    });
-                                    state.needs_redraw = true;
+                                    transparency_bridge::export_command(&app_state, &mut state, &conversation.id).await;
                                 }
                                 InputAction::OpenSidebarConversation => {
                                     if state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents) {

@@ -248,9 +248,21 @@ mod tests {
     #[test]
     fn text_output_states_the_scoped_integrity_claim() {
         let text = render_rows(&[row(1)], false);
-        assert!(text.contains("append-only"));
-        assert!(text.contains("not cryptographically tamper-evident"));
-        assert!(!text.to_lowercase().contains("tamper-evident log"));
+        // Bind to the CONSTANTS, not to a copy of their prose. Story 18.2's
+        // review replaced the old "not cryptographically tamper-evident"
+        // wording with the scoped structural-replay claim but left this test
+        // asserting the retired copy, so it shipped RED (repaired in 18.3
+        // Task 0.5). Asserting the constant cannot drift out of sync again.
+        assert!(text.contains(STRUCTURAL_REPLAY_CLAIM), "{text}");
+        assert!(text.contains(ATTRIBUTION_CAVEAT), "{text}");
+        assert!(text.contains("append-only"), "{text}");
+        // …and the claim must stay SCOPED. Nothing hash-chains a `JournalEntry`
+        // today (DF-18-2-AUTHENTICATED-JOURNAL), so the surface must never
+        // assert the log itself is tamper-evident.
+        assert!(
+            !text.to_lowercase().contains("tamper-evident log"),
+            "{text}"
+        );
     }
 
     #[test]

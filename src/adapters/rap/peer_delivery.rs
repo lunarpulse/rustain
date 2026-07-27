@@ -1,3 +1,12 @@
+//! Verified RAP peer-frame delivery.
+//!
+//! # Transparency scope
+//!
+//! This module records only peer-origin deliveries: `OwnershipKind::Peer` /
+//! `NodeOrigin::Remote`. Local `Owned`-to-`Owned` subagent chatter is explicitly
+//! out of scope — FR92 concerns another team member's agent, and journaling all
+//! internal chatter would reproduce `DF-18-2-JOURNAL-GROWTH` at a much higher rate.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,17 +21,34 @@ use crate::domain::models::{
     AgentEnvelope, AgentId, AgentMessage, AgentMetrics, CapabilityTokenId, Envelope, MessageHeader,
     MessageKind, NodeState, PeerId, SubagentEnvelope, SubagentEvent,
 };
-use crate::domain::ports::AgentMessageBus;
+use crate::domain::ports::{
+    AgentMessageBus, PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder,
+};
+use crate::domain::services::transparency::MAX_PEER_ID_BYTES;
 use crate::infrastructure::subagent::{AgentHandle, MailboxBudget, NodeTree};
 
 pub const MAX_PEER_MESSAGE_BYTES: usize = 64 * 1024;
 const PEER_INGEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Recipient consent decision, separate from operational consumer failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifiedPeerConsent {
+    Accept,
+    Decline,
+}
+
 /// Application-side consumer reached only after cryptographic verification and
-/// message-bus admission. Returning `Ok` means the content entered the local
-/// recipient context; only then may replay state and a delivery receipt commit.
+/// message-bus admission. Consent is decided before the durable acceptance
+/// append; `ingest` is called only after that append succeeds.
 #[async_trait]
 pub trait VerifiedPeerConsumer: Send + Sync {
+    async fn consent(
+        &self,
+        recipient: &AgentId,
+        content: &AgentMessage,
+        peer_id: &PeerId,
+    ) -> Result<VerifiedPeerConsent, String>;
+
     async fn ingest(
         &self,
         recipient: &AgentId,
@@ -45,6 +71,7 @@ pub struct VerifiedPeerFrameHandler {
     materialized: Arc<Mutex<HashSet<AgentId>>>,
     verified_senders: Arc<Mutex<HashMap<AgentId, PeerId>>>,
     pending_ingest: Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), PeerDeliveryError>>>>>,
+    recorder: Arc<dyn PeerInteractionRecorder>,
 }
 
 impl VerifiedPeerFrameHandler {
@@ -53,12 +80,14 @@ impl VerifiedPeerFrameHandler {
         agent_message_bus: Arc<ArcSwap<Arc<dyn AgentMessageBus>>>,
         domain_tx: mpsc::UnboundedSender<AppEvent>,
         consumer: Arc<dyn VerifiedPeerConsumer>,
+        recorder: Arc<dyn PeerInteractionRecorder>,
     ) -> Self {
         Self {
             node_tree,
             agent_message_bus,
             domain_tx,
             consumer,
+            recorder,
             materialized: Arc::new(Mutex::new(HashSet::new())),
             verified_senders: Arc::new(Mutex::new(HashMap::new())),
             pending_ingest: Arc::new(Mutex::new(HashMap::new())),
@@ -78,14 +107,12 @@ impl VerifiedPeerFrameHandler {
 
         let correlation = local.header.correlation_id.0.clone();
         let (ack_tx, ack_rx) = oneshot::channel();
-        if self
-            .pending_ingest
-            .lock()
-            .await
-            .insert(correlation.clone(), ack_tx)
-            .is_some()
         {
-            return Err(PeerDeliveryError::DuplicateCorrelation(correlation));
+            let mut pending = self.pending_ingest.lock().await;
+            if pending.contains_key(&correlation) {
+                return Err(PeerDeliveryError::DuplicateCorrelation(correlation));
+            }
+            pending.insert(correlation.clone(), ack_tx);
         }
 
         if let Err(error) = self
@@ -101,10 +128,9 @@ impl VerifiedPeerFrameHandler {
         match tokio::time::timeout(PEER_INGEST_TIMEOUT, ack_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(PeerDeliveryError::IngestChannelClosed),
-            Err(_) => {
-                self.pending_ingest.lock().await.remove(&correlation);
-                Err(PeerDeliveryError::IngestTimeout)
-            }
+            // Keep ownership of this correlation until the worker settles.
+            // Otherwise a late worker can remove and satisfy a retry's sender.
+            Err(_) => Err(PeerDeliveryError::IngestTimeout),
         }
     }
 
@@ -162,6 +188,7 @@ impl VerifiedPeerFrameHandler {
         let node_tree = self.node_tree.clone();
         let domain_tx = self.domain_tx.clone();
         let consumer = self.consumer.clone();
+        let recorder = self.recorder.clone();
         let verified_senders = self.verified_senders.clone();
         let pending_ingest = self.pending_ingest.clone();
         let materialized_set = self.materialized.clone();
@@ -181,28 +208,100 @@ impl VerifiedPeerFrameHandler {
                         break;
                     }
                     crate::domain::models::Op::Deliver(delivery) => {
-                        let correlation = delivery.envelope.header.correlation_id.0.clone();
-                        let peer_id = verified_senders
-                            .lock()
-                            .await
-                            .get(&delivery.envelope.header.sender)
-                            .cloned();
-                        let result = match peer_id {
-                            Some(peer_id) => consumer
-                                .ingest(&recipient, delivery.envelope.body, &peer_id)
-                                .await
-                                .map_err(PeerDeliveryError::Consumer),
-                            None => Err(PeerDeliveryError::UnboundSender),
-                        };
+                        let disposition = delivery.disposition;
+                        let header = delivery.envelope.header;
+                        let correlation = header.correlation_id.0.clone();
+                        let body = delivery.envelope.body;
+                        let content_bytes = body.content.len();
+                        let peer_id = verified_senders.lock().await.get(&header.sender).cloned();
+
+                        // Dispatch owns the reservation from this point onward.
+                        // Release before consent/journal/consumer awaits so one
+                        // slow recipient cannot consume mailbox capacity.
                         mailbox_budget.release();
-                        if result.is_ok() {
+
+                        let mut policy_refused = false;
+                        let result = match peer_id.as_ref() {
+                            None => Err(PeerDeliveryError::UnboundSender),
+                            Some(peer_id) => match consumer
+                                .consent(&recipient, &body, peer_id)
+                                .await
+                            {
+                                Err(error) => Err(PeerDeliveryError::Consumer(error)),
+                                Ok(VerifiedPeerConsent::Decline)
+                                    if crate::domain::models::may_consent_refuse(disposition) =>
+                                {
+                                    policy_refused = true;
+                                    let record = PeerDeliveryRecord {
+                                        peer: peer_id.clone(),
+                                        node: recipient.clone(),
+                                        correlation_id: header.correlation_id.clone(),
+                                        content_bytes,
+                                        outcome: PeerDeliveryOutcome::Refused,
+                                    };
+                                    if let Err(error) = recorder.record_peer_delivery(record).await
+                                    {
+                                        tracing::error!(
+                                            %error,
+                                            recipient = %recipient,
+                                            "failed to journal consent-refused peer delivery"
+                                        );
+                                    }
+                                    Err(PeerDeliveryError::Declined)
+                                }
+                                Ok(VerifiedPeerConsent::Decline) => {
+                                    Err(PeerDeliveryError::DeclineNotPermitted)
+                                }
+                                Ok(VerifiedPeerConsent::Accept) => {
+                                    // Durable first: no consumer turn or other
+                                    // irreversible effect starts until the
+                                    // canonical acceptance exists.
+                                    let record = PeerDeliveryRecord {
+                                        peer: peer_id.clone(),
+                                        node: recipient.clone(),
+                                        correlation_id: header.correlation_id.clone(),
+                                        content_bytes,
+                                        outcome: PeerDeliveryOutcome::Accepted,
+                                    };
+                                    match recorder.record_peer_delivery(record).await {
+                                        Err(error) => {
+                                            tracing::error!(
+                                                %error,
+                                                recipient = %recipient,
+                                                "refusing peer delivery because it could not be journaled"
+                                            );
+                                            Err(PeerDeliveryError::Transparency)
+                                        }
+                                        Ok(()) => consumer
+                                            .ingest(&recipient, body, peer_id)
+                                            .await
+                                            .map_err(PeerDeliveryError::Consumer),
+                                    }
+                                }
+                            },
+                        };
+
+                        if policy_refused {
+                            let receipt = crate::domain::models::refusal_receipt(
+                                &header,
+                                &recipient,
+                                crate::domain::models::RefuseReason::Policy,
+                            );
+                            if domain_tx.send(receipt).is_err() {
+                                if let Some(ack) = pending_ingest.lock().await.remove(&correlation)
+                                {
+                                    let _ = ack.send(Err(PeerDeliveryError::EventChannelClosed));
+                                }
+                                continue;
+                            }
+                        } else if result.is_ok() {
                             node_tree.mark_tainted(&recipient).await;
                             let receipt = AppEvent::Subagent(SubagentEnvelope::new(
-                                delivery.envelope.header.sender.as_str().to_owned(),
+                                header.sender.as_str().to_owned(),
                                 recipient.clone(),
-                                delivery.envelope.header.kind,
+                                header.kind.clone(),
                                 SubagentEvent::MessageDelivered {
-                                    correlation_id: delivery.envelope.header.correlation_id,
+                                    correlation_id: header.correlation_id.clone(),
                                 },
                             ));
                             if domain_tx.send(receipt).is_err() {
@@ -246,6 +345,12 @@ impl VerifiedPeerFrameHandler {
 pub fn translate_verified_peer_envelope(
     envelope: AgentEnvelope<serde_json::Value>,
 ) -> Result<Envelope<AgentMessage>, PeerDeliveryError> {
+    if envelope.header.sender.as_str().len() > MAX_PEER_ID_BYTES
+        || envelope.header.recipient.as_str().len() > MAX_PEER_ID_BYTES
+        || envelope.header.correlation_id.0.len() > MAX_PEER_ID_BYTES
+    {
+        return Err(PeerDeliveryError::IdentifierTooLong);
+    }
     if envelope.header.kind != MessageKind::PeerMessage {
         return Err(PeerDeliveryError::InvalidKind);
     }
@@ -277,6 +382,8 @@ pub enum PeerDeliveryError {
     InvalidBody,
     #[error("peer frame body exceeds {MAX_PEER_MESSAGE_BYTES} bytes")]
     BodyTooLarge,
+    #[error("peer frame identifier exceeds {MAX_PEER_ID_BYTES} bytes")]
+    IdentifierTooLong,
     #[error("peer sender is already bound to a different verified PeerId")]
     PeerBindingMismatch,
     #[error("duplicate in-flight peer correlation id: {0}")]
@@ -289,6 +396,12 @@ pub enum PeerDeliveryError {
     Delivery(String),
     #[error("peer recipient rejected ingest: {0}")]
     Consumer(String),
+    #[error("peer recipient declined ingest")]
+    Declined,
+    #[error("recipient relationship does not permit consent refusal")]
+    DeclineNotPermitted,
+    #[error("peer delivery could not be journaled")]
+    Transparency,
     #[error("peer ingest acknowledgement timed out")]
     IngestTimeout,
     #[error("peer ingest acknowledgement channel closed")]
@@ -303,7 +416,8 @@ pub enum PeerDeliveryError {
 mod tests {
     use super::*;
     use crate::domain::models::{
-        AgentEnvelopeHeader, CorrelationId, Ed25519Sig, MessageKind, PeerIdentity,
+        AgentEnvelopeHeader, CorrelationId, DeliveryDisposition, Ed25519Sig, MessageHeader,
+        MessageKind, OwnershipKind, PeerIdentity, RefuseReason,
     };
     use crate::domain::ports::{DeliveryPolicy, RelationshipDeliveryPolicy};
     use crate::infrastructure::agent_message_bus::LocalMessageBus;
@@ -312,6 +426,15 @@ mod tests {
 
     #[async_trait]
     impl VerifiedPeerConsumer for RecordingConsumer {
+        async fn consent(
+            &self,
+            _recipient: &AgentId,
+            _content: &AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<VerifiedPeerConsent, String> {
+            Ok(VerifiedPeerConsent::Accept)
+        }
+
         async fn ingest(
             &self,
             _recipient: &AgentId,
@@ -319,6 +442,17 @@ mod tests {
             _peer_id: &PeerId,
         ) -> Result<(), String> {
             self.0.lock().await.push(content.content);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRecorder(Mutex<Vec<PeerDeliveryRecord>>);
+
+    #[async_trait]
+    impl PeerInteractionRecorder for RecordingRecorder {
+        async fn record_peer_delivery(&self, record: PeerDeliveryRecord) -> Result<(), String> {
+            self.0.lock().await.push(record);
             Ok(())
         }
     }
@@ -360,8 +494,15 @@ mod tests {
         )) as Arc<dyn AgentMessageBus>;
         let bus_slot = Arc::new(ArcSwap::from_pointee(bus));
         let consumer = Arc::new(RecordingConsumer(Mutex::new(Vec::new())));
+        let recorder = Arc::new(RecordingRecorder::default());
         (
-            VerifiedPeerFrameHandler::new(node_tree.clone(), bus_slot, domain_tx, consumer.clone()),
+            VerifiedPeerFrameHandler::new(
+                node_tree.clone(),
+                bus_slot,
+                domain_tx,
+                consumer.clone(),
+                recorder,
+            ),
             node_tree,
             domain_rx,
             consumer,
@@ -391,6 +532,13 @@ mod tests {
                 serde_json::json!({"text": "hello"})
             )),
             Err(PeerDeliveryError::InvalidBody)
+        ));
+        let mut oversized_identifier = envelope(MessageKind::PeerMessage, serde_json::json!("x"));
+        oversized_identifier.header.correlation_id =
+            CorrelationId::new("x".repeat(MAX_PEER_ID_BYTES + 1));
+        assert!(matches!(
+            translate_verified_peer_envelope(oversized_identifier),
+            Err(PeerDeliveryError::IdentifierTooLong)
         ));
         assert!(matches!(
             translate_verified_peer_envelope(envelope(
@@ -458,5 +606,351 @@ mod tests {
             .handle_verified_peer_frame(next, peer_id)
             .await
             .expect("stale materialization is recreated");
+    }
+
+    // ── Story 18.3 (AC1) — consent enforcement on the live peer path ──
+
+    /// Always declines. The SAME hostile consumer drives both halves of the
+    /// differential, so the only variable is the stamped disposition.
+    struct DecliningConsumer;
+
+    #[async_trait]
+    impl VerifiedPeerConsumer for DecliningConsumer {
+        async fn consent(
+            &self,
+            _recipient: &AgentId,
+            _content: &AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<VerifiedPeerConsent, String> {
+            Ok(VerifiedPeerConsent::Decline)
+        }
+
+        async fn ingest(
+            &self,
+            _recipient: &AgentId,
+            _content: AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<(), String> {
+            panic!("declined content must never reach ingest")
+        }
+    }
+
+    struct BrokenRecorder;
+
+    #[async_trait]
+    impl PeerInteractionRecorder for BrokenRecorder {
+        async fn record_peer_delivery(&self, _record: PeerDeliveryRecord) -> Result<(), String> {
+            Err("injected journal failure".to_owned())
+        }
+    }
+
+    struct BlockingFirstRecorder {
+        calls: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl BlockingFirstRecorder {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PeerInteractionRecorder for BlockingFirstRecorder {
+        async fn record_peer_delivery(&self, _record: PeerDeliveryRecord) -> Result<(), String> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        }
+    }
+
+    /// Stamps a fixed disposition regardless of ownership, so the same arm can be
+    /// shown a `MustReport` delivery. Mirrors the hostile-policy pattern the
+    /// 14-4a `t7` keystones use on the local bus.
+    struct ForceDisposition(DeliveryDisposition);
+
+    impl DeliveryPolicy for ForceDisposition {
+        fn decide(
+            &self,
+            _header: &MessageHeader,
+            _ownership: OwnershipKind,
+        ) -> DeliveryDisposition {
+            self.0
+        }
+    }
+
+    fn handler_with(
+        policy: Arc<dyn DeliveryPolicy>,
+        consumer: Arc<dyn VerifiedPeerConsumer>,
+    ) -> (
+        VerifiedPeerFrameHandler,
+        NodeTree,
+        mpsc::UnboundedReceiver<AppEvent>,
+    ) {
+        handler_with_recorder(policy, consumer, Arc::new(RecordingRecorder::default()))
+    }
+
+    fn handler_with_recorder(
+        policy: Arc<dyn DeliveryPolicy>,
+        consumer: Arc<dyn VerifiedPeerConsumer>,
+        recorder: Arc<dyn PeerInteractionRecorder>,
+    ) -> (
+        VerifiedPeerFrameHandler,
+        NodeTree,
+        mpsc::UnboundedReceiver<AppEvent>,
+    ) {
+        let (domain_tx, domain_rx) = mpsc::unbounded_channel();
+        let node_tree = NodeTree::new();
+        let bus =
+            Arc::new(LocalMessageBus::new(node_tree.clone(), policy)) as Arc<dyn AgentMessageBus>;
+        let bus_slot = Arc::new(ArcSwap::from_pointee(bus));
+        (
+            VerifiedPeerFrameHandler::new(
+                node_tree.clone(),
+                bus_slot,
+                domain_tx,
+                consumer,
+                recorder,
+            ),
+            node_tree,
+            domain_rx,
+        )
+    }
+
+    /// Drive the FRONT DOOR — `handle_verified_peer_frame`, the only production
+    /// caller of `LocalMessageBus::deliver` — over a real bus and a real
+    /// `NodeTree` holding a real registered peer node. Returns whatever receipt
+    /// reached the real `domain_tx`.
+    ///
+    /// Deliberately NOT `may_consent_refuse(...)` called directly, and NOT an
+    /// `AgentDelivery` built in-test: either would prove the predicate rather
+    /// than the path (AC1's forbidden bypass).
+    async fn drive_declining_ingest(disposition: DeliveryDisposition) -> Option<AppEvent> {
+        let (handler, _tree, mut domain_rx) = handler_with(
+            Arc::new(ForceDisposition(disposition)),
+            Arc::new(DecliningConsumer),
+        );
+        let signed = envelope(MessageKind::PeerMessage, serde_json::json!("hello"));
+        let peer_id = signed.signer.peer_id.clone();
+        let outcome = handler.handle_verified_peer_frame(signed, peer_id).await;
+        assert!(
+            outcome.is_err(),
+            "a declining consumer must never report success"
+        );
+        // The arm sends the receipt BEFORE acking, and the front door awaits the
+        // ack — so this is deterministic with no sleep.
+        domain_rx.try_recv().ok()
+    }
+
+    /// [K1] AC1 differential — the same declining consumer through the same arm
+    /// produces observably different sender-visible outcomes depending ONLY on
+    /// the stamped disposition. Before 18.3 the arm never read `disposition`, so
+    /// these two cases were indistinguishable.
+    ///
+    /// Mutants that turn this RED: (a) drop the `may_consent_refuse` read
+    /// (`let consent_refused = result.is_err()`) — MustReport then also emits a
+    /// Policy receipt; (c) emit `MessageDelivered` instead of `MessageRefused`
+    /// on the refusal.
+    #[tokio::test]
+    async fn ac1_may_refuse_peer_gets_policy_receipt_but_must_report_does_not() {
+        let refused = drive_declining_ingest(DeliveryDisposition::MayRefuse).await;
+        assert!(
+            matches!(
+                &refused,
+                Some(AppEvent::Subagent(SubagentEnvelope {
+                    event: SubagentEvent::MessageRefused {
+                        reason: RefuseReason::Policy,
+                        correlation_id,
+                    },
+                    ..
+                })) if *correlation_id == CorrelationId::new("corr-1")
+            ),
+            "a MayRefuse peer that declines must produce MessageRefused{{Policy}}; got {refused:?}"
+        );
+
+        let reported = drive_declining_ingest(DeliveryDisposition::MustReport).await;
+        assert!(
+            reported.is_none(),
+            "a MustReport recipient cannot consent-refuse, so the IDENTICAL decline \
+             must not produce a policy receipt; got {reported:?}"
+        );
+    }
+
+    /// [K1] positive control — the arm can still fire the other way. Without
+    /// this, "refusal works" would also be satisfied by an arm that refuses
+    /// everything.
+    #[tokio::test]
+    async fn ac1_positive_control_accepting_peer_ingests_and_reports_delivered() {
+        let (handler, _tree, mut domain_rx, consumer) = handler();
+        let signed = envelope(MessageKind::PeerMessage, serde_json::json!("hello"));
+        let peer_id = signed.signer.peer_id.clone();
+        handler
+            .handle_verified_peer_frame(signed, peer_id)
+            .await
+            .expect("a Peer recipient that does NOT refuse must still ingest");
+        assert_eq!(consumer.0.lock().await.as_slice(), &["hello"]);
+        assert!(matches!(
+            domain_rx.try_recv().expect("delivery receipt"),
+            AppEvent::Subagent(SubagentEnvelope {
+                event: SubagentEvent::MessageDelivered { .. },
+                ..
+            })
+        ));
+    }
+
+    /// Drive `n` verified frames through the real front door and report the
+    /// peer node's `(reserved_total, released_total, live)` budget counters.
+    async fn budget_after(
+        consumer: Arc<dyn VerifiedPeerConsumer>,
+        n: usize,
+    ) -> (usize, usize, usize) {
+        let (handler, tree, _domain_rx) =
+            handler_with(Arc::new(RelationshipDeliveryPolicy), consumer);
+        for i in 0..n {
+            let mut signed = envelope(MessageKind::PeerMessage, serde_json::json!("hello"));
+            signed.header.correlation_id = CorrelationId::new(format!("corr-{i}"));
+            let peer_id = signed.signer.peer_id.clone();
+            let _ = handler.handle_verified_peer_frame(signed, peer_id).await;
+        }
+        let target = tree
+            .delivery_target(&AgentId::from_validated("local-peer-session"))
+            .await
+            .expect("the peer node must still be registered");
+        (
+            target.mailbox_budget.reserved_total(),
+            target.mailbox_budget.released_total(),
+            target.mailbox_budget.current(),
+        )
+    }
+
+    /// [K2] AC2 structural ratchet (Rule 4) — a DETERMINISTIC counter, never a
+    /// timing window. Every slot `LocalMessageBus` reserves must be released
+    /// exactly once, on both the accepted and the consent-refused arm.
+    ///
+    /// The `reserved == n` assertion is the built-in positive control: it makes
+    /// a vacuous pass impossible, because a ratchet that held only by never
+    /// reserving anything would fail it (the "truthful-only-while-empty" class
+    /// the story names).
+    ///
+    /// Mutants -> RED: (a) drop `mailbox_budget.release()` from the arm ->
+    /// released < reserved and live > 0; (b) double-release on the refusal path
+    /// -> released > reserved.
+    #[tokio::test]
+    async fn ac2_every_reserve_is_matched_by_exactly_one_release() {
+        let cases: Vec<(&str, Arc<dyn VerifiedPeerConsumer>)> = vec![
+            (
+                "accepted",
+                Arc::new(RecordingConsumer(Mutex::new(Vec::new()))),
+            ),
+            ("consent-refused", Arc::new(DecliningConsumer)),
+        ];
+        for (label, consumer) in cases {
+            let (reserved, released, live) = budget_after(consumer, 4).await;
+            assert_eq!(
+                reserved, 4,
+                "{label}: positive control — the deliveries must actually have reserved"
+            );
+            assert_eq!(
+                released, reserved,
+                "{label}: exactly one release per reserve (got {released} releases for {reserved} reserves)"
+            );
+            assert_eq!(live, 0, "{label}: no slot may be left outstanding");
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_correlation_remains_owned_until_worker_settles() {
+        let consumer = Arc::new(RecordingConsumer(Mutex::new(Vec::new())));
+        let recorder = Arc::new(BlockingFirstRecorder::new());
+        let (handler, _tree, _events) = handler_with_recorder(
+            Arc::new(RelationshipDeliveryPolicy),
+            consumer.clone(),
+            recorder.clone(),
+        );
+        let handler = Arc::new(handler);
+        let signed = envelope(MessageKind::PeerMessage, serde_json::json!("hello"));
+        let peer_id = signed.signer.peer_id.clone();
+        let entered = recorder.entered.notified();
+        let first = {
+            let handler = handler.clone();
+            let signed = signed.clone();
+            let peer_id = peer_id.clone();
+            tokio::spawn(async move { handler.handle_verified_peer_frame(signed, peer_id).await })
+        };
+        entered.await;
+        tokio::time::advance(PEER_INGEST_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(matches!(
+            first.await.expect("first caller task"),
+            Err(PeerDeliveryError::IngestTimeout)
+        ));
+        assert!(matches!(
+            handler
+                .handle_verified_peer_frame(signed.clone(), peer_id.clone())
+                .await,
+            Err(PeerDeliveryError::DuplicateCorrelation(_))
+        ));
+
+        recorder.release.notify_one();
+        for _ in 0..32 {
+            if handler.pending_ingest.lock().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(handler.pending_ingest.lock().await.is_empty());
+        handler
+            .handle_verified_peer_frame(signed, peer_id)
+            .await
+            .expect("retry succeeds only after the original worker settles");
+        assert_eq!(consumer.0.lock().await.len(), 2);
+    }
+
+    /// A durable-append failure happens before consumer ingest, emits no false
+    /// policy-refusal receipt, and leaves the context/correlation retryable.
+    #[tokio::test]
+    async fn ac5_journal_failure_prevents_ingest_and_keeps_context_retryable() {
+        let consumer = Arc::new(RecordingConsumer(Mutex::new(Vec::new())));
+        let (handler, tree, mut events) = handler_with_recorder(
+            Arc::new(RelationshipDeliveryPolicy),
+            consumer.clone(),
+            Arc::new(BrokenRecorder),
+        );
+        let signed = envelope(MessageKind::PeerMessage, serde_json::json!("hello"));
+        let peer_id = signed.signer.peer_id.clone();
+        assert!(matches!(
+            handler
+                .handle_verified_peer_frame(signed.clone(), peer_id.clone())
+                .await,
+            Err(PeerDeliveryError::Transparency)
+        ));
+        assert!(
+            consumer.0.lock().await.is_empty(),
+            "content must not reach the consumer before its acceptance is durable"
+        );
+        let recipient = AgentId::from_validated("local-peer-session");
+        let status = tree
+            .status_rx(&recipient)
+            .await
+            .expect("the peer context remains available for retry");
+        assert_ne!(*status.borrow(), NodeState::Cancelled);
+        assert!(
+            events.try_recv().is_err(),
+            "journal failure is not a recipient consent refusal"
+        );
+
+        assert!(matches!(
+            handler.handle_verified_peer_frame(signed, peer_id).await,
+            Err(PeerDeliveryError::Transparency)
+        ));
+        assert!(
+            consumer.0.lock().await.is_empty(),
+            "retry must remain durable-first too"
+        );
     }
 }

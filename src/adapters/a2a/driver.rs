@@ -589,12 +589,11 @@ impl A2aDelegationRuntime {
             failures,
             "failed to journal outbound A2A transparency record; records are missing from the audit log"
         );
-        let _ = self.event_tx.send(AppEvent::DomainEvent(
-            DomainEventPayload::TransparencyJournalFailed {
-                failures,
-                detail: error.to_string(),
-            },
-        ));
+        let payload = DomainEventPayload::TransparencyJournalFailed {
+            failures,
+            detail: error.to_string(),
+        };
+        let _ = self.event_tx.send(AppEvent::DomainEvent(payload)); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 18-2 AC1 — latched journal-failure notice; this adapter holds an event_tx, not an EventBus
     }
 
     fn emit_refused(
@@ -799,7 +798,7 @@ mod tests {
     #[async_trait]
     impl RoomJournal for TestRoomJournal {
         async fn record_event(&self, event: RoomEvent) -> Result<(), RoomJournalError> {
-            let _ = self.event_tx.send(AppEvent::DomainEvent(event.into()));
+            let _ = self.event_tx.send(AppEvent::DomainEvent(event.into())); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 18-2 AC1 — RoomJournal test double; a fake has no EventBus
             Ok(())
         }
     }

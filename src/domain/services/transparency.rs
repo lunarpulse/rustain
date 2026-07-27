@@ -90,6 +90,8 @@ pub enum TransparencyKind {
     AwaitingApproval,
     /// The peer asked for a task's status (first observation only).
     StatusQueried,
+    /// Content was actually handed back to the peer.
+    Disclosed,
     /// A record this build does not understand. Rendered, never dropped
     /// (UX-DR-ROOM-01).
     Unknown,
@@ -104,6 +106,7 @@ impl TransparencyKind {
             Self::Rejected => "✗",
             Self::AwaitingApproval => "⏸",
             Self::StatusQueried => "?",
+            Self::Disclosed => "⇢",
             _ => "·",
         }
     }
@@ -115,6 +118,7 @@ impl TransparencyKind {
             Self::Rejected => "refused",
             Self::AwaitingApproval => "awaiting-approval",
             Self::StatusQueried => "status-query",
+            Self::Disclosed => "disclosed",
             _ => "unknown",
         }
     }
@@ -265,6 +269,20 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             // something.
             (kind, Direction::Inbound, spoke.clone(), Some(task), summary)
         }
+        RoomEvent::PeerDisclosure {
+            peer,
+            node: _,
+            task,
+            disclosed_bytes,
+        } => (
+            TransparencyKind::Disclosed,
+            Direction::Outbound,
+            peer.as_ref()
+                .map(|peer| peer.as_str().to_owned())
+                .unwrap_or_else(|| "unknown-peer".to_owned()),
+            task.clone(),
+            format!("disclosed result to peer ({disclosed_bytes} bytes)"),
+        ),
         RoomEvent::Unrecognized => (
             TransparencyKind::Unknown,
             Direction::Unknown,
@@ -300,7 +318,7 @@ pub fn fold_transparency<'a>(
 /// Row filter shared by every transparency renderer.
 ///
 /// Grammar: `direction=inbound|outbound|unknown`,
-/// `kind=accepted|refused|awaiting-approval|status-query|unknown`,
+/// `kind=accepted|refused|awaiting-approval|status-query|disclosed|unknown`,
 /// `peer=<substring>`, or a bare substring matched against the whole row.
 /// `direction` and `kind` may appear once; repeated peer and bare-text terms
 /// are ANDed.
@@ -361,11 +379,12 @@ impl TransparencyFilter {
                         "refused" => TransparencyKind::Rejected,
                         "awaiting-approval" => TransparencyKind::AwaitingApproval,
                         "status-query" => TransparencyKind::StatusQueried,
+                        "disclosed" => TransparencyKind::Disclosed,
                         "unknown" => TransparencyKind::Unknown,
                         _ => {
                             return Err(format!(
                                 "unknown kind `{value}` — valid: accepted, refused, \
-                                 awaiting-approval, status-query, unknown"
+                                 awaiting-approval, status-query, disclosed, unknown"
                             ));
                         }
                     }));
@@ -784,6 +803,33 @@ mod tests {
         );
         // A supervisor flood-control defer is not an A2A disclosure.
         assert!(transparency_row(&deferred("fork-join-rate")).is_none());
+    }
+
+    #[test]
+    fn peer_disclosure_projects_as_an_outbound_distinct_row() {
+        let entry = room_entry(
+            7,
+            5,
+            RoomEvent::PeerDisclosure {
+                peer: Some(peer()),
+                node: AgentId::from_validated("a2a-in/p-peer/t-task".to_owned()),
+                task: Some("remote-task".to_owned()),
+                disclosed_bytes: 42,
+            },
+        );
+        let row = transparency_row(&entry).expect("disclosure projects");
+        assert_eq!(row.direction, Direction::Outbound);
+        assert_eq!(row.kind, TransparencyKind::Disclosed);
+        assert_eq!(row.task.as_deref(), Some("remote-task"));
+        assert_eq!(row.peer, peer().as_str());
+        assert_eq!(row.summary, "disclosed result to peer (42 bytes)");
+        assert_eq!(row.kind.glyph(), "⇢");
+        assert_eq!(row.kind.label(), "disclosed");
+        assert!(
+            TransparencyFilter::parse("kind=disclosed")
+                .expect("disclosed filter parses")
+                .matches(&row)
+        );
     }
 
     /// Regression: `flatten_batches` gives every record on an atomic

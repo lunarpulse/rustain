@@ -44,7 +44,10 @@ use tokio::sync::Mutex;
 
 use crate::domain::events::{AppEvent, DomainEventPayload};
 use crate::domain::models::{AgentId, Direction, JournalRecord, PeerId, RejectReason, RoomEvent};
-use crate::domain::ports::{EventEmitter, RoomJournal, RoomJournalError, RoomJournalReader};
+use crate::domain::ports::{
+    EventEmitter, PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder, RoomJournal,
+    RoomJournalError, RoomJournalReader,
+};
 use crate::domain::services::transparency::{
     MAX_PEER_ID_BYTES, TRUNCATION_MARKER, sanitize_disclosable,
 };
@@ -81,18 +84,25 @@ pub enum InboundOutcome {
     /// catch. First-observation-only is bounded by task count rather than by
     /// time, and closes FR92 instead of descoping it.
     StatusQueried { peer: PeerId, task_id: String },
+    /// Result content was handed back to the remote peer.
+    Disclosed {
+        peer: PeerId,
+        node: AgentId,
+        task_id: String,
+        disclosed_bytes: usize,
+    },
 }
 
 impl InboundOutcome {
     /// `true` when a journal failure must abort the operation.
     ///
-    /// Only an **accept** is fail-closed: an accept with no canonical record
-    /// is impossible by construction. Every other outcome is a refusal or an
-    /// observation, and suppressing those would convert a refusal into an
-    /// accept — a strictly worse failure.
+    /// Accepts and disclosures are fail-closed: neither work nor result content
+    /// may cross without its canonical record. Refusals and observations still
+    /// return when journaling fails because suppressing them would turn a
+    /// refusal into an accept.
     #[must_use]
     pub fn is_fail_closed(&self) -> bool {
-        matches!(self, Self::Accepted { .. })
+        matches!(self, Self::Accepted { .. } | Self::Disclosed { .. })
     }
 }
 
@@ -261,6 +271,17 @@ impl TransparencySink {
                     disclosable_task_id(&task_id)
                 ),
             },
+            InboundOutcome::Disclosed {
+                peer,
+                node,
+                task_id,
+                disclosed_bytes,
+            } => RoomEvent::PeerDisclosure {
+                peer: Some(peer),
+                node,
+                task: Some(disclosable_task_id(&task_id)),
+                disclosed_bytes,
+            },
         };
         if let Err(error) = journal.record_event(event).await {
             self.latch_failure(&error).await;
@@ -286,6 +307,35 @@ impl TransparencySink {
                 },
             ));
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl PeerInteractionRecorder for TransparencySink {
+    async fn record_peer_delivery(&self, record: PeerDeliveryRecord) -> Result<(), String> {
+        let PeerDeliveryRecord {
+            peer,
+            node,
+            correlation_id,
+            content_bytes,
+            outcome,
+        } = record;
+        let task_id = correlation_id.0;
+        let outcome = match outcome {
+            PeerDeliveryOutcome::Accepted => InboundOutcome::Accepted {
+                peer,
+                node,
+                task_id,
+            },
+            PeerDeliveryOutcome::Refused => InboundOutcome::Refused {
+                peer,
+                task_id,
+                reason: format!("peer delivery refused ({content_bytes} bytes)"),
+            },
+        };
+        self.record(outcome)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -364,12 +414,21 @@ mod tests {
     }
 
     #[test]
-    fn only_an_accept_is_fail_closed() {
+    fn accepts_and_disclosures_are_fail_closed() {
         assert!(
             InboundOutcome::Accepted {
                 peer: peer(),
                 node: AgentId::root(),
                 task_id: "t-1".to_owned(),
+            }
+            .is_fail_closed()
+        );
+        assert!(
+            InboundOutcome::Disclosed {
+                peer: peer(),
+                node: AgentId::root(),
+                task_id: "t-1".to_owned(),
+                disclosed_bytes: 1,
             }
             .is_fail_closed()
         );

@@ -102,8 +102,8 @@ pub use agent::{
 #[allow(unused_imports)]
 pub use agent_message::{
     AgentDelivery, AgentMessage, CorrelationId, DeliveryDisposition, DeliveryMode, DeliveryOutcome,
-    Envelope, MessageHeader, MessageKind, RefuseReason, delivery_decision,
-    relationship_disposition,
+    Envelope, MessageHeader, MessageKind, RefuseReason, delivery_decision, may_consent_refuse,
+    refusal_receipt, relationship_disposition,
 };
 #[allow(unused_imports)]
 pub use agent_node::{

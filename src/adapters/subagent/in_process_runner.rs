@@ -730,11 +730,12 @@ async fn run_child(
         }
     }
 
-    // Story 14-4a (F8/F11) — consent predicate shared by the three Op::Deliver
-    // sites (paused/running/streaming) so the MayRefuse check cannot drift.
-    fn consent_refuses(delivery: &crate::domain::models::AgentDelivery) -> bool {
-        delivery.disposition == crate::domain::models::DeliveryDisposition::MayRefuse
-    }
+    // Story 14-4a (F8/F11) — the consent predicate is shared by the three
+    // Op::Deliver sites (paused/running/streaming) so the MayRefuse check cannot
+    // drift. Story 18.3 (Task 1) hoisted it into the domain as
+    // `may_consent_refuse` so the RAP peer path shares the SAME predicate; this
+    // runner keeps its own semantics — a local subagent runner has no peer
+    // consumer, so a peer delivery that reaches it is always declined.
 
     // Story 14-4a (F10/F11) — emit a MessageRefused receipt for `delivery`,
     // release its reserved budget slot, and log at warn if the receipt itself
@@ -749,16 +750,10 @@ async fn run_child(
         warn_msg: &'static str,
     ) {
         mailbox_budget.release();
-        if let Err(e) = event_bus.emit_domain(crate::domain::events::AppEvent::Subagent(
-            crate::domain::models::SubagentEnvelope::new(
-                delivery.envelope.header.sender.as_str().to_string(),
-                agent_id.clone(),
-                delivery.envelope.header.kind.clone(),
-                crate::domain::models::SubagentEvent::MessageRefused {
-                    correlation_id: delivery.envelope.header.correlation_id.clone(),
-                    reason,
-                },
-            ),
+        if let Err(e) = event_bus.emit_domain(crate::domain::models::refusal_receipt(
+            &delivery.envelope.header,
+            agent_id,
+            reason,
         )) {
             tracing::warn!(error = %e, "{}", warn_msg);
         }
@@ -1017,7 +1012,7 @@ async fn run_child(
                                 // sites (paused/running/streaming) drift-free. Note:
                                 // while paused the bus stamps Queue; non-Queue modes are
                                 // handled uniformly here for parity with the other sites.
-                                if consent_refuses(&delivery) {
+                                if crate::domain::models::may_consent_refuse(delivery.disposition) {
                                     emit_refusal_receipt(
                                         &delivery,
                                         &mailbox_budget,
@@ -1253,7 +1248,7 @@ async fn run_child(
                     // Story 14-4a (AC3/F8/F11): consent enforcement — shared
                     // predicate + receipt helper keep the three Op::Deliver
                     // sites (paused/running/streaming) drift-free.
-                    if consent_refuses(&delivery) {
+                    if crate::domain::models::may_consent_refuse(delivery.disposition) {
                         emit_refusal_receipt(
                             &delivery,
                             &mailbox_budget,
@@ -1459,7 +1454,7 @@ async fn run_child(
                             // Story 14-4a (AC3/F8/F11): consent enforcement — shared
                             // predicate + receipt helper keep the three Op::Deliver
                             // sites (paused/running/streaming) drift-free.
-                            if consent_refuses(&delivery) {
+                            if crate::domain::models::may_consent_refuse(delivery.disposition) {
                                 emit_refusal_receipt(
                                     &delivery,
                                     &mailbox_budget,
@@ -2241,6 +2236,11 @@ mod tests {
             (*registry).clone(),
             Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
         );
+        let mailbox_budget = registry
+            .delivery_target(&agent_id)
+            .await
+            .expect("running child has a delivery target")
+            .mailbox_budget;
         let n = 5usize;
         for i in 0..n {
             let env = Envelope::new(
@@ -2300,6 +2300,13 @@ mod tests {
         // (turn-dispatched) release at dispatch, not via receipts — so receipt count
         // may be < n, but the child reaching terminal + debug_assert_eq!(budget, 0)
         // inside drain_mailbox (production code) is the invariant guarantee.
+        assert_eq!(mailbox_budget.reserved_total(), n);
+        assert_eq!(
+            mailbox_budget.released_total(),
+            mailbox_budget.reserved_total(),
+            "turn-dispatch plus terminal-drain releases must conserve every reservation"
+        );
+        assert_eq!(mailbox_budget.current(), 0);
         assert!(
             terminal_receipts > 0 || n == 0,
             "at least some TerminalState receipts must be emitted for un-consumed messages"
@@ -7241,28 +7248,27 @@ mod tests {
     // t7 proves the STAMP layer (policy.decide differs by policy); these prove the
     // ENFORCEMENT layer (disposition predicate + refusal receipt emission).
     //
-    // consent_refuses() and emit_refusal_receipt() are nested fns inside run_child()
-    // and inaccessible here. We test the same logic inline: the predicate is
-    // `delivery.disposition == MayRefuse`, and the emission is budget.release() +
-    // event_bus.emit_domain(AppEvent::Subagent(MessageRefused{Policy})).
+    // Story 18.3 (Task 1): both tests below used to re-implement the predicate and
+    // hand-build the receipt inline, because `consent_refuses`/`emit_refusal_receipt`
+    // were nested fns inside `run_child()` and unreachable from here — the gap
+    // recorded at 14-4a. That made the predicate test a class-A VACUOUS keystone:
+    // it asserted `MayRefuse == MayRefuse`, a tautology no production mutant can
+    // turn RED. The logic now lives in the domain (`may_consent_refuse` /
+    // `refusal_receipt`), so both tests drive the REAL functions.
 
-    /// AMELIA-1: MayRefuse disposition triggers consent refusal; MustReport does not.
+    /// AMELIA-1: `MayRefuse` permits a consent refusal; `MustReport` does not.
     #[test]
     fn amelia1_consent_disposition_predicate() {
         use crate::domain::models::*;
-        // The production predicate (consent_refuses) is:
-        //   delivery.disposition == DeliveryDisposition::MayRefuse
-        let may_refuse = DeliveryDisposition::MayRefuse;
-        let must_report = DeliveryDisposition::MustReport;
-        assert_eq!(
-            may_refuse,
-            DeliveryDisposition::MayRefuse,
-            "MayRefuse must match the consent-refusal predicate"
+        // Mutant: invert `may_consent_refuse`, or widen it to accept every
+        // disposition -> one of these two assertions turns RED.
+        assert!(
+            may_consent_refuse(DeliveryDisposition::MayRefuse),
+            "a Peer relationship must be permitted to consent-refuse"
         );
-        assert_ne!(
-            must_report,
-            DeliveryDisposition::MayRefuse,
-            "MustReport must NOT match the consent-refusal predicate"
+        assert!(
+            !may_consent_refuse(DeliveryDisposition::MustReport),
+            "an Owned/Self_ recipient owes a report and must NOT consent-refuse"
         );
     }
 
@@ -7282,17 +7288,32 @@ mod tests {
         let agent_id = AgentId::from_validated("recipient");
         let correlation = CorrelationId::new("corr-42");
 
-        // Simulate what emit_refusal_receipt does: release + emit receipt
+        // Drive the REAL receipt constructor. This block used to hand-build the
+        // envelope under a "simulate what emit_refusal_receipt does" comment,
+        // which asserted the test's own copy instead of production behaviour
+        // (Story 18.3, Task 1). Mutant: change the sender/kind/correlation
+        // `refusal_receipt` copies out of the delivery -> the assertions below
+        // turn RED.
+        let delivery = AgentDelivery::new(
+            Envelope::new(
+                MessageHeader {
+                    sender: AgentId::from_validated("sender"),
+                    recipient: agent_id.clone(),
+                    correlation_id: correlation.clone(),
+                    kind: MessageKind::PeerMessage,
+                    sequence: None,
+                },
+                AgentMessage::new("body"),
+            ),
+            DeliveryMode::Aside,
+            DeliveryDisposition::MayRefuse,
+        );
         budget.release();
-        let _ = event_bus.emit_domain(AppEvent::Subagent(SubagentEnvelope::new(
-            "sender",
-            agent_id.clone(),
-            MessageKind::PeerMessage,
-            SubagentEvent::MessageRefused {
-                correlation_id: correlation.clone(),
-                reason: RefuseReason::Policy,
-            },
-        )));
+        let _ = event_bus.emit_domain(refusal_receipt(
+            &delivery.envelope.header,
+            &agent_id,
+            RefuseReason::Policy,
+        ));
 
         // Budget released
         assert_eq!(
@@ -7698,6 +7719,17 @@ mod tests {
                     let n = it.sym(node.as_str());
                     lines.push(format!(
                         "journal TicketResolved node={n} artifact={artifact} outcome={outcome:?}"
+                    ));
+                }
+                RoomEvent::PeerDisclosure {
+                    peer: _,
+                    node,
+                    task,
+                    disclosed_bytes,
+                } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal PeerDisclosure node={n} task={task:?} disclosed_bytes={disclosed_bytes}"
                     ));
                 }
                 RoomEvent::Unrecognized => {

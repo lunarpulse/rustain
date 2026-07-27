@@ -39,5 +39,4 @@ pub mod server;
 pub mod task;
 #[cfg(feature = "a2a")]
 pub mod tls;
-#[cfg(feature = "a2a")]
 pub mod transparency;

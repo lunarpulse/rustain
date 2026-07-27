@@ -291,6 +291,22 @@ pub enum RoomEvent {
         artifact: ArtifactId,
         outcome: TicketResolution,
     },
+    /// Story 18.3 (AC4) — FR95 "who saw what": content actually crossed to the
+    /// peer. Distinct from the 18.2 status-query record, which only proves the
+    /// peer ASKED. A `tasks/get` returning `working` discloses nothing and MUST
+    /// NOT produce this event.
+    PeerDisclosure {
+        /// Authenticated remote principal that received the content.
+        #[serde(default)]
+        peer: Option<PeerId>,
+        node: AgentId,
+        /// Original remote task id when the protocol supplied one.
+        #[serde(default)]
+        task: Option<String>,
+        /// Byte length of the content handed back. Never the content itself.
+        #[serde(default)]
+        disclosed_bytes: usize,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -555,6 +571,7 @@ impl OrchestrationRoom {
                     view.resolved_tickets.entry(artifact).or_insert(outcome);
                 }
             }
+            RoomEvent::PeerDisclosure { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

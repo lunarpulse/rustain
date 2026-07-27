@@ -63,6 +63,62 @@ pub(crate) async fn export_report(
         .map_err(|error| error.to_string())
 }
 
+/// Open the Transparency Log panel: read the journal, park the cursor on the
+/// newest row, and size the sidebar.
+///
+/// Story 18.3 Task 0.5 pulled this out of the `InputAction::OpenPanel` arm.
+/// Same reason as the rest of this module: `EVENT_LOOP_HARD_BUDGET` is a
+/// ceiling, and Story 18.2 spent the last of its headroom (11_354 > 11_321).
+pub(crate) async fn open_panel(app_state: &AppState, state: &mut TuiState) {
+    refresh_panel(app_state, state).await;
+    state
+        .transparency_panel
+        .open_at_tail(&mut state.sidebar_selected);
+    state.sidebar_entry_count = state.transparency_panel.visible_len();
+}
+
+/// Export the snapshot the panel is currently showing, then report the outcome
+/// as an operator notice.
+///
+/// Reads the report out of the panel rather than re-reading the journal, so the
+/// exported bytes are exactly the snapshot on screen — the same anti-race
+/// reasoning as `export_report`'s explicit report argument.
+///
+/// Story 18.3 Task 0.5 pulled this out of the `InputAction::ExportTransparency`
+/// arm, which was 31 inline lines of the event loop's line budget.
+pub(crate) async fn export_command(
+    app_state: &AppState,
+    state: &mut TuiState,
+    conversation_id: &str,
+) {
+    let export = match state.transparency_panel.report.as_ref() {
+        Some(report) => export_report(app_state, report).await,
+        None => Err("open the Transparency Log before exporting its snapshot".to_owned()),
+    };
+    let (level, message) = match export {
+        Ok(export) => (
+            crate::domain::models::NoticeLevel::Warning,
+            format!(
+                "Transparency export written to {} ({} unfiltered rows).",
+                export.path.display(),
+                export.rows
+            ),
+        ),
+        Err(error) => (
+            crate::domain::models::NoticeLevel::Error,
+            format!("Transparency export failed: {error}"),
+        ),
+    };
+    let _ = app_state
+        .event_bus
+        .emit_domain(crate::domain::events::AppEvent::SystemNotice {
+            conversation_id: Some(conversation_id.to_owned()),
+            level,
+            message,
+        });
+    state.needs_redraw = true;
+}
+
 /// Gather everything `/team log` needs: the filtered rows, the divergence
 /// report, and the export result when `--export` was asked for.
 pub(crate) async fn team_log_input(app_state: &AppState, args: &TeamLogArgs) -> TeamLogInput {
@@ -124,34 +180,45 @@ fn filter_rows(
         .collect())
 }
 
-/// One-call shell for the `/team` dispatch arm: parse, read, render.
+/// One-call shell for the `/team` dispatch arm: parse, read, render, emit.
 ///
 /// The parse and the rendering are pure and live in
-/// `handlers::team_command`; this wrapper exists so the event-loop arm is six
+/// `handlers::team_command`; this wrapper exists so the event-loop arm is two
 /// lines instead of twenty — `EVENT_LOOP_HARD_BUDGET` is a ceiling, not a
 /// budget, and Story 18.2 had 24 lines for all of Cluster B.
+///
+/// Emits its own notices rather than returning them (Story 18.3 Task 0.5): the
+/// caller's `for … emit_domain` loop cost three lines of a budget that Story
+/// 18.2 had already overrun. The pure `handlers::team_command` still returns
+/// its events, so the behavioural tests are unaffected.
 pub(crate) async fn team_command(
     state: &mut TuiState,
     conversation_id: &str,
     cmd_arg: Option<&str>,
     app_state: &AppState,
-) -> Vec<crate::domain::events::AppEvent> {
+) {
     use crate::adapters::tui::handlers::team_command as handler;
 
     let args = match handler::parse_team_command(cmd_arg) {
         Ok(Some(args)) => args,
         // `parse_team_command` only returns `Ok(None)` for a non-`log`
         // invocation, which the grammar currently cannot produce.
-        Ok(None) => return Vec::new(),
+        Ok(None) => return,
         Err(message) => {
             state.needs_redraw = true;
-            return vec![crate::domain::events::AppEvent::SystemNotice {
-                conversation_id: Some(conversation_id.to_owned()),
-                level: crate::domain::models::NoticeLevel::Warning,
-                message,
-            }];
+            let _ =
+                app_state
+                    .event_bus
+                    .emit_domain(crate::domain::events::AppEvent::SystemNotice {
+                        conversation_id: Some(conversation_id.to_owned()),
+                        level: crate::domain::models::NoticeLevel::Warning,
+                        message,
+                    });
+            return;
         }
     };
     let input = team_log_input(app_state, &args).await;
-    handler::team_command(state, conversation_id, &args, input)
+    for event in handler::team_command(state, conversation_id, &args, input) {
+        let _ = app_state.event_bus.emit_domain(event);
+    }
 }

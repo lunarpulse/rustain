@@ -145,6 +145,59 @@ fn a_pre_18_2_journal_still_parses_and_renders_missing_fields_as_explicit_unknow
     }) {
         assert_eq!(row.direction, Direction::Inbound);
     }
+
+    // Story 18.3 additivity: the current-shape fixture remains schema-v1 and
+    // folds beside the historical one; adding `PeerDisclosure` must not turn a
+    // fixture replay into a migration requirement.
+    let current_entries = current_fixture_entries();
+    assert!(
+        !current_entries.is_empty(),
+        "the current-shape fixture must stay populated"
+    );
+    assert!(
+        current_entries
+            .iter()
+            .all(|entry| entry.schema_version == 1),
+        "NODE_JOURNAL_SCHEMA_VERSION must remain 1 for current records too"
+    );
+    assert!(
+        validate_replay_structure(&current_entries).is_empty(),
+        "the current-shape fixture must remain structurally replayable"
+    );
+    assert!(
+        !fold_transparency(&current_entries).is_empty(),
+        "the current-shape fixture must continue to fold"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| matches!(&entry.record, JournalRecord::Room(RoomEvent::Unrecognized))),
+        "the historical fixture's unknown event tag must still land on Unrecognized"
+    );
+
+    // The new variant's fields are additive too. This is the smallest durable
+    // shape a future writer may emit; removing the required numeric `default`
+    // must make this replay fail rather than silently invent data.
+    let peer_disclosure: JournalEntry = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "seq": 99,
+        "record": {
+            "kind": "room",
+            "payload": {
+                "event": "peer_disclosure",
+                "node": "a2a-in/p-peer/t-task"
+            }
+        }
+    }))
+    .expect("PeerDisclosure missing additive fields must replay");
+    assert!(matches!(
+        peer_disclosure.record,
+        JournalRecord::Room(RoomEvent::PeerDisclosure {
+            task: None,
+            disclosed_bytes: 0,
+            ..
+        })
+    ));
 }
 
 #[test]

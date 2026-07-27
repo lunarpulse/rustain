@@ -5250,7 +5250,28 @@ mod tests {
 
         let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
         assert_eq!(state.sidebar_selected, 1);
-        assert_eq!(state.transparency_panel.acknowledged_seq, 2);
+        // 'G' SELECTS the tail; it must not ACKNOWLEDGE it. Acknowledgement is
+        // a render-time effect (`widgets::transparency_panel::render` ->
+        // `acknowledge_rendered_boundary`) because a row that was never painted
+        // was never seen — the invariant stated verbatim at
+        // `transparency_panel.rs:343-346`. Story 18.2's review moved the ack to
+        // render and updated the widget test but not this one, which kept
+        // asserting the keystroke-time value and shipped RED (repaired in 18.3
+        // Task 0.5). Mutant: move the ack back into the 'G' arm -> RED here.
+        assert_eq!(
+            state.transparency_panel.acknowledged_seq, 0,
+            "selecting the tail must not acknowledge it before render"
+        );
+        // Positive control: the mechanism can fire, through the same call the
+        // renderer makes once the rows have a viewport to be painted into.
+        state
+            .transparency_panel
+            .set_viewport_rows(2, &mut state.sidebar_selected);
+        state.transparency_panel.acknowledge_rendered_boundary();
+        assert_eq!(
+            state.transparency_panel.acknowledged_seq, 2,
+            "the rendered boundary is what acknowledges"
+        );
         assert_eq!(
             handle_input(&mut state, &DomainInputEvent::KeyPress('e')),
             InputAction::ExportTransparency

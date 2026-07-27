@@ -847,7 +847,7 @@ async fn start_task(
     });
     response_rx
         .await
-        .map_err(|_| "A2A task setup ended before producing a task response".to_owned())
+        .map_err(|_| "A2A task setup ended before producing a task response".to_owned())?
 }
 
 /// Own the post-insert lifecycle independently of the HTTP handler.
@@ -863,14 +863,14 @@ async fn setup_task(
     text: String,
     peer_id: PeerId,
     needs_approval: bool,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
     if needs_approval {
         let ticket = match runtime.request_admission_approval(&peer_id, &text).await {
             Ok(ticket) => ticket,
             Err(error) => {
                 tracing::error!(%error, task = %task_id, "failed to request A2A admission approval");
                 terminalize_start_failure(&state, &task, &peer_id, None).await;
-                return task_projection(&state, &task).await;
+                return task_projection(&state, &task, &peer_id).await;
             }
         };
 
@@ -903,7 +903,7 @@ async fn setup_task(
                 pending,
                 ticket,
             ));
-            return projection_for(&state, &task_id, RapTaskState::AuthRequired, None).await;
+            return Ok(projection_for(&state, &task_id, RapTaskState::AuthRequired, None).await);
         }
 
         // Policy resolved it without a human. Still race cancellation so a
@@ -912,7 +912,7 @@ async fn setup_task(
             biased;
             _ = task.cancel.cancelled() => {
                 terminalize_canceled(&state, &task, &peer_id, None).await;
-                return task_projection(&state, &task).await;
+                return task_projection(&state, &task, &peer_id).await;
             }
             decision = ticket.decision => decision.unwrap_or(false),
         };
@@ -929,25 +929,51 @@ async fn setup_task(
             task.advance(RapTaskState::Working).await;
             task.set_detail(reason).await;
             task.advance(RapTaskState::Rejected).await;
-            return task_projection(&state, &task).await;
+            return task_projection(&state, &task, &peer_id).await;
         }
     }
 
     if task.cancel.is_cancelled() {
         terminalize_canceled(&state, &task, &peer_id, None).await;
-        return task_projection(&state, &task).await;
+        return task_projection(&state, &task, &peer_id).await;
     }
-    launch(&state, &runtime, &task, text, peer_id, None).await;
-    task_projection(&state, &task).await
+    launch(&state, &runtime, &task, text, peer_id.clone(), None).await;
+    task_projection(&state, &task, &peer_id).await
 }
 
 async fn task_projection(
     state: &ServerState,
     task: &Arc<super::exec::InboundTask>,
-) -> serde_json::Value {
+    peer_id: &PeerId,
+) -> Result<serde_json::Value, String> {
     let snapshot = task.snapshot().await;
+    let disclosing_result = snapshot.result.is_some();
     let text = snapshot.result.as_deref().or(snapshot.detail.as_deref());
-    projection_for(state, &task.id, snapshot.state, text).await
+    let projection = projection_for(state, &task.id, snapshot.state, text).await;
+    if disclosing_result
+        && let Some(disclosed_bytes) = disclosed_text_bytes(&projection)
+        && task.claim_result_disclosure().await
+    {
+        match state
+            .transparency
+            .record(InboundOutcome::Disclosed {
+                peer: peer_id.clone(),
+                node: task.node_id.clone(),
+                task_id: task.id.clone(),
+                disclosed_bytes,
+            })
+            .await
+        {
+            Ok(()) => task.commit_result_disclosure(),
+            Err(error) => {
+                task.release_result_disclosure();
+                return Err(format!(
+                    "withholding A2A result because its disclosure could not be journaled: {error}"
+                ));
+            }
+        }
+    }
+    Ok(projection)
 }
 
 async fn terminalize_start_failure(
@@ -1208,13 +1234,13 @@ async fn tasks_get(
             task.release_status_query();
         }
     }
-    let snapshot = task.snapshot().await;
-    let text = snapshot
-        .result
-        .as_deref()
-        .or(snapshot.detail.as_deref())
-        .map(str::to_owned);
-    Ok(projection_for(state, &task.id, snapshot.state, text.as_deref()).await)
+    let peer_id = caller.key.pseudonymous_peer_id();
+    task_projection(state, &task, &peer_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, task = %task.id, "withholding unjournaled A2A result");
+            JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, "Internal error")
+        })
 }
 
 async fn tasks_cancel(
@@ -1232,9 +1258,13 @@ async fn tasks_cancel(
         task.cancel.cancel();
         let _ = tokio::time::timeout(CANCEL_WAIT_TIMEOUT, task.wait_for_terminal()).await;
     }
-    let snapshot = task.snapshot().await;
-    let text = snapshot.result.as_deref().or(snapshot.detail.as_deref());
-    Ok(projection_for(state, &task.id, snapshot.state, text).await)
+    let peer_id = caller.key.pseudonymous_peer_id();
+    task_projection(state, &task, &peer_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, task = %task.id, "withholding unjournaled A2A result");
+            JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, "Internal error")
+        })
 }
 
 // ── projection helpers ──────────────────────────────────────────────────────
@@ -1255,6 +1285,16 @@ async fn projection_for(
         state.signer.identity().peer_id.to_string(),
     )
     .to_task_json()
+}
+
+/// Byte length of the result text actually present in an A2A task response.
+///
+/// This reads the completed projection, not the untrusted/raw runtime output:
+/// redaction may replace the result before it crosses the protocol boundary.
+fn disclosed_text_bytes(task: &serde_json::Value) -> Option<usize> {
+    task.pointer("/status/message/parts/0/text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::len)
 }
 
 /// A refusal never touches the task store, so it is projected directly.

@@ -2606,3 +2606,286 @@ async fn a_non_loopback_listener_serves_only_over_tls_and_only_with_the_key() {
     drop(keys);
     drop(workspace);
 }
+
+// ── Story 18.3 — AC2 (no silent Op::Deliver black hole) + AC3 (one bus) ──────
+
+/// A real `AttachServer` over a real `NodeTree`, with no HTTP listener: these
+/// two keystones drive the `InboundPeerRuntime` seam and the message bus
+/// directly, which is where the defects live.
+async fn peer_runtime_fixture() -> (
+    Arc<AttachServer>,
+    NodeTree,
+    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    tempfile::TempDir,
+) {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let ws = workspace.path().to_path_buf();
+    let (domain_tx, domain_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let node_journal = Arc::new(
+        NodeJournal::open_workspace(&ws)
+            .await
+            .expect("open node journal"),
+    );
+    let node_tree = NodeTree::with_event_tx(
+        domain_tx.clone(),
+        Arc::new(|| chrono::Utc::now().timestamp_millis()),
+    )
+    .with_journal(node_journal);
+    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+        rustain::infrastructure::paths::sessions_dir(&ws),
+        ws.clone(),
+    ));
+    let core = {
+        let ws = ws.clone();
+        let storage = storage.clone();
+        Arc::new(DaemonCore::new(
+            ws.clone(),
+            Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(NoOpMemory),
+            storage.clone(),
+            Arc::new(NoOpSecurity),
+            Arc::new(NoOpPersona),
+            Box::new(move || {
+                Ok(build_runtime(
+                    Arc::new(ScriptedProvider {
+                        chunks: answer_chunks(ANSWER),
+                        gate: None,
+                    }),
+                    storage.clone(),
+                    &ws,
+                ))
+            }),
+        ))
+    };
+    let server = AttachServer::new_with_node_tree(
+        core,
+        Arc::new(Mutex::new(Conversation {
+            id: "peer-runtime".to_owned(),
+            ..Conversation::default()
+        })),
+        domain_tx,
+        node_tree.clone(),
+    );
+    (server, node_tree, domain_rx, workspace)
+}
+
+fn peer_envelope(
+    recipient: &rustain::domain::models::AgentId,
+    correlation: &str,
+) -> rustain::domain::models::Envelope<rustain::domain::models::AgentMessage> {
+    use rustain::domain::models::{AgentId, AgentMessage, CorrelationId, Envelope, MessageHeader};
+    Envelope {
+        header: MessageHeader {
+            sender: AgentId::parse("peer-sender").expect("valid sender id"),
+            recipient: recipient.clone(),
+            correlation_id: CorrelationId::new(correlation),
+            kind: rustain::domain::models::MessageKind::PeerMessage,
+            sequence: None,
+        },
+        body: AgentMessage::new("hello"),
+    }
+}
+
+/// [K2] AC2 — an `Op::Deliver` reaching an inbound-A2A peer node is HANDLED or
+/// REFUSED WITH A RECEIPT, never received-and-dropped, and its reserved
+/// `MailboxBudget` slot is released exactly once (INV-DEL-2: Σ outcomes ==
+/// Σ sent, zero unaccounted).
+///
+/// The loop used to be `if matches!(op, Op::Kill) { … }`, so every `Op::Deliver`
+/// was silently discarded while the bus had already reserved its slot.
+///
+/// Mutant -> RED: restore the Kill-only loop. `released_total` stays 0, `current`
+/// stays 1, and no receipt ever arrives — all three assertions below fail.
+#[tokio::test]
+async fn ac2_inbound_peer_delivery_is_refused_with_a_receipt_never_dropped() {
+    use rustain::domain::models::{AgentId, DeliveryOutcome, RefuseReason, SubagentEvent};
+
+    let (server, node_tree, mut domain_rx, _ws) = peer_runtime_fixture().await;
+    let node_id = AgentId::parse("a2a-in/peer-a/task-1").expect("valid node id");
+    let cancel = CancellationToken::new();
+    server
+        .start(
+            InboundPeerTask {
+                node_id: node_id.clone(),
+                peer_id: rustain::domain::models::PeerIdentity::from_public_key(vec![9; 32])
+                    .expect("peer identity")
+                    .peer_id,
+                text: "do the thing".to_owned(),
+                subagent_type: "a2a-inbound".to_owned(),
+            },
+            cancel.clone(),
+        )
+        .await
+        .expect("inbound peer node registers");
+
+    // AC3 rides along: this is the SAME slot the composition root installed,
+    // reached through the server rather than a bus minted in this test body.
+    let bus = server.peer_bus();
+    let outcome = bus
+        .load()
+        .deliver(&node_id, peer_envelope(&node_id, "corr-blackhole"))
+        .await
+        .expect("the bus admits the delivery");
+    assert_eq!(outcome, DeliveryOutcome::Accepted);
+
+    // The receipt is the proof the op was accounted for rather than dropped.
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    let mut saw_refusal = false;
+    while tokio::time::Instant::now() < deadline && !saw_refusal {
+        match tokio::time::timeout(Duration::from_millis(200), domain_rx.recv()).await {
+            Ok(Some(AppEvent::Subagent(envelope))) => {
+                if let SubagentEvent::MessageRefused {
+                    correlation_id,
+                    reason,
+                } = &envelope.event
+                    && correlation_id.0 == "corr-blackhole"
+                {
+                    assert_eq!(
+                        *reason,
+                        RefuseReason::Policy,
+                        "an inbound-A2A node has no consumer, so the Peer/MayRefuse \
+                         relationship makes this a policy refusal"
+                    );
+                    saw_refusal = true;
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {}
+        }
+    }
+    assert!(
+        saw_refusal,
+        "Op::Deliver must produce a receipt — a received-and-dropped op is the \
+         black hole this AC closes"
+    );
+
+    let target = node_tree
+        .delivery_target(&node_id)
+        .await
+        .expect("the peer node is registered");
+    assert_eq!(
+        target.mailbox_budget.current(),
+        0,
+        "the reserved slot must not leak against MAILBOX_CAP"
+    );
+    assert_eq!(
+        target.mailbox_budget.released_total(),
+        target.mailbox_budget.reserved_total(),
+        "exactly one release per reserve"
+    );
+    cancel.cancel();
+}
+
+/// [K3] AC3 — there is ONE authoritative bus slot, and the RAP peer path honours
+/// whatever the composition root installed into it.
+///
+/// `AttachServer` used to mint a private `LocalMessageBus` +
+/// `RelationshipDeliveryPolicy` inside its own constructor, so a policy
+/// installed anywhere else could not govern the peer path, and the seam that
+/// would have reconciled them (`configure_peer_delivery`) had ZERO callers.
+///
+/// Mutant -> RED: go back to minting the slot inside the constructor. The
+/// distinguishable policy stored below would then govern nothing the server
+/// delivers through, and the `MustReport` assertion fails.
+#[tokio::test]
+async fn ac3_one_bus_slot_and_the_peer_path_honours_the_installed_policy() {
+    use rustain::domain::models::{
+        AgentId, DeliveryDisposition, MessageHeader, OwnershipKind, relationship_disposition,
+    };
+    use rustain::domain::ports::{AgentMessageBus, DeliveryPolicy};
+
+    /// Distinguishable from the stock policy: it stamps `MustReport` even for a
+    /// `Peer`, which `RelationshipDeliveryPolicy` never does.
+    struct AlwaysMustReport;
+    impl DeliveryPolicy for AlwaysMustReport {
+        fn decide(&self, _h: &MessageHeader, _o: OwnershipKind) -> DeliveryDisposition {
+            DeliveryDisposition::MustReport
+        }
+    }
+
+    let (server, node_tree, mut domain_rx, _ws) = peer_runtime_fixture().await;
+    let node_id = AgentId::parse("a2a-in/peer-b/task-2").expect("valid node id");
+    let cancel = CancellationToken::new();
+    server
+        .start(
+            InboundPeerTask {
+                node_id: node_id.clone(),
+                peer_id: rustain::domain::models::PeerIdentity::from_public_key(vec![4; 32])
+                    .expect("peer identity")
+                    .peer_id,
+                text: "do the thing".to_owned(),
+                subagent_type: "a2a-inbound".to_owned(),
+            },
+            cancel.clone(),
+        )
+        .await
+        .expect("inbound peer node registers");
+
+    // Positive control: the stock policy gives a Peer node MayRefuse, so the
+    // assertion below is not true by default.
+    assert_eq!(
+        relationship_disposition(OwnershipKind::Peer),
+        DeliveryDisposition::MayRefuse
+    );
+
+    // Install a distinguishable policy into the ONE slot, exactly as a
+    // composition root would.
+    let slot = server.peer_bus();
+    slot.store(Arc::new(Arc::new(
+        rustain::infrastructure::agent_message_bus::LocalMessageBus::new(
+            node_tree.clone(),
+            Arc::new(AlwaysMustReport),
+        ),
+    ) as Arc<dyn AgentMessageBus>));
+
+    // The server exposes the same slot the live inbound peer loop reads.
+    assert!(
+        Arc::ptr_eq(&slot, &server.peer_bus()),
+        "the server must expose the one slot, not a copy"
+    );
+
+    let target = node_tree
+        .delivery_target(&node_id)
+        .await
+        .expect("registered");
+    let stamped = server
+        .peer_bus()
+        .load()
+        .deliver(&node_id, peer_envelope(&node_id, "corr-policy"))
+        .await;
+    assert!(stamped.is_ok(), "the installed policy must still admit");
+
+    let event = tokio::time::timeout(BUDGET, async {
+        loop {
+            if let Some(AppEvent::Subagent(envelope)) = domain_rx.recv().await
+                && let rustain::domain::models::SubagentEvent::MessageRefused {
+                    correlation_id,
+                    reason,
+                } = envelope.event
+                && correlation_id.0 == "corr-policy"
+            {
+                break reason;
+            }
+        }
+    })
+    .await
+    .expect("the live inbound peer loop must settle the installed disposition");
+    assert_eq!(
+        event,
+        rustain::domain::models::RefuseReason::Unavailable,
+        "MustReport cannot be rewritten as a recipient policy refusal"
+    );
+    assert_eq!(
+        target.ownership,
+        OwnershipKind::Peer,
+        "the node really is a Peer — so a MayRefuse stamp would be the DEFAULT, \
+         and only the installed policy can make it MustReport"
+    );
+    assert_eq!(
+        target.mailbox_budget.released_total(),
+        target.mailbox_budget.reserved_total(),
+        "the MustReport operational refusal must release exactly once"
+    );
+    cancel.cancel();
+}

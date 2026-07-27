@@ -40,22 +40,56 @@ impl std::fmt::Display for MailboxFull {
 impl std::error::Error for MailboxFull {}
 
 /// Story 14-4a (AC1) — shared atomic mailbox budget for reserve-at-admission.
-/// Wraps an `Arc<AtomicUsize>` so `AgentHandle` (which is `Clone`) can share
-/// the budget across the bus and the runner. Budget = atomics only (no lock;
-/// ratchet constraint: untagged `std::sync` locks == 4).
+/// Shares an `Arc` so `AgentHandle` (which is `Clone`) can hand the same budget
+/// to both the bus and the runner. Budget = atomics only (no lock; ratchet
+/// constraint: untagged `std::sync` locks == 4).
+///
+/// Story 18.3 (AC2) closes `DF-CR-14-4a-4` + `DF-CR-14-4a-5`, two naked P2s with
+/// no target story. The release protocol lived **only in prose** and `release`
+/// was fully `pub`, so any holder — including code outside this crate — could
+/// release a slot it never reserved, guarded by nothing but a `debug_assert!`.
+/// Two changes close it:
+///
+/// 1. `release` is now `pub(crate)`. The corruption vector was an out-of-crate
+///    holder; in-crate release sites are the enumerated protocol paths.
+/// 2. Under test instrumentation the budget counts LIFETIME reserves and
+///    releases, so `every_reserve_is_matched_by_exactly_one_release` can prove
+///    the invariant with a deterministic counter instead of a timing race
+///    (Rule 4, the 17.3 RC-A precedent).
+///
+/// The five legal release paths are: sender self-release, recipient
+/// turn-dispatch, consent-refusal, terminal drain, and — new in 18.3 — the
+/// inbound-A2A peer-node loop.
 #[derive(Clone)]
-pub struct MailboxBudget(Arc<AtomicUsize>);
+pub struct MailboxBudget {
+    live: Arc<AtomicUsize>,
+    /// Lifetime count of successful `reserve()` calls.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    reserved_total: Arc<AtomicUsize>,
+    /// Lifetime count of `release()` CALLS — attempts, not successes, so a
+    /// double-release drives this above `reserved_total` even when the second
+    /// call underflows and is rejected.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    released_total: Arc<AtomicUsize>,
+}
 
 impl MailboxBudget {
     pub fn new() -> Self {
-        Self(Arc::new(AtomicUsize::new(0)))
+        Self {
+            live: Arc::new(AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            reserved_total: Arc::new(AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            released_total: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Atomically reserve one slot. Returns `Ok(())` if the count was below
     /// `MAILBOX_CAP`, or `Err(MailboxFull)` if full. `fetch_update` closes the
     /// TOCTOU window: two concurrent senders at 63/64 → exactly one succeeds.
     pub fn reserve(&self) -> Result<(), MailboxFull> {
-        self.0
+        let outcome = self
+            .live
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 if current < MAILBOX_CAP {
                     Some(current + 1)
@@ -64,15 +98,25 @@ impl MailboxBudget {
                 }
             })
             .map(|_| ())
-            .map_err(|_| MailboxFull)
+            .map_err(|_| MailboxFull);
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        if outcome.is_ok() {
+            self.reserved_total.fetch_add(1, Ordering::AcqRel);
+        }
+        outcome
     }
 
     /// Release one reserved slot. Must be called exactly once per successful
-    /// `reserve()` on one of the defined release paths (sender self-release,
-    /// recipient turn-dispatch, consent-refusal, or terminal drain).
-    pub fn release(&self) {
+    /// `reserve()` on one of the five defined release paths listed on the type.
+    ///
+    /// `pub(crate)` since Story 18.3 (AC2): releasing is the half of the
+    /// protocol that can corrupt the invariant, so it is not reachable from
+    /// outside this crate.
+    pub(crate) fn release(&self) {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        self.released_total.fetch_add(1, Ordering::AcqRel);
         let result = self
-            .0
+            .live
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 if current > 0 { Some(current - 1) } else { None }
             });
@@ -84,7 +128,19 @@ impl MailboxBudget {
 
     /// Current reservation count (for debug assertions and tests).
     pub fn current(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.live.load(Ordering::Acquire)
+    }
+
+    /// Lifetime successful reserves. Instrumentation for the AC2 ratchet.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn reserved_total(&self) -> usize {
+        self.reserved_total.load(Ordering::Acquire)
+    }
+
+    /// Lifetime `release()` calls. Instrumentation for the AC2 ratchet.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn released_total(&self) -> usize {
+        self.released_total.load(Ordering::Acquire)
     }
 }
 
@@ -3696,6 +3752,42 @@ mod tests {
             .find(|entry| entry.agent_id == node)
             .map(|entry| entry.current_status);
         assert_eq!(status, Some(NodeState::Completed));
+    }
+
+    #[tokio::test]
+    async fn failed_handoff_self_releases_exactly_once() {
+        let tree = NodeTree::new();
+        let node = AgentId::from_validated("closed-mailbox");
+        // `dummy_handle` deliberately drops its receiver.
+        tree.register(node.clone(), AgentId::root(), dummy_handle(node.clone(), 1))
+            .await
+            .unwrap();
+        let target = tree
+            .delivery_target(&node)
+            .await
+            .expect("registered target");
+        let bus = LocalMessageBus::new(
+            tree,
+            std::sync::Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+        );
+        let envelope = crate::domain::models::Envelope::new(
+            crate::domain::models::MessageHeader {
+                sender: AgentId::root(),
+                recipient: node.clone(),
+                correlation_id: crate::domain::models::CorrelationId::new("self-release"),
+                kind: crate::domain::models::MessageKind::PeerMessage,
+                sequence: None,
+            },
+            crate::domain::models::AgentMessage::new("closed receiver"),
+        );
+
+        assert!(
+            bus.deliver(&node, envelope).await.is_err(),
+            "closed receiver must fail the handoff"
+        );
+        assert_eq!(target.mailbox_budget.reserved_total(), 1);
+        assert_eq!(target.mailbox_budget.released_total(), 1);
+        assert_eq!(target.mailbox_budget.current(), 0);
     }
 
     // t4 (release-on-turn-dispatch) and t6 (consent-receipt correlation)

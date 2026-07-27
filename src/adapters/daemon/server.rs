@@ -160,6 +160,20 @@ pub struct AttachServer {
     /// unless they opt in.
     peer_delivery:
         Arc<tokio::sync::RwLock<Option<Arc<crate::adapters::rap::VerifiedPeerFrameHandler>>>>,
+    /// Story 18.3 (AC3) — the ONE authoritative `AgentMessageBus` slot for this
+    /// daemon, supplied by the composition root rather than minted here.
+    ///
+    /// `with_clock_and_node_tree` used to build its own `LocalMessageBus` +
+    /// `RelationshipDeliveryPolicy` privately, so the peer path was governed by a
+    /// policy object no composition root held a reference to, and the only seam
+    /// that could have reconciled it (`configure_peer_delivery`) had ZERO callers
+    /// repo-wide. A `DeliveryPolicy` installed anywhere else would therefore have
+    /// silently failed to govern the RAP peer path — the one direction a peer
+    /// policy exists to govern.
+    ///
+    /// Retained (not just forwarded to the frame handler) so a test can prove the
+    /// SAME object governs both routes.
+    peer_bus: PeerBusSlot,
     /// Story 18.1b — the assistant answer produced by each inbound A2A peer
     /// node, captured at the moment its turn finished.
     ///
@@ -177,6 +191,24 @@ struct DaemonPeerConsumer {
 
 #[async_trait::async_trait]
 impl crate::adapters::rap::VerifiedPeerConsumer for DaemonPeerConsumer {
+    async fn consent(
+        &self,
+        _recipient: &AgentId,
+        _content: &AgentMessage,
+        _peer_id: &PeerId,
+    ) -> Result<crate::adapters::rap::VerifiedPeerConsent, String> {
+        let server = self
+            .server
+            .upgrade()
+            .ok_or_else(|| "daemon peer consumer is shutting down".to_string())?;
+        server
+            .core
+            .ensure_runtime()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(crate::adapters::rap::VerifiedPeerConsent::Accept)
+    }
+
     async fn ingest(
         &self,
         _recipient: &AgentId,
@@ -215,6 +247,45 @@ fn ensure_approval_gate_once(
     });
 }
 
+/// The daemon's single `AgentMessageBus` slot: one atomically swappable pointer
+/// shared by every route that delivers into this daemon's `NodeTree`.
+///
+/// Story 18.3 (AC3). Structurally identical to `AgentCore.agent_message_bus`
+/// (`Arc<ArcSwap<Arc<dyn AgentMessageBus>>>`) so a composition root can hand the
+/// same shape to either consumer, and so installing a `DeliveryPolicy` is one
+/// store into one slot rather than a per-adapter mint.
+pub type PeerBusSlot = Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::AgentMessageBus>>>;
+
+/// Build the default peer bus slot: a `LocalMessageBus` over `node_tree` with
+/// the stock `RelationshipDeliveryPolicy`.
+///
+/// This is the ONE `LocalMessageBus` construction site outside a composition
+/// root. It exists for the convenience constructors that non-daemon callers and
+/// tests use; the daemon composition root builds and owns its own slot so the
+/// policy it installs is the policy the peer path honours.
+pub fn default_peer_bus_slot(node_tree: &crate::infrastructure::subagent::NodeTree) -> PeerBusSlot {
+    let bus = Arc::new(
+        crate::infrastructure::agent_message_bus::LocalMessageBus::new(
+            node_tree.clone(),
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+        ),
+    ) as Arc<dyn crate::domain::ports::AgentMessageBus>;
+    Arc::new(arc_swap::ArcSwap::from_pointee(bus))
+}
+
+fn inbound_peer_refuse_reason(
+    disposition: crate::domain::models::DeliveryDisposition,
+    terminal: bool,
+) -> crate::domain::models::RefuseReason {
+    if terminal {
+        crate::domain::models::RefuseReason::TerminalState
+    } else if crate::domain::models::may_consent_refuse(disposition) {
+        crate::domain::models::RefuseReason::Policy
+    } else {
+        crate::domain::models::RefuseReason::Unavailable
+    }
+}
+
 impl AttachServer {
     pub fn new(
         core: Arc<DaemonCore>,
@@ -242,7 +313,8 @@ impl AttachServer {
             domain_tx.clone(),
             Arc::new(|| chrono::Utc::now().timestamp_millis()),
         );
-        Self::with_clock_and_node_tree(core, conversation, domain_tx, clock, node_tree)
+        let peer_bus = default_peer_bus_slot(&node_tree);
+        Self::with_clock_and_node_tree(core, conversation, domain_tx, clock, node_tree, peer_bus)
     }
 
     pub fn new_with_node_tree(
@@ -251,12 +323,27 @@ impl AttachServer {
         domain_tx: mpsc::UnboundedSender<AppEvent>,
         node_tree: crate::infrastructure::subagent::NodeTree,
     ) -> Arc<Self> {
+        let peer_bus = default_peer_bus_slot(&node_tree);
+        Self::new_with_node_tree_and_bus(core, conversation, domain_tx, node_tree, peer_bus)
+    }
+
+    /// The production entry point (Story 18.3, AC3): the composition root owns
+    /// the bus slot and hands it in, so the `DeliveryPolicy` it installed is the
+    /// one the RAP peer path actually honours.
+    pub fn new_with_node_tree_and_bus(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        node_tree: crate::infrastructure::subagent::NodeTree,
+        peer_bus: PeerBusSlot,
+    ) -> Arc<Self> {
         Self::with_clock_and_node_tree(
             core,
             conversation,
             domain_tx,
             Arc::new(SystemClock::default()),
             node_tree,
+            peer_bus,
         )
     }
 
@@ -266,45 +353,29 @@ impl AttachServer {
         domain_tx: mpsc::UnboundedSender<AppEvent>,
         clock: Arc<dyn Clock>,
         node_tree: crate::infrastructure::subagent::NodeTree,
+        peer_bus: PeerBusSlot,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|weak| {
-            let bus = Arc::new(
-                crate::infrastructure::agent_message_bus::LocalMessageBus::new(
-                    node_tree.clone(),
-                    Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
-                ),
-            ) as Arc<dyn crate::domain::ports::AgentMessageBus>;
-            let bus_slot = Arc::new(arc_swap::ArcSwap::from_pointee(bus));
-            let consumer = Arc::new(DaemonPeerConsumer {
-                server: weak.clone(),
-            });
-            let peer_delivery = Arc::new(crate::adapters::rap::VerifiedPeerFrameHandler::new(
-                node_tree.clone(),
-                bus_slot,
-                domain_tx.clone(),
-                consumer,
-            ));
-            Self {
-                core,
-                conversation,
-                registry: Arc::new(Mutex::new(ConnRegistry::default())),
-                domain_tx,
-                node_tree,
-                blocked_waiting: Arc::new(AtomicUsize::new(0)),
-                next_conn_id: AtomicU64::new(1),
-                approval_gate_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                turn_serial: Arc::new(Mutex::new(())),
-                turn_complete: Arc::new(Notify::new()),
-                retained_consolidations: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                active_channel_origin: Arc::new(Mutex::new(ChannelKind::Terminal)),
-                pending_channel_response_tx: Arc::new(Mutex::new(None)),
-                next_proposal_token: Arc::new(AtomicU64::new(1)),
-                generating_consolidations: Arc::new(Mutex::new(std::collections::HashSet::new())),
-                replay: Arc::new(Mutex::new(ReplayWindow::default())),
-                clock,
-                peer_delivery: Arc::new(tokio::sync::RwLock::new(Some(peer_delivery))),
-                inbound_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            }
+        Arc::new_cyclic(|_weak| Self {
+            core,
+            conversation,
+            registry: Arc::new(Mutex::new(ConnRegistry::default())),
+            domain_tx,
+            node_tree,
+            blocked_waiting: Arc::new(AtomicUsize::new(0)),
+            next_conn_id: AtomicU64::new(1),
+            approval_gate_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            turn_serial: Arc::new(Mutex::new(())),
+            turn_complete: Arc::new(Notify::new()),
+            retained_consolidations: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            active_channel_origin: Arc::new(Mutex::new(ChannelKind::Terminal)),
+            pending_channel_response_tx: Arc::new(Mutex::new(None)),
+            next_proposal_token: Arc::new(AtomicU64::new(1)),
+            generating_consolidations: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            replay: Arc::new(Mutex::new(ReplayWindow::default())),
+            clock,
+            peer_delivery: Arc::new(tokio::sync::RwLock::new(None)),
+            peer_bus,
+            inbound_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -312,10 +383,30 @@ impl AttachServer {
         self.node_tree.clone()
     }
 
-    pub async fn configure_peer_delivery(
-        &self,
-        handler: Arc<crate::adapters::rap::VerifiedPeerFrameHandler>,
+    /// The authoritative bus slot this server delivers verified peer frames
+    /// through — the same object the composition root installed (AC3).
+    pub fn peer_bus(&self) -> PeerBusSlot {
+        self.peer_bus.clone()
+    }
+
+    /// Install the mandatory transparency recorder and enable peer delivery.
+    ///
+    /// Before this call verified frames are rejected at the daemon boundary;
+    /// there is no recorder-free live path. The rebuilt handler receives the
+    /// same authoritative bus slot owned by this server.
+    pub async fn configure_peer_recorder(
+        self: &Arc<Self>,
+        recorder: Arc<dyn crate::domain::ports::PeerInteractionRecorder>,
     ) {
+        let handler = Arc::new(crate::adapters::rap::VerifiedPeerFrameHandler::new(
+            self.node_tree.clone(),
+            self.peer_bus.clone(),
+            self.domain_tx.clone(),
+            Arc::new(DaemonPeerConsumer {
+                server: Arc::downgrade(self),
+            }),
+            recorder,
+        ));
         *self.peer_delivery.write().await = Some(handler);
     }
 
@@ -1879,6 +1970,10 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
         use crate::domain::ports::InboundPeerError;
         use crate::infrastructure::subagent::{AgentHandle, MailboxBudget};
 
+        // Story 18.3 (AC2) — named so the command loop below can settle a
+        // delivery's reservation. It used to be constructed inline in the
+        // `AgentHandle`, which is precisely why the loop had nothing to release.
+        let mailbox_budget = MailboxBudget::new();
         let (command_tx, mut command_rx) = mpsc::channel(1);
         let (status_tx, _) = tokio::sync::watch::channel(NodeState::Created);
         let (_, metrics_rx) = tokio::sync::watch::channel(AgentMetrics::default());
@@ -1901,7 +1996,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     status: status_tx,
                     metrics: metrics_rx,
                     isolated: false,
-                    mailbox_budget: MailboxBudget::new(),
+                    mailbox_budget: mailbox_budget.clone(),
                 },
             )
             .await
@@ -1917,13 +2012,54 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
 
         // `Op::Kill` (cascade kill, teardown) must reach the running turn, and
         // the only thing the turn selects on is this token.
+        //
+        // Story 18.3 (AC2) — the loop used to be `if matches!(op, Op::Kill)`, so
+        // every other op, INCLUDING `Op::Deliver`, was received and silently
+        // dropped. `LocalMessageBus` had already reserved a `MailboxBudget` slot
+        // for it and nothing released it: a permanent leak against
+        // `MAILBOX_CAP = 64` plus a receipt the sender never got, violating
+        // 14-4a's INV-DEL-2 (Σ outcomes == Σ sent, zero unaccounted).
+        //
+        // Not reachable today — nothing delivers to these ids — but 18-3b routes
+        // peer responses through the bus and makes it reachable, so it is fixed
+        // before it can bite rather than deferred (Rule 3: latent-but-reachable).
         {
             let cancel = cancel.clone();
+            let mailbox_budget = mailbox_budget.clone();
+            let domain_tx = self.domain_tx.clone();
+            let node_id = task.node_id.clone();
             tokio::spawn(async move {
+                let settle =
+                    |delivery: crate::domain::models::AgentDelivery,
+                     reason: crate::domain::models::RefuseReason| {
+                        mailbox_budget.release();
+                        let receipt = crate::domain::models::refusal_receipt(
+                            &delivery.envelope.header,
+                            &node_id,
+                            reason,
+                        );
+                        let _ = domain_tx.send(receipt); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 18-3 AC2 — the receipt that stops an Op::Deliver being received-and-dropped; this spawned loop holds a domain_tx, not an EventBus
+                    };
                 while let Some(op) = command_rx.recv().await {
-                    if matches!(op, Op::Kill) {
-                        cancel.cancel();
-                        break;
+                    match op {
+                        Op::Kill => {
+                            cancel.cancel();
+                            break;
+                        }
+                        Op::Deliver(delivery) => {
+                            let reason = inbound_peer_refuse_reason(delivery.disposition, false);
+                            settle(delivery, reason);
+                        }
+                        _ => {}
+                    }
+                }
+                // Terminal drain: a delivery that raced the kill still holds a
+                // reservation, so account for it too rather than leaking on exit.
+                command_rx.close();
+                while let Ok(op) = command_rx.try_recv() {
+                    if let Op::Deliver(delivery) = op {
+                        let reason = inbound_peer_refuse_reason(delivery.disposition, true);
+                        settle(delivery, reason);
                     }
                 }
             });
@@ -2079,6 +2215,28 @@ mod tests {
     use futures::stream::BoxStream;
     use std::path::Path;
     use tokio::net::UnixStream;
+
+    #[test]
+    fn inbound_peer_refusal_reason_separates_policy_unavailable_and_terminal() {
+        use crate::domain::models::{DeliveryDisposition, RefuseReason};
+
+        assert_eq!(
+            inbound_peer_refuse_reason(DeliveryDisposition::MayRefuse, false),
+            RefuseReason::Policy
+        );
+        assert_eq!(
+            inbound_peer_refuse_reason(DeliveryDisposition::MustReport, false),
+            RefuseReason::Unavailable
+        );
+        assert_eq!(
+            inbound_peer_refuse_reason(DeliveryDisposition::MayRefuse, true),
+            RefuseReason::TerminalState
+        );
+        assert_eq!(
+            inbound_peer_refuse_reason(DeliveryDisposition::MustReport, true),
+            RefuseReason::TerminalState
+        );
+    }
 
     /// A provider that replays a fixed chunk script — deterministic, no network.
     struct ScriptedProvider {
@@ -2486,6 +2644,18 @@ mod tests {
         )
     }
 
+    struct AcceptingPeerRecorder;
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::PeerInteractionRecorder for AcceptingPeerRecorder {
+        async fn record_peer_delivery(
+            &self,
+            _record: crate::domain::ports::PeerDeliveryRecord,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     /// Stand up an `AttachServer` on a temp socket. `clock = None` uses the
     /// production `SystemClock`; `Some(clock)` injects it (deterministic TTL).
     async fn spawn_proof_server(
@@ -2510,6 +2680,9 @@ mod tests {
             Some(c) => AttachServer::with_clock(core, conversation, bus.domain_tx.clone(), c),
             None => AttachServer::new(core, conversation, bus.domain_tx.clone()),
         };
+        server
+            .configure_peer_recorder(Arc::new(AcceptingPeerRecorder))
+            .await;
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();

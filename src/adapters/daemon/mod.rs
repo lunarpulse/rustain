@@ -437,12 +437,43 @@ async fn run_daemon_foreground(
         }
     };
 
-    let server = crate::adapters::daemon::server::AttachServer::new_with_node_tree(
+    // Story 18.3 (AC3) — the daemon composition root owns the ONE
+    // `AgentMessageBus` slot. `AttachServer` used to mint its own privately, so
+    // the RAP peer path was governed by a `DeliveryPolicy` object no composition
+    // root held a reference to, and the seam that could have reconciled them
+    // (`configure_peer_delivery`) had ZERO callers repo-wide. Holding the slot
+    // here means a policy installed at the root governs the peer path by
+    // construction — the seam Story 18-3b plugs into.
+    let peer_bus = crate::adapters::daemon::server::default_peer_bus_slot(&node_tree);
+    let server = crate::adapters::daemon::server::AttachServer::new_with_node_tree_and_bus(
         core.clone(),
         conversation.clone(),
         domain_tx.clone(),
         node_tree,
+        peer_bus,
     );
+
+    // The recorder is mandatory for every live verified peer frame, regardless
+    // of whether the optional HTTP A2A listener is enabled.
+    let reader: std::sync::Arc<dyn crate::domain::ports::RoomJournalReader> = node_journal.clone();
+    let journal: std::sync::Arc<dyn crate::domain::ports::RoomJournal> = std::sync::Arc::new(
+        crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
+            node_journal,
+            Some(domain_tx.clone()),
+        ),
+    );
+    let notices: std::sync::Arc<dyn crate::domain::ports::EventEmitter> = std::sync::Arc::new(
+        crate::infrastructure::runtime::event_bus::ChannelEmitter::new(domain_tx.clone()),
+    );
+    let transparency = std::sync::Arc::new(
+        crate::adapters::a2a::transparency::TransparencySink::new(journal)
+            .with_reader(reader)
+            .with_notices(notices),
+    );
+    server
+        .configure_peer_recorder(transparency.clone()
+            as std::sync::Arc<dyn crate::domain::ports::PeerInteractionRecorder>)
+        .await;
     arm_node_recovery_harness(&server).await?;
 
     // Story 18.1b, AC5b — the A2A listener is a SIBLING `tokio::spawn` inside
@@ -456,8 +487,7 @@ async fn run_daemon_foreground(
         &workspace,
         &config,
         server.clone(),
-        node_journal.clone(),
-        domain_tx,
+        transparency,
         a2a_shutdown.child_token(),
     )
     .await?;
@@ -596,45 +626,24 @@ async fn spawn_a2a_listener(
     workspace: &std::path::Path,
     config: &AppConfig,
     server: std::sync::Arc<crate::adapters::daemon::server::AttachServer>,
-    node_journal: std::sync::Arc<crate::infrastructure::subagent::NodeJournal>,
-    domain_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
+    transparency: std::sync::Arc<crate::adapters::a2a::transparency::TransparencySink>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {
     let Some(addr) = addr else {
-        let _ = (workspace, config, server, node_journal, domain_tx, shutdown);
+        let _ = (workspace, config, server, transparency, shutdown);
         return Ok(None);
     };
     #[cfg(not(feature = "a2a"))]
     {
-        let _ = (workspace, config, server, node_journal, domain_tx, shutdown);
+        let _ = (workspace, config, server, transparency, shutdown);
         anyhow::bail!(
             "--serve-a2a={addr} was requested but this build has the `a2a` feature disabled"
         );
     }
     #[cfg(feature = "a2a")]
     {
-        use crate::adapters::a2a::transparency::TransparencySink;
         use crate::domain::ports::InboundPeerRuntime;
-
-        let reader: std::sync::Arc<dyn crate::domain::ports::RoomJournalReader> =
-            node_journal.clone();
-        let journal: std::sync::Arc<dyn crate::domain::ports::RoomJournal> = std::sync::Arc::new(
-            crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
-                node_journal,
-                Some(domain_tx.clone()),
-            ),
-        );
         let runtime: std::sync::Arc<dyn InboundPeerRuntime> = server;
-        // AC1: a journal-append failure must reach the operator, latched. The
-        // daemon holds the sender rather than the bus, so it wraps it.
-        let notices: std::sync::Arc<dyn crate::domain::ports::EventEmitter> = std::sync::Arc::new(
-            crate::infrastructure::runtime::event_bus::ChannelEmitter::new(domain_tx),
-        );
-        let transparency = std::sync::Arc::new(
-            TransparencySink::new(journal)
-                .with_reader(reader)
-                .with_notices(notices),
-        );
         let workspace = workspace.to_path_buf();
         let config = config.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

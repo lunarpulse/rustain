@@ -1,7 +1,14 @@
 #![cfg(feature = "a2a")]
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
+use rustain::adapters::a2a::auth::A2aServerSecurity;
+use rustain::adapters::a2a::card_cache::SignedCardCache;
+use rustain::adapters::a2a::transparency::{InboundOutcome, TransparencySink};
+
+use arc_swap::ArcSwap;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::header::CONTENT_TYPE;
@@ -15,10 +22,24 @@ use rustain::adapters::a2a::jws::verify_card;
 use rustain::adapters::a2a::lifecycle::TaskSnapshot;
 use rustain::adapters::a2a::server::{ServeConfig, serve};
 use rustain::adapters::a2a::task::A2aTaskState;
-use rustain::adapters::rap::IdentityKeyStore;
+use rustain::adapters::rap::{
+    IdentityKeyStore, VerifiedPeerConsent, VerifiedPeerConsumer, VerifiedPeerFrameHandler,
+};
 use rustain::domain::models::capability_id::CapabilityId;
 use rustain::domain::models::capability_registry::{CapabilityRegistry, RegisteredCapability};
+use rustain::domain::models::{
+    AgentEnvelope, AgentEnvelopeHeader, AgentId, AgentMessage, CorrelationId, Ed25519Sig,
+    MessageKind, NodeState, PeerId, PeerIdentity,
+};
 use rustain::domain::models::{PinnedKey, PinnedKeyAlgorithm, TrustTier};
+use rustain::domain::ports::{
+    AgentMessageBus, DeliveryPolicy, InboundApprovalTicket, InboundPeerError, InboundPeerRuntime,
+    InboundPeerTask, PeerInteractionRecorder, RelationshipDeliveryPolicy, RoomJournal,
+};
+use rustain::domain::services::transparency::{TransparencyKind, fold_transparency};
+use rustain::infrastructure::agent_message_bus::LocalMessageBus;
+use rustain::infrastructure::subagent::{NodeJournal, NodeRoomJournal, NodeTree};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 fn skill(name: &str) -> RegisteredCapability {
@@ -79,6 +100,137 @@ fn pin_for(signer: &rustain::adapters::rap::AgentSigner) -> PinnedKey {
 async fn stop_server(cancel: CancellationToken, task: tokio::task::JoinHandle<anyhow::Result<()>>) {
     cancel.cancel();
     task.await.unwrap().unwrap();
+}
+
+/// Runtime whose terminal transition is test-controlled, so the listener must
+/// serve a real `working` poll before it can disclose the completed result.
+struct DisclosureRuntime {
+    complete: Arc<Notify>,
+    completed: Arc<Notify>,
+    result: String,
+}
+
+#[async_trait::async_trait]
+impl InboundPeerRuntime for DisclosureRuntime {
+    async fn start(
+        &self,
+        _task: InboundPeerTask,
+        _cancel: CancellationToken,
+    ) -> Result<tokio::sync::watch::Receiver<NodeState>, InboundPeerError> {
+        let (state_tx, state_rx) = tokio::sync::watch::channel(NodeState::Running);
+        let complete = self.complete.clone();
+        let completed = self.completed.clone();
+        tokio::spawn(async move {
+            complete.notified().await;
+            let _ = state_tx.send(NodeState::Completed);
+            completed.notify_one();
+        });
+        Ok(state_rx)
+    }
+
+    async fn request_admission_approval(
+        &self,
+        _peer_id: &PeerId,
+        _summary: &str,
+    ) -> Result<InboundApprovalTicket, InboundPeerError> {
+        Err(InboundPeerError::unavailable(
+            "approval is not used by this runtime",
+        ))
+    }
+
+    async fn take_result_text(&self, _node_id: &AgentId) -> Option<String> {
+        Some(self.result.clone())
+    }
+
+    async fn disclosure_forbidden_fragments(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn reconcile_orphaned_tasks(&self, _subagent_type: &str) -> Vec<AgentId> {
+        Vec::new()
+    }
+}
+
+async fn rpc(
+    client: &reqwest::Client,
+    endpoint: &str,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let response = client
+        .post(endpoint)
+        .json(&JsonRpcRequest::new(id, method, params))
+        .send()
+        .await
+        .expect("real listener response");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response.json().await.expect("JSON-RPC response")
+}
+
+struct PeerAcceptingConsumer;
+
+#[async_trait::async_trait]
+impl VerifiedPeerConsumer for PeerAcceptingConsumer {
+    async fn consent(
+        &self,
+        _recipient: &AgentId,
+        _content: &AgentMessage,
+        _peer_id: &PeerId,
+    ) -> Result<VerifiedPeerConsent, String> {
+        Ok(VerifiedPeerConsent::Accept)
+    }
+
+    async fn ingest(
+        &self,
+        _recipient: &AgentId,
+        _content: AgentMessage,
+        _peer_id: &PeerId,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct PeerDecliningConsumer;
+
+#[async_trait::async_trait]
+impl VerifiedPeerConsumer for PeerDecliningConsumer {
+    async fn consent(
+        &self,
+        _recipient: &AgentId,
+        _content: &AgentMessage,
+        _peer_id: &PeerId,
+    ) -> Result<VerifiedPeerConsent, String> {
+        Ok(VerifiedPeerConsent::Decline)
+    }
+
+    async fn ingest(
+        &self,
+        _recipient: &AgentId,
+        _content: AgentMessage,
+        _peer_id: &PeerId,
+    ) -> Result<(), String> {
+        panic!("declined content must not reach ingest")
+    }
+}
+
+fn peer_delivery_envelope(correlation_id: &str) -> AgentEnvelope<serde_json::Value> {
+    AgentEnvelope::new(
+        AgentEnvelopeHeader {
+            sender: AgentId::parse("peer-agent").expect("valid sender"),
+            recipient: AgentId::parse("local-peer-session").expect("valid recipient"),
+            correlation_id: CorrelationId::new(correlation_id),
+            kind: MessageKind::PeerMessage,
+            sequence: 1,
+            not_after: i64::MAX,
+            nonce: "nonce".to_owned(),
+            content_hash: vec![1],
+            prev_hash: vec![2],
+        },
+        serde_json::json!("hello"),
+        PeerIdentity::from_public_key(vec![7; 32]).expect("peer identity"),
+        Ed25519Sig(vec![]),
+    )
 }
 
 /// The decision core over the address STRING. Non-loopback is no longer a flat
@@ -422,4 +574,348 @@ async fn serve_refuses_a_self_bound_non_loopback_listener_without_tls_and_auth()
         "unexpected error: {message}"
     );
     assert!(message.contains("TLS"), "unexpected error: {message}");
+}
+
+/// **[K4] AC4 differential.** A real listener must distinguish a poll that
+/// merely asks about work from a response that actually hands result text back.
+/// The journal is real: the fold observes exactly the same durable records that
+/// `/team log`, the CLI, and the panel will render.
+#[tokio::test]
+async fn ac4_working_poll_records_status_query_without_disclosure_but_completed_fetch_records_both()
+{
+    const TASK_ID: &str = "disclosure-task";
+    const RESULT: &str = "completed peer-visible result";
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
+    let complete = Arc::new(Notify::new());
+    let completed_signal = Arc::new(Notify::new());
+    let runtime: Arc<dyn InboundPeerRuntime> = Arc::new(DisclosureRuntime {
+        complete: complete.clone(),
+        completed: completed_signal.clone(),
+        result: RESULT.to_owned(),
+    });
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: Some(runtime),
+            transparency: Arc::new(TransparencySink::new(room)),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+    let client = reqwest::Client::new();
+
+    let accepted = rpc(
+        &client,
+        &endpoint,
+        1,
+        "message/send",
+        serde_json::json!({
+            "message": {
+                "messageId": TASK_ID,
+                "role": "user",
+                "parts": [{ "kind": "text", "text": "perform the task" }]
+            }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(
+            accepted["result"]["status"]["state"].as_str(),
+            Some("submitted" | "working")
+        ),
+        "message/send must enter the real task lifecycle: {accepted}"
+    );
+
+    let working = rpc(
+        &client,
+        &endpoint,
+        2,
+        "tasks/get",
+        serde_json::json!({ "id": TASK_ID }),
+    )
+    .await;
+    assert_eq!(working["result"]["status"]["state"], "working");
+    assert!(
+        working["result"]["status"].get("message").is_none(),
+        "a working poll must hand no text back: {working}"
+    );
+    let working_rows = fold_transparency(&journal.load().await.expect("load journal"));
+    assert_eq!(
+        working_rows
+            .iter()
+            .filter(|row| {
+                row.kind == TransparencyKind::StatusQueried && row.task.as_deref() == Some(TASK_ID)
+            })
+            .count(),
+        1,
+        "positive control: the first working poll remains an 18.2 status-query record"
+    );
+    assert!(
+        working_rows.iter().all(|row| {
+            !(row.kind == TransparencyKind::Disclosed && row.task.as_deref() == Some(TASK_ID))
+        }),
+        "a working poll must not fabricate a disclosure row"
+    );
+
+    complete.notify_one();
+    let completed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let response = rpc(
+                &client,
+                &endpoint,
+                3,
+                "tasks/get",
+                serde_json::json!({ "id": TASK_ID }),
+            )
+            .await;
+            if response["result"]["status"]["state"].as_str() == Some("completed") {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the gated runtime must complete");
+    assert_eq!(
+        completed["result"]["status"]["message"]["parts"][0]["text"], RESULT,
+        "the completed fetch must actually carry the result text"
+    );
+    completed_signal.notified().await;
+
+    let repeated = rpc(
+        &client,
+        &endpoint,
+        4,
+        "tasks/get",
+        serde_json::json!({ "id": TASK_ID }),
+    )
+    .await;
+    assert_eq!(
+        repeated["result"]["status"]["message"]["parts"][0]["text"], RESULT,
+        "repeated fetch still returns the immutable result"
+    );
+
+    let rows = fold_transparency(&journal.load().await.expect("load journal"));
+    assert_eq!(
+        rows.iter()
+            .filter(|row| {
+                row.kind == TransparencyKind::StatusQueried && row.task.as_deref() == Some(TASK_ID)
+            })
+            .count(),
+        1,
+        "the completed fetch must preserve the status-query positive control"
+    );
+    let disclosure = rows
+        .iter()
+        .find(|row| row.kind == TransparencyKind::Disclosed && row.task.as_deref() == Some(TASK_ID))
+        .expect("the completed result must produce a distinct disclosure row");
+    assert_eq!(disclosure.direction.label(), "outbound");
+    assert_eq!(
+        disclosure.summary,
+        format!("disclosed result to peer ({} bytes)", RESULT.len())
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| {
+                row.kind == TransparencyKind::Disclosed && row.task.as_deref() == Some(TASK_ID)
+            })
+            .count(),
+        1,
+        "repeated fetches must not append duplicate disclosures"
+    );
+    let status_peer = rows
+        .iter()
+        .find(|row| {
+            row.kind == TransparencyKind::StatusQueried && row.task.as_deref() == Some(TASK_ID)
+        })
+        .expect("status query row")
+        .peer
+        .clone();
+    assert_eq!(
+        disclosure.peer, status_peer,
+        "disclosure must identify the authenticated remote principal, not the local task node"
+    );
+
+    const CANCEL_TASK_ID: &str = "cancel-result-task";
+    let _submitted = rpc(
+        &client,
+        &endpoint,
+        5,
+        "message/send",
+        serde_json::json!({
+            "message": {
+                "messageId": CANCEL_TASK_ID,
+                "role": "user",
+                "parts": [{ "kind": "text", "text": "complete before cancellation" }]
+            }
+        }),
+    )
+    .await;
+    let completed_wait = completed_signal.notified();
+    complete.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), completed_wait)
+        .await
+        .expect("second runtime completion");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let cancelled = rpc(
+        &client,
+        &endpoint,
+        6,
+        "tasks/cancel",
+        serde_json::json!({ "id": CANCEL_TASK_ID }),
+    )
+    .await;
+    assert_eq!(
+        cancelled["result"]["status"]["message"]["parts"][0]["text"], RESULT,
+        "tasks/cancel must not bypass disclosure when it returns completed content"
+    );
+    let cancel_rows = fold_transparency(&journal.load().await.expect("load journal"));
+    assert_eq!(
+        cancel_rows
+            .iter()
+            .filter(|row| {
+                row.kind == TransparencyKind::Disclosed
+                    && row.task.as_deref() == Some(CANCEL_TASK_ID)
+            })
+            .count(),
+        1,
+        "tasks/cancel result content must be journaled exactly once"
+    );
+
+    cancel.cancel();
+    http.await
+        .expect("server task")
+        .expect("server shuts down cleanly");
+}
+
+/// **[K5] AC5 double-divergence keystone.** The real RAP peer front door writes
+/// through `TransparencySink` to a real `NodeJournal`; raw file bytes prove the
+/// flock/fsync writer ran, and the production fold proves the records reach the
+/// existing team-log projection. An established inbound-A2A row is the positive
+/// control in the same journal.
+#[tokio::test]
+async fn ac5_peer_deliveries_are_durable_and_fold_into_transparency() {
+    let workspace = tempfile::tempdir().expect("real journal workspace");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real NodeJournal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(
+        journal.clone(),
+        Some(domain_tx.clone()),
+    ));
+    let sink = Arc::new(TransparencySink::new(room));
+    let remote_peer = PeerId::from_public_key(&[7; 32]).expect("peer id");
+
+    sink.record(InboundOutcome::Accepted {
+        peer: remote_peer,
+        node: AgentId::parse("a2a-in/p-control/t-inbound").expect("control node"),
+        task_id: "inbound-a2a-control".to_owned(),
+    })
+    .await
+    .expect("record unchanged inbound-A2A positive control");
+    let recorder: Arc<dyn PeerInteractionRecorder> = sink;
+
+    let accepting_tree = NodeTree::new();
+    let accepting_bus = Arc::new(LocalMessageBus::new(
+        accepting_tree.clone(),
+        Arc::new(RelationshipDeliveryPolicy) as Arc<dyn DeliveryPolicy>,
+    )) as Arc<dyn AgentMessageBus>;
+    let accepting_handler = VerifiedPeerFrameHandler::new(
+        accepting_tree,
+        Arc::new(ArcSwap::from_pointee(accepting_bus)),
+        domain_tx.clone(),
+        Arc::new(PeerAcceptingConsumer),
+        recorder.clone(),
+    );
+    let accepted = peer_delivery_envelope("peer-accept");
+    let accepted_peer = accepted.signer.peer_id.clone();
+    accepting_handler
+        .handle_verified_peer_frame(accepted, accepted_peer)
+        .await
+        .expect("accepted peer delivery must journal before its receipt");
+
+    let refusing_tree = NodeTree::new();
+    let refusing_bus = Arc::new(LocalMessageBus::new(
+        refusing_tree.clone(),
+        Arc::new(RelationshipDeliveryPolicy) as Arc<dyn DeliveryPolicy>,
+    )) as Arc<dyn AgentMessageBus>;
+    let refusing_handler = VerifiedPeerFrameHandler::new(
+        refusing_tree,
+        Arc::new(ArcSwap::from_pointee(refusing_bus)),
+        domain_tx,
+        Arc::new(PeerDecliningConsumer),
+        recorder,
+    );
+    let refused = peer_delivery_envelope("peer-refusal");
+    let refused_peer = refused.signer.peer_id.clone();
+    assert!(
+        refusing_handler
+            .handle_verified_peer_frame(refused, refused_peer)
+            .await
+            .is_err(),
+        "a consent refusal must remain sender-visible"
+    );
+
+    let rows = fold_transparency(&journal.load().await.expect("load real journal"));
+    assert!(
+        rows.iter().any(|row| {
+            row.kind == TransparencyKind::Accepted
+                && row.direction.label() == "inbound"
+                && row.task.as_deref() == Some("inbound-a2a-control")
+        }),
+        "positive control: the established inbound-A2A row must remain unchanged"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row.kind == TransparencyKind::Accepted && row.task.as_deref() == Some("peer-accept")
+        }),
+        "the accepted peer delivery must fold into the existing team-log row type"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row.kind == TransparencyKind::Rejected && row.task.as_deref() == Some("peer-refusal")
+        }),
+        "the AC1 consent refusal must fold into the existing team-log row type"
+    );
+    let raw = std::fs::read_to_string(journal.path()).expect("read fsynced journal file");
+    assert!(
+        raw.contains(r#""event":"remote_envelope_accepted""#),
+        "the real journal file must contain accepted records: {raw}"
+    );
+    assert!(
+        raw.contains(r#""event":"remote_envelope_rejected""#),
+        "the real journal file must contain the consent-refusal record: {raw}"
+    );
 }

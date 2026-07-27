@@ -139,6 +139,11 @@ pub struct InboundTask {
     /// submitter-scoped record — which is already evicted on terminal — rather
     /// than in a new `(peer, task)` map that would need an eviction path.
     query_state: AtomicU8,
+    /// State of the first result disclosure. Unlike status queries, disclosure
+    /// is fail-closed: concurrent response paths wait for the in-flight append
+    /// instead of returning content before its canonical record exists.
+    disclosure_state: AtomicU8,
+    disclosure_settled: Notify,
     /// Wakes a durable-cancel request once a lifecycle watcher terminalizes the
     /// task. This is task-local async coordination, never a host-thread lock.
     terminal: Notify,
@@ -167,6 +172,9 @@ impl InboundTask {
     const QUERY_UNSEEN: u8 = 0;
     const QUERY_RECORDING: u8 = 1;
     const QUERY_RECORDED: u8 = 2;
+    const DISCLOSURE_UNSEEN: u8 = 0;
+    const DISCLOSURE_RECORDING: u8 = 1;
+    const DISCLOSURE_RECORDED: u8 = 2;
 
     fn new(id: String, node_id: AgentId, submitter: SubmitterKey, initial: RapTaskState) -> Self {
         Self {
@@ -175,6 +183,8 @@ impl InboundTask {
             submitter,
             cancel: CancellationToken::new(),
             query_state: AtomicU8::new(Self::QUERY_UNSEEN),
+            disclosure_state: AtomicU8::new(Self::DISCLOSURE_UNSEEN),
+            disclosure_settled: Notify::new(),
             terminal: Notify::new(),
             state: RwLock::new(TaskState {
                 rap: initial,
@@ -219,6 +229,54 @@ impl InboundTask {
     pub fn restore_status_query(&self) {
         self.query_state
             .store(Self::QUERY_RECORDED, Ordering::Release);
+    }
+
+    /// Claim the first durable disclosure of this task's immutable result.
+    ///
+    /// A concurrent result-bearing response waits for the active append. It may
+    /// return content only after that append commits, or retry the append after
+    /// the active writer releases a failed claim.
+    pub async fn claim_result_disclosure(&self) -> bool {
+        loop {
+            let settled = self.disclosure_settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            match self.disclosure_state.load(Ordering::Acquire) {
+                Self::DISCLOSURE_RECORDED => return false,
+                Self::DISCLOSURE_UNSEEN => {
+                    if self
+                        .disclosure_state
+                        .compare_exchange(
+                            Self::DISCLOSURE_UNSEEN,
+                            Self::DISCLOSURE_RECORDING,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                Self::DISCLOSURE_RECORDING => settled.await,
+                state => unreachable!("invalid disclosure state {state}"),
+            }
+        }
+    }
+
+    pub fn commit_result_disclosure(&self) {
+        self.disclosure_state
+            .store(Self::DISCLOSURE_RECORDED, Ordering::Release);
+        self.disclosure_settled.notify_waiters();
+    }
+
+    pub fn release_result_disclosure(&self) {
+        let _ = self.disclosure_state.compare_exchange(
+            Self::DISCLOSURE_RECORDING,
+            Self::DISCLOSURE_UNSEEN,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.disclosure_settled.notify_waiters();
     }
 
     pub async fn snapshot(&self) -> TaskSnapshot {
