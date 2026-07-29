@@ -287,6 +287,10 @@ fn build_runtime(
 
 struct Harness {
     addr: std::net::SocketAddr,
+    // Read only by `repeated_card_fetches_sign_once_per_registry_generation`, whose
+    // signature-count assertions are `test-instrumentation`-gated. Live in the CI
+    // a2a lane (which enables the feature), genuinely dead without it.
+    #[cfg_attr(not(feature = "test-instrumentation"), allow(dead_code))]
     cards: Arc<SignedCardCache>,
     cancel: CancellationToken,
     http: tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -912,6 +916,7 @@ async fn cancel_during_auth_required_is_durable_and_never_registers_after_a_late
         attach_operator(h.server.clone(), &workspace, domain_rx).await;
     let client = reqwest::Client::new();
     let endpoint = h.endpoint();
+    #[cfg(feature = "test-instrumentation")]
     let registrations_before = h.node_tree.registration_count();
 
     let accepted = rpc(
@@ -959,6 +964,7 @@ async fn cancel_during_auth_required_is_durable_and_never_registers_after_a_late
     .await
     .expect("late grant write");
     tokio::time::sleep(Duration::from_millis(50)).await;
+    #[cfg(feature = "test-instrumentation")]
     assert_eq!(
         h.node_tree.registration_count(),
         registrations_before,
@@ -1523,6 +1529,7 @@ async fn notifications_without_message_ids_mint_distinct_task_ids() {
     .await;
     let client = reqwest::Client::new();
     let endpoint = h.endpoint();
+    #[cfg(feature = "test-instrumentation")]
     let before = h.node_tree.registration_count();
 
     for text in ["first notification", "second notification"] {
@@ -1544,13 +1551,16 @@ async fn notifications_without_message_ids_mint_distinct_task_ids() {
         assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
     }
 
-    let deadline = tokio::time::Instant::now() + BUDGET;
-    while h.node_tree.registration_count() < before + 2 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "both id-less notifications must execute rather than collide"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    #[cfg(feature = "test-instrumentation")]
+    {
+        let deadline = tokio::time::Instant::now() + BUDGET;
+        while h.node_tree.registration_count() < before + 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "both id-less notifications must execute rather than collide"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
     h.stop().await;
 }
@@ -2459,6 +2469,7 @@ async fn a_non_loopback_listener_serves_only_over_tls_and_only_with_the_key() {
         "a wildcard listener publishes its configured client-reachable authority"
     );
 
+    #[cfg(feature = "test-instrumentation")]
     let registrations_before = node_tree.registration_count();
 
     // No credential → rejected BEFORE dispatch.
@@ -2517,6 +2528,7 @@ async fn a_non_loopback_listener_serves_only_over_tls_and_only_with_the_key() {
     );
 
     // Zero mutation from all four: authentication runs before admission.
+    #[cfg(feature = "test-instrumentation")]
     assert_eq!(
         node_tree.registration_count(),
         registrations_before,
@@ -2599,6 +2611,7 @@ async fn a_non_loopback_listener_serves_only_over_tls_and_only_with_the_key() {
         not_owner, fabricated,
         "A/B scoping must be byte-identical to non-existence on the real HTTP path"
     );
+    #[cfg(feature = "test-instrumentation")]
     assert!(node_tree.registration_count() > registrations_before);
 
     cancel.cancel();
@@ -2769,6 +2782,7 @@ async fn ac2_inbound_peer_delivery_is_refused_with_a_receipt_never_dropped() {
         0,
         "the reserved slot must not leak against MAILBOX_CAP"
     );
+    #[cfg(feature = "test-instrumentation")]
     assert_eq!(
         target.mailbox_budget.released_total(),
         target.mailbox_budget.reserved_total(),
@@ -2882,6 +2896,7 @@ async fn ac3_one_bus_slot_and_the_peer_path_honours_the_installed_policy() {
         "the node really is a Peer — so a MayRefuse stamp would be the DEFAULT, \
          and only the installed policy can make it MustReport"
     );
+    #[cfg(feature = "test-instrumentation")]
     assert_eq!(
         target.mailbox_budget.released_total(),
         target.mailbox_budget.reserved_total(),

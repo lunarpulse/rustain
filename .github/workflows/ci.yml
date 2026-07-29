@@ -62,7 +62,9 @@ jobs:
           fi
 
       - name: Test
-        run: cargo test --lib
+        run: |
+          cargo test --lib
+          cargo test --test conformance_18_3b_policy
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest

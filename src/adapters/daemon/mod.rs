@@ -29,6 +29,8 @@ mod lifecycle;
 #[cfg(unix)]
 mod pidfile;
 #[cfg(unix)]
+mod policy_startup;
+#[cfg(unix)]
 mod procargs;
 #[cfg(unix)]
 pub mod protocol;
@@ -59,6 +61,7 @@ pub async fn run_daemon(
     config: AppConfig,
     memory_adapter: String,
     selection: crate::domain::models::profile::ProfileSelection,
+    a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
     // Story 18.1b — `--serve-a2a=ADDR` combined with daemon mode. The A2A
     // listener runs as a sibling `tokio::spawn` inside this daemon's lifecycle,
     // sharing its `NodeTree`, `DaemonCore` and event bus. There is no second
@@ -70,14 +73,29 @@ pub async fn run_daemon(
         match action {
             DaemonAction::Start { foreground } => {
                 if foreground {
-                    run_daemon_foreground(workspace, config, memory_adapter, selection, serve_a2a)
-                        .await
+                    run_daemon_foreground(
+                        workspace,
+                        config,
+                        memory_adapter,
+                        selection,
+                        a2a_peers,
+                        serve_a2a,
+                    )
+                    .await
                 } else {
                     run_daemon_start(workspace, config, serve_a2a).await
                 }
             }
             DaemonAction::Run => {
-                run_daemon_foreground(workspace, config, memory_adapter, selection, serve_a2a).await
+                run_daemon_foreground(
+                    workspace,
+                    config,
+                    memory_adapter,
+                    selection,
+                    a2a_peers,
+                    serve_a2a,
+                )
+                .await
             }
             DaemonAction::Stop => run_daemon_stop(workspace).await,
             // Story 12.2c — default to the rich multi-channel TUI; `--plain` keeps
@@ -253,9 +271,25 @@ async fn run_daemon_foreground(
     config: AppConfig,
     memory_adapter: String,
     selection: crate::domain::models::profile::ProfileSelection,
+    a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
     serve_a2a: Option<String>,
 ) -> Result<()> {
     config.daemon.validate().map_err(|e| anyhow::anyhow!(e))?;
+
+    // Story 18.3b (AC5 / NFR66) — resolve the interaction policy and read it back
+    // through the daemon's LOG, before anything else is composed.
+    //
+    // Here rather than in `run_daemon_start` (ADR-18-3b-01 D4): `start` is the
+    // launcher that re-execs a detached child and returns, and validating there
+    // would both double-report and still miss the supervised systemd/launchd
+    // entrypoint, which skips the launcher entirely — the same gap the PID guard
+    // below documents. This body is every way the daemon actually runs.
+    //
+    // A malformed policy file is fatal (fail-closed, AC2). A conflict is reported
+    // and start proceeds, because NFR66 asks for "resolution guidance", not a
+    // refusal. There is deliberately no TTY check: a daemon never has a terminal,
+    // so gating on one would disable the report exactly where it matters most.
+    policy_startup::validate_startup_policies(&workspace, &a2a_peers)?;
 
     let pid_path = crate::infrastructure::paths::daemon_pid_path(&workspace)?;
     let socket_path = crate::infrastructure::paths::daemon_socket_path(&workspace)?;

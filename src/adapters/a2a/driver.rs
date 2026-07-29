@@ -224,7 +224,7 @@ impl A2aDelegationRuntime {
         message: serde_json::Value,
         cancel: CancellationToken,
     ) -> Result<serde_json::Value, DelegationError> {
-        let peer = peer_id_for(&spec);
+        let peer = spec.resolved_identity();
         // Admission signal only — stamped into the dispatch log, never used to
         // branch on content (R-D).
         tracing::info!(peer = %spec.id, ?trust, "dispatching A2A delegation");
@@ -305,7 +305,7 @@ impl A2aDelegationRuntime {
         let Some((_peer_str, task_id)) = parse_a2a_node_id(node_id) else {
             return Ok(());
         };
-        let peer = peer_id_for(spec);
+        let peer = spec.resolved_identity();
         let value = match transport.tasks_get(&task_id).await {
             Ok(value) => value,
             Err(error) => {
@@ -669,22 +669,6 @@ fn project_rap_to_node_state(state: RapTaskState) -> Option<NodeState> {
         RapTaskState::Canceled => Some(NodeState::Cancelled),
         RapTaskState::InputRequired | RapTaskState::AuthRequired => None,
     }
-}
-
-/// Derive an observability `PeerId`. A `Verified` peer's pinned Ed25519 key is
-/// its real identity; an `Unverified` peer has no crypto identity, so a stable
-/// (non-cryptographic) id is derived from the operator-configured peer id purely
-/// so room events have a consistent key.
-fn peer_id_for(spec: &A2aPeerSpec) -> PeerId {
-    if let Some(pinned) = spec.pinned_key.as_ref()
-        && let Ok(bytes) = URL_SAFE_NO_PAD.decode(pinned.x.as_bytes())
-        && bytes.len() == 32
-        && let Ok(peer_id) = PeerId::from_public_key(&bytes)
-    {
-        return peer_id;
-    }
-    let digest = Sha256::digest(spec.id.as_bytes());
-    PeerId::from_public_key(&digest).expect("sha256 digest is exactly 32 bytes")
 }
 
 fn content_hash(value: &serde_json::Value) -> ContentHash {
@@ -1335,7 +1319,7 @@ mod tests {
         let (rt, _tree, _rx) = runtime();
         let node_id = mint_node_id("planets", "task-1");
         let _control = rt.materialize(&node_id).await.unwrap();
-        let peer = peer_id_for(&spec("planets", false));
+        let peer = spec("planets", false).resolved_identity();
         let transport = Scripted::new(&["completed"]);
         let first =
             TaskSnapshot::from_result(transport.message_send(serde_json::json!({})).await.unwrap())

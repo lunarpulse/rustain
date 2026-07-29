@@ -572,13 +572,14 @@ pub async fn run() -> Result<()> {
             .into_iter()
             .map(|(id, provider)| (id, Some(provider)))
             .collect();
-        // Story 13.2b: resolve MCP servers from active profile (mirrors `providers` threading).
-        let mcp_servers = {
+        // Resolve every profile-backed doctor input once so the policy check sees
+        // the same effective A2A peer set as runtime composition.
+        let (mcp_servers, a2a_peers) = {
             use crate::domain::ports::ProfileResolver;
             profile_resolver_swap
                 .load()
                 .resolve_active()
-                .map(|p| p.mcp_servers.clone())
+                .map(|profile| (profile.mcp_servers.clone(), profile.a2a_peers.clone()))
                 .unwrap_or_default()
         };
         return crate::adapters::cli::doctor::run_doctor(
@@ -587,6 +588,7 @@ pub async fn run() -> Result<()> {
             json,
             provider_pairs,
             mcp_servers,
+            a2a_peers,
         )
         .await
         .map_err(|e| {
@@ -920,24 +922,28 @@ pub async fn run() -> Result<()> {
         use crate::domain::models::profile::PortDimension;
         let workspace = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
-        let resolved_selection = profile_resolver_arc.resolve_active().map(|r| r.selection);
+        let resolved_profile = profile_resolver_arc.resolve_active();
+        let resolved_selection = resolved_profile.as_ref().map(|profile| &profile.selection);
         let memory_adapter = resolved_selection
-            .as_ref()
-            .and_then(|sel| {
-                sel.dimensions
+            .and_then(|selection| {
+                selection
+                    .dimensions
                     .get(&PortDimension::Memory)
-                    .map(|a| a.adapter.clone())
+                    .map(|adapter| adapter.adapter.clone())
             })
             .unwrap_or_else(|| "noop".to_string());
-        // Story 12.2b — the daemon composes its full turn runtime (lazily) from the
-        // active profile selection, so thread it through (not just the memory name).
-        let selection = resolved_selection.unwrap_or_default();
+        let selection = resolved_selection.cloned().unwrap_or_default();
+        let a2a_peers = resolved_profile
+            .as_ref()
+            .map(|profile| profile.a2a_peers.clone())
+            .unwrap_or_default();
         return crate::adapters::daemon::run_daemon(
             action,
             workspace,
             app_config,
             memory_adapter,
             selection,
+            a2a_peers,
             cli.serve_a2a.clone(),
         )
         .await

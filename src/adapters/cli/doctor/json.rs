@@ -7,7 +7,9 @@ use serde::Serialize;
 
 use super::{CheckResult, CheckStatus};
 
-pub const DOCTOR_SCHEMA_VERSION: &str = "1.2";
+/// Bumped to 1.3 by Story 18.3b: `CheckResultOut` gained the optional `detail`
+/// object carrying the NFR66 policy derivation.
+pub const DOCTOR_SCHEMA_VERSION: &str = "1.3";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +31,10 @@ pub struct CheckResultOut {
     pub fix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
+    /// Structured detail a check chose to publish (Story 18.3b — the NFR66
+    /// policy derivation). Absent for every check that publishes none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +64,7 @@ impl From<&CheckResult> for CheckResultOut {
             message: r.message.clone(),
             fix: r.fix.clone(),
             latency_ms: r.latency.map(|d| d.as_millis() as u64),
+            detail: None,
         }
     }
 }
@@ -95,5 +102,21 @@ impl DoctorReport {
                 total: results.len(),
             },
         }
+    }
+
+    /// Build a report, attaching each check's structured detail.
+    ///
+    /// `details` is positional against `results` — both come from the same
+    /// `build_check_list` order, so a mismatch would mean the caller zipped two
+    /// unrelated lists.
+    pub fn from_results_with_detail(
+        results: &[CheckResult],
+        details: &[Option<serde_json::Value>],
+    ) -> Self {
+        let mut report = Self::from_results(results);
+        for (check, detail) in report.checks.iter_mut().zip(details) {
+            check.detail = detail.clone();
+        }
+        report
     }
 }

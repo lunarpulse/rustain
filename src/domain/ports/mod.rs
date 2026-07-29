@@ -22,6 +22,8 @@ mod channel;
 mod clipboard;
 mod config_store;
 #[allow(unused_imports)]
+mod consent_projection;
+#[allow(unused_imports)]
 mod context;
 #[allow(unused_imports)]
 mod context_assembler;
@@ -102,6 +104,7 @@ pub use catalog_observer::{ObserverError, SubscriptionHandle, SubscriptionId};
 pub use channel::ChannelPort;
 pub use clipboard::ClipboardPort;
 pub use config_store::ConfigStorePort;
+pub use consent_projection::{ConsentProjectionQuery, ConsentState};
 pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;

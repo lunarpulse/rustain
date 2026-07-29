@@ -75,6 +75,7 @@ pub mod subagent_view;
 pub mod tab;
 pub mod taint;
 pub mod task_handle;
+pub mod team_policy;
 pub mod tool_call;
 pub mod tool_descriptor;
 pub mod tool_policy;
@@ -94,6 +95,7 @@ pub mod waiting_hazard;
 #[allow(unused_imports)]
 pub use a2a_peer_spec::{
     A2aPeerSource, A2aPeerSpec, A2aPeerSpecError, PinnedKey, PinnedKeyAlgorithm, TrustTier,
+    alias_pseudonym,
 };
 pub use agent::{
     ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
@@ -283,6 +285,14 @@ pub use subagent_envelope::{SubagentEnvelope, SubagentEvent};
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]
 pub use taint::{ProvenanceTag, TaintDecision};
+#[allow(unused_imports)]
+pub use team_policy::{
+    DEFAULT_DIGEST_INTERVAL_MINUTES, DeferredKey, EffectivePolicy, INDIVIDUAL_POLICY_FILE,
+    IndividualDefaults, IndividualPolicy, MSGTYPE_DEFERRAL, MessageTypeOverride,
+    NotificationUrgency, PolicySource, Resolved, ResponseMode, SenderBinding, SenderIdentity,
+    SenderIdentityConflict, SenderOverride, SenderPolicy, SharingBreadth, TEAM_POLICY_FILE,
+    TeamDefaults, TeamOverrides, TeamPolicy, TeamTransparency, TransparencyInvariant,
+};
 #[allow(unused_imports)]
 pub use tool_call::{
     ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,

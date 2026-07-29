@@ -91,8 +91,32 @@ fn a2a_feature_is_off_by_default_and_declares_the_documented_fallback() {
 #[test]
 fn only_config_parsing_compiles_without_the_a2a_feature() {
     let module = source("src/adapters/a2a/mod.rs");
-    assert!(module.contains("pub mod config;"));
-    assert!(!module.contains("#[cfg(feature = \"a2a\")]\npub mod config;"));
+
+    // Two modules are deliberately ungated, and each has a production consumer
+    // that would not compile otherwise.
+    //
+    // `config`: startup must reject configured peers loudly rather than silently
+    // omit them (this test's original subject).
+    //
+    // `transparency`: Story 18.3 made `TransparencySink` the mandatory recorder for
+    // every live verified peer frame, and the RAP path that holds it is ungated core
+    // (ADR-18-3-01 D3 — when two adapters must meet, they meet at a domain port).
+    // It is named ungated at `infrastructure/startup.rs:978` and
+    // `adapters/daemon/mod.rs:486,646`. 18.3 widened the feature-off surface here and
+    // left this list unchanged, so the list — not the module — was stale; it failed
+    // on disk at `530dbd2` and is corrected by Story 18.3b rather than relabelled.
+    for ungated in ["config", "transparency"] {
+        assert!(
+            module.contains(&format!("pub mod {ungated};")),
+            "{ungated} must exist"
+        );
+        assert!(
+            !module.contains(&format!("#[cfg(feature = \"a2a\")]\npub mod {ungated};")),
+            "{ungated} must stay UNGATED — it has ungated production consumers, and gating it \
+             would break the feature-off daemon build"
+        );
+    }
+
     for adapter in [
         "admission",
         "auth",
@@ -106,7 +130,6 @@ fn only_config_parsing_compiles_without_the_a2a_feature() {
         "provider",
         "server",
         "tls",
-        "transparency",
     ] {
         assert!(
             module.contains(&format!("#[cfg(feature = \"a2a\")]\npub mod {adapter};")),
