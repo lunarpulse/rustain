@@ -2152,13 +2152,18 @@ impl AttachServer {
                 self.blocked_waiting.fetch_add(1, Ordering::SeqCst);
                 record_blocked_action(&self.conversation, &self.core.storage, "a2a/sender-consent")
                     .await;
-                let _ = self.domain_tx.send(AppEvent::SystemNotice {
-                    conversation_id: None,
-                    level: crate::domain::models::NoticeLevel::Warning,
-                    message:
-                        "Sender consent card admission failed: the attached writer queue is full."
-                            .to_owned(),
-                });
+                crate::domain::ports::EventEmitter::emit(
+                    &crate::infrastructure::runtime::event_bus::ChannelEmitter::new(
+                        self.domain_tx.clone(),
+                    ),
+                    AppEvent::SystemNotice {
+                        conversation_id: None,
+                        level: crate::domain::models::NoticeLevel::Warning,
+                        message:
+                            "Sender consent card admission failed: the attached writer queue is full."
+                                .to_owned(),
+                    },
+                );
             }
         }
     }
@@ -2440,6 +2445,7 @@ async fn run_approval_gate(
         Mutex<std::collections::HashMap<crate::domain::models::RequestId, DaemonFrame>>,
     >,
 ) {
+    let event_emitter = crate::infrastructure::runtime::event_bus::ChannelEmitter::new(domain_tx);
     loop {
         match rx.recv().await {
             Ok(ApprovalRuntimeEvent::Requested {
@@ -2477,12 +2483,15 @@ async fn run_approval_gate(
                                 .await;
                             blocked.fetch_add(1, Ordering::SeqCst);
                             record_blocked_action(&conversation, &storage, &tool).await;
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
-                                conversation_id: None,
-                                level: crate::domain::models::NoticeLevel::Warning,
-                                message: "Sender consent card admission failed: the attached writer queue is full."
-                                    .to_owned(),
-                            });
+                            crate::domain::ports::EventEmitter::emit(
+                                &event_emitter,
+                                AppEvent::SystemNotice {
+                                    conversation_id: None,
+                                    level: crate::domain::models::NoticeLevel::Warning,
+                                    message: "Sender consent card admission failed: the attached writer queue is full."
+                                        .to_owned(),
+                                },
+                            );
                             tracing::warn!(?error, "sender consent failed: writer queue full");
                         }
                     } else {
