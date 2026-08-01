@@ -308,30 +308,150 @@ pub(crate) async fn team_command(
     cmd_arg: Option<&str>,
     app_state: &AppState,
 ) {
-    use crate::adapters::tui::handlers::team_command as handler;
+    use crate::adapters::tui::handlers::team_command::{self as handler, TeamCommandArgs};
 
-    let args = match handler::parse_team_command(cmd_arg) {
-        Ok(Some(args)) => args,
-        // `parse_team_command` only returns `Ok(None)` for a non-`log`
-        // invocation, which the grammar currently cannot produce.
-        Ok(None) => return,
+    let command = match handler::parse_team_command(cmd_arg) {
+        Ok(command) => command,
         Err(message) => {
-            state.needs_redraw = true;
-            let _ =
-                app_state
-                    .event_bus
-                    .emit_domain(crate::domain::events::AppEvent::SystemNotice {
-                        conversation_id: Some(conversation_id.to_owned()),
-                        level: crate::domain::models::NoticeLevel::Warning,
-                        message,
-                    });
+            emit_team_warning(state, conversation_id, app_state, message);
             return;
         }
     };
-    let input = team_log_input(app_state, &args).await;
-    for event in handler::team_command(state, conversation_id, &args, input) {
-        let _ = app_state.event_bus.emit_domain(event);
+    match command {
+        TeamCommandArgs::Log(args) => {
+            let input = team_log_input(app_state, &args).await;
+            for event in handler::team_command(state, conversation_id, &args, input) {
+                let _ = app_state.event_bus.emit_domain(event);
+            }
+        }
+        TeamCommandArgs::Trust(target) => {
+            match change_sender_consent(app_state, &target, true).await {
+                Ok(message) => handler::show_team_status(state, message),
+                Err(message) => emit_team_warning(state, conversation_id, app_state, message),
+            }
+        }
+        TeamCommandArgs::Untrust(target) => {
+            match change_sender_consent(app_state, &target, false).await {
+                Ok(message) => handler::show_team_status(state, message),
+                Err(message) => emit_team_warning(state, conversation_id, app_state, message),
+            }
+        }
+        TeamCommandArgs::Status => match load_team_status(app_state).await {
+            Ok(message) => handler::show_team_status(state, message),
+            Err(message) => emit_team_warning(state, conversation_id, app_state, message),
+        },
     }
+}
+
+fn emit_team_warning(
+    state: &mut TuiState,
+    conversation_id: &str,
+    app_state: &AppState,
+    message: String,
+) {
+    state.needs_redraw = true;
+    let _ = app_state
+        .event_bus
+        .emit_domain(crate::domain::events::AppEvent::SystemNotice {
+            conversation_id: Some(conversation_id.to_owned()),
+            level: crate::domain::models::NoticeLevel::Warning,
+            message,
+        });
+}
+
+async fn change_sender_consent(
+    app_state: &AppState,
+    target: &str,
+    trust: bool,
+) -> Result<String, String> {
+    let workspace = &app_state.compose_snapshot.workspace_path;
+    let peers = &app_state.compose_snapshot.a2a_peers;
+    let (message, event) = persist_sender_consent(
+        workspace,
+        peers,
+        target,
+        trust,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await?;
+    if let Some(event) = event {
+        let _ = app_state
+            .event_bus
+            .emit_domain(crate::domain::events::AppEvent::DomainEvent(event.into()));
+    }
+    Ok(message)
+}
+
+async fn persist_sender_consent(
+    workspace: &std::path::Path,
+    peers: &[crate::domain::models::A2aPeerSpec],
+    target: &str,
+    trust: bool,
+    now: i64,
+) -> Result<(String, Option<crate::domain::models::RoomEvent>), String> {
+    use crate::domain::ports::ConsentProjectionQuery;
+
+    let sender = crate::adapters::tui::handlers::team_command::resolve_peer_target(target, peers)?;
+    let projection = crate::adapters::policy::JournalConsentProjection::load_workspace(workspace)
+        .await
+        .map_err(|error| error.to_string())?;
+    let current = projection.consent_for(&sender);
+    if trust && current == crate::domain::ports::ConsentState::Trusted {
+        return Ok((
+            format!("{target} ({sender}) is already trusted; no new grant was recorded."),
+            None,
+        ));
+    }
+    if !trust && current != crate::domain::ports::ConsentState::Trusted {
+        return Ok((
+            format!("No active grant for {target} ({sender}); nothing changed."),
+            None,
+        ));
+    }
+
+    let event = if trust {
+        crate::domain::models::RoomEvent::ConsentGranted {
+            sender: Some(sender.clone()),
+            granted_at: now,
+        }
+    } else {
+        crate::domain::models::RoomEvent::ConsentRevoked {
+            sender: Some(sender.clone()),
+            revoked_at: now,
+        }
+    };
+    let journal =
+        crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+    journal
+        .append_room(event.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let message = if trust {
+        format!("Trusted {target} ({sender}). Future tasks from this sender may proceed.")
+    } else {
+        format!("Revoked trust for {target} ({sender}). Future tasks require consent.")
+    };
+    Ok((message, Some(event)))
+}
+
+async fn load_team_status(app_state: &AppState) -> Result<String, String> {
+    let workspace = &app_state.compose_snapshot.workspace_path;
+    let peers = &app_state.compose_snapshot.a2a_peers;
+    let projection = crate::adapters::policy::JournalConsentProjection::load_workspace(workspace)
+        .await
+        .map_err(|error| error.to_string())?;
+    let (policy, _) =
+        crate::adapters::policy::resolve_workspace_policy(workspace, peers, &projection)
+            .map_err(|error| error.to_string())?;
+    Ok(
+        crate::adapters::tui::handlers::team_command::render_team_status(
+            &policy,
+            &projection,
+            peers,
+        ),
+    )
 }
 /// One-call shell for the shipped `/memory consolidate|forget` dispatch paths.
 ///
@@ -436,4 +556,89 @@ pub(crate) async fn memory_command(
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::ports::{ConsentProjectionQuery, ConsentState, RoomJournalReader};
+
+    #[tokio::test]
+    async fn trust_and_untrust_are_durable_idempotent_and_visible_in_team_log() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let sender = crate::domain::models::PeerId::from_public_key(&[11u8; 32]).unwrap();
+        let target = sender.as_str();
+
+        let (_, grant) = persist_sender_consent(workspace.path(), &[], target, true, 10)
+            .await
+            .unwrap();
+        assert!(matches!(
+            grant,
+            Some(crate::domain::models::RoomEvent::ConsentGranted { .. })
+        ));
+        let projection =
+            crate::adapters::policy::JournalConsentProjection::load_workspace(workspace.path())
+                .await
+                .unwrap();
+        assert_eq!(projection.consent_for(&sender), ConsentState::Trusted);
+
+        let (_, duplicate) = persist_sender_consent(workspace.path(), &[], target, true, 11)
+            .await
+            .unwrap();
+        assert!(duplicate.is_none());
+
+        let (_, revoke) = persist_sender_consent(workspace.path(), &[], target, false, 12)
+            .await
+            .unwrap();
+        assert!(matches!(
+            revoke,
+            Some(crate::domain::models::RoomEvent::ConsentRevoked { .. })
+        ));
+        let (_, duplicate_revoke) =
+            persist_sender_consent(workspace.path(), &[], target, false, 13)
+                .await
+                .unwrap();
+        assert!(duplicate_revoke.is_none());
+
+        let projection =
+            crate::adapters::policy::JournalConsentProjection::load_workspace(workspace.path())
+                .await
+                .unwrap();
+        assert_eq!(projection.consent_for(&sender), ConsentState::Revoked);
+        let reader =
+            crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                workspace.path(),
+            );
+        let entries = reader.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 2);
+        let rows = crate::domain::services::transparency::fold_transparency(&entries);
+        assert!(matches!(
+            rows.as_slice(),
+            [
+                crate::domain::services::transparency::TransparencyRow {
+                    kind: crate::domain::services::transparency::TransparencyKind::ConsentGranted,
+                    ..
+                },
+                crate::domain::services::transparency::TransparencyRow {
+                    kind: crate::domain::services::transparency::TransparencyKind::ConsentRevoked,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[tokio::test]
+    async fn untrust_unknown_sender_is_a_noop_without_creating_a_journal() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let sender = crate::domain::models::PeerId::from_public_key(&[12u8; 32]).unwrap();
+
+        let (message, event) =
+            persist_sender_consent(workspace.path(), &[], sender.as_str(), false, 20)
+                .await
+                .unwrap();
+
+        assert!(event.is_none());
+        assert!(message.contains("nothing changed"));
+        assert!(!workspace.path().join(".rustain").exists());
+    }
 }

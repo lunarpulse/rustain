@@ -322,6 +322,25 @@ pub enum RoomEvent {
         agent_composed: bool,
         sent: bool,
     },
+    /// Durable operator grant allowing one authenticated sender to bypass the
+    /// pending-consent gate. Duplicate grants are replay-idempotent.
+    ConsentGranted {
+        /// Stable authenticated sender identity. A missing value from a
+        /// forward-written or malformed record fails closed during projection.
+        #[serde(default)]
+        sender: Option<PeerId>,
+        #[serde(default)]
+        granted_at: i64,
+    },
+    /// Durable operator revocation of a previously granted sender.
+    ConsentRevoked {
+        /// Stable authenticated sender identity. Missing and never-granted
+        /// senders are projection no-ops; revocation never manufactures trust.
+        #[serde(default)]
+        sender: Option<PeerId>,
+        #[serde(default)]
+        revoked_at: i64,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -588,7 +607,9 @@ impl OrchestrationRoom {
             }
             RoomEvent::PeerDisclosure { .. }
             | RoomEvent::AutoResponseRetracted { .. }
-            | RoomEvent::PeerDraftResolved { .. } => {}
+            | RoomEvent::PeerDraftResolved { .. }
+            | RoomEvent::ConsentGranted { .. }
+            | RoomEvent::ConsentRevoked { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

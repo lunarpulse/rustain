@@ -1,35 +1,9 @@
-//! The effective-consent projection the NFR66 explainer consumes (Story 18.3b).
+//! Effective-consent projection consumed by the NFR66 policy explainer.
 //!
-//! # Why this port exists in the story that cannot fill it
-//!
-//! `ux-design-specification-addendum-peer-policy.md` makes "doctor surfaces
-//! effective consent beside TOML policy" a cross-story contract and resolves the
-//! ordering in its **O4**: *18-3c defines the projection and its query; 18-3b's
-//! NFR66 check consumes it. If 18-3b lands first, its explainer ships a stub that
-//! 18-3c fills.* 18-3b landed first.
-//!
-//! # Why this is not an inert seam
-//!
-//! A port with no consumer proves nothing — `ContentBlockType::AutoSentMarker` has
-//! sat unused since Sprint 0 and is the tree's canonical example. This port ships
-//! **with its consumer in the same story**: `PolicyExplainerCheck` queries it and
-//! renders a consent line per sender it knows about. The precedent is 18-3's own
-//! `PeerInteractionRecorder`, introduced alongside its consumer.
-//!
-//! # Why the empty implementation must announce itself
-//!
-//! [`EmptyConsentProjection`] returns no senders, because no journaled grants
-//! exist yet: 18-3 recorded `Accepted`/`Refused` per *delivery* via
-//! `PeerInteractionRecorder`, and `RoomEvent::PeerDisclosure` is content
-//! disclosure, not a grant. The explainer therefore emits an explicit
-//! `no journaled consent grants recorded` line rather than nothing at all.
-//! **Silence is indistinguishable from absence:** when 18-3c fills the projection,
-//! grants would otherwise appear from nowhere — a policy source that materialises
-//! without ever having been declared. Being observably empty is what makes the
-//! stub conformant, because a mutant that removes the line can be turned RED.
-//!
-//! `DF-18-3b-CONSENT-PROJECTION` — the `ConsentGranted`/`ConsentRevoked` events and
-//! the replay-folded projection are 18.3c's. **Trigger-story: 18.3c.**
+//! The query remains synchronous and effect-free: adapters fold the durable
+//! room journal before composition and update their cached projection only
+//! after successful consent appends. This keeps journal I/O out of the domain
+//! resolver and the delivery hot path.
 
 use crate::domain::models::PeerId;
 

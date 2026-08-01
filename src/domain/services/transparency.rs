@@ -92,6 +92,10 @@ pub enum TransparencyKind {
     StatusQueried,
     /// Content was actually handed back to the peer.
     Disclosed,
+    /// Operator granted durable consent to one authenticated sender.
+    ConsentGranted,
+    /// Operator revoked durable consent from one authenticated sender.
+    ConsentRevoked,
     /// A record this build does not understand. Rendered, never dropped
     /// (UX-DR-ROOM-01).
     Unknown,
@@ -107,6 +111,8 @@ impl TransparencyKind {
             Self::AwaitingApproval => "⏸",
             Self::StatusQueried => "?",
             Self::Disclosed => "⇢",
+            Self::ConsentGranted => "+",
+            Self::ConsentRevoked => "−",
             _ => "·",
         }
     }
@@ -119,6 +125,8 @@ impl TransparencyKind {
             Self::AwaitingApproval => "awaiting-approval",
             Self::StatusQueried => "status-query",
             Self::Disclosed => "disclosed",
+            Self::ConsentGranted => "consent-granted",
+            Self::ConsentRevoked => "consent-revoked",
             _ => "unknown",
         }
     }
@@ -288,6 +296,26 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
                 .unwrap_or_else(|| "unknown-peer".to_owned()),
             task.clone(),
             format!("disclosed result to peer ({disclosed_bytes} bytes)"),
+        ),
+        RoomEvent::ConsentGranted { sender, .. } => (
+            TransparencyKind::ConsentGranted,
+            Direction::Unknown,
+            sender
+                .as_ref()
+                .map(|sender| sender.as_str().to_owned())
+                .unwrap_or_else(|| "unknown-peer".to_owned()),
+            None,
+            "operator granted durable sender consent".to_owned(),
+        ),
+        RoomEvent::ConsentRevoked { sender, .. } => (
+            TransparencyKind::ConsentRevoked,
+            Direction::Unknown,
+            sender
+                .as_ref()
+                .map(|sender| sender.as_str().to_owned())
+                .unwrap_or_else(|| "unknown-peer".to_owned()),
+            None,
+            "operator revoked durable sender consent".to_owned(),
         ),
         // Retractions mutate the prior projected row in `fold_transparency`;
         // they never create a second visible row.

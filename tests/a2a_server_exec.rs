@@ -489,6 +489,7 @@ async fn harness_full_mode(
         delivery,
         journal.clone(),
         node_journal.clone(),
+        None,
     );
 
     let registry = Arc::new(CapabilityRegistry::new(None));

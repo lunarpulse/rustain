@@ -80,7 +80,23 @@ impl HealthCheck for PolicyExplainerCheck {
             },
         };
 
-        let projection = crate::adapters::policy::EmptyConsentProjection;
+        let projection =
+            match crate::adapters::policy::JournalConsentProjection::load_workspace(&workspace)
+                .await
+            {
+                Ok(projection) => projection,
+                Err(error) => {
+                    return self.result(
+                        CheckStatus::Fail,
+                        format!("consent journal did not load: {error}"),
+                        Some(
+                            "Repair or restore the workspace room journal before trusting the \
+                             reported effective consent."
+                                .to_string(),
+                        ),
+                    );
+                }
+            };
         let (policy, explanation) = match crate::adapters::policy::resolve_workspace_policy(
             &workspace,
             &self.peers,
@@ -264,5 +280,62 @@ mod tests {
         );
         assert_eq!(detail["journal_projection_empty"], false);
         assert!(detail["sharing_breadth"]["source_file"].is_null());
+    }
+
+    #[tokio::test]
+    async fn doctor_reads_trusted_then_revoked_state_from_the_real_journal() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let sender = crate::domain::models::PeerId::from_public_key(&[7u8; 32]).unwrap();
+        journal
+            .append_room(crate::domain::models::RoomEvent::ConsentGranted {
+                sender: Some(sender.clone()),
+                granted_at: 10,
+            })
+            .await
+            .unwrap();
+
+        let trusted = PolicyExplainerCheck::new(Some(workspace.path().to_path_buf()), Vec::new());
+        let result = trusted.run().await;
+        assert_eq!(result.status, CheckStatus::Info);
+        assert_eq!(
+            trusted.machine_detail().unwrap()["consent"][0]["state"],
+            "trusted"
+        );
+
+        journal
+            .append_room(crate::domain::models::RoomEvent::ConsentRevoked {
+                sender: Some(sender),
+                revoked_at: 20,
+            })
+            .await
+            .unwrap();
+        let revoked = PolicyExplainerCheck::new(Some(workspace.path().to_path_buf()), Vec::new());
+        let result = revoked.run().await;
+        assert_eq!(result.status, CheckStatus::Info);
+        assert_eq!(
+            revoked.machine_detail().unwrap()["consent"][0]["state"],
+            "revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_missing_journal_stays_explicitly_empty_without_creating_files() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let check = PolicyExplainerCheck::new(Some(workspace.path().to_path_buf()), Vec::new());
+
+        let result = check.run().await;
+
+        assert_eq!(result.status, CheckStatus::Info);
+        assert!(
+            result
+                .message
+                .contains("no journaled consent grants recorded")
+        );
+        assert!(!workspace.path().join(".rustain").exists());
     }
 }

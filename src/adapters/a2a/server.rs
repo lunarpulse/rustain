@@ -864,7 +864,7 @@ async fn setup_task(
     peer_id: PeerId,
     needs_approval: bool,
 ) -> Result<serde_json::Value, String> {
-    if needs_approval {
+    if needs_approval || runtime.enforces_sender_consent() {
         let ticket = match runtime.request_admission_approval(&peer_id, &text).await {
             Ok(ticket) => ticket,
             Err(error) => {
@@ -908,15 +908,17 @@ async fn setup_task(
 
         // Policy resolved it without a human. Still race cancellation so a
         // request canceled during setup cannot be registered after the fact.
-        let granted = tokio::select! {
+        let decision = tokio::select! {
             biased;
             _ = task.cancel.cancelled() => {
                 terminalize_canceled(&state, &task, &peer_id, None).await;
                 return task_projection(&state, &task, &peer_id).await;
             }
-            decision = ticket.decision => decision.unwrap_or(false),
+            decision = ticket.decision => decision.unwrap_or(
+                crate::domain::ports::InboundApprovalDecision::Decline
+            ),
         };
-        if !granted {
+        if decision == crate::domain::ports::InboundApprovalDecision::Decline {
             let reason = "admission policy declined this task".to_owned();
             let _ = state
                 .transparency
@@ -1031,17 +1033,19 @@ async fn watch_pending_approval(
 ) {
     // Cancellation wins an already-ready grant too. Dropping the ticket receiver
     // on this branch withdraws this task's interest in the operator decision.
-    let granted = tokio::select! {
+    let decision = tokio::select! {
         biased;
         _ = task.cancel.cancelled() => {
             terminalize_canceled(&state, &task, &peer_id, Some(&pending)).await;
             return;
         }
-        decision = ticket.decision => decision.unwrap_or(false),
+        decision = ticket.decision => decision.unwrap_or(
+            crate::domain::ports::InboundApprovalDecision::Decline
+        ),
     };
 
     task.set_pending_auth(PendingAuth::None).await;
-    if !granted {
+    if decision == crate::domain::ports::InboundApprovalDecision::Decline {
         let reason = "the operator declined this task".to_owned();
         task.set_detail(reason.clone()).await;
         task.advance(RapTaskState::Rejected).await;

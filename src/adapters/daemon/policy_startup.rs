@@ -53,12 +53,12 @@ pub(crate) const AUTO_AUTHORITY_WARNING: &str = "server.admission=\"allow\" auth
 /// Returns `Err` only when a policy file is **malformed**; a conflict is logged and
 /// start proceeds.
 pub(crate) fn validate_startup_policies(
-    workspace: &Path,
+    workspace: &std::path::Path,
     peers: &[A2aPeerSpec],
+    projection: &dyn crate::domain::ports::ConsentProjectionQuery,
 ) -> Result<EffectivePolicy> {
-    let projection = crate::adapters::policy::EmptyConsentProjection;
     let (policy, explanation) =
-        crate::adapters::policy::resolve_workspace_policy(workspace, peers, &projection)?;
+        crate::adapters::policy::resolve_workspace_policy(workspace, peers, projection)?;
     report_to_log(&explanation);
     tracing::info!("{MESSAGE_TYPE_DEFERRAL_NOTICE}");
     Ok(policy)
@@ -126,8 +126,12 @@ mod tests {
             TEAM_POLICY_FILE,
             "[team.defaults]\nnotification = \"immediate\"\n",
         );
-        let policy = validate_startup_policies(dir.path(), &[])
-            .expect("a conflict must not stop the daemon");
+        let policy = validate_startup_policies(
+            dir.path(),
+            &[],
+            &crate::adapters::policy::EmptyConsentProjection,
+        )
+        .expect("a conflict must not stop the daemon");
         assert_eq!(policy.urgency.value, NotificationUrgency::Immediate);
     }
 
@@ -137,8 +141,12 @@ mod tests {
     fn startup_validation_fails_on_a_malformed_file() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), INDIVIDUAL_POLICY_FILE, "not = = toml");
-        let error = validate_startup_policies(dir.path(), &[])
-            .expect_err("a malformed policy file must stop startup");
+        let error = validate_startup_policies(
+            dir.path(),
+            &[],
+            &crate::adapters::policy::EmptyConsentProjection,
+        )
+        .expect_err("a malformed policy file must stop startup");
         assert!(
             error.to_string().contains(INDIVIDUAL_POLICY_FILE),
             "{error}"
@@ -150,7 +158,12 @@ mod tests {
     #[test]
     fn startup_validation_succeeds_with_no_policy_files() {
         let dir = tempfile::tempdir().unwrap();
-        let policy = validate_startup_policies(dir.path(), &[]).expect("no files is not an error");
+        let policy = validate_startup_policies(
+            dir.path(),
+            &[],
+            &crate::adapters::policy::EmptyConsentProjection,
+        )
+        .expect("no files is not an error");
         assert_eq!(
             policy.automation.value,
             crate::domain::models::ResponseMode::NotifyAndWait
@@ -164,8 +177,12 @@ mod tests {
         use crate::domain::models::ResponseMode;
 
         let dir = tempfile::tempdir().unwrap();
-        let mut policy =
-            validate_startup_policies(dir.path(), &[]).expect("default policy resolves");
+        let mut policy = validate_startup_policies(
+            dir.path(),
+            &[],
+            &crate::adapters::policy::EmptyConsentProjection,
+        )
+        .expect("default policy resolves");
         policy.automation.value = ResponseMode::NotifyAndAuto;
         assert!(should_warn_auto_authority_widening(
             A2aAdmissionPolicy::Allow,

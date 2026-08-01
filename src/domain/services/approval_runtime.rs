@@ -264,7 +264,9 @@ impl ApprovalRuntime {
             }
         }
 
-        {
+        let sender_consent_request =
+            tool == "a2a/sender-consent" && matches!(&source, ApprovalSource::RemotePeer { .. });
+        if !sender_consent_request {
             let mut set = self.session.write().await;
             if set.is_auto_approved(&tool, server_id, path_hint) {
                 let (tx, rx) = oneshot::channel();
@@ -312,9 +314,24 @@ impl ApprovalRuntime {
     pub async fn resolve(&self, id: &RequestId, outcome: ApprovalOutcome) {
         let record = self.pending.write().await.remove(id);
         if let Some(record) = record {
+            // `[a]` on the sender-consent card is persisted by the consent
+            // manager as a peer-scoped journal grant. It must not leak into
+            // ApprovalRuntime's tool-wide session/persistence policy.
+            let session_outcome = if record.request.tool == "a2a/sender-consent"
+                && matches!(&record.request.source, ApprovalSource::RemotePeer { .. })
+                && matches!(
+                    &outcome,
+                    ApprovalOutcome::AlwaysTool { .. }
+                        | ApprovalOutcome::AlwaysServer { .. }
+                        | ApprovalOutcome::AlwaysAndSave { .. }
+                ) {
+                ApprovalOutcome::Once
+            } else {
+                outcome.clone()
+            };
             {
                 let mut session = self.session.write().await;
-                match &outcome {
+                match &session_outcome {
                     ApprovalOutcome::Once => {}
                     ApprovalOutcome::AlwaysTool { tool_name } => {
                         session.always_tools.insert(tool_name.clone());

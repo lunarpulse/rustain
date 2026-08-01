@@ -48,6 +48,17 @@ pub struct InboundPeerTask {
     pub response_policy: PeerResponsePolicy,
 }
 
+/// Operator decision for one pending sender-consent card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundApprovalDecision {
+    /// Release the tasks currently waiting without creating durable trust.
+    AllowOnce,
+    /// Durably trust the sender, then release every waiting task.
+    AllowAlways,
+    /// Decline every task currently waiting for this sender.
+    Decline,
+}
+
 /// Outcome of raising an admission approval without waiting for it.
 pub struct InboundApprovalTicket {
     /// `true` when a *human* decision is outstanding. `false` means policy
@@ -56,8 +67,8 @@ pub struct InboundApprovalTicket {
     /// This flag is the whole point of the type: it is what lets the caller
     /// answer `auth-required` instead of holding the request open.
     pub pending: bool,
-    /// Resolves to `true` on grant, `false` on decline or cancellation.
-    pub decision: oneshot::Receiver<bool>,
+    /// Resolution applied to every task grouped under this sender's card.
+    pub decision: oneshot::Receiver<InboundApprovalDecision>,
 }
 
 impl std::fmt::Debug for InboundApprovalTicket {
@@ -130,6 +141,15 @@ pub trait InboundPeerRuntime: Send + Sync {
         task: InboundPeerTask,
         cancel: CancellationToken,
     ) -> Result<watch::Receiver<NodeState>, InboundPeerError>;
+
+    /// Whether this runtime has the durable sender-consent gate composed.
+    ///
+    /// The default preserves lightweight test and discovery runtimes. Production
+    /// daemon composition returns `true`, making coarse listener `allow` policy
+    /// insufficient to bypass per-sender consent.
+    fn enforces_sender_consent(&self) -> bool {
+        false
+    }
 
     /// Raise a human admission approval for `peer_id` **without awaiting it**.
     ///

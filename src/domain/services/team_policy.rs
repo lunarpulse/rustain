@@ -738,10 +738,11 @@ pub fn explain_effective_policy(
             detail: "effective consent per sender: no journaled consent grants recorded — \
                      TOML policy precedence is the only live source"
                 .to_owned(),
-            guidance: Some(format!(
-                "The consent projection is a stub in this version ({CONSENT_DEFERRAL}); grants \
-                 and revocations are journaled by a later story."
-            )),
+            guidance: Some(
+                "Grant a sender with `/team trust <alias-or-peer-id>`; revocations remain \
+                 visible as journaled state."
+                    .to_owned(),
+            ),
             notice: PolicyNotice::Info,
         });
     }

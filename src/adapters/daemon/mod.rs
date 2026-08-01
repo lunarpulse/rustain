@@ -23,6 +23,8 @@ use crate::domain::models::AppConfig;
 #[cfg(unix)]
 mod attach_client;
 #[cfg(unix)]
+pub(crate) mod consent;
+#[cfg(unix)]
 mod crash;
 #[cfg(unix)]
 mod lifecycle;
@@ -278,22 +280,26 @@ async fn run_daemon_foreground(
 ) -> Result<()> {
     config.daemon.validate().map_err(|e| anyhow::anyhow!(e))?;
 
-    // Story 18.3b (AC5 / NFR66) — resolve the interaction policy and read it back
-    // through the daemon's LOG, before anything else is composed.
-    //
-    // Here rather than in `run_daemon_start` (ADR-18-3b-01 D4): `start` is the
-    // launcher that re-execs a detached child and returns, and validating there
-    // would both double-report and still miss the supervised systemd/launchd
-    // entrypoint, which skips the launcher entirely — the same gap the PID guard
-    // below documents. This body is every way the daemon actually runs.
-    //
-    // A malformed policy file is fatal (fail-closed, AC2). A conflict is reported
-    // and start proceeds, because NFR66 asks for "resolution guidance", not a
-    // refusal. There is deliberately no TTY check: a daemon never has a terminal,
-    // so gating on one would disable the report exactly where it matters most.
-    let effective_policy = std::sync::Arc::new(policy_startup::validate_startup_policies(
-        &workspace, &a2a_peers,
-    )?);
+    // Resolve policy against the single replay-folded consent projection shared
+    // with the delivery gate. Missing journals fold to the explicit empty state.
+    let consent_projection = std::sync::Arc::new(
+        crate::adapters::policy::JournalConsentProjection::load_workspace(&workspace)
+            .await
+            .context("failed to load durable consent projection")?,
+    );
+    let effective_policy = policy_startup::validate_startup_policies(
+        &workspace,
+        &a2a_peers,
+        consent_projection.as_ref(),
+    )?;
+    if !effective_policy.deferred_overrides.is_empty() {
+        tracing::info!(
+            message_type = "policy_deferred_override",
+            count = effective_policy.deferred_overrides.len(),
+            "policy contains accepted-but-unenforced sender overrides"
+        );
+    }
+    let effective_policy = std::sync::Arc::new(effective_policy);
     // The admission value only feeds the authority-widening WARNING — a
     // malformed optional-listener config must not be fatal to daemon startup
     // (previously it could only break the feature-gated A2A listener itself).
@@ -519,6 +525,7 @@ async fn run_daemon_foreground(
             delivery_policy,
             journal.clone(),
             reader.clone(),
+            Some(consent_projection.clone()),
         );
 
     // The recorder is mandatory for every live verified peer frame, regardless

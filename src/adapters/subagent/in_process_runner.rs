@@ -7757,6 +7757,16 @@ mod tests {
                         "journal PeerDraftResolved node={n} agent_composed={agent_composed} sent={sent}"
                     ));
                 }
+                RoomEvent::ConsentGranted { sender, granted_at } => {
+                    lines.push(format!(
+                        "journal ConsentGranted sender={sender:?} granted_at={granted_at}"
+                    ));
+                }
+                RoomEvent::ConsentRevoked { sender, revoked_at } => {
+                    lines.push(format!(
+                        "journal ConsentRevoked sender={sender:?} revoked_at={revoked_at}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

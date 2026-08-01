@@ -178,6 +178,7 @@ pub struct AttachServer {
     /// direct A2A front door's response-mode query.
     delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
     pending_drafts: Arc<super::response_modes::PendingDraftController>,
+    pending_consent: Option<Arc<super::consent::PendingConsentManager>>,
     room_journal: Option<Arc<dyn crate::domain::ports::RoomJournal>>,
     /// Read half of the same journal — the retract path derives the disclosed
     /// `target_seq` from it instead of trusting the client's frame (AC5).
@@ -202,19 +203,32 @@ impl crate::adapters::rap::VerifiedPeerConsumer for DaemonPeerConsumer {
     async fn consent(
         &self,
         _recipient: &AgentId,
-        _content: &AgentMessage,
-        _peer_id: &PeerId,
+        content: &AgentMessage,
+        peer_id: &PeerId,
     ) -> Result<crate::adapters::rap::VerifiedPeerConsent, String> {
         let server = self
             .server
             .upgrade()
             .ok_or_else(|| "daemon peer consumer is shutting down".to_string())?;
-        server
-            .core
-            .ensure_runtime()
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(crate::adapters::rap::VerifiedPeerConsent::Accept)
+        if !crate::domain::ports::InboundPeerRuntime::enforces_sender_consent(server.as_ref()) {
+            return Ok(crate::adapters::rap::VerifiedPeerConsent::Accept);
+        }
+        let ticket = crate::domain::ports::InboundPeerRuntime::request_admission_approval(
+            server.as_ref(),
+            peer_id,
+            &content.content,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        match ticket.decision.await {
+            Ok(crate::domain::ports::InboundApprovalDecision::AllowOnce)
+            | Ok(crate::domain::ports::InboundApprovalDecision::AllowAlways) => {
+                Ok(crate::adapters::rap::VerifiedPeerConsent::Accept)
+            }
+            Ok(crate::domain::ports::InboundApprovalDecision::Decline) | Err(_) => {
+                Ok(crate::adapters::rap::VerifiedPeerConsent::Decline)
+            }
+        }
     }
 
     async fn ingest(
@@ -362,6 +376,7 @@ impl AttachServer {
             delivery_policy,
             None,
             None,
+            None,
         )
     }
 
@@ -382,6 +397,7 @@ impl AttachServer {
             node_tree,
             peer_bus,
             delivery_policy,
+            None,
             None,
             None,
         )
@@ -425,6 +441,7 @@ impl AttachServer {
             delivery_policy,
             None,
             None,
+            None,
         )
     }
 
@@ -437,6 +454,7 @@ impl AttachServer {
         delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
         room_journal: Arc<dyn crate::domain::ports::RoomJournal>,
         room_journal_reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
+        consent_projection: Option<Arc<crate::adapters::policy::JournalConsentProjection>>,
     ) -> Arc<Self> {
         Self::with_clock_and_node_tree(
             core,
@@ -448,6 +466,7 @@ impl AttachServer {
             delivery_policy,
             Some(room_journal),
             Some(room_journal_reader),
+            consent_projection,
         )
     }
 
@@ -461,7 +480,19 @@ impl AttachServer {
         delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
         room_journal: Option<Arc<dyn crate::domain::ports::RoomJournal>>,
         room_journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>>,
+        consent_projection: Option<Arc<crate::adapters::policy::JournalConsentProjection>>,
     ) -> Arc<Self> {
+        let pending_consent =
+            room_journal
+                .as_ref()
+                .zip(consent_projection)
+                .map(|(journal, projection)| {
+                    Arc::new(super::consent::PendingConsentManager::new(
+                        projection,
+                        Arc::clone(journal),
+                        Arc::clone(&clock),
+                    ))
+                });
         Arc::new_cyclic(|_weak| Self {
             core,
             conversation,
@@ -484,6 +515,7 @@ impl AttachServer {
             peer_bus,
             delivery_policy,
             pending_drafts: Arc::new(super::response_modes::PendingDraftController::default()),
+            pending_consent,
             room_journal,
             room_journal_reader,
             inbound_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -2945,6 +2977,10 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
         Ok(status)
     }
 
+    fn enforces_sender_consent(&self) -> bool {
+        self.pending_consent.is_some()
+    }
+
     async fn request_admission_approval(
         &self,
         peer_id: &PeerId,
@@ -2952,20 +2988,89 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
     ) -> Result<crate::domain::ports::InboundApprovalTicket, crate::domain::ports::InboundPeerError>
     {
         use crate::domain::models::ApprovalOutcome;
-        use crate::domain::ports::{InboundApprovalTicket, InboundPeerError};
+        use crate::domain::ports::{
+            InboundApprovalDecision, InboundApprovalTicket, InboundPeerError,
+        };
 
-        let rt = self
+        let resolve_outcome = |outcome: Result<
+            crate::domain::services::approval_runtime::ResolvedApproval,
+            tokio::sync::oneshot::error::RecvError,
+        >| match outcome.map(|resolved| resolved.outcome) {
+            Ok(ApprovalOutcome::Once) => InboundApprovalDecision::AllowOnce,
+            Ok(
+                ApprovalOutcome::AlwaysTool { .. }
+                | ApprovalOutcome::AlwaysServer { .. }
+                | ApprovalOutcome::AlwaysAndSave { .. },
+            ) => InboundApprovalDecision::AllowAlways,
+            _ => InboundApprovalDecision::Decline,
+        };
+
+        if let Some(manager) = &self.pending_consent {
+            let registration = manager
+                .register(
+                    peer_id.clone(),
+                    summary,
+                    crate::domain::models::relationship_disposition(
+                        crate::domain::models::OwnershipKind::Peer,
+                    ),
+                )
+                .await;
+            let pending = registration.pending;
+            let decision = registration.decision;
+            if !registration.first_for_sender {
+                return Ok(InboundApprovalTicket { pending, decision });
+            }
+
+            let runtime = self
+                .core
+                .ensure_runtime()
+                .await
+                .map_err(|error| InboundPeerError::Unavailable(error.to_string()))?;
+            self.ensure_approval_gate(runtime.approval.clone());
+            let conversation_id = self.conversation.lock().await.id.clone();
+            let card = manager
+                .card_text(peer_id)
+                .await
+                .expect("first pending sender has a consent card");
+            let (request_id, resolved) = runtime
+                .approval
+                .request(
+                    crate::domain::models::tool_call::ApprovalSource::RemotePeer {
+                        conversation_id,
+                        peer_id: peer_id.clone(),
+                    },
+                    "a2a/sender-consent".to_owned(),
+                    serde_json::json!({
+                        "card": card,
+                        "peer": peer_id.as_str(),
+                        "instruction": summary.chars().take(400).collect::<String>(),
+                    }),
+                    ToolRisk::Elevated,
+                    None,
+                    None,
+                )
+                .await;
+            let manager = Arc::clone(manager);
+            let peer_id = peer_id.clone();
+            tokio::spawn(async move {
+                manager
+                    .resolve(&peer_id, resolve_outcome(resolved.await))
+                    .await;
+            });
+            return Ok(InboundApprovalTicket {
+                pending: request_id.is_some(),
+                decision,
+            });
+        }
+
+        let runtime = self
             .core
             .ensure_runtime()
             .await
             .map_err(|error| InboundPeerError::Unavailable(error.to_string()))?;
-        self.ensure_approval_gate(rt.approval.clone());
-
+        self.ensure_approval_gate(runtime.approval.clone());
         let conversation_id = self.conversation.lock().await.id.clone();
-        // `ApprovalRuntime::request` RAISES and returns; it never awaits the
-        // human. `request_id.is_some()` is precisely "a person must decide", and
-        // that is the flag the caller turns into `auth-required`.
-        let (request_id, resolved) = rt
+        let (request_id, resolved) = runtime
             .approval
             .request(
                 crate::domain::models::tool_call::ApprovalSource::RemotePeer {
@@ -2975,8 +3080,6 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 "a2a/message.send".to_owned(),
                 serde_json::json!({
                     "peer": peer_id.as_str(),
-                    // A bounded preview: the prompt must be readable, and the
-                    // whole instruction could be 64 KiB of remote text.
                     "instruction": summary.chars().take(400).collect::<String>(),
                 }),
                 ToolRisk::Elevated,
@@ -2984,21 +3087,18 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 None,
             )
             .await;
-
-        let pending = request_id.is_some();
         let (decision_tx, decision) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let granted = matches!(
-                resolved.await.map(|resolved| resolved.outcome),
-                Ok(ApprovalOutcome::Once
-                    | ApprovalOutcome::AlwaysTool { .. }
-                    | ApprovalOutcome::AlwaysServer { .. }
-                    | ApprovalOutcome::AlwaysAndSave { .. })
-            );
-            let _ = decision_tx.send(granted);
+            let legacy_decision = match resolve_outcome(resolved.await) {
+                InboundApprovalDecision::Decline => InboundApprovalDecision::Decline,
+                _ => InboundApprovalDecision::AllowOnce,
+            };
+            let _ = decision_tx.send(legacy_decision);
         });
-
-        Ok(InboundApprovalTicket { pending, decision })
+        Ok(InboundApprovalTicket {
+            pending: request_id.is_some(),
+            decision,
+        })
     }
 
     async fn take_result_text(&self, node_id: &AgentId) -> Option<String> {
@@ -3689,6 +3789,22 @@ mod tests {
         domain_tx: mpsc::UnboundedSender<AppEvent>,
         journal: Arc<RecordingJournal>,
     ) -> Arc<AttachServer> {
+        journaled_server_with_projection(
+            core,
+            conversation,
+            domain_tx,
+            journal,
+            Arc::new(crate::adapters::policy::JournalConsentProjection::default()),
+        )
+    }
+
+    fn journaled_server_with_projection(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        journal: Arc<RecordingJournal>,
+        consent_projection: Arc<crate::adapters::policy::JournalConsentProjection>,
+    ) -> Arc<AttachServer> {
         let node_tree = crate::infrastructure::subagent::NodeTree::with_event_tx(
             domain_tx.clone(),
             Arc::new(|| 123_i64),
@@ -3705,7 +3821,148 @@ mod tests {
             delivery_policy,
             journal.clone(),
             journal,
+            Some(consent_projection),
         )
+    }
+
+    #[tokio::test]
+    async fn production_consent_gate_groups_once_and_persists_sender_only_always() {
+        use crate::domain::models::{ApprovalOutcome, ApprovalScope};
+        use crate::domain::ports::{ConsentProjectionQuery, ConsentState, InboundApprovalDecision};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let runtime = core.ensure_runtime().await.unwrap();
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "consent-gate".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let journal = Arc::new(RecordingJournal::default());
+        let projection = Arc::new(crate::adapters::policy::JournalConsentProjection::default());
+        let server = journaled_server_with_projection(
+            core,
+            conversation,
+            domain_tx,
+            journal.clone(),
+            projection.clone(),
+        );
+        let (writer_tx, mut writer_rx) = mpsc::channel(8);
+        server.registry.lock().await.conns.push(Conn {
+            id: 1,
+            tx: writer_tx,
+            mode: AttachMode::ReadWrite,
+        });
+        let sender = test_signer(100).identity().peer_id.clone();
+
+        let first = server
+            .request_admission_approval(&sender, "first task")
+            .await
+            .unwrap();
+        let second = server
+            .request_admission_approval(&sender, "second task")
+            .await
+            .unwrap();
+        assert!(first.pending && second.pending);
+        assert_eq!(
+            server
+                .pending_consent
+                .as_ref()
+                .unwrap()
+                .waiting_count(&sender)
+                .await,
+            2
+        );
+        let request_id = match writer_rx.recv().await.unwrap() {
+            DaemonFrame::ApprovalRequest {
+                request_id,
+                tool,
+                input_preview,
+                ..
+            } => {
+                assert_eq!(tool, "a2a/sender-consent");
+                assert!(input_preview.contains("New teammate"));
+                request_id
+            }
+            frame => panic!("expected consent card, got {frame:?}"),
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), writer_rx.recv())
+                .await
+                .is_err(),
+            "a second task from the same sender must not mint a second card"
+        );
+
+        runtime
+            .approval
+            .resolve(&request_id, ApprovalOutcome::Once)
+            .await;
+        assert_eq!(
+            first.decision.await.unwrap(),
+            InboundApprovalDecision::AllowOnce
+        );
+        assert_eq!(
+            second.decision.await.unwrap(),
+            InboundApprovalDecision::AllowOnce
+        );
+        assert_eq!(projection.consent_for(&sender), ConsentState::None);
+        assert!(journal.events.lock().await.is_empty());
+
+        let always = server
+            .request_admission_approval(&sender, "third task")
+            .await
+            .unwrap();
+        let request_id = match writer_rx.recv().await.unwrap() {
+            DaemonFrame::ApprovalRequest { request_id, .. } => request_id,
+            frame => panic!("expected second consent card, got {frame:?}"),
+        };
+        runtime
+            .approval
+            .resolve(
+                &request_id,
+                ApprovalOutcome::AlwaysAndSave {
+                    scope: ApprovalScope::Tool("a2a/sender-consent".to_owned()),
+                },
+            )
+            .await;
+        assert_eq!(
+            always.decision.await.unwrap(),
+            InboundApprovalDecision::AllowAlways
+        );
+        assert_eq!(projection.consent_for(&sender), ConsentState::Trusted);
+        assert_eq!(journal.events.lock().await.len(), 1);
+
+        let trusted = server
+            .request_admission_approval(&sender, "later task")
+            .await
+            .unwrap();
+        assert!(!trusted.pending);
+        assert_eq!(
+            trusted.decision.await.unwrap(),
+            InboundApprovalDecision::AllowAlways
+        );
+
+        let other = test_signer(101).identity().peer_id.clone();
+        let unrelated = server
+            .request_admission_approval(&other, "different sender")
+            .await
+            .unwrap();
+        assert!(
+            unrelated.pending,
+            "always-trust must be scoped to the selected sender"
+        );
+        let other_request = match writer_rx.recv().await.unwrap() {
+            DaemonFrame::ApprovalRequest { request_id, .. } => request_id,
+            frame => panic!("expected other sender card, got {frame:?}"),
+        };
+        runtime
+            .approval
+            .resolve(&other_request, ApprovalOutcome::Reject { feedback: None })
+            .await;
+        assert_eq!(
+            unrelated.decision.await.unwrap(),
+            InboundApprovalDecision::Decline
+        );
     }
 
     #[tokio::test]

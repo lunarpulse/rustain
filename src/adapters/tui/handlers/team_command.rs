@@ -21,8 +21,8 @@ use crate::domain::services::transparency::{
     ATTRIBUTION_CAVEAT, STRUCTURAL_REPLAY_CLAIM, TransparencyExport, TransparencyRow,
 };
 
-/// The valid sub-verb set, named verbatim in the unknown-sub-verb warning.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export]";
+/// The valid sub-verb set, named verbatim in every parser refusal.
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team trust <alias-or-peer-id> | /team untrust <alias-or-peer-id> | /team status";
 
 /// What the dispatch arm already did on the caller's behalf.
 pub struct TeamLogInput {
@@ -43,35 +43,59 @@ pub struct TeamLogArgs {
     pub export: bool,
 }
 
-/// `Ok(None)` = not a `log` invocation. `Err(msg)` = operator-facing refusal.
-pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<Option<TeamLogArgs>, String> {
-    let arg = cmd_arg.map(str::trim).unwrap_or("");
-    // Bare `/team` defaults to `log`, matching `/context`'s bare-invocation
-    // behaviour.
-    let tail = if arg.is_empty() {
-        ""
-    } else if let Some(rest) = arg.strip_prefix("log") {
-        if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
-            return Err(format!("Unknown /team subcommand '{arg}'. Use: {USAGE}"));
-        }
-        rest.trim()
-    } else {
-        let verb = arg.split_whitespace().next().unwrap_or(arg);
-        return Err(format!("Unknown /team subcommand '{verb}'. Use: {USAGE}"));
-    };
+#[derive(Debug, PartialEq, Eq)]
+pub enum TeamCommandArgs {
+    Log(TeamLogArgs),
+    Trust(String),
+    Untrust(String),
+    Status,
+}
 
-    let mut args = TeamLogArgs::default();
-    for token in tail.split_whitespace() {
-        match token {
-            "--json" => args.json = true,
-            "--export" => args.export = true,
-            _ => match token.strip_prefix("--filter=") {
-                Some(spec) if !spec.is_empty() => args.filter = Some(spec.to_owned()),
-                _ => return Err(format!("Unknown /team log flag '{token}'. Use: {USAGE}")),
-            },
+/// Parse one `/team` subcommand. Bare `/team` remains the log view.
+pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, String> {
+    let arg = cmd_arg.map(str::trim).unwrap_or("");
+    let mut tokens = arg.split_whitespace();
+    let verb = tokens.next().unwrap_or("log");
+    match verb {
+        "trust" | "untrust" => {
+            let target = tokens
+                .next()
+                .ok_or_else(|| format!("Missing peer target. Use: {USAGE}"))?;
+            if tokens.next().is_some() {
+                return Err(format!(
+                    "Expected one alias or PeerId after '{verb}'. Use: {USAGE}"
+                ));
+            }
+            if verb == "trust" {
+                Ok(TeamCommandArgs::Trust(target.to_owned()))
+            } else {
+                Ok(TeamCommandArgs::Untrust(target.to_owned()))
+            }
         }
+        "status" => {
+            if tokens.next().is_some() {
+                return Err(format!("'/team status' takes no arguments. Use: {USAGE}"));
+            }
+            Ok(TeamCommandArgs::Status)
+        }
+        "log" => {
+            let mut args = TeamLogArgs::default();
+            for token in tokens {
+                match token {
+                    "--json" => args.json = true,
+                    "--export" => args.export = true,
+                    _ => match token.strip_prefix("--filter=") {
+                        Some(spec) if !spec.is_empty() => args.filter = Some(spec.to_owned()),
+                        _ => {
+                            return Err(format!("Unknown /team log flag '{token}'. Use: {USAGE}"));
+                        }
+                    },
+                }
+            }
+            Ok(TeamCommandArgs::Log(args))
+        }
+        _ => Err(format!("Unknown /team subcommand '{verb}'. Use: {USAGE}")),
     }
-    Ok(Some(args))
 }
 
 /// Stable id for the in-chat rows. `/team log` is a **view**, not an event
@@ -176,6 +200,76 @@ pub fn render_rows(rows: &[TransparencyRow], json: bool) -> String {
     out
 }
 
+/// Resolve an operator-facing peer alias or a full stable `PeerId`.
+pub fn resolve_peer_target(
+    target: &str,
+    peers: &[crate::domain::models::A2aPeerSpec],
+) -> Result<crate::domain::models::PeerId, String> {
+    if let Ok(peer_id) = crate::domain::models::PeerId::parse(target.to_owned()) {
+        return Ok(peer_id);
+    }
+    peers
+        .iter()
+        .find(|peer| peer.id == target)
+        .map(crate::domain::models::A2aPeerSpec::resolved_identity)
+        .ok_or_else(|| format!("Unknown peer '{target}'. Use a configured alias or a full PeerId."))
+}
+
+/// Persistent in-chat policy/consent summary for `/team status`.
+pub fn render_team_status(
+    policy: &crate::domain::models::EffectivePolicy,
+    projection: &dyn crate::domain::ports::ConsentProjectionQuery,
+    peers: &[crate::domain::models::A2aPeerSpec],
+) -> String {
+    use crate::domain::ports::ConsentState;
+
+    let mut identities: Vec<(String, crate::domain::models::PeerId)> = peers
+        .iter()
+        .map(|peer| (peer.id.clone(), peer.resolved_identity()))
+        .collect();
+    for sender in projection.known_senders() {
+        if !identities.iter().any(|(_, known)| known == &sender) {
+            identities.push((sender.as_str().to_owned(), sender));
+        }
+    }
+    identities.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut status = format!(
+        "Team interaction policy\nResponse mode: {}\nNotification urgency: {}",
+        policy.automation.value.as_str(),
+        policy.urgency.value.as_str()
+    );
+    if identities.is_empty() {
+        status.push_str("\nPeers: no known peers.");
+        return status;
+    }
+    status.push_str("\nPeers:");
+    for (label, sender) in identities {
+        let state = match projection.consent_for(&sender) {
+            ConsentState::Trusted => "trusted",
+            ConsentState::Revoked => "revoked",
+            ConsentState::None => "not granted",
+        };
+        status.push_str(&format!("\n- {label} ({sender}): {state}"));
+    }
+    status
+}
+
+pub(crate) fn show_team_status(state: &mut TuiState, message: String) {
+    const TEAM_STATUS_BLOCK_ID: &str = "team-status";
+    state.feedback_blocks.insert(
+        TEAM_STATUS_BLOCK_ID.to_owned(),
+        crate::domain::models::FeedbackBlock {
+            id: TEAM_STATUS_BLOCK_ID.to_owned(),
+            level: crate::domain::models::FeedbackLevel::Info,
+            message,
+            actions: Vec::new(),
+        },
+    );
+    state.active_feedback_id = Some(TEAM_STATUS_BLOCK_ID.to_owned());
+    state.needs_redraw = true;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,10 +291,13 @@ mod tests {
 
     #[test]
     fn bare_team_defaults_to_log() {
-        assert_eq!(parse_team_command(None), Ok(Some(TeamLogArgs::default())));
+        assert_eq!(
+            parse_team_command(None),
+            Ok(TeamCommandArgs::Log(TeamLogArgs::default()))
+        );
         assert_eq!(
             parse_team_command(Some("log")),
-            Ok(Some(TeamLogArgs::default()))
+            Ok(TeamCommandArgs::Log(TeamLogArgs::default()))
         );
     }
 
@@ -208,7 +305,7 @@ mod tests {
     fn flags_parse_and_combine() {
         assert_eq!(
             parse_team_command(Some("log --json --export --filter=direction=inbound")),
-            Ok(Some(TeamLogArgs {
+            Ok(TeamCommandArgs::Log(TeamLogArgs {
                 filter: Some("direction=inbound".to_owned()),
                 json: true,
                 export: true,
@@ -347,5 +444,67 @@ mod tests {
             "silent truncation is a lie with good intentions: {text}"
         );
         assert!(text.contains("Ctrl+X, L"), "the full surface must be named");
+    }
+
+    #[test]
+    fn consent_subcommands_require_exactly_one_target_and_status_takes_none() {
+        assert_eq!(
+            parse_team_command(Some("trust alice")),
+            Ok(TeamCommandArgs::Trust("alice".to_owned()))
+        );
+        assert_eq!(
+            parse_team_command(Some("untrust 1220abcd")),
+            Ok(TeamCommandArgs::Untrust("1220abcd".to_owned()))
+        );
+        assert_eq!(
+            parse_team_command(Some("status")),
+            Ok(TeamCommandArgs::Status)
+        );
+        assert!(parse_team_command(Some("trust")).is_err());
+        assert!(parse_team_command(Some("trust alice extra")).is_err());
+        assert!(parse_team_command(Some("status extra")).is_err());
+    }
+
+    #[test]
+    fn aliases_resolve_to_stable_identity_and_status_shows_effective_state() {
+        let peer = crate::domain::models::A2aPeerSpec {
+            id: "alice".to_owned(),
+            url: crate::domain::models::RedactedUrl::new("https://alice.example/a2a".to_owned()),
+            pinned_key: None,
+            source: crate::domain::models::A2aPeerSource::Workspace,
+        };
+        let sender = peer.resolved_identity();
+        assert_eq!(
+            resolve_peer_target("alice", std::slice::from_ref(&peer)).unwrap(),
+            sender
+        );
+        assert_eq!(resolve_peer_target(sender.as_str(), &[]).unwrap(), sender);
+        assert!(resolve_peer_target("unknown", std::slice::from_ref(&peer)).is_err());
+
+        let entries = vec![crate::domain::models::JournalEntry::new(
+            1,
+            crate::domain::models::JournalRecord::Room(
+                crate::domain::models::RoomEvent::ConsentGranted {
+                    sender: Some(sender),
+                    granted_at: 10,
+                },
+            ),
+            10,
+        )];
+        let projection = crate::adapters::policy::JournalConsentProjection::from_entries(&entries);
+        let policy = crate::domain::services::team_policy::resolve_effective_policy(
+            &crate::domain::models::IndividualPolicy::default(),
+            None,
+            std::slice::from_ref(&peer),
+        );
+
+        let status = render_team_status(&policy, &projection, &[peer]);
+        assert!(
+            status.contains("Response mode: notify-and-wait"),
+            "{status}"
+        );
+        assert!(status.contains("Notification urgency: queue"), "{status}");
+        assert!(status.contains("alice"), "{status}");
+        assert!(status.contains("trusted"), "{status}");
     }
 }

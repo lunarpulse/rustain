@@ -111,7 +111,8 @@ pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
 pub use execution_sandbox::{ExecutionSandbox, ExecutionSandboxError};
 pub use inbound_peer_runtime::{
-    InboundApprovalTicket, InboundPeerError, InboundPeerRuntime, InboundPeerTask,
+    InboundApprovalDecision, InboundApprovalTicket, InboundPeerError, InboundPeerRuntime,
+    InboundPeerTask,
 };
 pub use isolation_provider::IsolationProvider;
 pub use ledger_journal_sink::{LedgerJournalError, LedgerJournalSink};
