@@ -580,13 +580,18 @@ fn test_no_std_sync_lock_in_async_module() {
 /// 11_071, incl. the AI-11.5 trace-id fix). This reconciles the const to
 /// committed reality and un-skips `test_event_loop_baseline_integrity`.
 ///
+/// Re-pinned 2026-08-01 (Story 18.3d Task 1) from the unreachable
+/// `1bde7715d9931a249ccee7510eeaf60590ad5070` object to the committed 18.3c
+/// baseline `cb99253`, where `event_loop.rs` is 11_237 lines. The paired
+/// `/memory` extraction creates headroom without hiding the committed baseline.
+///
 /// GOVERNANCE (Epic 11 retro AI-11.3 / closes AI-10.3): this and every other
 /// tracked ratchet const (`MAX_KNOWN_BYPASSES`, `MAX_KNOWN_STD_SYNC_LOCKS`,
 /// `EVENT_LOOP_*`, `EXPECTED_HANDLE_COUNT`) are gated by
 /// `.github/workflows/ratchet-signoff-guard.yml`. Changing any of them requires a
 /// `RATCHET-SIGNOFF: <CONST_NAME> — <why>` trailer in a commit message or the PR
 /// body, or CI fails. Bumping a ratchet is a governance decision, never a silent edit.
-const EVENT_LOOP_BASELINE_LINES: usize = 11_071;
+const EVENT_LOOP_BASELINE_LINES: usize = 11_237;
 
 /// Soft ceiling: PR-comment warning. Mary's calibration (baseline+75).
 const EVENT_LOOP_SOFT_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 75;
@@ -601,10 +606,10 @@ const EVENT_LOOP_RUN_BASELINE_CCN: u32 = 155;
 const COMPLEXITY_MULTIPLIER_PCT: u32 = 120;
 
 /// Commit SHA at which `EVENT_LOOP_BASELINE_LINES` was measured.
-/// Pinned 2026-06-05 (Epic 11 retro AI-11.7 closeout) to the `retro 11` commit,
-/// where `git show <SHA>:event_loop.rs | wc -l` == `EVENT_LOOP_BASELINE_LINES`
-/// (11_071). `test_event_loop_baseline_integrity` is now LIVE (no longer skipped).
-const EVENT_LOOP_BASELINE_SHA: &str = "1bde7715d9931a249ccee7510eeaf60590ad5070";
+///
+/// Re-pinned by Story 18.3d to the reachable 18.3c baseline, where
+/// `git show <SHA>:src/infrastructure/runtime/event_loop.rs | wc -l` is 11_237.
+const EVENT_LOOP_BASELINE_SHA: &str = "cb99253cd5b8ad16fd29f84b80bca745c2f8ec51";
 
 /// AC-4 line-budget ratchet for `event_loop.rs`. Soft warns; hard fails.
 /// Per Story 8.0a AC-4 + ADR-08-01 §D6.5.
@@ -635,6 +640,29 @@ fn test_event_loop_line_budget() {
             lines, EVENT_LOOP_SOFT_BUDGET, EVENT_LOOP_BASELINE_LINES, EVENT_LOOP_HARD_BUDGET,
         );
     }
+}
+/// Story 18.3d Task 1: `/memory consolidate|forget` must delegate to the
+/// runtime effect shell instead of spending the event-loop line budget.
+#[test]
+fn test_event_loop_memory_command_delegates_to_runtime_bridge() {
+    let event_loop = std::fs::read_to_string("src/infrastructure/runtime/event_loop.rs")
+        .expect("conformance: cannot read event_loop.rs");
+    let bridge = std::fs::read_to_string("src/infrastructure/runtime/transparency_bridge.rs")
+        .expect("conformance: cannot read transparency_bridge.rs");
+
+    assert!(
+        event_loop.contains("transparency_bridge::memory_command("),
+        "/memory must delegate into the runtime bridge"
+    );
+    assert!(
+        !event_loop.contains("build_proposal_prompt(&entries)"),
+        "memory consolidation effects must not remain inline in event_loop.rs"
+    );
+    assert!(
+        bridge.contains("build_proposal_prompt(&entries)")
+            && bridge.contains("parse_forget_query(cmd_name, cmd_arg)"),
+        "the runtime bridge must retain both shipped memory command paths"
+    );
 }
 
 /// AC-4c baseline integrity (Mary's anchor): the pinned const must match what

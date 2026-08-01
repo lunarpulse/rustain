@@ -333,3 +333,107 @@ pub(crate) async fn team_command(
         let _ = app_state.event_bus.emit_domain(event);
     }
 }
+/// One-call shell for the shipped `/memory consolidate|forget` dispatch paths.
+///
+/// Returns `false` for `/memory` adapter overrides so the event loop can keep
+/// routing those through `port_dimension_from_command_name`.
+pub(crate) async fn memory_command(
+    state: &mut TuiState,
+    conversation_id: &str,
+    cmd_name: &str,
+    cmd_arg: Option<&str>,
+    is_streaming: bool,
+    config: &AppConfig,
+    app_state: &AppState,
+    provider: &std::sync::Arc<dyn crate::domain::ports::StreamingProvider>,
+    domain_tx: &tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
+) -> bool {
+    use crate::adapters::tui::handlers;
+    use crate::domain::events::AppEvent;
+    use crate::domain::models::NoticeLevel;
+
+    let consolidate = cmd_name == "memory" && cmd_arg.map(str::trim) == Some("consolidate");
+    let forget_query = handlers::forget_command::parse_forget_query(cmd_name, cmd_arg);
+    if !consolidate && forget_query.is_none() {
+        return false;
+    }
+
+    if is_streaming {
+        let message = if consolidate {
+            "Consolidation unavailable while a turn is in progress — try again after it finishes."
+        } else {
+            "Memory forget unavailable while a turn is in progress — try again after it finishes."
+        };
+        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: Some(conversation_id.to_owned()),
+            level: NoticeLevel::Info,
+            message: message.to_string(),
+        });
+        state.needs_redraw = true;
+        return true;
+    }
+
+    if consolidate {
+        let memory = app_state.agent_core.memory.load_full();
+        match memory.recent(30).await {
+            Ok(entries) if entries.is_empty() => {
+                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conversation_id.to_owned()),
+                    level: NoticeLevel::Info,
+                    message: "Nothing to consolidate yet — no recent activity recorded."
+                        .to_string(),
+                });
+                state.needs_redraw = true;
+            }
+            Ok(entries) => {
+                let prompt_body =
+                    crate::domain::services::consolidation::build_proposal_prompt(&entries);
+                let payload = handlers::consolidation::ConsolidationPayload {
+                    provider: std::sync::Arc::clone(provider),
+                    model: config.model.clone(),
+                    prompt_body,
+                    conversation_id: conversation_id.to_owned(),
+                    domain_tx: domain_tx.clone(),
+                };
+                tokio::spawn(handlers::consolidation::run_consolidation(payload));
+                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conversation_id.to_owned()),
+                    level: NoticeLevel::Info,
+                    message: "Reviewing recent activity for durable facts…".to_string(),
+                });
+                state.needs_redraw = true;
+            }
+            Err(e) => {
+                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conversation_id.to_owned()),
+                    level: NoticeLevel::Warning,
+                    message: format!("Consolidation failed: {e}"),
+                });
+                state.needs_redraw = true;
+            }
+        }
+    } else if let Some(query) = forget_query {
+        let result = if query.is_empty() {
+            None
+        } else {
+            Some(
+                app_state
+                    .agent_core
+                    .memory
+                    .load_full()
+                    .forget_candidates(&query, handlers::forget_command::FORGET_CANDIDATE_LIMIT)
+                    .await,
+            )
+        };
+        for event in handlers::forget_command::handle_forget_command(
+            state,
+            &conversation_id.to_owned(),
+            &query,
+            result,
+        ) {
+            let _ = app_state.event_bus.emit_domain(event);
+        }
+    }
+
+    true
+}
