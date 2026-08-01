@@ -1,13 +1,15 @@
 //! Pending sender-consent manager (Story 18.3d).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, oneshot};
 
 use crate::adapters::policy::JournalConsentProjection;
 use crate::domain::clock::Clock;
-use crate::domain::models::{DeliveryDisposition, PeerId, RoomEvent, may_consent_refuse};
+use crate::domain::models::{
+    DeliveryDisposition, PeerId, RequestId, RoomEvent, may_consent_refuse,
+};
 use crate::domain::ports::{
     ConsentProjectionQuery, ConsentState, InboundApprovalDecision, RoomJournal,
 };
@@ -30,6 +32,7 @@ pub(crate) struct PendingConsentManager {
     journal: Arc<dyn RoomJournal>,
     clock: Arc<dyn Clock>,
     pending: Mutex<HashMap<PeerId, PendingSender>>,
+    always_requests: Mutex<HashSet<RequestId>>,
 }
 
 impl PendingConsentManager {
@@ -43,6 +46,7 @@ impl PendingConsentManager {
             journal,
             clock,
             pending: Mutex::new(HashMap::new()),
+            always_requests: Mutex::new(HashSet::new()),
         }
     }
 
@@ -91,30 +95,36 @@ impl PendingConsentManager {
     /// regardless of how many tasks have joined it.
     pub(crate) async fn card_text(&self, sender: &PeerId) -> Option<String> {
         let pending = self.pending.lock().await;
-        let count = pending.get(sender)?.waiters.len();
-        Some(format!(
-            "New teammate: {}\n{count} waiting\n[y] respond once  [n] decline  [a] always trust",
-            sender.as_str()
-        ))
+        pending.get(sender)?;
+        Some(crate::infrastructure::runtime::transparency_bridge::consent_card_text(sender))
+    }
+
+    /// Persist standing trust before the approval runtime is resolved.
+    ///
+    /// The request marker tells the detached watcher that the subsequent
+    /// `ApprovalOutcome::Once` came from `[a]`, not `[y]`.
+    pub(crate) async fn grant_always(&self, request_id: RequestId, sender: &PeerId) -> bool {
+        if !self.persist_grant(sender).await {
+            return false;
+        }
+        self.always_requests.lock().await.insert(request_id);
+        true
+    }
+
+    pub(crate) async fn take_granted(&self, request_id: &RequestId) -> bool {
+        self.always_requests.lock().await.remove(request_id)
     }
 
     /// Resolve the sender's whole waiting group. `AllowAlways` is fail-closed:
     /// waiters are released only after the grant is durably appended.
     pub(crate) async fn resolve(&self, sender: &PeerId, requested: InboundApprovalDecision) {
-        let resolved = if requested == InboundApprovalDecision::AllowAlways {
-            let event = RoomEvent::ConsentGranted {
-                sender: Some(sender.clone()),
-                granted_at: self.clock.wall_now_ms(),
-            };
-            match self.journal.record_event(event.clone()).await {
-                Ok(()) => {
-                    self.projection.apply(&event);
-                    InboundApprovalDecision::AllowAlways
-                }
-                Err(error) => {
-                    tracing::error!(%error, peer = %sender, "durable consent grant failed");
-                    InboundApprovalDecision::Decline
-                }
+        let resolved = if requested == InboundApprovalDecision::AllowAlways
+            && self.projection.consent_for(sender) != ConsentState::Trusted
+        {
+            if self.persist_grant(sender).await {
+                InboundApprovalDecision::AllowAlways
+            } else {
+                InboundApprovalDecision::Decline
             }
         } else {
             requested
@@ -128,6 +138,26 @@ impl PendingConsentManager {
             .map_or_else(Vec::new, |group| group.waiters);
         for waiter in waiters {
             let _ = waiter.send(resolved);
+        }
+    }
+
+    async fn persist_grant(&self, sender: &PeerId) -> bool {
+        if self.projection.consent_for(sender) == ConsentState::Trusted {
+            return true;
+        }
+        let event = RoomEvent::ConsentGranted {
+            sender: Some(sender.clone()),
+            granted_at: self.clock.wall_now_ms(),
+        };
+        match self.journal.record_event(event.clone()).await {
+            Ok(()) => {
+                self.projection.apply(&event);
+                true
+            }
+            Err(error) => {
+                tracing::error!(%error, peer = %sender, "durable consent grant failed");
+                false
+            }
         }
     }
 
@@ -210,13 +240,12 @@ mod tests {
         );
         assert!(first.first_for_sender);
         assert!(!second.first_for_sender);
-        assert_eq!(
-            manager.card_text(&sender).await.unwrap(),
-            format!(
-                "New teammate: {}\n2 waiting\n[y] respond once  [n] decline  [a] always trust",
-                sender.as_str()
-            )
-        );
+        let card = manager.card_text(&sender).await.unwrap();
+        assert!(card.contains(&format!("Consent required — {}", sender.as_str())));
+        assert!(card.contains("[y] Allow once  [a] Always allow  [n] Decline"));
+        assert!(card.contains("key this sender presents, not the person"));
+        assert!(card.contains("Awaiting your decision"));
+        assert!(card.contains("Logged immediately for safety"));
 
         manager
             .resolve(&sender, InboundApprovalDecision::AllowOnce)

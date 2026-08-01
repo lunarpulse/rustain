@@ -142,6 +142,21 @@ pub trait InboundPeerRuntime: Send + Sync {
         cancel: CancellationToken,
     ) -> Result<watch::Receiver<NodeState>, InboundPeerError>;
 
+    /// Materialize a consent-pending peer node in `Waiting` without starting a
+    /// provider turn. Production stamps `AwaitingPeerResponse` so the existing
+    /// hazard scheduler escalates exactly once after the dwell threshold.
+    async fn park_pending_consent(
+        &self,
+        _node_id: &AgentId,
+        _subagent_type: &str,
+        _cancel: CancellationToken,
+    ) -> Result<(), InboundPeerError> {
+        Ok(())
+    }
+
+    /// Remove a parked consent node when the task is declined or cancelled.
+    async fn discard_pending_consent_node(&self, _node_id: &AgentId) {}
+
     /// Whether this runtime has the durable sender-consent gate composed.
     ///
     /// The default preserves lightweight test and discovery runtimes. Production

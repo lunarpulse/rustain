@@ -302,6 +302,18 @@ pub(crate) fn fanout_command(
 /// caller's `for … emit_domain` loop cost three lines of a budget that Story
 /// 18.2 had already overrun. The pure `handlers::team_command` still returns
 /// its events, so the behavioural tests are unaffected.
+/// Exact first-contact card copy shared by daemon state and TUI rendering.
+pub(crate) fn consent_card_text(sender: &crate::domain::models::PeerId) -> String {
+    format!(
+        "Consent required — {sender}\n\
+         No standing consent is recorded for this sender.\n\
+         [y] Allow once  [a] Always allow  [n] Decline\n\
+         [a] trusts the key this sender presents, not the person; a rotated key is a new peer.\n\
+         Awaiting your decision.\n\
+         Logged immediately for safety; interruption timing follows your policy."
+    )
+}
+
 pub(crate) async fn team_command(
     state: &mut TuiState,
     conversation_id: &str,

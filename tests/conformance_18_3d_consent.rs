@@ -209,7 +209,7 @@ fn provenance_clauses_name_the_stored_sources_without_fabricated_defaults() {
 }
 
 #[test]
-fn malformed_policy_is_a_named_error_and_never_falls_back_through_raw_stderr() {
+fn malformed_policy_and_admission_configs_fail_loud_without_silent_fallback() {
     let workspace = tempfile::TempDir::new().unwrap();
     let policy_dir = workspace.path().join(".rustain");
     std::fs::create_dir_all(&policy_dir).unwrap();
@@ -227,6 +227,16 @@ fn malformed_policy_is_a_named_error_and_never_falls_back_through_raw_stderr() {
         !source.contains("eprintln!"),
         "policy config must use returned diagnostics, not raw stderr"
     );
+    let daemon = std::fs::read_to_string("src/adapters/daemon/mod.rs").unwrap();
+    let parse_error_arm = daemon
+        .split("Err(error) =>")
+        .nth(1)
+        .expect("daemon has an explicit malformed-a2a.json arm")
+        .split(',')
+        .next()
+        .unwrap();
+    assert!(parse_error_arm.contains("report_unknown_admission_posture"));
+    assert!(!parse_error_arm.contains("Default::default"));
 }
 
 #[test]
@@ -247,4 +257,39 @@ fn production_wiring_uses_the_journal_projection_and_central_a2a_gate() {
     assert!(!doctor.contains("EmptyConsentProjection"));
     assert!(a2a.contains("runtime.enforces_sender_consent()"));
     assert!(daemon.contains("new_with_node_tree_bus_policy_journal_and_urgency"));
+}
+
+#[test]
+fn consent_card_labels_have_guarded_non_test_dispatch_arms() {
+    let renderer =
+        std::fs::read_to_string("src/infrastructure/runtime/transparency_bridge.rs").unwrap();
+    for label in ["[y] Allow once", "[a] Always allow", "[n] Decline"] {
+        assert!(
+            renderer.contains(label),
+            "missing consent-card label {label}"
+        );
+    }
+
+    let attach = std::fs::read_to_string("src/infrastructure/runtime/attach_loop.rs").unwrap();
+    let production = attach.split("#[cfg(test)]\nmod tests").next().unwrap();
+    let dispatch = production
+        .split("Story 18.3d AC1")
+        .nth(1)
+        .expect("sender consent dispatcher must exist in production")
+        .split("Story 12.2d AC4")
+        .next()
+        .unwrap();
+    for arm in [
+        "(KeyCode::Char('y'), m)",
+        "(KeyCode::Char('a'), m)",
+        "(KeyCode::Char('n'), m) | (KeyCode::Esc, m)",
+        "!pending_consent_approvals.is_empty()",
+        "ApprovalOutcome::Once",
+        "ApprovalOutcome::AlwaysAndSave",
+        "ApprovalOutcome::Reject",
+        "ClientFrame::ApprovalResponse",
+    ] {
+        assert!(dispatch.contains(arm), "missing guarded dispatch: {arm}");
+    }
+    assert!(production.contains(r#"tool == "a2a/sender-consent""#));
 }

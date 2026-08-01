@@ -310,16 +310,20 @@ async fn run_daemon_foreground(
     // The admission value only feeds the authority-widening WARNING — a
     // malformed optional-listener config must not be fatal to daemon startup
     // (previously it could only break the feature-gated A2A listener itself).
-    let admission = match crate::adapters::a2a::config::parse_workspace_a2a_server_config(
+    match crate::adapters::a2a::config::parse_workspace_a2a_server_config(
         &workspace.join(".rustain").join("a2a.json"),
     ) {
-        Ok(config) => config.map_or_else(Default::default, |server| server.admission),
-        Err(error) => {
-            tracing::warn!(error = %error, "could not parse a2a.json; admission warning skipped");
-            Default::default()
+        Ok(config) => {
+            let admission = config.map_or_else(Default::default, |server| server.admission);
+            policy_startup::report_auto_authority_widening(
+                admission,
+                &effective_policy,
+                &a2a_peers,
+                consent_projection.as_ref(),
+            );
         }
-    };
-    policy_startup::report_auto_authority_widening(admission, &effective_policy);
+        Err(error) => policy_startup::report_unknown_admission_posture(&error),
+    }
 
     let pid_path = crate::infrastructure::paths::daemon_pid_path(&workspace)?;
     let socket_path = crate::infrastructure::paths::daemon_socket_path(&workspace)?;

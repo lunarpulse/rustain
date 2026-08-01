@@ -45,8 +45,11 @@ pub(crate) const MESSAGE_TYPE_DEFERRAL_NOTICE: &str = "per-sender response mode 
     semantic message type is not carried, so per-message-type response overrides remain deferred \
     (DF-18-3b-MSGTYPE)";
 pub(crate) const AUTO_AUTHORITY_WARNING: &str = "server.admission=\"allow\" authorizes inbound \
-    execution and notify-and-auto also replies in the operator's name; use admission=\"ask\" or \
-    lower the effective response mode if that authority widening is unintended";
+    execution and at least one notify-and-auto sender lacks journaled or TOML-implied consent; \
+    grant that sender, use admission=\"ask\", or lower its effective response mode";
+pub(crate) const UNKNOWN_ADMISSION_WARNING: &str = "could not determine server admission posture \
+    from .rustain/a2a.json; treating the unknown posture as an authority-widening hazard until \
+    the configuration is repaired";
 
 /// Resolve both policy files and report the outcome through the daemon's log.
 ///
@@ -66,23 +69,52 @@ pub(crate) fn validate_startup_policies(
 pub(crate) fn report_auto_authority_widening(
     admission: crate::adapters::a2a::config::A2aAdmissionPolicy,
     policy: &EffectivePolicy,
+    peers: &[A2aPeerSpec],
+    projection: &dyn crate::domain::ports::ConsentProjectionQuery,
 ) {
-    if should_warn_auto_authority_widening(admission, policy) {
+    if should_warn_auto_authority_widening(admission, policy, peers, projection) {
         tracing::warn!("{AUTO_AUTHORITY_WARNING}");
     }
+}
+
+pub(crate) fn report_unknown_admission_posture(error: &dyn std::fmt::Display) {
+    tracing::warn!(%error, "{UNKNOWN_ADMISSION_WARNING}");
+    tracing::warn!("{AUTO_AUTHORITY_WARNING}");
 }
 
 fn should_warn_auto_authority_widening(
     admission: crate::adapters::a2a::config::A2aAdmissionPolicy,
     policy: &EffectivePolicy,
+    peers: &[A2aPeerSpec],
+    projection: &dyn crate::domain::ports::ConsentProjectionQuery,
 ) -> bool {
-    admission == crate::adapters::a2a::config::A2aAdmissionPolicy::Allow
-        && (policy.automation.value == crate::domain::models::ResponseMode::NotifyAndAuto
-            || policy.sender_overrides.iter().any(|sender| {
-                sender.response_mode.as_ref().is_some_and(|mode| {
-                    mode.value == crate::domain::models::ResponseMode::NotifyAndAuto
-                })
-            }))
+    use crate::domain::models::{ResponseMode, SenderPolicy};
+    use crate::domain::ports::ConsentState;
+
+    if admission != crate::adapters::a2a::config::A2aAdmissionPolicy::Allow {
+        return false;
+    }
+    let default_auto = policy.automation.value == ResponseMode::NotifyAndAuto;
+    if peers.is_empty() {
+        return default_auto;
+    }
+    peers.iter().any(|peer| {
+        let Some(peer_id) = peer.pinned_identity() else {
+            return default_auto;
+        };
+        let sender_override: Option<&SenderPolicy> = policy
+            .sender_overrides
+            .iter()
+            .find(|sender| sender.identity.peer_id() == Some(&peer_id));
+        let effective_auto = sender_override
+            .and_then(|sender| sender.response_mode.as_ref())
+            .map_or(default_auto, |mode| {
+                mode.value == ResponseMode::NotifyAndAuto
+            });
+        let has_consent =
+            sender_override.is_some() || projection.consent_for(&peer_id) == ConsentState::Trusted;
+        effective_auto && !has_consent
+    })
 }
 
 /// The daemon's report. `tracing`, never `println!`.
@@ -186,16 +218,97 @@ mod tests {
         policy.automation.value = ResponseMode::NotifyAndAuto;
         assert!(should_warn_auto_authority_widening(
             A2aAdmissionPolicy::Allow,
-            &policy
+            &policy,
+            &[],
+            &crate::adapters::policy::EmptyConsentProjection,
         ));
         assert!(!should_warn_auto_authority_widening(
             A2aAdmissionPolicy::Ask,
-            &policy
+            &policy,
+            &[],
+            &crate::adapters::policy::EmptyConsentProjection,
         ));
         policy.automation.value = ResponseMode::NotifyAndWait;
         assert!(!should_warn_auto_authority_widening(
             A2aAdmissionPolicy::Allow,
-            &policy
+            &policy,
+            &[],
+            &crate::adapters::policy::EmptyConsentProjection,
         ));
+    }
+
+    #[test]
+    fn authority_warning_narrows_only_when_every_auto_sender_has_consent() {
+        use crate::adapters::a2a::config::A2aAdmissionPolicy;
+        use crate::domain::models::{
+            A2aPeerSource, PinnedKey, PinnedKeyAlgorithm, RedactedUrl, ResponseMode, RoomEvent,
+        };
+        use base64::Engine as _;
+
+        let peer = |alias: &str, key: [u8; 32]| A2aPeerSpec {
+            id: alias.to_owned(),
+            url: RedactedUrl::new("https://peer.example/a2a".to_owned()),
+            pinned_key: Some(PinnedKey::new(
+                PinnedKeyAlgorithm::EdDsa,
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key),
+                None,
+            )),
+            source: A2aPeerSource::Workspace,
+        };
+        let trusted = peer("trusted", [7; 32]);
+        let trusted_id = trusted.pinned_identity().unwrap();
+        let projection = crate::adapters::policy::JournalConsentProjection::default();
+        projection.apply(&RoomEvent::ConsentGranted {
+            sender: Some(trusted_id),
+            granted_at: 1,
+        });
+        let mut policy = validate_startup_policies(
+            tempfile::tempdir().unwrap().path(),
+            std::slice::from_ref(&trusted),
+            &projection,
+        )
+        .unwrap();
+        policy.automation.value = ResponseMode::NotifyAndAuto;
+
+        assert!(
+            !should_warn_auto_authority_widening(
+                A2aAdmissionPolicy::Allow,
+                &policy,
+                std::slice::from_ref(&trusted),
+                &projection,
+            ),
+            "a journal grant narrows the warning for the configured sender"
+        );
+        let override_dir = tempfile::tempdir().unwrap();
+        write(
+            override_dir.path(),
+            INDIVIDUAL_POLICY_FILE,
+            "[interaction.overrides.\"trusted\"]\nresponse_mode = \"notify-and-auto\"\n",
+        );
+        let override_policy = validate_startup_policies(
+            override_dir.path(),
+            std::slice::from_ref(&trusted),
+            &crate::adapters::policy::EmptyConsentProjection,
+        )
+        .unwrap();
+        assert!(
+            !should_warn_auto_authority_widening(
+                A2aAdmissionPolicy::Allow,
+                &override_policy,
+                std::slice::from_ref(&trusted),
+                &crate::adapters::policy::EmptyConsentProjection,
+            ),
+            "an identity-bound TOML override implies consent"
+        );
+        let untrusted = peer("rotated", [8; 32]);
+        assert!(
+            should_warn_auto_authority_widening(
+                A2aAdmissionPolicy::Allow,
+                &policy,
+                &[trusted, untrusted],
+                &projection,
+            ),
+            "a rotated pin is a new untrusted sender and re-opens the warning"
+        );
     }
 }

@@ -865,9 +865,22 @@ async fn setup_task(
     needs_approval: bool,
 ) -> Result<serde_json::Value, String> {
     if needs_approval || runtime.enforces_sender_consent() {
+        let consent_parked = runtime.enforces_sender_consent();
+        if consent_parked
+            && let Err(error) = runtime
+                .park_pending_consent(&task.node_id, INBOUND_SUBAGENT_TYPE, task.cancel.clone())
+                .await
+        {
+            tracing::error!(%error, task = %task_id, "failed to park consent-pending peer node");
+            terminalize_start_failure(&state, &task, &peer_id, None).await;
+            return task_projection(&state, &task, &peer_id).await;
+        }
         let ticket = match runtime.request_admission_approval(&peer_id, &text).await {
             Ok(ticket) => ticket,
             Err(error) => {
+                if consent_parked {
+                    runtime.discard_pending_consent_node(&task.node_id).await;
+                }
                 tracing::error!(%error, task = %task_id, "failed to request A2A admission approval");
                 terminalize_start_failure(&state, &task, &peer_id, None).await;
                 return task_projection(&state, &task, &peer_id).await;
@@ -911,6 +924,9 @@ async fn setup_task(
         let decision = tokio::select! {
             biased;
             _ = task.cancel.cancelled() => {
+                if consent_parked {
+                    runtime.discard_pending_consent_node(&task.node_id).await;
+                }
                 terminalize_canceled(&state, &task, &peer_id, None).await;
                 return task_projection(&state, &task, &peer_id).await;
             }
@@ -919,6 +935,9 @@ async fn setup_task(
             ),
         };
         if decision == crate::domain::ports::InboundApprovalDecision::Decline {
+            if consent_parked {
+                runtime.discard_pending_consent_node(&task.node_id).await;
+            }
             let reason = "admission policy declined this task".to_owned();
             let _ = state
                 .transparency
@@ -936,6 +955,7 @@ async fn setup_task(
     }
 
     if task.cancel.is_cancelled() {
+        runtime.discard_pending_consent_node(&task.node_id).await;
         terminalize_canceled(&state, &task, &peer_id, None).await;
         return task_projection(&state, &task, &peer_id).await;
     }
@@ -1036,6 +1056,7 @@ async fn watch_pending_approval(
     let decision = tokio::select! {
         biased;
         _ = task.cancel.cancelled() => {
+            runtime.discard_pending_consent_node(&task.node_id).await;
             terminalize_canceled(&state, &task, &peer_id, Some(&pending)).await;
             return;
         }
@@ -1046,6 +1067,7 @@ async fn watch_pending_approval(
 
     task.set_pending_auth(PendingAuth::None).await;
     if decision == crate::domain::ports::InboundApprovalDecision::Decline {
+        runtime.discard_pending_consent_node(&task.node_id).await;
         let reason = "the operator declined this task".to_owned();
         task.set_detail(reason.clone()).await;
         task.advance(RapTaskState::Rejected).await;
@@ -1061,6 +1083,7 @@ async fn watch_pending_approval(
         return;
     }
     if task.cancel.is_cancelled() {
+        runtime.discard_pending_consent_node(&task.node_id).await;
         terminalize_canceled(&state, &task, &peer_id, Some(&pending)).await;
         return;
     }
@@ -1090,6 +1113,7 @@ async fn launch(
         })
         .await
     {
+        runtime.discard_pending_consent_node(&task.node_id).await;
         tracing::error!(
             %error,
             task = %task.id,

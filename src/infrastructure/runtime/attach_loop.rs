@@ -315,6 +315,13 @@ struct PendingPeerResponse {
     queued: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingConsentApproval {
+    request_id: crate::domain::models::RequestId,
+    tool: String,
+    input_preview: String,
+}
+
 /// The first pending peer-response row, if any. A row is pending iff it is the
 /// wait placeholder, the drafting placeholder, or the unresolved approval card
 /// — settled rows (sent content, a rejected card) never classify.
@@ -394,6 +401,21 @@ fn peer_response_card_lines(pending: &PendingPeerResponse) -> Vec<ratatui::text:
             )),
         ],
     }
+}
+
+fn consent_approval_card_lines(
+    pending: &PendingConsentApproval,
+    queued: usize,
+) -> Vec<ratatui::text::Line<'static>> {
+    let mut lines: Vec<_> = pending
+        .input_preview
+        .lines()
+        .map(|line| ratatui::text::Line::from(line.to_owned()))
+        .collect();
+    if queued > 0 {
+        lines.push(ratatui::text::Line::from(format!("[{queued} more queued]")));
+    }
+    lines
 }
 
 fn retract_confirm_lines(preview: &str) -> Vec<ratatui::text::Line<'static>> {
@@ -603,6 +625,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     // composer-prefill correlation and the retract confirmation live here.
     let mut peer_draft_edit_node: Option<String> = None;
     let mut retract_confirm: Option<(String, String)> = None;
+    // Consent cards are daemon-owned and re-emitted after attach. This FIFO is
+    // only the current socket's rendering order, never the durable truth.
+    let mut pending_consent_approvals = std::collections::VecDeque::<PendingConsentApproval>::new();
 
     // ── Terminal ──
     let mut term = terminal::setup(false)?;
@@ -678,6 +703,17 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     layout.chat_pane,
                 );
             }
+            if let Some(pending) = pending_consent_approvals.front() {
+                render_bottom_anchored_card(
+                    f.buffer_mut(),
+                    consent_approval_card_lines(
+                        pending,
+                        pending_consent_approvals.len().saturating_sub(1),
+                    ),
+                    state.theme.colors.accent,
+                    layout.chat_pane,
+                );
+            }
             status_bar::render(
                 f,
                 layout.status_bar,
@@ -740,6 +776,49 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                         // Any further keypress dismisses the retract confirmation.
                         state.feedback_blocks.remove("peer-retract");
                         match (key.code, key.modifiers) {
+                            // Story 18.3d AC1 — sender-consent Approval Pattern.
+                            // The guard is the daemon-derived pending FIFO, so
+                            // these single-letter keys are inert everywhere else.
+                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && !pending_consent_approvals.is_empty() =>
+                            {
+                                if let Some(pending) = pending_consent_approvals.pop_front() {
+                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
+                                        request_id: pending.request_id,
+                                        outcome: crate::domain::models::ApprovalOutcome::Once,
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('a'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && !pending_consent_approvals.is_empty() =>
+                            {
+                                if let Some(pending) = pending_consent_approvals.pop_front() {
+                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
+                                        request_id: pending.request_id,
+                                        outcome: crate::domain::models::ApprovalOutcome::AlwaysAndSave {
+                                            scope: crate::domain::models::ApprovalScope::Tool(
+                                                pending.tool,
+                                            ),
+                                        },
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
+                                if !m.contains(KeyModifiers::CONTROL)
+                                    && !pending_consent_approvals.is_empty() =>
+                            {
+                                if let Some(pending) = pending_consent_approvals.pop_front() {
+                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
+                                        request_id: pending.request_id,
+                                        outcome: crate::domain::models::ApprovalOutcome::Reject {
+                                            feedback: None,
+                                        },
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
                             // Story 12.2d AC4/AC5 — consolidation card intercept.
                             (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
                                 && pending_consolidation_token.is_some() =>
@@ -995,8 +1074,20 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     Ok(Some(DaemonFrame::Error(e))) => {
                         conversation.messages.push(system_message(format!("[daemon error] {e}")));
                     }
+                    Ok(Some(DaemonFrame::ApprovalRequest {
+                        tool,
+                        request_id,
+                        input_preview,
+                        ..
+                    })) if tool == "a2a/sender-consent" => {
+                        pending_consent_approvals.push_back(PendingConsentApproval {
+                            request_id,
+                            tool,
+                            input_preview,
+                        });
+                        state.needs_redraw = true;
+                    }
                     Ok(Some(DaemonFrame::ApprovalRequest { tool, request_id, .. })) => {
-                        // Rich approval card over attach is 12.2d; surface it honestly.
                         conversation.messages.push(system_message(format!(
                             "[approval needed] {tool} (id {}) — approve from the local TUI for now.",
                             request_id.0
@@ -1051,6 +1142,24 @@ mod tests {
     use crate::domain::models::{NoticeLevel, StopReason, StreamChunk};
     use std::time::Instant;
     use tokio::net::UnixStream;
+
+    #[test]
+    fn consent_card_queue_indicator_is_derived_from_the_daemon_fifo() {
+        let pending = PendingConsentApproval {
+            request_id: crate::domain::models::RequestId::new(),
+            tool: "a2a/sender-consent".to_owned(),
+            input_preview: "Consent required\n[y] Allow once  [a] Always allow  [n] Decline"
+                .to_owned(),
+        };
+        let text = consent_approval_card_lines(&pending, 2)
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("[2 more queued]"));
+        assert!(text.contains("[y] Allow once  [a] Always allow  [n] Decline"));
+    }
 
     // ── Story 18.3c (AC3/AC5) — peer response decision-core coverage ────────
 
