@@ -226,6 +226,17 @@ pub fn render(
                         muted,
                     ))));
                 }
+                if let Some(provenance) = &row.provenance {
+                    for detail in [
+                        format!("    {}", provenance.response_clause()),
+                        format!("    {}", provenance.notification_clause()),
+                    ] {
+                        lines.push(ListItem::new(Line::from(Span::styled(
+                            truncate_to_width(&detail, inner.width as usize),
+                            muted,
+                        ))));
+                    }
+                }
             }
             lines
         })
@@ -302,6 +313,7 @@ mod tests {
             peer: "peer-a".to_owned(),
             task: Some("t-1".to_owned()),
             summary: "refused by policy".to_owned(),
+            provenance: None,
         }
     }
 

@@ -780,6 +780,7 @@ mod tests {
             crate::domain::ports::PeerResponsePolicy {
                 mode: self.0,
                 auto_response: None,
+                ..Default::default()
             }
         }
     }

@@ -5189,6 +5189,7 @@ mod tests {
             peer: "peer-a".to_owned(),
             task: Some(format!("task-{seq}")),
             summary: summary.to_owned(),
+            provenance: None,
         };
         let mut state = TuiState::new(160, 40);
         state.focus = FocusState::Sidebar {

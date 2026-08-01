@@ -76,6 +76,7 @@ impl rustain::domain::ports::DeliveryPolicy for ModePolicy {
         rustain::domain::ports::PeerResponsePolicy {
             mode: self.0,
             auto_response: None,
+            ..Default::default()
         }
     }
 }
@@ -215,6 +216,7 @@ impl InboundPeerRuntime for ScrubRuntime {
         rustain::domain::ports::PeerResponsePolicy {
             mode: rustain::domain::models::ResponseMode::NotifyAndAuto,
             auto_response: None,
+            ..Default::default()
         }
     }
 

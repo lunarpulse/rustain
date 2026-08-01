@@ -35,6 +35,8 @@ pub trait AgentMessageBus: Send + Sync {
 pub struct PeerResponsePolicy {
     pub mode: ResponseMode,
     pub auto_response: Option<String>,
+    pub notification: crate::domain::models::NotificationUrgency,
+    pub provenance: crate::domain::models::InteractionPolicySnapshot,
 }
 
 impl Default for PeerResponsePolicy {
@@ -42,6 +44,8 @@ impl Default for PeerResponsePolicy {
         Self {
             mode: ResponseMode::NotifyAndWait,
             auto_response: None,
+            notification: crate::domain::models::NotificationUrgency::Queue,
+            provenance: crate::domain::models::InteractionPolicySnapshot::default(),
         }
     }
 }
@@ -108,11 +112,21 @@ impl DeliveryPolicy for EffectiveDeliveryPolicy {
 
     fn response_policy_for_peer(&self, peer_id: &PeerId) -> PeerResponsePolicy {
         let sender = sender_policy_for(&self.policy, peer_id);
+        let response = sender
+            .and_then(|policy| policy.response_mode.clone())
+            .unwrap_or_else(|| self.policy.automation.clone());
+        let notification = sender
+            .and_then(|policy| policy.notification.clone())
+            .unwrap_or_else(|| self.policy.urgency.clone());
         PeerResponsePolicy {
-            mode: sender
-                .and_then(|policy| policy.response_mode.as_ref())
-                .map_or(self.policy.automation.value, |mode| mode.value),
+            mode: response.value,
             auto_response: sender.and_then(|policy| policy.auto_response.clone()),
+            notification: notification.value,
+            provenance: crate::domain::models::InteractionPolicySnapshot {
+                sender_label: sender.map(|policy| policy.alias.clone()),
+                response,
+                notification,
+            },
         }
     }
 }
@@ -171,7 +185,14 @@ mod tests {
                 individual: ResponseMode::NotifyAndAuto,
                 team: None,
             }),
-            notification: None,
+            notification: Some(Resolved {
+                value: crate::domain::models::NotificationUrgency::Immediate,
+                source: PolicySource::TeamRaised {
+                    file: ".rustain/team-policy.toml".to_owned(),
+                },
+                individual: crate::domain::models::NotificationUrgency::Queue,
+                team: Some(crate::domain::models::NotificationUrgency::Immediate),
+            }),
             auto_response: Some("acknowledged".to_owned()),
             deferred_types: vec![],
         });
@@ -184,6 +205,24 @@ mod tests {
             PeerResponsePolicy {
                 mode: ResponseMode::NotifyAndAuto,
                 auto_response: Some("acknowledged".to_owned()),
+                notification: crate::domain::models::NotificationUrgency::Immediate,
+                provenance: crate::domain::models::InteractionPolicySnapshot {
+                    sender_label: Some("trusted-peer".to_owned()),
+                    response: Resolved {
+                        value: ResponseMode::NotifyAndAuto,
+                        source: PolicySource::Default,
+                        individual: ResponseMode::NotifyAndAuto,
+                        team: None,
+                    },
+                    notification: Resolved {
+                        value: crate::domain::models::NotificationUrgency::Immediate,
+                        source: PolicySource::TeamRaised {
+                            file: ".rustain/team-policy.toml".to_owned(),
+                        },
+                        individual: crate::domain::models::NotificationUrgency::Queue,
+                        team: Some(crate::domain::models::NotificationUrgency::Immediate),
+                    },
+                },
             }
         );
         assert_eq!(

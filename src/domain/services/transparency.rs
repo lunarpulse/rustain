@@ -96,6 +96,10 @@ pub enum TransparencyKind {
     ConsentGranted,
     /// Operator revoked durable consent from one authenticated sender.
     ConsentRevoked,
+    /// Interaction became visible in the audit spine before interruption routing.
+    InteractionSurfaced,
+    /// A batch of prior digest-tier interactions was shown to the operator.
+    DigestFlushed,
     /// A record this build does not understand. Rendered, never dropped
     /// (UX-DR-ROOM-01).
     Unknown,
@@ -113,6 +117,8 @@ impl TransparencyKind {
             Self::Disclosed => "⇢",
             Self::ConsentGranted => "+",
             Self::ConsentRevoked => "−",
+            Self::InteractionSurfaced => "!",
+            Self::DigestFlushed => "≋",
             _ => "·",
         }
     }
@@ -127,6 +133,8 @@ impl TransparencyKind {
             Self::Disclosed => "disclosed",
             Self::ConsentGranted => "consent-granted",
             Self::ConsentRevoked => "consent-revoked",
+            Self::InteractionSurfaced => "surfaced",
+            Self::DigestFlushed => "digest-flushed",
             _ => "unknown",
         }
     }
@@ -150,6 +158,9 @@ pub struct TransparencyRow {
     pub task: Option<String>,
     /// Human-readable, already sanitized and length-capped.
     pub summary: String,
+    /// Decision-time source snapshot; `None` only for non-interaction rows and
+    /// journals written before this event family existed.
+    pub provenance: Option<crate::domain::models::InteractionPolicySnapshot>,
 }
 
 impl TransparencyRow {
@@ -239,6 +250,10 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         return None;
     };
     let recorded_at_ms = entry.has_timestamp().then_some(entry.recorded_at_ms);
+    let provenance = match event {
+        RoomEvent::PeerInteractionSurfaced { provenance, .. } => Some(provenance.clone()),
+        _ => None,
+    };
     let (kind, direction, peer, task, summary) = match event {
         RoomEvent::RemoteEnvelopeAccepted {
             peer,
@@ -297,6 +312,27 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             task.clone(),
             format!("disclosed result to peer ({disclosed_bytes} bytes)"),
         ),
+        RoomEvent::PeerInteractionSurfaced {
+            peer,
+            task,
+            notification,
+            ..
+        } => (
+            TransparencyKind::InteractionSurfaced,
+            Direction::Inbound,
+            peer.as_ref()
+                .map(|peer| peer.as_str().to_owned())
+                .unwrap_or_else(|| "unknown-peer".to_owned()),
+            task.clone(),
+            format!("peer interaction recorded · notification {notification}"),
+        ),
+        RoomEvent::PeerDigestFlushed { count, .. } => (
+            TransparencyKind::DigestFlushed,
+            Direction::Inbound,
+            "—".to_owned(),
+            None,
+            format!("surfaced digest of {count} peer interactions"),
+        ),
         RoomEvent::ConsentGranted { sender, .. } => (
             TransparencyKind::ConsentGranted,
             Direction::Unknown,
@@ -340,6 +376,7 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         peer: sanitize_disclosable(&peer, MAX_PEER_ID_BYTES),
         task: task.map(|id| sanitize_disclosable(&id, MAX_PEER_ID_BYTES)),
         summary: sanitize_disclosable(&summary, MAX_SUMMARY_BYTES),
+        provenance,
     })
 }
 
@@ -503,6 +540,12 @@ pub fn render_export(rows: &[TransparencyRow]) -> String {
             "peer": row.peer,
             "task": row.task,
             "summary": row.summary,
+            "responseProvenance": row.provenance.as_ref().map(
+                crate::domain::models::InteractionPolicySnapshot::response_clause
+            ),
+            "notificationProvenance": row.provenance.as_ref().map(
+                crate::domain::models::InteractionPolicySnapshot::notification_clause
+            ),
             "structural_replay": STRUCTURAL_REPLAY_CLAIM,
         });
         out.push_str(&value.to_string());
@@ -1059,10 +1102,47 @@ mod tests {
             room_entry(2, 0, RoomEvent::Unrecognized),
             room_entry(3, 9, RoomEvent::Unrecognized),
         ];
+
         assert!(matches!(
             validate_replay_structure(&descending_nonlegacy).as_slice(),
             [StructuralDivergence::TimestampDescent { seq: 3, .. }]
         ));
+    }
+    #[test]
+    fn provenance_snapshot_remains_stable_when_live_policy_changes() {
+        let peer = crate::domain::models::PeerId::from_public_key(&[21u8; 32]).unwrap();
+        let snapshot = crate::domain::models::InteractionPolicySnapshot::default();
+        let row = transparency_row(&room_entry(
+            1,
+            10,
+            RoomEvent::PeerInteractionSurfaced {
+                peer: Some(peer),
+                node: crate::domain::models::AgentId::from_validated("node-provenance"),
+                task: Some("task-provenance".to_owned()),
+                notification: crate::domain::models::NotificationUrgency::Queue,
+                provenance: snapshot,
+            },
+        ))
+        .unwrap();
+        let before = render_export(std::slice::from_ref(&row));
+
+        let _live_policy_changed_afterward = crate::domain::models::InteractionPolicySnapshot {
+            notification: crate::domain::models::Resolved {
+                value: crate::domain::models::NotificationUrgency::Immediate,
+                source: crate::domain::models::PolicySource::TeamRaised {
+                    file: ".rustain/team-policy.toml".to_owned(),
+                },
+                individual: crate::domain::models::NotificationUrgency::Queue,
+                team: Some(crate::domain::models::NotificationUrgency::Immediate),
+            },
+            ..Default::default()
+        };
+        let after = render_export(&[row]);
+
+        assert_eq!(before, after, "rendering must use the stored snapshot");
+        assert!(before.contains("response: notify-and-wait · via default"));
+        assert!(before.contains("notification: queue · via default"));
+        assert!(!before.contains("team-policy.toml"));
     }
 
     #[test]
@@ -1076,6 +1156,7 @@ mod tests {
             peer: "peer-a".to_owned(),
             task: Some("task-a".to_owned()),
             summary: "accepted".to_owned(),
+            provenance: None,
         };
         for spec in ["", " \t", "peer=", "direction=", "kind="] {
             assert!(

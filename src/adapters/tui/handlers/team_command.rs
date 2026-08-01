@@ -193,6 +193,10 @@ pub fn render_rows(rows: &[TransparencyRow], json: bool) -> String {
     }
     for row in rows.iter().skip(skipped) {
         out.push_str(&format!("{} {}\n", row.timestamp_label(), row.one_line()));
+        if let Some(provenance) = &row.provenance {
+            out.push_str(&format!("  {}\n", provenance.response_clause()));
+            out.push_str(&format!("  {}\n", provenance.notification_clause()));
+        }
     }
     out.push_str(&format!(
         "— {STRUCTURAL_REPLAY_CLAIM}; {ATTRIBUTION_CAVEAT}"
@@ -286,6 +290,7 @@ mod tests {
             peer: "peer-a".to_owned(),
             task: Some("t-1".to_owned()),
             summary: "peer reported terminal state failed".to_owned(),
+            provenance: None,
         }
     }
 

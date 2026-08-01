@@ -179,6 +179,8 @@ pub struct AttachServer {
     delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
     pending_drafts: Arc<super::response_modes::PendingDraftController>,
     pending_consent: Option<Arc<super::consent::PendingConsentManager>>,
+    urgency_router: Option<Arc<super::urgency::UrgencyRouter>>,
+    operator_turn_active: std::sync::atomic::AtomicBool,
     room_journal: Option<Arc<dyn crate::domain::ports::RoomJournal>>,
     /// Read half of the same journal — the retract path derives the disclosed
     /// `target_seq` from it instead of trusting the client's frame (AC5).
@@ -377,6 +379,7 @@ impl AttachServer {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -397,6 +400,7 @@ impl AttachServer {
             node_tree,
             peer_bus,
             delivery_policy,
+            None,
             None,
             None,
             None,
@@ -442,6 +446,7 @@ impl AttachServer {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -456,6 +461,32 @@ impl AttachServer {
         room_journal_reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
         consent_projection: Option<Arc<crate::adapters::policy::JournalConsentProjection>>,
     ) -> Arc<Self> {
+        Self::new_with_node_tree_bus_policy_journal_and_urgency(
+            core,
+            conversation,
+            domain_tx,
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            room_journal,
+            room_journal_reader,
+            consent_projection,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_node_tree_bus_policy_journal_and_urgency(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        node_tree: crate::infrastructure::subagent::NodeTree,
+        peer_bus: PeerBusSlot,
+        delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
+        room_journal: Arc<dyn crate::domain::ports::RoomJournal>,
+        room_journal_reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
+        consent_projection: Option<Arc<crate::adapters::policy::JournalConsentProjection>>,
+        urgency_router: Option<Arc<super::urgency::UrgencyRouter>>,
+    ) -> Arc<Self> {
         Self::with_clock_and_node_tree(
             core,
             conversation,
@@ -467,6 +498,7 @@ impl AttachServer {
             Some(room_journal),
             Some(room_journal_reader),
             consent_projection,
+            urgency_router,
         )
     }
 
@@ -481,6 +513,7 @@ impl AttachServer {
         room_journal: Option<Arc<dyn crate::domain::ports::RoomJournal>>,
         room_journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>>,
         consent_projection: Option<Arc<crate::adapters::policy::JournalConsentProjection>>,
+        urgency_router: Option<Arc<super::urgency::UrgencyRouter>>,
     ) -> Arc<Self> {
         let pending_consent =
             room_journal
@@ -516,6 +549,8 @@ impl AttachServer {
             delivery_policy,
             pending_drafts: Arc::new(super::response_modes::PendingDraftController::default()),
             pending_consent,
+            urgency_router,
+            operator_turn_active: std::sync::atomic::AtomicBool::new(false),
             room_journal,
             room_journal_reader,
             inbound_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -624,7 +659,58 @@ impl AttachServer {
                 },
             }
         }
+
         forwarder.abort();
+    }
+    async fn surface_queued_interactions(
+        &self,
+        queued: Vec<super::urgency::SurfaceInteraction>,
+    ) -> anyhow::Result<()> {
+        if queued.is_empty() {
+            return Ok(());
+        }
+        let mut conversation = self.conversation.lock().await;
+        for interaction in queued {
+            conversation.messages.push(ChatMessage {
+                id: generate_message_id(),
+                role: MessageRole::User,
+                content: format!(
+                    "{}\n{}\n{}",
+                    interaction.text,
+                    interaction.provenance.response_clause(),
+                    interaction.provenance.notification_clause()
+                ),
+                created_at: crate::domain::models::session_meta::now_unix(),
+                ..Default::default()
+            });
+        }
+        self.core.storage.save_conversation(&conversation).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn surface_digest_batch(
+        &self,
+        batch: super::urgency::DigestBatch,
+    ) -> anyhow::Result<()> {
+        let mut content = batch.content();
+        for item in &batch.items {
+            content.push_str(&format!(
+                "\n  {}\n  {}",
+                item.provenance.response_clause(),
+                item.provenance.notification_clause()
+            ));
+        }
+        let mut conversation = self.conversation.lock().await;
+        conversation.messages.push(ChatMessage {
+            id: generate_message_id(),
+            role: MessageRole::System,
+            content,
+            created_at: crate::domain::models::session_meta::now_unix(),
+            synthetic: true,
+            ..Default::default()
+        });
+        self.core.storage.save_conversation(&conversation).await?;
+        Ok(())
     }
 
     /// Fold an assistant turn into the conversation (persist on completion) and
@@ -632,8 +718,12 @@ impl AttachServer {
     async fn handle_bus_event(&self, event: &AppEvent, assistant_buf: &mut String) {
         if let AppEvent::ProviderChunk { chunk, .. } = event {
             match chunk {
-                StreamChunk::Text { content, .. } => assistant_buf.push_str(content),
+                StreamChunk::Text { content, .. } => {
+                    self.operator_turn_active.store(true, Ordering::Release);
+                    assistant_buf.push_str(content);
+                }
                 StreamChunk::TurnComplete { stop_reason } => {
+                    self.operator_turn_active.store(false, Ordering::Release);
                     if *stop_reason == StopReason::Cancelled {
                         // A cancelled turn has no committed assistant answer. In
                         // particular, an aborted inbound turn can have already
@@ -645,12 +735,20 @@ impl AttachServer {
                         assistant_buf.clear();
                         self.turn_complete.notify_waiters();
                     }
+                    if let Some(router) = &self.urgency_router {
+                        let queued = router.take_idle_queue().await;
+                        if let Err(error) = self.surface_queued_interactions(queued).await {
+                            tracing::error!(%error, "failed to surface queued peer interactions");
+                        }
+                    }
                 }
                 StreamChunk::ToolUse { id, name, .. } => {
                     assistant_buf.push_str(&format!("\n[tool use: {name} (id: {id})]\n"));
+                    self.operator_turn_active.store(true, Ordering::Release);
                 }
                 StreamChunk::ToolResult { content, .. } => {
                     assistant_buf.push_str(&format!("[tool result: {content}]\n"));
+                    self.operator_turn_active.store(true, Ordering::Release);
                 }
                 _ => {}
             }
@@ -2800,6 +2898,36 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
         }
         let fallible = async {
             let response_started_at_ms = self.clock.wall_now_ms();
+            let surface_now =
+                if let Some(router) = &self.urgency_router {
+                    let route = router
+                        .route(super::urgency::SurfaceInteraction {
+                            peer: task.peer_id.clone(),
+                            node: task.node_id.clone(),
+                            task: Some(task.node_id.as_str().to_owned()),
+                            text: task.text.clone(),
+                            notification: task.response_policy.notification,
+                            provenance: task.response_policy.provenance.clone(),
+                            recorded_at_ms: response_started_at_ms,
+                        })
+                        .await
+                        .map_err(|error| InboundPeerError::Unavailable(error.to_string()))?;
+                    match route {
+                        super::urgency::UrgencyRoute::Immediate(_) => true,
+                        super::urgency::UrgencyRoute::Queued => {
+                            if !self.operator_turn_active.load(Ordering::Acquire) {
+                                let queued = router.take_idle_queue().await;
+                                self.surface_queued_interactions(queued).await.map_err(
+                                    |error| InboundPeerError::Unavailable(error.to_string()),
+                                )?;
+                            }
+                            false
+                        }
+                        super::urgency::UrgencyRoute::Digested => false,
+                    }
+                } else {
+                    true
+                };
             match task.response_policy.mode {
                 crate::domain::models::ResponseMode::NotifyAndWait => {
                     if !self.pending_drafts.begin(task.node_id.as_str()).await
@@ -2814,13 +2942,20 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     }
                     {
                         let mut conversation = self.conversation.lock().await;
-                        conversation.messages.push(ChatMessage {
-                            id: generate_message_id(),
-                            role: MessageRole::User,
-                            content: task.text.clone(),
-                            created_at: crate::domain::models::session_meta::now_unix(),
-                            ..Default::default()
-                        });
+                        if surface_now {
+                            conversation.messages.push(ChatMessage {
+                                id: generate_message_id(),
+                                role: MessageRole::User,
+                                content: format!(
+                                    "{}\n{}\n{}",
+                                    task.text,
+                                    task.response_policy.provenance.response_clause(),
+                                    task.response_policy.provenance.notification_clause()
+                                ),
+                                created_at: crate::domain::models::session_meta::now_unix(),
+                                ..Default::default()
+                            });
+                        }
                         conversation.messages.push(ChatMessage {
                             id: format!("peer-response-{}", task.node_id.as_str()),
                             role: MessageRole::Assistant,
@@ -2861,13 +2996,20 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     );
                     {
                         let mut conversation = self.conversation.lock().await;
-                        conversation.messages.push(ChatMessage {
-                            id: generate_message_id(),
-                            role: MessageRole::User,
-                            content: task.text.clone(),
-                            created_at: crate::domain::models::session_meta::now_unix(),
-                            ..Default::default()
-                        });
+                        if surface_now {
+                            conversation.messages.push(ChatMessage {
+                                id: generate_message_id(),
+                                role: MessageRole::User,
+                                content: format!(
+                                    "{}\n{}\n{}",
+                                    task.text,
+                                    task.response_policy.provenance.response_clause(),
+                                    task.response_policy.provenance.notification_clause()
+                                ),
+                                created_at: crate::domain::models::session_meta::now_unix(),
+                                ..Default::default()
+                            });
+                        }
                         conversation.messages.push(ChatMessage {
                             id: format!("peer-response-{}", task.node_id.as_str()),
                             role: MessageRole::Assistant,
@@ -2918,13 +3060,20 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     }
                     {
                         let mut conversation = self.conversation.lock().await;
-                        conversation.messages.push(ChatMessage {
-                            id: generate_message_id(),
-                            role: MessageRole::User,
-                            content: task.text.clone(),
-                            created_at: crate::domain::models::session_meta::now_unix(),
-                            ..Default::default()
-                        });
+                        if surface_now {
+                            conversation.messages.push(ChatMessage {
+                                id: generate_message_id(),
+                                role: MessageRole::User,
+                                content: format!(
+                                    "{}\n{}\n{}",
+                                    task.text,
+                                    task.response_policy.provenance.response_clause(),
+                                    task.response_policy.provenance.notification_clause()
+                                ),
+                                created_at: crate::domain::models::session_meta::now_unix(),
+                                ..Default::default()
+                            });
+                        }
                         conversation.messages.push(ChatMessage {
                             id: format!("peer-response-{}", task.node_id.as_str()),
                             role: MessageRole::Assistant,
@@ -3438,6 +3587,7 @@ mod tests {
             response_policy: crate::domain::ports::PeerResponsePolicy {
                 mode: crate::domain::models::ResponseMode::NotifyAndAuto,
                 auto_response: None,
+                ..Default::default()
             },
         }
     }
@@ -3616,6 +3766,7 @@ mod tests {
         task.response_policy = crate::domain::ports::PeerResponsePolicy {
             mode: crate::domain::models::ResponseMode::NotifyAndAuto,
             auto_response: Some("Acknowledged.".to_owned()),
+            ..Default::default()
         };
         let node_id = task.node_id.clone();
 
@@ -3825,6 +3976,34 @@ mod tests {
         )
     }
 
+    fn journaled_server_with_urgency(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        journal: Arc<RecordingJournal>,
+        urgency: Arc<crate::adapters::daemon::urgency::UrgencyRouter>,
+    ) -> Arc<AttachServer> {
+        let node_tree = crate::infrastructure::subagent::NodeTree::with_event_tx(
+            domain_tx.clone(),
+            Arc::new(|| 123_i64),
+        );
+        let delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy> =
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy);
+        let peer_bus = peer_bus_slot_with_policy(&node_tree, delivery_policy.clone());
+        AttachServer::new_with_node_tree_bus_policy_journal_and_urgency(
+            core,
+            conversation,
+            domain_tx,
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            journal.clone(),
+            journal,
+            None,
+            Some(urgency),
+        )
+    }
+
     #[tokio::test]
     async fn production_consent_gate_groups_once_and_persists_sender_only_always() {
         use crate::domain::models::{ApprovalOutcome, ApprovalScope};
@@ -3962,6 +4141,108 @@ mod tests {
         assert_eq!(
             unrelated.decision.await.unwrap(),
             InboundApprovalDecision::Decline
+        );
+    }
+
+    #[tokio::test]
+    async fn digest_flush_surfaces_one_batched_drillable_conversation_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = journaled_server(
+            core,
+            conversation.clone(),
+            domain_tx,
+            Arc::new(RecordingJournal::default()),
+        );
+        let make_item = |byte: u8| crate::adapters::daemon::urgency::SurfaceInteraction {
+            peer: test_signer(byte).identity().peer_id.clone(),
+            node: AgentId::from_validated(format!("digest-node-{byte}")),
+            task: Some(format!("digest-task-{byte}")),
+            text: format!("message-{byte}"),
+            notification: crate::domain::models::NotificationUrgency::Digest,
+            provenance: crate::domain::models::InteractionPolicySnapshot::default(),
+            recorded_at_ms: 10,
+        };
+
+        server
+            .surface_digest_batch(crate::adapters::daemon::urgency::DigestBatch {
+                items: vec![make_item(110), make_item(111)],
+                flushed_at_ms: 20,
+            })
+            .await
+            .unwrap();
+
+        let conversation = conversation.lock().await;
+        assert_eq!(conversation.messages.len(), 1);
+        let content = &conversation.messages[0].content;
+        assert!(content.contains("Team digest — 2 interactions"));
+        assert!(content.contains("digest-task-110"));
+        assert!(content.contains("digest-task-111"));
+        assert!(content.contains("response: notify-and-wait · via default"));
+        assert!(content.contains("notification: queue · via default"));
+    }
+
+    #[tokio::test]
+    async fn queue_urgency_surfaces_at_the_next_turn_complete_without_notice_severity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let (domain_tx, mut domain_rx) = mpsc::unbounded_channel();
+        let journal = Arc::new(RecordingJournal::default());
+        let router = Arc::new(crate::adapters::daemon::urgency::UrgencyRouter::new(
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(10)),
+            journal.clone(),
+            &[],
+            60_000,
+        ));
+        let sender = test_signer(112).identity().peer_id.clone();
+        router
+            .route(crate::adapters::daemon::urgency::SurfaceInteraction {
+                peer: sender,
+                node: AgentId::from_validated("queue-node"),
+                task: Some("queue-task".to_owned()),
+                text: "queued peer message".to_owned(),
+                notification: crate::domain::models::NotificationUrgency::Queue,
+                provenance: crate::domain::models::InteractionPolicySnapshot::default(),
+                recorded_at_ms: 0,
+            })
+            .await
+            .unwrap();
+        let server =
+            journaled_server_with_urgency(core, conversation.clone(), domain_tx, journal, router);
+        assert!(conversation.lock().await.messages.is_empty());
+
+        let mut assistant_buf = String::new();
+        server
+            .handle_bus_event(
+                &AppEvent::ProviderChunk {
+                    conversation_id: "queue-test".to_owned(),
+                    chunk: StreamChunk::TurnComplete {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                },
+                &mut assistant_buf,
+            )
+            .await;
+
+        let conversation = conversation.lock().await;
+        assert_eq!(conversation.messages.len(), 1);
+        assert!(
+            conversation.messages[0]
+                .content
+                .contains("queued peer message")
+        );
+        assert!(
+            conversation.messages[0]
+                .content
+                .contains("notification: queue")
+        );
+        assert!(
+            std::iter::from_fn(|| domain_rx.try_recv().ok())
+                .all(|event| !matches!(event, AppEvent::SystemNotice { .. })),
+            "urgency must not be encoded as NoticeLevel"
         );
     }
 

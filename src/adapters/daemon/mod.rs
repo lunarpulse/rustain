@@ -52,6 +52,8 @@ mod session_queue;
 mod socket;
 #[cfg(unix)]
 pub mod status;
+#[cfg(unix)]
+pub(crate) mod urgency;
 
 #[cfg(unix)]
 pub use lifecycle::{duration_until_next, emit_session_boundary};
@@ -280,12 +282,17 @@ async fn run_daemon_foreground(
 ) -> Result<()> {
     config.daemon.validate().map_err(|e| anyhow::anyhow!(e))?;
 
-    // Resolve policy against the single replay-folded consent projection shared
-    // with the delivery gate. Missing journals fold to the explicit empty state.
+    // One read supplies both replay-folded consent and restart-safe digest
+    // state. Neither projection re-reads the journal on delivery.
+    let journal_reader =
+        crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+            &workspace,
+        );
+    let journal_entries = crate::domain::ports::RoomJournalReader::load_entries(&journal_reader)
+        .await
+        .context("failed to load policy and urgency journal projections")?;
     let consent_projection = std::sync::Arc::new(
-        crate::adapters::policy::JournalConsentProjection::load_workspace(&workspace)
-            .await
-            .context("failed to load durable consent projection")?,
+        crate::adapters::policy::JournalConsentProjection::from_entries(&journal_entries),
     );
     let effective_policy = policy_startup::validate_startup_policies(
         &workspace,
@@ -360,9 +367,10 @@ async fn run_daemon_foreground(
             .await
             .map_err(|error| anyhow::anyhow!("opening node journal: {error}"))?,
     );
+    let clock: std::sync::Arc<dyn crate::domain::clock::Clock> =
+        std::sync::Arc::new(crate::domain::clock::SystemClock::default());
     let now_fn = {
-        use crate::domain::clock::Clock;
-        let clock = std::sync::Arc::new(crate::domain::clock::SystemClock::default());
+        let clock = clock.clone();
         std::sync::Arc::new(move || clock.wall_now_ms())
     };
     let node_tree =
@@ -503,6 +511,12 @@ async fn run_daemon_foreground(
             Some(domain_tx.clone()),
         ),
     );
+    let urgency_router = std::sync::Arc::new(crate::adapters::daemon::urgency::UrgencyRouter::new(
+        clock,
+        journal.clone(),
+        &journal_entries,
+        i64::from(effective_policy.digest_interval_minutes).saturating_mul(60_000),
+    ));
 
     // Story 18.3c (AC1) — the composition root installs the already-resolved
     // effective policy into the ONE bus consumed by verified peer delivery.
@@ -516,7 +530,7 @@ async fn run_daemon_foreground(
         delivery_policy.clone(),
     );
     let server =
-        crate::adapters::daemon::server::AttachServer::new_with_node_tree_bus_policy_and_journal(
+        crate::adapters::daemon::server::AttachServer::new_with_node_tree_bus_policy_journal_and_urgency(
             core.clone(),
             conversation.clone(),
             domain_tx.clone(),
@@ -526,7 +540,24 @@ async fn run_daemon_foreground(
             journal.clone(),
             reader.clone(),
             Some(consent_projection.clone()),
+            Some(urgency_router.clone()),
         );
+    if let Some(batch) = urgency_router
+        .flush_pending_on_start()
+        .await
+        .context("failed to journal pending startup digest")?
+    {
+        server
+            .surface_digest_batch(batch)
+            .await
+            .context("failed to surface pending startup digest")?;
+    }
+    let urgency_shutdown = tokio_util::sync::CancellationToken::new();
+    let urgency_task = tokio::spawn(crate::adapters::daemon::urgency::run_digest_flusher(
+        urgency_router,
+        std::sync::Arc::downgrade(&server),
+        urgency_shutdown.child_token(),
+    ));
 
     // The recorder is mandatory for every live verified peer frame, regardless
     // of whether the optional HTTP A2A listener is enabled.
@@ -613,6 +644,9 @@ async fn run_daemon_foreground(
     });
 
     let result = lifecycle::run_lifecycle(rt).await;
+
+    urgency_shutdown.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), urgency_task).await;
 
     a2a_shutdown.cancel();
     if let Some(task) = a2a_task {

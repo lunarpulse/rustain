@@ -7757,6 +7757,23 @@ mod tests {
                         "journal PeerDraftResolved node={n} agent_composed={agent_composed} sent={sent}"
                     ));
                 }
+                RoomEvent::PeerInteractionSurfaced {
+                    peer,
+                    node,
+                    task,
+                    notification,
+                    ..
+                } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal PeerInteractionSurfaced peer={peer:?} node={n} task={task:?} notification={notification}"
+                    ));
+                }
+                RoomEvent::PeerDigestFlushed { flushed_at, count } => {
+                    lines.push(format!(
+                        "journal PeerDigestFlushed flushed_at={flushed_at} count={count}"
+                    ));
+                }
                 RoomEvent::ConsentGranted { sender, granted_at } => {
                     lines.push(format!(
                         "journal ConsentGranted sender={sender:?} granted_at={granted_at}"

@@ -16,6 +16,7 @@ use crate::domain::models::artifact::{
 use crate::domain::models::invocation_fingerprint::InvocationFingerprint;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::peer_identity::PeerId;
+use crate::domain::models::team_policy::{InteractionPolicySnapshot, NotificationUrgency};
 use crate::domain::models::tool_call::ApprovalSource;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -322,6 +323,27 @@ pub enum RoomEvent {
         agent_composed: bool,
         sent: bool,
     },
+    /// Decision-time record for an inbound peer interaction. This row is
+    /// journaled before urgency decides when to interrupt the operator.
+    PeerInteractionSurfaced {
+        #[serde(default)]
+        peer: Option<PeerId>,
+        node: AgentId,
+        #[serde(default)]
+        task: Option<String>,
+        #[serde(default)]
+        notification: NotificationUrgency,
+        #[serde(default)]
+        provenance: InteractionPolicySnapshot,
+    },
+    /// Auditable boundary after which preceding digest-tier interaction rows
+    /// have been shown in one batch.
+    PeerDigestFlushed {
+        #[serde(default)]
+        flushed_at: i64,
+        #[serde(default)]
+        count: usize,
+    },
     /// Durable operator grant allowing one authenticated sender to bypass the
     /// pending-consent gate. Duplicate grants are replay-idempotent.
     ConsentGranted {
@@ -608,6 +630,8 @@ impl OrchestrationRoom {
             RoomEvent::PeerDisclosure { .. }
             | RoomEvent::AutoResponseRetracted { .. }
             | RoomEvent::PeerDraftResolved { .. }
+            | RoomEvent::PeerInteractionSurfaced { .. }
+            | RoomEvent::PeerDigestFlushed { .. }
             | RoomEvent::ConsentGranted { .. }
             | RoomEvent::ConsentRevoked { .. } => {}
             // The room read model has nothing to fold an unknown tag into.

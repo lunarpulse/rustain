@@ -288,10 +288,11 @@ pub use taint::{ProvenanceTag, TaintDecision};
 #[allow(unused_imports)]
 pub use team_policy::{
     DEFAULT_DIGEST_INTERVAL_MINUTES, DeferredKey, EffectivePolicy, INDIVIDUAL_POLICY_FILE,
-    IndividualDefaults, IndividualPolicy, MSGTYPE_DEFERRAL, MessageTypeOverride,
-    NotificationUrgency, PolicySource, Resolved, ResponseMode, SenderBinding, SenderIdentity,
-    SenderIdentityConflict, SenderOverride, SenderPolicy, SharingBreadth, TEAM_POLICY_FILE,
-    TeamDefaults, TeamOverrides, TeamPolicy, TeamTransparency, TransparencyInvariant,
+    IndividualDefaults, IndividualPolicy, InteractionPolicySnapshot, MSGTYPE_DEFERRAL,
+    MessageTypeOverride, NotificationUrgency, PolicySource, Resolved, ResponseMode, SenderBinding,
+    SenderIdentity, SenderIdentityConflict, SenderOverride, SenderPolicy, SharingBreadth,
+    TEAM_POLICY_FILE, TeamDefaults, TeamOverrides, TeamPolicy, TeamTransparency,
+    TransparencyInvariant,
 };
 #[allow(unused_imports)]
 pub use tool_call::{

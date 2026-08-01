@@ -165,6 +165,71 @@ fn policy_explainer_consumes_real_trusted_and_revoked_projection_states() {
 }
 
 #[test]
+fn provenance_clauses_name_the_stored_sources_without_fabricated_defaults() {
+    let default = rustain::domain::models::InteractionPolicySnapshot::default();
+    assert_eq!(
+        default.response_clause(),
+        "response: notify-and-wait · via default"
+    );
+    assert_eq!(
+        default.notification_clause(),
+        "notification: queue · via default"
+    );
+    assert!(!default.response_clause().contains(".rustain/"));
+
+    let constrained = rustain::domain::models::InteractionPolicySnapshot {
+        sender_label: Some("marcus-arch".to_owned()),
+        response: rustain::domain::models::Resolved {
+            value: rustain::domain::models::ResponseMode::NotifyAndWait,
+            source: rustain::domain::models::PolicySource::TeamCapped {
+                file: ".rustain/team-policy.toml".to_owned(),
+            },
+            individual: rustain::domain::models::ResponseMode::NotifyAndAuto,
+            team: Some(rustain::domain::models::ResponseMode::NotifyAndWait),
+        },
+        notification: rustain::domain::models::Resolved {
+            value: rustain::domain::models::NotificationUrgency::Immediate,
+            source: rustain::domain::models::PolicySource::TeamRaised {
+                file: ".rustain/team-policy.toml".to_owned(),
+            },
+            individual: rustain::domain::models::NotificationUrgency::Queue,
+            team: Some(rustain::domain::models::NotificationUrgency::Immediate),
+        },
+    };
+    assert_eq!(
+        constrained.response_clause(),
+        "response: notify-and-wait · lowered from notify-and-auto by team floor — \
+         .rustain/team-policy.toml (your edit cannot raise it)"
+    );
+    assert_eq!(
+        constrained.notification_clause(),
+        "notification: immediate · raised from queue by team floor — \
+         .rustain/team-policy.toml (your edit cannot lower it)"
+    );
+}
+
+#[test]
+fn malformed_policy_is_a_named_error_and_never_falls_back_through_raw_stderr() {
+    let workspace = tempfile::TempDir::new().unwrap();
+    let policy_dir = workspace.path().join(".rustain");
+    std::fs::create_dir_all(&policy_dir).unwrap();
+    std::fs::write(
+        policy_dir.join("a2a-interaction.toml"),
+        "[interaction.defaults\n",
+    )
+    .unwrap();
+
+    let error = rustain::adapters::policy::config::load_workspace_policies(workspace.path())
+        .expect_err("malformed policy must fail closed");
+    assert!(error.to_string().contains("malformed and was NOT applied"));
+    let source = std::fs::read_to_string("src/adapters/policy/config.rs").unwrap();
+    assert!(
+        !source.contains("eprintln!"),
+        "policy config must use returned diagnostics, not raw stderr"
+    );
+}
+
+#[test]
 fn production_wiring_uses_the_journal_projection_and_central_a2a_gate() {
     let daemon = std::fs::read_to_string("src/adapters/daemon/mod.rs").unwrap();
     let startup = std::fs::read_to_string("src/adapters/daemon/policy_startup.rs").unwrap();
@@ -172,10 +237,14 @@ fn production_wiring_uses_the_journal_projection_and_central_a2a_gate() {
     let a2a = std::fs::read_to_string("src/adapters/a2a/server.rs").unwrap();
     let startup_production = startup.split("#[cfg(test)]").next().unwrap();
 
-    assert!(daemon.contains("JournalConsentProjection::load_workspace"));
+    assert!(daemon.contains("JournalConsentProjection::from_entries(&journal_entries)"));
     assert!(daemon.contains("consent_projection.as_ref()"));
+    assert!(daemon.contains("UrgencyRouter::new"));
+    assert!(daemon.contains("run_digest_flusher"));
+    assert!(daemon.contains("Some(consent_projection.clone())"));
+    assert!(daemon.contains("Some(urgency_router.clone())"));
     assert!(!startup_production.contains("EmptyConsentProjection"));
     assert!(!doctor.contains("EmptyConsentProjection"));
     assert!(a2a.contains("runtime.enforces_sender_consent()"));
-    assert!(daemon.contains("new_with_node_tree_bus_policy_and_journal"));
+    assert!(daemon.contains("new_with_node_tree_bus_policy_journal_and_urgency"));
 }

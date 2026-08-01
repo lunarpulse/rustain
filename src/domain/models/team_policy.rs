@@ -580,6 +580,77 @@ pub struct Resolved<T> {
     pub team: Option<T>,
 }
 
+/// Decision-time response/urgency snapshot carried by every surfaced peer
+/// interaction. Rendering reads this value; it never re-opens policy files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractionPolicySnapshot {
+    #[serde(default)]
+    pub sender_label: Option<String>,
+    pub response: Resolved<ResponseMode>,
+    pub notification: Resolved<NotificationUrgency>,
+}
+
+impl Default for InteractionPolicySnapshot {
+    fn default() -> Self {
+        Self {
+            sender_label: None,
+            response: Resolved {
+                value: ResponseMode::NotifyAndWait,
+                source: PolicySource::Default,
+                individual: ResponseMode::NotifyAndWait,
+                team: None,
+            },
+            notification: Resolved {
+                value: NotificationUrgency::Queue,
+                source: PolicySource::Default,
+                individual: NotificationUrgency::Queue,
+                team: None,
+            },
+        }
+    }
+}
+
+impl InteractionPolicySnapshot {
+    #[must_use]
+    pub fn response_clause(&self) -> String {
+        let value = self.response.value.as_str();
+        match &self.response.source {
+            PolicySource::Default => format!("response: {value} · via default"),
+            PolicySource::Individual { file } => self.sender_label.as_ref().map_or_else(
+                || format!("response: {value} · via individual — {file}"),
+                |alias| format!("response: {value} · via override \"{alias}\" — {file}"),
+            ),
+            PolicySource::TeamCapped { file } => format!(
+                "response: {value} · lowered from {} by team floor — {file} \
+                 (your edit cannot raise it)",
+                self.response.individual.as_str()
+            ),
+            PolicySource::TeamRaised { file } => {
+                format!("response: {value} · via team floor — {file}")
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn notification_clause(&self) -> String {
+        let value = self.notification.value.as_str();
+        match &self.notification.source {
+            PolicySource::Default => format!("notification: {value} · via default"),
+            PolicySource::Individual { file } => {
+                format!("notification: {value} · via individual — {file}")
+            }
+            PolicySource::TeamRaised { file } => format!(
+                "notification: {value} · raised from {} by team floor — {file} \
+                 (your edit cannot lower it)",
+                self.notification.individual.as_str()
+            ),
+            PolicySource::TeamCapped { file } => {
+                format!("notification: {value} · via team cap — {file}")
+            }
+        }
+    }
+}
+
 /// Sharing breadth — the quantity that **binds in neither direction**.
 ///
 /// `effective` is always `individual`. The team value travels alongside as a

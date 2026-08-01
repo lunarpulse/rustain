@@ -3548,6 +3548,30 @@ mod parts_aware_tests {
     }
 
     #[test]
+    fn provenance_content_changes_height_cache_hash_and_preserves_layout_invariant() {
+        let plain = crate::domain::models::ChatMessage {
+            role: MessageRole::User,
+            content: "peer message".to_owned(),
+            ..Default::default()
+        };
+        let surfaced = crate::domain::models::ChatMessage {
+            content: "peer message\nresponse: notify-and-wait · via default\nnotification: queue · via default"
+                .to_owned(),
+            ..plain.clone()
+        };
+        assert_ne!(
+            hash_message_content(&plain),
+            hash_message_content(&surfaced)
+        );
+
+        let theme = Theme::dark();
+        let rendered = render_message(&surfaced, 80, &theme, false, false, None, None, false);
+        let computed = compute_message_height(&surfaced.content, false, false, false, false, 80);
+        assert_eq!(rendered.len(), computed);
+        assert!(computed > compute_message_height(&plain.content, false, false, false, false, 80));
+    }
+
+    #[test]
     fn auto_sent_and_retracted_rows_keep_authorship_and_content_visible() {
         let mut message = crate::domain::models::ChatMessage {
             role: MessageRole::Assistant,
