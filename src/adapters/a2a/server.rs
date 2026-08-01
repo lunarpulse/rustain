@@ -1108,6 +1108,7 @@ async fn launch(
         return;
     }
     task.advance(RapTaskState::Working).await;
+    let response_policy = runtime.response_policy(&peer_id);
     let started = runtime
         .start(
             InboundPeerTask {
@@ -1115,6 +1116,7 @@ async fn launch(
                 peer_id: peer_id.clone(),
                 text,
                 subagent_type: INBOUND_SUBAGENT_TYPE.to_owned(),
+                response_policy,
             },
             task.cancel.clone(),
         )
@@ -1128,6 +1130,22 @@ async fn launch(
             return;
         }
     };
+    let node_state = *status.borrow();
+    let pending_auth = task.pending_auth().await;
+    let initial = project_node_to_rap(node_state, pending_auth);
+    task.advance(initial).await;
+    if initial.is_terminal() {
+        if initial == RapTaskState::Completed {
+            task.set_result(runtime.take_result_text(&task.node_id).await)
+                .await;
+        } else if initial == RapTaskState::Failed {
+            task.set_detail(FAILURE_DETAIL).await;
+        }
+        if let Some(record) = pending.as_ref() {
+            remove_pending_task(state, record).await;
+        }
+        return;
+    }
 
     let state = ServerState::clone(state);
     let task = task.clone();

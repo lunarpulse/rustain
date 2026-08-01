@@ -90,7 +90,8 @@ mod workspace_registry;
 pub use self_update::{BinaryReplacerPort, SelfUpdatePort};
 
 pub use agent_message_bus::{
-    AgentMessageBus, DeliveryError, DeliveryPolicy, RelationshipDeliveryPolicy,
+    AgentMessageBus, DeliveryError, DeliveryPolicy, EffectiveDeliveryPolicy, PeerResponsePolicy,
+    RelationshipDeliveryPolicy,
 };
 pub use agent_transport::{AgentTransport, AgentTransportError};
 pub use approval_persistence::ApprovalPersistencePort;

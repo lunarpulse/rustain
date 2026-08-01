@@ -174,6 +174,14 @@ pub struct AttachServer {
     /// Retained (not just forwarded to the frame handler) so a test can prove the
     /// SAME object governs both routes.
     peer_bus: PeerBusSlot,
+    /// Same policy object as the one installed in `peer_bus`, retained for the
+    /// direct A2A front door's response-mode query.
+    delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
+    pending_drafts: Arc<super::response_modes::PendingDraftController>,
+    room_journal: Option<Arc<dyn crate::domain::ports::RoomJournal>>,
+    /// Read half of the same journal — the retract path derives the disclosed
+    /// `target_seq` from it instead of trusting the client's frame (AC5).
+    room_journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>>,
     /// Story 18.1b — the assistant answer produced by each inbound A2A peer
     /// node, captured at the moment its turn finished.
     ///
@@ -211,16 +219,37 @@ impl crate::adapters::rap::VerifiedPeerConsumer for DaemonPeerConsumer {
 
     async fn ingest(
         &self,
-        _recipient: &AgentId,
+        recipient: &AgentId,
         content: AgentMessage,
         peer_id: &PeerId,
+    ) -> Result<(), String> {
+        self.ingest_with_policy(
+            recipient,
+            content,
+            peer_id,
+            crate::domain::ports::PeerResponsePolicy::default(),
+        )
+        .await
+    }
+
+    async fn ingest_with_policy(
+        &self,
+        recipient: &AgentId,
+        content: AgentMessage,
+        peer_id: &PeerId,
+        response_policy: crate::domain::ports::PeerResponsePolicy,
     ) -> Result<(), String> {
         let server = self
             .server
             .upgrade()
             .ok_or_else(|| "daemon peer consumer is shutting down".to_string())?;
         server
-            .enqueue_verified_peer_turn(content.content, peer_id.clone())
+            .enqueue_verified_peer_turn(
+                recipient.clone(),
+                content.content,
+                peer_id.clone(),
+                response_policy,
+            )
             .await
     }
 }
@@ -264,11 +293,18 @@ pub type PeerBusSlot = Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::Agent
 /// tests use; the daemon composition root builds and owns its own slot so the
 /// policy it installs is the policy the peer path honours.
 pub fn default_peer_bus_slot(node_tree: &crate::infrastructure::subagent::NodeTree) -> PeerBusSlot {
+    peer_bus_slot_with_policy(
+        node_tree,
+        Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+    )
+}
+
+pub fn peer_bus_slot_with_policy(
+    node_tree: &crate::infrastructure::subagent::NodeTree,
+    policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
+) -> PeerBusSlot {
     let bus = Arc::new(
-        crate::infrastructure::agent_message_bus::LocalMessageBus::new(
-            node_tree.clone(),
-            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
-        ),
+        crate::infrastructure::agent_message_bus::LocalMessageBus::new(node_tree.clone(), policy),
     ) as Arc<dyn crate::domain::ports::AgentMessageBus>;
     Arc::new(arc_swap::ArcSwap::from_pointee(bus))
 }
@@ -313,8 +349,20 @@ impl AttachServer {
             domain_tx.clone(),
             Arc::new(|| chrono::Utc::now().timestamp_millis()),
         );
-        let peer_bus = default_peer_bus_slot(&node_tree);
-        Self::with_clock_and_node_tree(core, conversation, domain_tx, clock, node_tree, peer_bus)
+        let delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy> =
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy);
+        let peer_bus = peer_bus_slot_with_policy(&node_tree, delivery_policy.clone());
+        Self::with_clock_and_node_tree(
+            core,
+            conversation,
+            domain_tx,
+            clock,
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            None,
+            None,
+        )
     }
 
     pub fn new_with_node_tree(
@@ -323,8 +371,20 @@ impl AttachServer {
         domain_tx: mpsc::UnboundedSender<AppEvent>,
         node_tree: crate::infrastructure::subagent::NodeTree,
     ) -> Arc<Self> {
-        let peer_bus = default_peer_bus_slot(&node_tree);
-        Self::new_with_node_tree_and_bus(core, conversation, domain_tx, node_tree, peer_bus)
+        let delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy> =
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy);
+        let peer_bus = peer_bus_slot_with_policy(&node_tree, delivery_policy.clone());
+        Self::with_clock_and_node_tree(
+            core,
+            conversation,
+            domain_tx,
+            Arc::new(SystemClock::default()),
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            None,
+            None,
+        )
     }
 
     /// The production entry point (Story 18.3, AC3): the composition root owns
@@ -337,6 +397,24 @@ impl AttachServer {
         node_tree: crate::infrastructure::subagent::NodeTree,
         peer_bus: PeerBusSlot,
     ) -> Arc<Self> {
+        Self::new_with_node_tree_bus_and_policy(
+            core,
+            conversation,
+            domain_tx,
+            node_tree,
+            peer_bus,
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+        )
+    }
+
+    pub fn new_with_node_tree_bus_and_policy(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        node_tree: crate::infrastructure::subagent::NodeTree,
+        peer_bus: PeerBusSlot,
+        delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
+    ) -> Arc<Self> {
         Self::with_clock_and_node_tree(
             core,
             conversation,
@@ -344,6 +422,32 @@ impl AttachServer {
             Arc::new(SystemClock::default()),
             node_tree,
             peer_bus,
+            delivery_policy,
+            None,
+            None,
+        )
+    }
+
+    pub fn new_with_node_tree_bus_policy_and_journal(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        node_tree: crate::infrastructure::subagent::NodeTree,
+        peer_bus: PeerBusSlot,
+        delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
+        room_journal: Arc<dyn crate::domain::ports::RoomJournal>,
+        room_journal_reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
+    ) -> Arc<Self> {
+        Self::with_clock_and_node_tree(
+            core,
+            conversation,
+            domain_tx,
+            Arc::new(SystemClock::default()),
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            Some(room_journal),
+            Some(room_journal_reader),
         )
     }
 
@@ -354,6 +458,9 @@ impl AttachServer {
         clock: Arc<dyn Clock>,
         node_tree: crate::infrastructure::subagent::NodeTree,
         peer_bus: PeerBusSlot,
+        delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
+        room_journal: Option<Arc<dyn crate::domain::ports::RoomJournal>>,
+        room_journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|_weak| Self {
             core,
@@ -375,6 +482,10 @@ impl AttachServer {
             clock,
             peer_delivery: Arc::new(tokio::sync::RwLock::new(None)),
             peer_bus,
+            delivery_policy,
+            pending_drafts: Arc::new(super::response_modes::PendingDraftController::default()),
+            room_journal,
+            room_journal_reader,
             inbound_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
@@ -537,6 +648,8 @@ impl AttachServer {
             synthetic: false,
             images: vec![],
             origin,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         let now = crate::domain::models::session_meta::now_unix();
         conv.updated_at = now;
@@ -566,6 +679,8 @@ impl AttachServer {
             synthetic: false,
             images: vec![],
             origin: ChannelKind::Cron,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         let now = crate::domain::models::session_meta::now_unix();
         conv.updated_at = now;
@@ -793,6 +908,220 @@ impl AttachServer {
         writer.abort();
     }
 
+    async fn resolve_peer_draft(
+        &self,
+        node_id: &AgentId,
+        resolution: super::response_modes::DraftResolution,
+    ) -> Result<(), String> {
+        // AC3 — resolutions are idempotent: a duplicate frame over an already
+        // settled draft is a no-op, never an error and never a second send.
+        match self.pending_drafts.state(node_id.as_str()).await {
+            Some(super::response_modes::DraftState::Sent { .. })
+            | Some(super::response_modes::DraftState::Rejected) => return Ok(()),
+            Some(super::response_modes::DraftState::Ready { .. }) => {}
+            Some(super::response_modes::DraftState::Drafting { .. }) => {
+                return Err("peer draft is still being composed".to_owned());
+            }
+            None => {
+                // Restart/re-attach: rebuild controller state ONLY from a row
+                // that is still pending. A settled row (sent content, a
+                // rejected card) is terminal — reconstructing it into `Ready`
+                // would double-send and double-journal.
+                let persisted = {
+                    let conversation = self.conversation.lock().await;
+                    conversation
+                        .messages
+                        .iter()
+                        .find(|message| message.id == format!("peer-response-{}", node_id.as_str()))
+                        .map(|message| message.content.clone())
+                }
+                .ok_or_else(|| "peer response row was not found".to_owned())?;
+                let generated = super::response_modes::pending_draft_content(&persisted)
+                    .ok_or_else(|| "peer response is already settled".to_owned())?;
+                if !self.pending_drafts.begin(node_id.as_str()).await
+                    || !self
+                        .pending_drafts
+                        .complete(node_id.as_str(), generated)
+                        .await
+                {
+                    return Err("peer response could not be reconstructed".to_owned());
+                }
+            }
+        }
+        let original = match self.pending_drafts.state(node_id.as_str()).await {
+            Some(super::response_modes::DraftState::Ready { content }) => content,
+            _ => return Err("peer draft is not ready for resolution".to_owned()),
+        };
+        let state = self
+            .pending_drafts
+            .resolve(node_id.as_str(), resolution)
+            .await
+            .ok_or_else(|| "peer draft resolution was rejected".to_owned())?;
+        let (content, authorship, sent) = match state {
+            super::response_modes::DraftState::Sent {
+                content,
+                authorship,
+            } => (content, authorship, true),
+            super::response_modes::DraftState::Rejected => (
+                String::new(),
+                super::response_modes::DraftAuthorship::HumanWritten,
+                false,
+            ),
+            _ => return Err("peer draft did not reach a terminal resolution".to_owned()),
+        };
+        let journal = self
+            .room_journal
+            .as_ref()
+            .ok_or_else(|| "room journal is unavailable".to_owned())?;
+        if let Err(error) = journal
+            .record_event(crate::domain::models::RoomEvent::PeerDraftResolved {
+                node: node_id.clone(),
+                agent_composed: authorship == super::response_modes::DraftAuthorship::AgentComposed,
+                sent,
+            })
+            .await
+        {
+            let restored = self
+                .pending_drafts
+                .restore_ready(node_id.as_str(), original)
+                .await;
+            if !restored {
+                tracing::error!(node = %node_id, "failed to roll back draft after journal failure");
+            }
+            return Err(error.to_string());
+        }
+
+        {
+            let mut conversation = self.conversation.lock().await;
+            let row = conversation
+                .messages
+                .iter_mut()
+                .find(|message| message.id == format!("peer-response-{}", node_id.as_str()))
+                .ok_or_else(|| "peer draft row was not found".to_owned())?;
+            if sent {
+                row.content = content.clone();
+                row.authorship = match authorship {
+                    super::response_modes::DraftAuthorship::AgentComposed => {
+                        crate::domain::models::MessageAuthorship::AgentComposed
+                    }
+                    super::response_modes::DraftAuthorship::HumanWritten => {
+                        crate::domain::models::MessageAuthorship::HumanWritten
+                    }
+                };
+                row.synthetic = false;
+            } else {
+                row.content = format!("[draft rejected]\n{}", row.content);
+                row.synthetic = true;
+            }
+            if let Err(error) = self.core.storage.save_conversation(&conversation).await {
+                // The journal append stands (it is append-only); restore the
+                // draft so the operator can retry. The retried resolution
+                // appends a twin event — same node, same outcome — which the
+                // projection fold must treat idempotently.
+                let restored = self
+                    .pending_drafts
+                    .restore_ready(node_id.as_str(), original)
+                    .await;
+                if !restored {
+                    tracing::error!(node = %node_id, "failed to roll back draft after persistence failure");
+                }
+                return Err(error.to_string());
+            }
+        }
+
+        self.node_tree.set_state(node_id, NodeState::Running).await;
+        if sent {
+            self.inbound_results
+                .lock()
+                .await
+                .insert(node_id.clone(), content);
+            self.node_tree
+                .set_state(node_id, NodeState::Completed)
+                .await;
+        } else {
+            self.node_tree
+                .set_state(node_id, NodeState::Cancelled)
+                .await;
+        }
+        self.node_tree.deregister(node_id).await;
+        Ok(())
+    }
+
+    async fn retract_auto_response(
+        &self,
+        message_id: &str,
+        target_seq: Option<u64>,
+    ) -> Result<(), String> {
+        let journal = self
+            .room_journal
+            .as_ref()
+            .ok_or_else(|| "room journal is unavailable".to_owned())?;
+        let reader = self
+            .room_journal_reader
+            .as_ref()
+            .ok_or_else(|| "room journal reader is unavailable".to_owned())?;
+        let mut conversation = self.conversation.lock().await;
+        let index = conversation
+            .messages
+            .iter()
+            .position(|message| message.id == message_id)
+            .ok_or_else(|| "auto response row was not found".to_owned())?;
+
+        // AC5 — the daemon owns the message↔seq binding. The retract target is
+        // the journal seq of this response's `PeerDisclosure`, derived from the
+        // journal itself (operator-paced path, never per-message); the frame's
+        // `target_seq` is validated against it, never trusted.
+        let node = message_id
+            .strip_prefix("peer-response-")
+            .and_then(|suffix| AgentId::parse(suffix).ok())
+            .ok_or_else(|| "auto response row does not name a peer response".to_owned())?;
+        let entries = reader
+            .load_entries()
+            .await
+            .map_err(|error| error.to_string())?;
+        let derived_seq = entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.record {
+                crate::domain::models::JournalRecord::Room(
+                    crate::domain::models::RoomEvent::PeerDisclosure {
+                        node: disclosed, ..
+                    },
+                ) if *disclosed == node => Some(entry.seq),
+                _ => None,
+            })
+            .ok_or_else(|| "no disclosure is journaled for this auto response".to_owned())?;
+        if let Some(supplied) = target_seq
+            && supplied != derived_seq
+        {
+            return Err(format!(
+                "retraction target mismatch: the row's disclosure is journaled at seq {derived_seq}, not {supplied}"
+            ));
+        }
+
+        let plan = super::response_modes::plan_auto_response_retraction(
+            &conversation.messages[index],
+            derived_seq,
+            true,
+            self.clock.wall_now_ms(),
+        )
+        .map_err(|error| format!("retraction refused: {error:?}"))?;
+
+        journal
+            .record_event(plan.event)
+            .await
+            .map_err(|error| error.to_string())?;
+        let original = std::mem::replace(&mut conversation.messages[index], plan.message);
+        if let Err(error) = self.core.storage.save_conversation(&conversation).await {
+            // The event stands (append-only; the fold is idempotent on
+            // duplicates) — roll the in-memory row back so a retry is not
+            // refused as `AlreadyRetracted` while disk says otherwise.
+            conversation.messages[index] = original;
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
+
     /// Returns `true` if the connection should detach.
     async fn handle_client_frame(
         &self,
@@ -992,6 +1321,76 @@ impl AttachServer {
                     }
                 }
             }
+            ClientFrame::ResolvePeerDraft { node, action } => {
+                if mode != AttachMode::ReadWrite {
+                    self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
+                        .await;
+                    return false;
+                }
+                if tier != ConnectionTier::TrustedLocal {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::PeerVerification(
+                            "draft resolution is same-host trusted-local only".to_owned(),
+                        )),
+                    )
+                    .await;
+                    return false;
+                }
+                let node = match AgentId::parse(&node) {
+                    Ok(node) => node,
+                    Err(error) => {
+                        self.send_to(
+                            conn_id,
+                            DaemonFrame::Error(ProtocolError::Malformed(error.to_string())),
+                        )
+                        .await;
+                        return false;
+                    }
+                };
+                let resolution = match action {
+                    super::protocol::PeerDraftAction::Approve => {
+                        super::response_modes::DraftResolution::Approve
+                    }
+                    super::protocol::PeerDraftAction::Edit { content } => {
+                        super::response_modes::DraftResolution::Edit(content)
+                    }
+                    super::protocol::PeerDraftAction::Reject => {
+                        super::response_modes::DraftResolution::Reject
+                    }
+                    super::protocol::PeerDraftAction::WriteOwn { content } => {
+                        super::response_modes::DraftResolution::WriteOwn(content)
+                    }
+                };
+                if let Err(error) = self.resolve_peer_draft(&node, resolution).await {
+                    self.send_to(conn_id, DaemonFrame::Error(ProtocolError::Internal(error)))
+                        .await;
+                }
+            }
+            ClientFrame::RetractAutoResponse {
+                message_id,
+                target_seq,
+            } => {
+                if mode != AttachMode::ReadWrite {
+                    self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
+                        .await;
+                    return false;
+                }
+                if tier != ConnectionTier::TrustedLocal {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::PeerVerification(
+                            "retraction is same-host trusted-local only".to_owned(),
+                        )),
+                    )
+                    .await;
+                    return false;
+                }
+                if let Err(error) = self.retract_auto_response(&message_id, target_seq).await {
+                    self.send_to(conn_id, DaemonFrame::Error(ProtocolError::Internal(error)))
+                        .await;
+                }
+            }
             ClientFrame::Attach { .. } => {
                 // Re-Attach mid-session is a protocol error.
                 self.send_to(
@@ -1144,62 +1543,276 @@ impl AttachServer {
 
     async fn enqueue_verified_peer_turn(
         self: Arc<Self>,
+        recipient: AgentId,
         text: String,
         peer_id: PeerId,
+        response_policy: crate::domain::ports::PeerResponsePolicy,
     ) -> Result<(), String> {
-        let (ingested_tx, ingested_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let _turn_guard = self.turn_serial.lock().await;
-            *self.active_channel_origin.lock().await = ChannelKind::Terminal;
-            let rt = match self.core.ensure_runtime().await {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    let _ = ingested_tx.send(Err(error.to_string()));
-                    return;
+        let response_row_id = format!("peer-response-{}", recipient.as_str());
+        match response_policy.mode {
+            crate::domain::models::ResponseMode::NotifyAndWait => {
+                // Same contract as the A2A front door's wait arm: a durable
+                // pending card (controller entry + `peer-response-<node>` row)
+                // the operator can resolve after a detach/restart. Unlike the
+                // A2A door, a RAP recipient names a NODE, not a task — many
+                // envelopes share it, so an existing card is appended to,
+                // never an error and never a duplicate row id.
+                let fresh = self.pending_drafts.begin(recipient.as_str()).await;
+                if fresh
+                    && !self
+                        .pending_drafts
+                        .complete(recipient.as_str(), String::new())
+                        .await
+                {
+                    return Err("pending peer response could not be initialised".to_owned());
                 }
-            };
-            self.ensure_approval_gate(rt.approval.clone());
-
-            let turn_complete = self.turn_complete.notified();
-            let handle = {
-                let mut conversation = self.conversation.lock().await;
-                conversation.messages.push(ChatMessage {
-                    id: generate_message_id(),
-                    role: MessageRole::User,
-                    content: text,
-                    content_blocks: vec![],
-                    tool_calls: vec![],
-                    created_at: crate::domain::models::session_meta::now_unix(),
-                    token_count: None,
-                    stop_reason: None,
-                    synthetic: false,
-                    images: vec![],
-                    origin: ChannelKind::Terminal,
-                });
-                rt.drive_preloaded_turn(
-                    &mut conversation,
-                    &self.domain_tx,
-                    TurnOrigin::RemotePeer { peer_id },
-                    CancellationToken::new(),
-                )
-            };
-            let _ = ingested_tx.send(Ok(()));
-
-            if let Err(error) = handle.await {
-                tracing::warn!(error = ?error, "daemon verified-peer turn failed");
-            } else if tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete)
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    "verified-peer turn completed but assistant commit was not observed"
-                );
+                {
+                    let mut conversation = self.conversation.lock().await;
+                    conversation.messages.push(ChatMessage {
+                        id: generate_message_id(),
+                        role: MessageRole::User,
+                        content: text,
+                        created_at: crate::domain::models::session_meta::now_unix(),
+                        ..Default::default()
+                    });
+                    if fresh {
+                        conversation.messages.push(ChatMessage {
+                            id: response_row_id.clone(),
+                            role: MessageRole::Assistant,
+                            content: super::response_modes::AWAITING_RESPONSE_PLACEHOLDER
+                                .to_owned(),
+                            created_at: crate::domain::models::session_meta::now_unix(),
+                            synthetic: true,
+                            ..Default::default()
+                        });
+                    }
+                    if let Err(error) = self.core.storage.save_conversation(&conversation).await {
+                        if fresh {
+                            self.pending_drafts.abandon(recipient.as_str()).await;
+                        }
+                        return Err(error.to_string());
+                    }
+                }
+                self.node_tree
+                    .set_state(&recipient, NodeState::Running)
+                    .await;
+                self.node_tree
+                    .set_state(&recipient, NodeState::Waiting)
+                    .await;
+                self.node_tree
+                    .stamp_wait_reason(
+                        &recipient,
+                        Some(crate::domain::models::WaitReason::AwaitingPeerResponse),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(())
             }
-            *self.active_channel_origin.lock().await = ChannelKind::Terminal;
-        });
-        ingested_rx
-            .await
-            .map_err(|_| "verified-peer ingest task closed".to_string())?
+            crate::domain::models::ResponseMode::NotifyAndAuto => {
+                // AC4 — a conservative template, never inference. The row is
+                // persisted (and thereby visible) BEFORE the deadline is read.
+                // Its id is generated, not the card convention: a RAP node
+                // receives many template dispatches, and each exchange is a
+                // distinct row (`ChatMessage.id` stays unique).
+                let response_started_at_ms = self.clock.wall_now_ms();
+                let response = super::response_modes::auto_response_template(
+                    response_policy.auto_response.as_ref(),
+                );
+                {
+                    let mut conversation = self.conversation.lock().await;
+                    conversation.messages.push(ChatMessage {
+                        id: generate_message_id(),
+                        role: MessageRole::User,
+                        content: text,
+                        created_at: crate::domain::models::session_meta::now_unix(),
+                        ..Default::default()
+                    });
+                    conversation.messages.push(ChatMessage {
+                        id: generate_message_id(),
+                        role: MessageRole::Assistant,
+                        content: response.clone(),
+                        created_at: crate::domain::models::session_meta::now_unix(),
+                        authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+                        ..Default::default()
+                    });
+                    self.core
+                        .storage
+                        .save_conversation(&conversation)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                super::response_modes::auto_response_surface(
+                    self.clock.as_ref(),
+                    response_started_at_ms,
+                    true,
+                    false,
+                )
+                .map_err(|miss| {
+                    format!(
+                        "auto response surface missed deadline by {}ms",
+                        miss.elapsed_ms
+                    )
+                })?;
+                self.inbound_results
+                    .lock()
+                    .await
+                    .insert(recipient.clone(), response);
+                self.node_tree
+                    .set_state(&recipient, NodeState::Running)
+                    .await;
+                self.node_tree
+                    .set_state(&recipient, NodeState::Completed)
+                    .await;
+                Ok(())
+            }
+            _ => {
+                // NotifyAndDraft — and any future variant, failing closed:
+                // buffer daemon-side, disclose nothing until the operator
+                // resolves the draft (AC3). A second envelope to the same node
+                // while a draft is pending appends to the conversation and
+                // rides the existing card — no duplicate inference, no
+                // duplicate row id.
+                if !self.pending_drafts.begin(recipient.as_str()).await {
+                    let mut conversation = self.conversation.lock().await;
+                    conversation.messages.push(ChatMessage {
+                        id: generate_message_id(),
+                        role: MessageRole::User,
+                        content: text,
+                        created_at: crate::domain::models::session_meta::now_unix(),
+                        ..Default::default()
+                    });
+                    self.core
+                        .storage
+                        .save_conversation(&conversation)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
+                {
+                    let mut conversation = self.conversation.lock().await;
+                    conversation.messages.push(ChatMessage {
+                        id: generate_message_id(),
+                        role: MessageRole::User,
+                        content: text,
+                        created_at: crate::domain::models::session_meta::now_unix(),
+                        ..Default::default()
+                    });
+                    conversation.messages.push(ChatMessage {
+                        id: response_row_id.clone(),
+                        role: MessageRole::Assistant,
+                        content: super::response_modes::DRAFTING_PLACEHOLDER.to_owned(),
+                        created_at: crate::domain::models::session_meta::now_unix(),
+                        synthetic: true,
+                        ..Default::default()
+                    });
+                    if let Err(error) = self.core.storage.save_conversation(&conversation).await {
+                        self.pending_drafts.abandon(recipient.as_str()).await;
+                        return Err(error.to_string());
+                    }
+                }
+                let (ingested_tx, ingested_rx) = tokio::sync::oneshot::channel();
+                let server = self.clone();
+                tokio::spawn(async move {
+                    let _turn_guard = server.turn_serial.lock().await;
+                    *server.active_channel_origin.lock().await = ChannelKind::Terminal;
+                    let rt = match server.core.ensure_runtime().await {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            let _ = ingested_tx.send(Err(error.to_string()));
+                            return;
+                        }
+                    };
+                    server.ensure_approval_gate(rt.approval.clone());
+
+                    let (tap_tx, tap_rx) = mpsc::unbounded_channel::<AppEvent>();
+                    let collector = spawn_turn_collector(tap_rx, server.domain_tx.clone(), true);
+                    let handle = {
+                        let mut conversation = server.conversation.lock().await;
+                        rt.drive_preloaded_turn(
+                            &mut conversation,
+                            &tap_tx,
+                            TurnOrigin::RemotePeer { peer_id },
+                            CancellationToken::new(),
+                        )
+                    };
+                    drop(tap_tx);
+                    let _ = ingested_tx.send(Ok(()));
+
+                    let join_failed = handle.await.is_err();
+                    let (answer, errored, completed) = collector.await.unwrap_or_default();
+                    let terminal = if join_failed
+                        || errored
+                        || !completed
+                        || answer.trim().is_empty()
+                    {
+                        NodeState::Failed
+                    } else {
+                        server
+                            .pending_drafts
+                            .complete(recipient.as_str(), answer.clone())
+                            .await;
+                        let mut conversation = server.conversation.lock().await;
+                        if let Some(row) = conversation
+                            .messages
+                            .iter_mut()
+                            .find(|message| message.id == response_row_id)
+                        {
+                            row.content = format!(
+                                "{}{}",
+                                super::response_modes::DRAFT_APPROVAL_PREFIX,
+                                answer
+                            );
+                        }
+                        match server.core.storage.save_conversation(&conversation).await {
+                            Ok(()) => NodeState::Waiting,
+                            Err(error) => {
+                                // An unparked card the operator could never
+                                // resolve after a restart is worse than an
+                                // honest failure (AC3).
+                                tracing::warn!(%error, "persisting completed peer draft failed");
+                                server.pending_drafts.abandon(recipient.as_str()).await;
+                                NodeState::Failed
+                            }
+                        }
+                    };
+                    if terminal != NodeState::Waiting {
+                        let mut conversation = server.conversation.lock().await;
+                        conversation
+                            .messages
+                            .retain(|message| message.id != response_row_id);
+                        if let Err(error) =
+                            server.core.storage.save_conversation(&conversation).await
+                        {
+                            tracing::warn!(%error, "removing failed peer response placeholder failed");
+                        }
+                    }
+                    server
+                        .node_tree
+                        .set_state(&recipient, NodeState::Running)
+                        .await;
+                    server.node_tree.set_state(&recipient, terminal).await;
+                    if terminal == NodeState::Waiting
+                        && let Err(error) = server
+                            .node_tree
+                            .stamp_wait_reason(
+                                &recipient,
+                                Some(crate::domain::models::WaitReason::AwaitingPeerResponse),
+                            )
+                            .await
+                    {
+                        tracing::error!(%error, node = %recipient, "stamping peer draft wait failed");
+                        server
+                            .node_tree
+                            .set_state(&recipient, NodeState::Failed)
+                            .await;
+                    }
+                    *server.active_channel_origin.lock().await = ChannelKind::Terminal;
+                });
+                ingested_rx
+                    .await
+                    .map_err(|_| "verified-peer ingest task closed".to_string())?
+            }
+        }
     }
 
     /// Build the runtime (first activity), spawn the approval gate once, drive
@@ -1680,6 +2293,8 @@ async fn record_blocked_action(
         synthetic: true,
         images: vec![],
         origin: ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     if let Err(e) = storage.save_conversation(&conv).await {
         tracing::warn!(error = %e, "daemon: persisting blocked-action record failed");
@@ -1702,10 +2317,73 @@ struct InboundTurnContext {
     turn_serial: Arc<Mutex<()>>,
     active_channel_origin: Arc<Mutex<ChannelKind>>,
     inbound_results: Arc<Mutex<std::collections::HashMap<AgentId, String>>>,
+    pending_drafts: Arc<super::response_modes::PendingDraftController>,
     registry: Arc<Mutex<ConnRegistry>>,
     blocked_waiting: Arc<AtomicUsize>,
     approval_gate_started: Arc<std::sync::atomic::AtomicBool>,
     turn_complete: Arc<Notify>,
+}
+
+/// Tee-collector shared by the A2A front door (`InboundTurnContext::run`) and
+/// the RAP delivery path. The assistant answer is committed to the shared
+/// `conversation` by the attach forwarder, which only runs when a client is
+/// attached — so reading the conversation afterwards would make "did the remote
+/// peer get its answer?" depend on whether an operator happened to be watching.
+/// Accumulating from the turn's own `ProviderChunk` stream does not.
+///
+/// `run_turn`'s join handle resolves `Ok` whether the turn succeeded or died,
+/// because failure is reported on the event stream rather than by unwinding.
+/// This is therefore the ONLY place "the turn finished" and "the turn worked"
+/// are different questions — and there are three ways it can have not worked:
+/// (1) an in-stream error chunk (tool loop limit, stream disconnect), (2) a
+/// provider call that never produced a stream at all (`run_turn` emits an error
+/// notice and returns), and (3) the catch-all: a turn that never reached a
+/// final `TurnComplete` did not complete, whatever else it did or did not say.
+///
+/// In managed (buffered) modes, provider text and terminal chunks stay local —
+/// nothing reaches the daemon bus until the operator resolves the draft (AC3).
+fn spawn_turn_collector(
+    mut tap_rx: mpsc::UnboundedReceiver<AppEvent>,
+    downstream: mpsc::UnboundedSender<AppEvent>,
+    buffer_response: bool,
+) -> tokio::task::JoinHandle<(String, bool, bool)> {
+    tokio::spawn(async move {
+        let mut answer = String::new();
+        let mut errored = false;
+        let mut completed = false;
+        while let Some(event) = tap_rx.recv().await {
+            match &event {
+                AppEvent::ProviderChunk {
+                    chunk: StreamChunk::Error { .. },
+                    ..
+                } => errored = true,
+                AppEvent::SystemNotice {
+                    level: crate::domain::models::NoticeLevel::Error,
+                    ..
+                } => errored = true,
+                AppEvent::ProviderChunk {
+                    chunk: StreamChunk::TurnComplete { stop_reason },
+                    ..
+                } if *stop_reason != StopReason::ToolUse => completed = true,
+                AppEvent::ProviderChunk {
+                    chunk: StreamChunk::Text { content, .. },
+                    ..
+                } => answer.push_str(content),
+                _ => {}
+            }
+            let buffered_chunk = matches!(
+                &event,
+                AppEvent::ProviderChunk {
+                    chunk: StreamChunk::Text { .. } | StreamChunk::TurnComplete { .. },
+                    ..
+                }
+            );
+            if !buffer_response || !buffered_chunk {
+                let _ = downstream.send(event);
+            }
+        }
+        (answer, errored, completed)
+    })
 }
 
 impl InboundTurnContext {
@@ -1727,7 +2405,21 @@ impl InboundTurnContext {
     /// injection path. The only additions are the ones the front door owes the
     /// node: a terminal transition that distinguishes cancel from failure, and
     /// capture of the answer this task produced.
-    async fn run(self, node_id: AgentId, peer_id: PeerId, text: String, cancel: CancellationToken) {
+    async fn run(
+        self,
+        node_id: AgentId,
+        peer_id: PeerId,
+        cancel: CancellationToken,
+        response_policy: crate::domain::ports::PeerResponsePolicy,
+    ) {
+        // Fail closed: only an explicit wait/auto policy takes another path;
+        // draft and every future variant buffer until operator resolution.
+        let managed_response = !matches!(
+            response_policy.mode,
+            crate::domain::models::ResponseMode::NotifyAndWait
+                | crate::domain::models::ResponseMode::NotifyAndAuto
+        );
+        let response_row_id = format!("peer-response-{}", node_id.as_str());
         let runtime = match self.core.ensure_runtime().await {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -1773,74 +2465,16 @@ impl InboundTurnContext {
         tokio::pin!(turn_complete);
         turn_complete.as_mut().enable();
 
-        // Tee the turn's event stream. The assistant answer is committed to the
-        // shared `conversation` by the attach forwarder, which only runs when a
-        // client is attached — so reading the conversation afterwards would make
-        // "did the remote peer get its answer?" depend on whether an operator
-        // happened to be watching. Accumulating from the turn's own
-        // `ProviderChunk` stream does not.
-        //
-        // Every event is forwarded on to the real `domain_tx`, so the daemon bus,
-        // the forwarder, and every other consumer see exactly what they saw
-        // before.
-        let (tap_tx, mut tap_rx) = mpsc::unbounded_channel::<AppEvent>();
-        let downstream = self.domain_tx.clone();
-        let collector = tokio::spawn(async move {
-            let mut answer = String::new();
-            let mut errored = false;
-            let mut completed = false;
-            while let Some(event) = tap_rx.recv().await {
-                // `run_turn`'s join handle resolves `Ok` whether the turn
-                // succeeded or died, because failure is reported on the event
-                // stream rather than by unwinding. This is therefore the ONLY
-                // place "the turn finished" and "the turn worked" are different
-                // questions — and there are three ways it can have not worked:
-                match &event {
-                    // (1) an in-stream error chunk (tool loop limit, stream
-                    //     disconnect);
-                    AppEvent::ProviderChunk {
-                        chunk: StreamChunk::Error { .. },
-                        ..
-                    } => errored = true,
-                    // (2) a provider call that never produced a stream at all —
-                    //     `run_turn` emits an error notice and returns;
-                    AppEvent::SystemNotice {
-                        level: crate::domain::models::NoticeLevel::Error,
-                        ..
-                    } => errored = true,
-                    AppEvent::ProviderChunk {
-                        chunk: StreamChunk::TurnComplete { stop_reason },
-                        ..
-                    } if *stop_reason != StopReason::ToolUse => completed = true,
-                    AppEvent::ProviderChunk {
-                        chunk: StreamChunk::Text { content, .. },
-                        ..
-                    } => answer.push_str(content),
-                    _ => {}
-                }
-                let _ = downstream.send(event);
-            }
-            // (3) …and the catch-all: a turn that never reached a final
-            // `TurnComplete` did not complete, whatever else it did or did not say.
-            (answer, errored, completed)
-        });
+        // Tee the turn's event stream (see `spawn_turn_collector`). Every
+        // non-buffered event is forwarded on to the real `domain_tx`, so the
+        // daemon bus, the forwarder, and every other consumer see exactly what
+        // they saw before.
+        let (tap_tx, tap_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let collector = spawn_turn_collector(tap_rx, self.domain_tx.clone(), managed_response);
 
         let (mut handle, conversation_id) = {
             let mut conversation = self.conversation.lock().await;
             let conversation_id = conversation.id.clone();
-            conversation.messages.push(ChatMessage {
-                id: generate_message_id(),
-                role: MessageRole::User,
-                content: text,
-                content_blocks: vec![],
-                tool_calls: vec![],
-                created_at: crate::domain::models::session_meta::now_unix(),
-                token_count: None,
-                stop_reason: None,
-                synthetic: false,
-                images: vec![],
-                origin: ChannelKind::Terminal,
-            });
             (
                 runtime.drive_preloaded_turn(
                     &mut conversation,
@@ -1913,6 +2547,34 @@ impl InboundTurnContext {
                         let _ = self.domain_tx.send(reset); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 18-1b AC6b — ordered cancel reset via the daemon forwarder channel
                     }
                     NodeState::Failed
+                } else if managed_response && !answer.trim().is_empty() {
+                    let _ = self
+                        .pending_drafts
+                        .complete(node_id.as_str(), answer.clone())
+                        .await;
+                    let mut conversation = self.conversation.lock().await;
+                    if let Some(row) = conversation
+                        .messages
+                        .iter_mut()
+                        .find(|message| message.id == response_row_id)
+                    {
+                        row.content =
+                            format!("{}{}", super::response_modes::DRAFT_APPROVAL_PREFIX, answer);
+                    }
+                    match self.core.storage.save_conversation(&conversation).await {
+                        Ok(()) => NodeState::Waiting,
+                        Err(error) => {
+                            // Parking `Waiting` on a card that never reached
+                            // disk strands the operator after a restart — fail
+                            // honestly instead (AC3). The managed-failure
+                            // cleanup below removes the placeholder row.
+                            tracing::warn!(%error, "persisting completed peer draft failed");
+                            self.pending_drafts.abandon(node_id.as_str()).await;
+                            NodeState::Failed
+                        }
+                    }
+                } else if managed_response {
+                    NodeState::Failed
                 } else {
                     if !answer.trim().is_empty() {
                         self.inbound_results
@@ -1923,17 +2585,44 @@ impl InboundTurnContext {
                     NodeState::Completed
                 };
 
-                let folded =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete).await;
-                if folded.is_err() {
-                    tracing::warn!(
-                        "daemon inbound turn completed but assistant commit was not observed before timeout"
-                    );
+                if !managed_response {
+                    let folded =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete)
+                            .await;
+                    if folded.is_err() {
+                        tracing::warn!(
+                            "daemon inbound turn completed but assistant commit was not observed before timeout"
+                        );
+                    }
                 }
                 terminal
             }
         };
+        if managed_response && !matches!(terminal, NodeState::Completed | NodeState::Waiting) {
+            let mut conversation = self.conversation.lock().await;
+            conversation
+                .messages
+                .retain(|message| message.id != response_row_id);
+            if let Err(error) = self.core.storage.save_conversation(&conversation).await {
+                tracing::warn!(%error, "removing failed peer response placeholder failed");
+            }
+        }
         self.node_tree.set_state(&node_id, terminal).await;
+        if terminal == NodeState::Waiting {
+            if let Err(error) = self
+                .node_tree
+                .stamp_wait_reason(
+                    &node_id,
+                    Some(crate::domain::models::WaitReason::AwaitingPeerResponse),
+                )
+                .await
+            {
+                tracing::error!(%error, node = %node_id, "stamping peer draft wait failed");
+                self.node_tree.set_state(&node_id, NodeState::Failed).await;
+                self.node_tree.deregister(&node_id).await;
+            }
+            return;
+        }
         self.node_tree.deregister(&node_id).await;
     }
 }
@@ -1960,6 +2649,10 @@ fn disclosure_forbidden_fragments(system_prompt: &str) -> Vec<String> {
 /// everything but name.
 #[async_trait::async_trait]
 impl crate::domain::ports::InboundPeerRuntime for AttachServer {
+    fn response_policy(&self, peer_id: &PeerId) -> crate::domain::ports::PeerResponsePolicy {
+        self.delivery_policy.response_policy_for_peer(peer_id)
+    }
+
     async fn start(
         &self,
         task: crate::domain::ports::InboundPeerTask,
@@ -2065,6 +2758,169 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
             });
         }
 
+        // Every mode branch below runs AFTER registration and the command-loop
+        // spawn, so an early `return Err` here would orphan a live node nobody
+        // can reach. Route all fallible work through one block and unwind both
+        // on failure.
+        enum StartRouting {
+            Settled,
+            DriveDraftTurn,
+        }
+        let fallible = async {
+            let response_started_at_ms = self.clock.wall_now_ms();
+            match task.response_policy.mode {
+                crate::domain::models::ResponseMode::NotifyAndWait => {
+                    if !self.pending_drafts.begin(task.node_id.as_str()).await
+                        || !self
+                            .pending_drafts
+                            .complete(task.node_id.as_str(), String::new())
+                            .await
+                    {
+                        return Err(InboundPeerError::Register(
+                            "pending peer response already exists for inbound node".to_owned(),
+                        ));
+                    }
+                    {
+                        let mut conversation = self.conversation.lock().await;
+                        conversation.messages.push(ChatMessage {
+                            id: generate_message_id(),
+                            role: MessageRole::User,
+                            content: task.text.clone(),
+                            created_at: crate::domain::models::session_meta::now_unix(),
+                            ..Default::default()
+                        });
+                        conversation.messages.push(ChatMessage {
+                            id: format!("peer-response-{}", task.node_id.as_str()),
+                            role: MessageRole::Assistant,
+                            content: super::response_modes::AWAITING_RESPONSE_PLACEHOLDER
+                                .to_owned(),
+                            created_at: crate::domain::models::session_meta::now_unix(),
+                            synthetic: true,
+                            ..Default::default()
+                        });
+                        if let Err(error) = self.core.storage.save_conversation(&conversation).await
+                        {
+                            self.pending_drafts.abandon(task.node_id.as_str()).await;
+                            return Err(InboundPeerError::Unavailable(error.to_string()));
+                        }
+                    }
+                    self.node_tree
+                        .set_state(&task.node_id, NodeState::Running)
+                        .await;
+                    self.node_tree
+                        .set_state(&task.node_id, NodeState::Waiting)
+                        .await;
+                    self.node_tree
+                        .stamp_wait_reason(
+                            &task.node_id,
+                            Some(crate::domain::models::WaitReason::AwaitingPeerResponse),
+                        )
+                        .await
+                        .map_err(|error| InboundPeerError::Register(error.to_string()))?;
+                    Ok(StartRouting::Settled)
+                }
+                crate::domain::models::ResponseMode::NotifyAndAuto => {
+                    // AC4 — a conservative template, never inference. The row
+                    // is persisted (and thereby visible) BEFORE the deadline is
+                    // read, and it carries a real id so the retract path can
+                    // address it (AC5).
+                    let response = super::response_modes::auto_response_template(
+                        task.response_policy.auto_response.as_ref(),
+                    );
+                    {
+                        let mut conversation = self.conversation.lock().await;
+                        conversation.messages.push(ChatMessage {
+                            id: generate_message_id(),
+                            role: MessageRole::User,
+                            content: task.text.clone(),
+                            created_at: crate::domain::models::session_meta::now_unix(),
+                            ..Default::default()
+                        });
+                        conversation.messages.push(ChatMessage {
+                            id: format!("peer-response-{}", task.node_id.as_str()),
+                            role: MessageRole::Assistant,
+                            content: response.clone(),
+                            created_at: crate::domain::models::session_meta::now_unix(),
+                            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+                            ..Default::default()
+                        });
+                        self.core
+                            .storage
+                            .save_conversation(&conversation)
+                            .await
+                            .map_err(|error| InboundPeerError::Unavailable(error.to_string()))?;
+                    }
+                    super::response_modes::auto_response_surface(
+                        self.clock.as_ref(),
+                        response_started_at_ms,
+                        true,
+                        false,
+                    )
+                    .map_err(|miss| {
+                        InboundPeerError::Unavailable(format!(
+                            "auto response surface missed deadline by {}ms",
+                            miss.elapsed_ms
+                        ))
+                    })?;
+                    self.inbound_results
+                        .lock()
+                        .await
+                        .insert(task.node_id.clone(), response);
+                    self.node_tree
+                        .set_state(&task.node_id, NodeState::Running)
+                        .await;
+                    self.node_tree
+                        .set_state(&task.node_id, NodeState::Completed)
+                        .await;
+                    self.node_tree.deregister(&task.node_id).await;
+                    Ok(StartRouting::Settled)
+                }
+                _ => {
+                    // NotifyAndDraft — and any future variant, failing closed:
+                    // buffer daemon-side, disclose nothing until the operator
+                    // resolves the draft (AC3).
+                    if !self.pending_drafts.begin(task.node_id.as_str()).await {
+                        return Err(InboundPeerError::Register(
+                            "pending draft already exists for inbound node".to_owned(),
+                        ));
+                    }
+                    {
+                        let mut conversation = self.conversation.lock().await;
+                        conversation.messages.push(ChatMessage {
+                            id: generate_message_id(),
+                            role: MessageRole::User,
+                            content: task.text.clone(),
+                            created_at: crate::domain::models::session_meta::now_unix(),
+                            ..Default::default()
+                        });
+                        conversation.messages.push(ChatMessage {
+                            id: format!("peer-response-{}", task.node_id.as_str()),
+                            role: MessageRole::Assistant,
+                            content: super::response_modes::DRAFTING_PLACEHOLDER.to_owned(),
+                            created_at: crate::domain::models::session_meta::now_unix(),
+                            synthetic: true,
+                            ..Default::default()
+                        });
+                        if let Err(error) = self.core.storage.save_conversation(&conversation).await
+                        {
+                            self.pending_drafts.abandon(task.node_id.as_str()).await;
+                            return Err(InboundPeerError::Unavailable(error.to_string()));
+                        }
+                    }
+                    Ok(StartRouting::DriveDraftTurn)
+                }
+            }
+        };
+        match fallible.await {
+            Ok(StartRouting::Settled) => return Ok(status),
+            Ok(StartRouting::DriveDraftTurn) => {}
+            Err(error) => {
+                cancel.cancel();
+                self.node_tree.deregister(&task.node_id).await;
+                return Err(error);
+            }
+        }
+
         let context = InboundTurnContext {
             core: self.core.clone(),
             conversation: self.conversation.clone(),
@@ -2077,12 +2933,13 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
             turn_complete: self.turn_complete.clone(),
             active_channel_origin: self.active_channel_origin.clone(),
             inbound_results: self.inbound_results.clone(),
+            pending_drafts: self.pending_drafts.clone(),
         };
         tokio::spawn(context.run(
             task.node_id.clone(),
             task.peer_id.clone(),
-            task.text,
             cancel,
+            task.response_policy,
         ));
 
         Ok(status)
@@ -2206,6 +3063,7 @@ mod tests {
     use crate::domain::errors::ProviderError;
     use crate::domain::models::{AgentEnvelope, ModelDescriptor};
     use crate::domain::models::{AppConfig, CompletionOptions, Message, StopReason};
+    use crate::domain::ports::RoomJournal;
     use crate::domain::ports::{
         InboundPeerRuntime, InboundPeerTask, PersonaPort, SecurityPort, StoragePort,
         StreamingProvider, ToolSetPort,
@@ -2477,6 +3335,10 @@ mod tests {
             peer_id,
             text: text.into(),
             subagent_type: "a2a-test".to_owned(),
+            response_policy: crate::domain::ports::PeerResponsePolicy {
+                mode: crate::domain::models::ResponseMode::NotifyAndAuto,
+                auto_response: None,
+            },
         }
     }
 
@@ -2493,6 +3355,567 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn notify_and_wait_transitions_then_stamps_and_resume_clears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation, domain_tx);
+        let mut task = inbound_task(test_signer(90).identity().peer_id.clone(), "status?");
+        task.response_policy = crate::domain::ports::PeerResponsePolicy::default();
+        let node_id = task.node_id.clone();
+
+        let status = server
+            .start(task, CancellationToken::new())
+            .await
+            .expect("wait mode registers a durable peer node");
+        assert_eq!(*status.borrow(), NodeState::Waiting);
+        let waiting = server
+            .node_tree()
+            .list()
+            .await
+            .into_iter()
+            .find(|node| node.agent_id == node_id)
+            .expect("registered waiting node");
+        assert_eq!(
+            waiting.wait_reason,
+            Some(crate::domain::models::WaitReason::AwaitingPeerResponse)
+        );
+
+        server
+            .node_tree()
+            .set_state(&node_id, NodeState::Running)
+            .await;
+        let resumed = server
+            .node_tree()
+            .list()
+            .await
+            .into_iter()
+            .find(|node| node.agent_id == node_id)
+            .expect("resumed node");
+        assert_eq!(resumed.wait_reason, None);
+
+        // Restart reconciliation may discover that a peer task which was
+        // persisted as waiting is actually terminal. The terminal transition
+        // must clear the replayed side-state rather than render a false wait.
+        server
+            .node_tree()
+            .set_state(&node_id, NodeState::Waiting)
+            .await;
+        server
+            .node_tree()
+            .stamp_wait_reason(
+                &node_id,
+                Some(crate::domain::models::WaitReason::AwaitingPeerResponse),
+            )
+            .await
+            .expect("replayed peer wait");
+        server
+            .node_tree()
+            .set_state(&node_id, NodeState::Running)
+            .await;
+        server
+            .node_tree()
+            .set_state(&node_id, NodeState::Failed)
+            .await;
+        let reconciled = server
+            .node_tree()
+            .list()
+            .await
+            .into_iter()
+            .find(|node| node.agent_id == node_id)
+            .expect("reconciled node");
+        assert_eq!(reconciled.wait_reason, None);
+    }
+
+    #[tokio::test]
+    async fn notify_and_draft_buffers_provider_output_until_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(
+            tmp.path(),
+            vec![
+                StreamChunk::Text {
+                    content: "private draft".to_owned(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        );
+        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let (domain_tx, mut domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation.clone(), domain_tx);
+        let mut task = inbound_task(test_signer(91).identity().peer_id.clone(), "draft this");
+        task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
+        let node_id = task.node_id.clone();
+
+        let mut status = server
+            .start(task, CancellationToken::new())
+            .await
+            .expect("draft mode starts inference");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while *status.borrow_and_update() != NodeState::Waiting {
+                status
+                    .changed()
+                    .await
+                    .expect("draft node remains registered");
+            }
+        })
+        .await
+        .expect("completed draft parks for operator resolution");
+
+        assert_eq!(
+            server.pending_drafts.state(node_id.as_str()).await,
+            Some(crate::adapters::daemon::response_modes::DraftState::Ready {
+                content: "private draft".to_owned(),
+            })
+        );
+        assert!(
+            server.inbound_results.lock().await.get(&node_id).is_none(),
+            "an unresolved draft must never enter the peer-disclosable result map"
+        );
+        assert!(
+            !std::iter::from_fn(|| domain_rx.try_recv().ok()).any(|event| matches!(
+                event,
+                AppEvent::ProviderChunk {
+                    chunk: StreamChunk::Text { .. },
+                    ..
+                }
+            )),
+            "draft provider text must remain buffered"
+        );
+        let draft_row = conversation
+            .lock()
+            .await
+            .messages
+            .iter()
+            .find(|message| message.id == format!("peer-response-{}", node_id.as_str()))
+            .cloned()
+            .expect("draft placeholder becomes the pending local draft row");
+        assert!(
+            draft_row
+                .content
+                .starts_with("[y] Approve  [e] Edit  [n] Reject")
+        );
+        assert!(draft_row.content.ends_with("private draft"));
+    }
+
+    #[tokio::test]
+    async fn notify_and_auto_fixed_response_is_immediate_persisted_and_marked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "notify-and-auto-fixed".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation.clone(), domain_tx);
+        let mut task = inbound_task(test_signer(92).identity().peer_id.clone(), "status?");
+        task.response_policy = crate::domain::ports::PeerResponsePolicy {
+            mode: crate::domain::models::ResponseMode::NotifyAndAuto,
+            auto_response: Some("Acknowledged.".to_owned()),
+        };
+        let node_id = task.node_id.clone();
+
+        let status = server
+            .start(task, CancellationToken::new())
+            .await
+            .expect("fixed auto response completes at admission");
+        assert_eq!(*status.borrow(), NodeState::Completed);
+        assert_eq!(
+            server.take_result_text(&node_id).await.as_deref(),
+            Some("Acknowledged.")
+        );
+        let row = conversation
+            .lock()
+            .await
+            .messages
+            .last()
+            .cloned()
+            .expect("auto response persisted locally");
+        assert_eq!(row.content, "Acknowledged.");
+        assert_eq!(
+            row.id,
+            format!("peer-response-{}", node_id.as_str()),
+            "the retract path must be able to address the template fast-path row (AC5)"
+        );
+        assert_eq!(
+            row.authorship,
+            crate::domain::models::MessageAuthorship::AgentComposed
+        );
+        assert!(
+            !conversation.lock().await.messages.iter().any(|message| {
+                message.content == crate::adapters::daemon::response_modes::DRAFTING_PLACEHOLDER
+            }),
+            "the template fast path must never emit a drafting placeholder"
+        );
+        let reloaded = storage
+            .load_conversation("notify-and-auto-fixed")
+            .await
+            .expect("auto response reload succeeds")
+            .expect("auto response persists on disk");
+        let reloaded_row = reloaded
+            .messages
+            .iter()
+            .find(|message| message.id == format!("peer-response-{}", node_id.as_str()))
+            .expect("persisted auto response remains addressable");
+        assert_eq!(
+            reloaded_row.authorship,
+            crate::domain::models::MessageAuthorship::AgentComposed,
+            "agent authorship must persist on the auto response"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_and_auto_without_override_dispatches_the_conservative_template() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No scripted chunks: any provider call would produce nothing, so a
+        // completed response here proves no inference ran (AC4 — templates,
+        // never LLM text).
+        let (core, storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "notify-and-auto-template".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, mut domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation.clone(), domain_tx);
+        let task = inbound_task(test_signer(93).identity().peer_id.clone(), "status?");
+        let node_id = task.node_id.clone();
+
+        let status = server
+            .start(task, CancellationToken::new())
+            .await
+            .expect("template auto response completes at admission");
+        assert_eq!(*status.borrow(), NodeState::Completed);
+        assert_eq!(
+            server.take_result_text(&node_id).await.as_deref(),
+            Some(crate::adapters::daemon::response_modes::DEFAULT_AUTO_RESPONSE_TEMPLATE)
+        );
+        assert!(
+            !std::iter::from_fn(|| domain_rx.try_recv().ok())
+                .any(|event| matches!(event, AppEvent::ProviderChunk { .. })),
+            "a template dispatch drives no provider turn"
+        );
+        let row = conversation
+            .lock()
+            .await
+            .messages
+            .iter()
+            .find(|message| message.id == format!("peer-response-{}", node_id.as_str()))
+            .cloned()
+            .expect("template response persisted with an addressable id");
+        assert_eq!(
+            row.content,
+            crate::adapters::daemon::response_modes::DEFAULT_AUTO_RESPONSE_TEMPLATE
+        );
+        assert_eq!(
+            row.authorship,
+            crate::domain::models::MessageAuthorship::AgentComposed
+        );
+        assert!(
+            !conversation.lock().await.messages.iter().any(|message| {
+                message.content == crate::adapters::daemon::response_modes::DRAFTING_PLACEHOLDER
+            }),
+            "the template fast path must never emit a drafting placeholder"
+        );
+        let reloaded = storage
+            .load_conversation("notify-and-auto-template")
+            .await
+            .expect("template auto response reload succeeds")
+            .expect("template auto response persists on disk");
+        let reloaded_row = reloaded
+            .messages
+            .iter()
+            .find(|message| message.id == format!("peer-response-{}", node_id.as_str()))
+            .expect("persisted template auto response remains addressable");
+        assert_eq!(
+            reloaded_row.authorship,
+            crate::domain::models::MessageAuthorship::AgentComposed,
+            "agent authorship must persist on the template auto response"
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingJournal {
+        events: Mutex<Vec<crate::domain::models::RoomEvent>>,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::RoomJournal for RecordingJournal {
+        async fn record_event(
+            &self,
+            event: crate::domain::models::RoomEvent,
+        ) -> Result<(), crate::domain::ports::RoomJournalError> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::domain::ports::RoomJournalError::Append(
+                    "disk full".to_owned(),
+                ));
+            }
+            self.events.lock().await.push(event);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::RoomJournalReader for RecordingJournal {
+        async fn load_entries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::JournalEntry>, crate::domain::ports::RoomJournalError>
+        {
+            Ok(self
+                .events
+                .lock()
+                .await
+                .iter()
+                .enumerate()
+                .map(|(index, event)| {
+                    crate::domain::models::JournalEntry::new(
+                        (index + 1) as u64,
+                        crate::domain::models::JournalRecord::Room(event.clone()),
+                        0,
+                    )
+                })
+                .collect())
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn journaled_server(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        journal: Arc<RecordingJournal>,
+    ) -> Arc<AttachServer> {
+        let node_tree = crate::infrastructure::subagent::NodeTree::with_event_tx(
+            domain_tx.clone(),
+            Arc::new(|| 123_i64),
+        );
+        let delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy> =
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy);
+        let peer_bus = peer_bus_slot_with_policy(&node_tree, delivery_policy.clone());
+        AttachServer::new_with_node_tree_bus_policy_and_journal(
+            core,
+            conversation,
+            domain_tx,
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            journal.clone(),
+            journal,
+        )
+    }
+
+    #[tokio::test]
+    async fn trusted_local_retract_dispatch_journals_once_then_marks_without_deleting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let auto_node = AgentId::from_validated("auto-node");
+        let conversation = Arc::new(Mutex::new(Conversation {
+            messages: vec![ChatMessage {
+                id: format!("peer-response-{}", auto_node.as_str()),
+                role: MessageRole::Assistant,
+                content: "retained response".to_owned(),
+                authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let journal = Arc::new(RecordingJournal::default());
+        // The retract target is derived from this disclosure, never trusted
+        // from the client's frame (AC5).
+        journal
+            .record_event(crate::domain::models::RoomEvent::PeerDisclosure {
+                peer: None,
+                node: auto_node.clone(),
+                task: None,
+                disclosed_bytes: 17,
+            })
+            .await
+            .expect("seed disclosure");
+        let server = journaled_server(core, conversation.clone(), domain_tx, journal.clone());
+        let row_id = format!("peer-response-{}", auto_node.as_str());
+
+        assert!(
+            server
+                .retract_auto_response(&row_id, Some(2))
+                .await
+                .is_err(),
+            "a target_seq that does not match the journaled disclosure is refused"
+        );
+        server
+            .retract_auto_response(&row_id, None)
+            .await
+            .expect("first same-host retraction derives the disclosure seq");
+        assert!(
+            server
+                .retract_auto_response(&row_id, Some(1))
+                .await
+                .is_err(),
+            "the same row can retract only once"
+        );
+        assert!(matches!(
+            journal.events.lock().await.as_slice(),
+            [
+                crate::domain::models::RoomEvent::PeerDisclosure { .. },
+                crate::domain::models::RoomEvent::AutoResponseRetracted { target_seq: 1, .. }
+            ]
+        ));
+        let row = conversation.lock().await.messages[0].clone();
+        assert_eq!(row.content, "retained response");
+        assert!(row.retracted_at_ms.is_some());
+
+        let draft_node = AgentId::from_validated("draft-node");
+        conversation.lock().await.messages.push(ChatMessage {
+            id: "peer-response-draft-node".to_owned(),
+            role: MessageRole::Assistant,
+            content: "generated draft".to_owned(),
+            synthetic: true,
+            ..Default::default()
+        });
+        assert!(server.pending_drafts.begin(draft_node.as_str()).await);
+        assert!(
+            server
+                .pending_drafts
+                .complete(draft_node.as_str(), "generated draft")
+                .await
+        );
+        server
+            .resolve_peer_draft(
+                &draft_node,
+                crate::adapters::daemon::response_modes::DraftResolution::WriteOwn(
+                    "human answer".to_owned(),
+                ),
+            )
+            .await
+            .expect("blank-composer resolution is dispatched and journaled");
+        assert_eq!(
+            journal.events.lock().await.last(),
+            Some(&crate::domain::models::RoomEvent::PeerDraftResolved {
+                node: draft_node,
+                agent_composed: false,
+                sent: true,
+            })
+        );
+        let draft = conversation.lock().await.messages[1].clone();
+        assert_eq!(draft.content, "human answer");
+        assert_eq!(
+            draft.authorship,
+            crate::domain::models::MessageAuthorship::HumanWritten
+        );
+
+        let failed_auto_node = AgentId::from_validated("failed-auto-node");
+        conversation.lock().await.messages.push(ChatMessage {
+            id: format!("peer-response-{}", failed_auto_node.as_str()),
+            role: MessageRole::Assistant,
+            content: "still visible".to_owned(),
+            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            ..Default::default()
+        });
+        journal
+            .record_event(crate::domain::models::RoomEvent::PeerDisclosure {
+                peer: None,
+                node: failed_auto_node.clone(),
+                task: None,
+                disclosed_bytes: 13,
+            })
+            .await
+            .expect("seed failed-node disclosure");
+        journal
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            server
+                .retract_auto_response(
+                    &format!("peer-response-{}", failed_auto_node.as_str()),
+                    Some(4)
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            conversation.lock().await.messages[2].retracted_at_ms,
+            None,
+            "journal failure must leave the persisted row unmodified"
+        );
+
+        let failed_draft_node = AgentId::from_validated("failed-draft-node");
+        conversation.lock().await.messages.push(ChatMessage {
+            id: "peer-response-failed-draft-node".to_owned(),
+            role: MessageRole::Assistant,
+            content: "retryable draft".to_owned(),
+            synthetic: true,
+            ..Default::default()
+        });
+        assert!(
+            server
+                .pending_drafts
+                .begin(failed_draft_node.as_str())
+                .await
+        );
+        assert!(
+            server
+                .pending_drafts
+                .complete(failed_draft_node.as_str(), "retryable draft")
+                .await
+        );
+        assert!(
+            server
+                .resolve_peer_draft(
+                    &failed_draft_node,
+                    crate::adapters::daemon::response_modes::DraftResolution::Approve,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            server
+                .pending_drafts
+                .state(failed_draft_node.as_str())
+                .await,
+            Some(crate::adapters::daemon::response_modes::DraftState::Ready {
+                content: "retryable draft".to_owned(),
+            }),
+            "journal failure must restore the retryable draft state"
+        );
+        assert_eq!(
+            conversation.lock().await.messages[3].content,
+            "retryable draft"
+        );
+
+        journal
+            .fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let wait_node = AgentId::from_validated("reattached-wait-node");
+        conversation.lock().await.messages.push(ChatMessage {
+            id: "peer-response-reattached-wait-node".to_owned(),
+            role: MessageRole::Assistant,
+            content: crate::adapters::daemon::response_modes::AWAITING_RESPONSE_PLACEHOLDER
+                .to_owned(),
+            synthetic: true,
+            ..Default::default()
+        });
+        assert_eq!(server.pending_drafts.state(wait_node.as_str()).await, None);
+        server
+            .resolve_peer_draft(
+                &wait_node,
+                crate::adapters::daemon::response_modes::DraftResolution::WriteOwn(
+                    "manual response after reattach".to_owned(),
+                ),
+            )
+            .await
+            .expect("persisted pending response reconstructs on reattach");
+        let resumed = conversation.lock().await.messages[4].clone();
+        assert_eq!(resumed.content, "manual response after reattach");
+        assert_eq!(
+            resumed.authorship,
+            crate::domain::models::MessageAuthorship::HumanWritten
+        );
+    }
+
     async fn wait_for_deregistration(server: &AttachServer, node_id: &AgentId) {
         while server.node_tree().status_rx(node_id).await.is_some() {
             tokio::task::yield_now().await;
@@ -2505,6 +3928,7 @@ mod tests {
     ) -> (
         Arc<AttachServer>,
         Arc<Mutex<Conversation>>,
+        Arc<RecordingJournal>,
         CancellationToken,
         tokio::task::JoinHandle<()>,
     ) {
@@ -2515,7 +3939,13 @@ mod tests {
         }));
         let (bus, domain_rx) = EventBus::new(64);
         let listener = UnixListener::bind(workspace.join("inbound-forwarder.sock")).unwrap();
-        let server = AttachServer::new(core, conversation.clone(), bus.domain_tx.clone());
+        let journal = Arc::new(RecordingJournal::default());
+        let server = journaled_server(
+            core,
+            conversation.clone(),
+            bus.domain_tx.clone(),
+            journal.clone(),
+        );
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let shutdown_for_run = shutdown.clone();
@@ -2523,7 +3953,7 @@ mod tests {
             srv.run(listener, domain_rx, None, None, shutdown_for_run)
                 .await;
         });
-        (server, conversation, shutdown, handle)
+        (server, conversation, journal, shutdown, handle)
     }
 
     struct PromptPersona(String);
@@ -4819,7 +6249,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn inbound_terminal_deregistration_frees_root_capacity() {
         let tmp = tempfile::tempdir().unwrap();
-        let (server, _conversation, shutdown, handle) = spawn_inbound_forwarder(
+        let (server, _conversation, _journal, shutdown, handle) = spawn_inbound_forwarder(
             tmp.path(),
             vec![
                 StreamChunk::Text {
@@ -4835,18 +6265,35 @@ mod tests {
         let peer_id = test_signer(80).identity().peer_id.clone();
 
         for _ in 0..11 {
-            let task = inbound_task(peer_id.clone(), "repeat");
+            let mut task = inbound_task(peer_id.clone(), "repeat");
+            task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
             let node_id = task.node_id.clone();
             let mut status = server
                 .start(task, CancellationToken::new())
                 .await
                 .expect("a terminal inbound task frees root capacity for the next task");
+            // Draft mode parks for the operator; resolution is the terminal
+            // transition that frees capacity.
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while *status.borrow_and_update() != NodeState::Waiting {
+                    status.changed().await.expect("draft node parks");
+                }
+            })
+            .await
+            .expect("completed draft parks for operator resolution");
+            server
+                .resolve_peer_draft(
+                    &node_id,
+                    crate::adapters::daemon::response_modes::DraftResolution::Approve,
+                )
+                .await
+                .expect("operator resolution settles the draft");
             let terminal = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 wait_for_terminal(&mut status),
             )
             .await
-            .expect("inbound turn should reach a terminal state");
+            .expect("resolved draft should reach a terminal state");
             assert_eq!(terminal, NodeState::Completed);
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
@@ -4872,7 +6319,8 @@ mod tests {
         let server = AttachServer::new(core, conversation, domain_tx);
         let blocked_turn = server.turn_serial.lock().await;
         let cancel = CancellationToken::new();
-        let task = inbound_task(test_signer(81).identity().peer_id.clone(), "queued");
+        let mut task = inbound_task(test_signer(81).identity().peer_id.clone(), "queued");
+        task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
         let node_id = task.node_id.clone();
         let mut status = server.start(task, cancel.clone()).await.unwrap();
 
@@ -4987,7 +6435,8 @@ mod tests {
         }));
         let (bus, domain_rx) = EventBus::new(64);
         let listener = UnixListener::bind(tmp.path().join("abort-reset.sock")).unwrap();
-        let server = AttachServer::new(core, conversation.clone(), bus.domain_tx.clone());
+        let journal = Arc::new(RecordingJournal::default());
+        let server = journaled_server(core, conversation.clone(), bus.domain_tx.clone(), journal);
         let shutdown = CancellationToken::new();
         let server_for_run = server.clone();
         let shutdown_for_run = shutdown.clone();
@@ -4999,7 +6448,8 @@ mod tests {
 
         let peer_id = test_signer(82).identity().peer_id.clone();
         let cancel = CancellationToken::new();
-        let first_task = inbound_task(peer_id.clone(), "first");
+        let mut first_task = inbound_task(peer_id.clone(), "first");
+        first_task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
         let first_node_id = first_task.node_id.clone();
         let mut first_status = server.start(first_task, cancel.clone()).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), partial_streamed)
@@ -5023,19 +6473,34 @@ mod tests {
         .await
         .expect("aborted node must deregister after publishing Cancelled");
 
-        let second_task = inbound_task(peer_id, "second");
+        let mut second_task = inbound_task(peer_id, "second");
+        second_task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
         let second_node_id = second_task.node_id.clone();
         let mut second_status = server
             .start(second_task, CancellationToken::new())
             .await
             .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while *second_status.borrow_and_update() != NodeState::Waiting {
+                second_status.changed().await.expect("second draft parks");
+            }
+        })
+        .await
+        .expect("second inbound turn must park as a resolved-pending draft");
+        server
+            .resolve_peer_draft(
+                &second_node_id,
+                crate::adapters::daemon::response_modes::DraftResolution::Approve,
+            )
+            .await
+            .expect("operator approves the second draft");
         assert_eq!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 wait_for_terminal(&mut second_status),
             )
             .await
-            .expect("second inbound turn must complete"),
+            .expect("resolved second draft must complete"),
             NodeState::Completed
         );
         tokio::time::timeout(

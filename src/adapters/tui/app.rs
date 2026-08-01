@@ -5183,6 +5183,7 @@ mod tests {
         let row = |seq, summary: &str| TransparencyRow {
             seq,
             recorded_at_ms: Some(seq as i64),
+            retracted_at_ms: None,
             direction: RoomDirection::Inbound,
             kind: TransparencyKind::Rejected,
             peer: "peer-a".to_owned(),

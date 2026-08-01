@@ -307,6 +307,21 @@ pub enum RoomEvent {
         #[serde(default)]
         disclosed_bytes: usize,
     },
+    /// Append-only same-host retraction of a previously disclosed auto response.
+    AutoResponseRetracted {
+        /// Journal sequence of the original [`RoomEvent::PeerDisclosure`].
+        #[serde(default)]
+        target_seq: u64,
+        /// Wall-clock timestamp captured by the same-host action dispatcher.
+        #[serde(default)]
+        retracted_at_ms: i64,
+    },
+    /// Durable operator resolution of a buffered peer-response draft.
+    PeerDraftResolved {
+        node: AgentId,
+        agent_composed: bool,
+        sent: bool,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -571,7 +586,9 @@ impl OrchestrationRoom {
                     view.resolved_tickets.entry(artifact).or_insert(outcome);
                 }
             }
-            RoomEvent::PeerDisclosure { .. } => {}
+            RoomEvent::PeerDisclosure { .. }
+            | RoomEvent::AutoResponseRetracted { .. }
+            | RoomEvent::PeerDraftResolved { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

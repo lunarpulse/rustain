@@ -41,6 +41,12 @@ use crate::domain::services::team_policy::{PolicyExplanation, PolicyNotice};
 /// would be indistinguishable from "validation was skipped", which is exactly the
 /// no-op mutant this AC guards against.
 pub(crate) const STARTUP_BANNER: &str = "interaction policy resolved (NFR66)";
+pub(crate) const MESSAGE_TYPE_DEFERRAL_NOTICE: &str = "per-sender response mode is enforced; \
+    semantic message type is not carried, so per-message-type response overrides remain deferred \
+    (DF-18-3b-MSGTYPE)";
+pub(crate) const AUTO_AUTHORITY_WARNING: &str = "server.admission=\"allow\" authorizes inbound \
+    execution and notify-and-auto also replies in the operator's name; use admission=\"ask\" or \
+    lower the effective response mode if that authority widening is unintended";
 
 /// Resolve both policy files and report the outcome through the daemon's log.
 ///
@@ -54,7 +60,29 @@ pub(crate) fn validate_startup_policies(
     let (policy, explanation) =
         crate::adapters::policy::resolve_workspace_policy(workspace, peers, &projection)?;
     report_to_log(&explanation);
+    tracing::info!("{MESSAGE_TYPE_DEFERRAL_NOTICE}");
     Ok(policy)
+}
+pub(crate) fn report_auto_authority_widening(
+    admission: crate::adapters::a2a::config::A2aAdmissionPolicy,
+    policy: &EffectivePolicy,
+) {
+    if should_warn_auto_authority_widening(admission, policy) {
+        tracing::warn!("{AUTO_AUTHORITY_WARNING}");
+    }
+}
+
+fn should_warn_auto_authority_widening(
+    admission: crate::adapters::a2a::config::A2aAdmissionPolicy,
+    policy: &EffectivePolicy,
+) -> bool {
+    admission == crate::adapters::a2a::config::A2aAdmissionPolicy::Allow
+        && (policy.automation.value == crate::domain::models::ResponseMode::NotifyAndAuto
+            || policy.sender_overrides.iter().any(|sender| {
+                sender.response_mode.as_ref().is_some_and(|mode| {
+                    mode.value == crate::domain::models::ResponseMode::NotifyAndAuto
+                })
+            }))
 }
 
 /// The daemon's report. `tracing`, never `println!`.
@@ -128,5 +156,29 @@ mod tests {
             crate::domain::models::ResponseMode::NotifyAndWait
         );
         assert!(!policy.team_file_present);
+    }
+
+    #[test]
+    fn authority_widening_warning_has_both_positive_controls() {
+        use crate::adapters::a2a::config::A2aAdmissionPolicy;
+        use crate::domain::models::ResponseMode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut policy =
+            validate_startup_policies(dir.path(), &[]).expect("default policy resolves");
+        policy.automation.value = ResponseMode::NotifyAndAuto;
+        assert!(should_warn_auto_authority_widening(
+            A2aAdmissionPolicy::Allow,
+            &policy
+        ));
+        assert!(!should_warn_auto_authority_widening(
+            A2aAdmissionPolicy::Ask,
+            &policy
+        ));
+        policy.automation.value = ResponseMode::NotifyAndWait;
+        assert!(!should_warn_auto_authority_widening(
+            A2aAdmissionPolicy::Allow,
+            &policy
+        ));
     }
 }

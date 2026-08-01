@@ -281,6 +281,7 @@ async fn ac5_real_tree_wiring_behavioral() {
             correlation_id: CorrelationId::new("wiring"),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         },
         body: AgentMessage::new("hello"),
     };
@@ -319,6 +320,7 @@ async fn ac5_mutant_empty_tree_returns_not_found() {
             correlation_id: CorrelationId::new("mutant"),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         },
         body: AgentMessage::new("hello"),
     };

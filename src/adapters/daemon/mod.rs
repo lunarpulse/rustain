@@ -35,6 +35,8 @@ mod procargs;
 #[cfg(unix)]
 pub mod protocol;
 #[cfg(unix)]
+pub(crate) mod response_modes;
+#[cfg(unix)]
 pub mod runtime;
 #[cfg(unix)]
 pub mod server;
@@ -289,7 +291,22 @@ async fn run_daemon_foreground(
     // and start proceeds, because NFR66 asks for "resolution guidance", not a
     // refusal. There is deliberately no TTY check: a daemon never has a terminal,
     // so gating on one would disable the report exactly where it matters most.
-    policy_startup::validate_startup_policies(&workspace, &a2a_peers)?;
+    let effective_policy = std::sync::Arc::new(policy_startup::validate_startup_policies(
+        &workspace, &a2a_peers,
+    )?);
+    // The admission value only feeds the authority-widening WARNING — a
+    // malformed optional-listener config must not be fatal to daemon startup
+    // (previously it could only break the feature-gated A2A listener itself).
+    let admission = match crate::adapters::a2a::config::parse_workspace_a2a_server_config(
+        &workspace.join(".rustain").join("a2a.json"),
+    ) {
+        Ok(config) => config.map_or_else(Default::default, |server| server.admission),
+        Err(error) => {
+            tracing::warn!(error = %error, "could not parse a2a.json; admission warning skipped");
+            Default::default()
+        }
+    };
+    policy_startup::report_auto_authority_widening(admission, &effective_policy);
 
     let pid_path = crate::infrastructure::paths::daemon_pid_path(&workspace)?;
     let socket_path = crate::infrastructure::paths::daemon_socket_path(&workspace)?;
@@ -471,24 +488,8 @@ async fn run_daemon_foreground(
         }
     };
 
-    // Story 18.3 (AC3) — the daemon composition root owns the ONE
-    // `AgentMessageBus` slot. `AttachServer` used to mint its own privately, so
-    // the RAP peer path was governed by a `DeliveryPolicy` object no composition
-    // root held a reference to, and the seam that could have reconciled them
-    // (`configure_peer_delivery`) had ZERO callers repo-wide. Holding the slot
-    // here means a policy installed at the root governs the peer path by
-    // construction — the seam Story 18-3b plugs into.
-    let peer_bus = crate::adapters::daemon::server::default_peer_bus_slot(&node_tree);
-    let server = crate::adapters::daemon::server::AttachServer::new_with_node_tree_and_bus(
-        core.clone(),
-        conversation.clone(),
-        domain_tx.clone(),
-        node_tree,
-        peer_bus,
-    );
-
-    // The recorder is mandatory for every live verified peer frame, regardless
-    // of whether the optional HTTP A2A listener is enabled.
+    // The room journal is shared by peer transparency and the same-host
+    // response action dispatcher. Both write through the same durable port.
     let reader: std::sync::Arc<dyn crate::domain::ports::RoomJournalReader> = node_journal.clone();
     let journal: std::sync::Arc<dyn crate::domain::ports::RoomJournal> = std::sync::Arc::new(
         crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
@@ -496,6 +497,32 @@ async fn run_daemon_foreground(
             Some(domain_tx.clone()),
         ),
     );
+
+    // Story 18.3c (AC1) — the composition root installs the already-resolved
+    // effective policy into the ONE bus consumed by verified peer delivery.
+    // Relationship disposition remains a separate decision inside the policy.
+    let delivery_policy: std::sync::Arc<dyn crate::domain::ports::DeliveryPolicy> =
+        std::sync::Arc::new(crate::domain::ports::EffectiveDeliveryPolicy::new(
+            effective_policy.clone(),
+        ));
+    let peer_bus = crate::adapters::daemon::server::peer_bus_slot_with_policy(
+        &node_tree,
+        delivery_policy.clone(),
+    );
+    let server =
+        crate::adapters::daemon::server::AttachServer::new_with_node_tree_bus_policy_and_journal(
+            core.clone(),
+            conversation.clone(),
+            domain_tx.clone(),
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            journal.clone(),
+            reader.clone(),
+        );
+
+    // The recorder is mandatory for every live verified peer frame, regardless
+    // of whether the optional HTTP A2A listener is enabled.
     let notices: std::sync::Arc<dyn crate::domain::ports::EventEmitter> = std::sync::Arc::new(
         crate::infrastructure::runtime::event_bus::ChannelEmitter::new(domain_tx.clone()),
     );

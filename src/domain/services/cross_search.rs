@@ -248,6 +248,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 

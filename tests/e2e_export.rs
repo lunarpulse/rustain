@@ -29,6 +29,8 @@ fn msg(role: MessageRole, content: &str, created_at: i64) -> ChatMessage {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 
@@ -62,6 +64,8 @@ fn msg_with_tool_call(
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 

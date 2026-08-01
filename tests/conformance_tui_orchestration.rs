@@ -268,34 +268,42 @@ fn fanout_consults_gate_decision_before_launch() {
     let fanout_arm = event_loop
         .split("cmd_name == \"fanout\"")
         .nth(1)
-        .expect("the /fanout ExecuteCommand arm must exist in event_loop.rs");
-    // Bound the arm at the next command branch so we don't scan the whole file.
-    let fanout_arm = fanout_arm
-        .split("port_dimension_from_command_name")
+        .expect("the /fanout ExecuteCommand arm must exist in event_loop.rs")
+        .split("cmd_name == \"team\"")
         .next()
-        .expect("the /fanout arm must be bounded by the next command branch");
+        .expect("the /fanout arm must be bounded by the /team branch");
+    assert!(
+        fanout_arm.contains("transparency_bridge::fanout_command("),
+        "/fanout must delegate into the runtime bridge"
+    );
+
+    let bridge = include_str!("../src/infrastructure/runtime/transparency_bridge.rs");
+    let fanout_command = bridge
+        .split("pub(crate) fn fanout_command(")
+        .nth(1)
+        .expect("the /fanout bridge command must exist")
+        .split("pub(crate) async fn team_command(")
+        .next()
+        .expect("the /fanout bridge command must be bounded by the /team command");
 
     assert!(
-        fanout_arm.contains("gate_decision("),
+        fanout_command.contains("gate_decision("),
         "/fanout must consult gate_decision before launching the wave"
     );
     assert!(
-        fanout_arm.contains("GateDecision::Refuse") && fanout_arm.contains("pending_spawn_gate"),
+        fanout_command.contains("GateDecision::Refuse")
+            && fanout_command.contains("pending_spawn_gate"),
         "the Refuse path must open the spawn gate, not silently launch"
     );
     assert!(
-        fanout_arm.contains("GateDecision::Allow") && fanout_arm.contains("launch_wave_request("),
+        fanout_command.contains("GateDecision::Allow")
+            && fanout_command.contains("launch_wave_request("),
         "the Allow path must launch the wave"
     );
     // F5 (AI-12.3 post-review party-mode): the launch-on-Refuse equivalent
-    // mutant. The three asserts above prove the Refuse arm OPENS the gate (token
-    // present) — but a mutant that ALSO launches on Refuse
-    // (`state.pending_spawn_gate = Some(...); launch_wave_request(...);`) keeps
-    // every token checked above, so D4 alone stays GREEN while the bypass is
-    // live. This negative assertion kills it: the Refuse arm body must contain
-    // NO `launch_wave_request(`. (Allow precedes Refuse, so the post-Refuse
-    // region excludes the legitimate Allow launch.)
-    let refuse_arm = fanout_arm
+    // mutant. The positive assertions above prove the Refuse arm opens the
+    // gate; this negative assertion proves it cannot also launch.
+    let refuse_arm = fanout_command
         .split("GateDecision::Refuse =>")
         .nth(1)
         .expect("the Refuse arm must exist");

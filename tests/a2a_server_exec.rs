@@ -45,7 +45,7 @@ use rustain::domain::models::{
 };
 use rustain::domain::ports::{
     InboundApprovalTicket, InboundPeerError, InboundPeerRuntime, InboundPeerTask, RoomJournal,
-    SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
+    RoomJournalReader, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
 };
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::infrastructure::subagent::{NodeJournal, NodeTree, node_journal::NodeRoomJournal};
@@ -56,6 +56,50 @@ const ANSWER: &str = "The corpus contains 141 parseable agent cards.";
 /// Deadline for every poll loop. Generous enough to survive a loaded CI box,
 /// short enough that a genuine hang fails the run rather than stalling it.
 const BUDGET: Duration = Duration::from_secs(20);
+
+#[derive(Debug)]
+struct ModePolicy(rustain::domain::models::ResponseMode);
+
+impl rustain::domain::ports::DeliveryPolicy for ModePolicy {
+    fn decide(
+        &self,
+        _header: &rustain::domain::models::MessageHeader,
+        ownership: rustain::domain::models::OwnershipKind,
+    ) -> rustain::domain::models::DeliveryDisposition {
+        rustain::domain::models::relationship_disposition(ownership)
+    }
+
+    fn response_policy_for_peer(
+        &self,
+        _peer_id: &rustain::domain::models::PeerId,
+    ) -> rustain::domain::ports::PeerResponsePolicy {
+        rustain::domain::ports::PeerResponsePolicy {
+            mode: self.0,
+            auto_response: None,
+        }
+    }
+}
+
+fn auto_response_server(
+    core: Arc<DaemonCore>,
+    conversation: Arc<Mutex<Conversation>>,
+    domain_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    node_tree: NodeTree,
+) -> Arc<AttachServer> {
+    let policy: Arc<dyn rustain::domain::ports::DeliveryPolicy> = Arc::new(ModePolicy(
+        rustain::domain::models::ResponseMode::NotifyAndAuto,
+    ));
+    let bus =
+        rustain::adapters::daemon::server::peer_bus_slot_with_policy(&node_tree, policy.clone());
+    AttachServer::new_with_node_tree_bus_and_policy(
+        core,
+        conversation,
+        domain_tx,
+        node_tree,
+        bus,
+        policy,
+    )
+}
 
 // ── Scripted provider (the ONE thing that may not be real) ──────────────────
 
@@ -164,6 +208,16 @@ struct ScrubRuntime {
 
 #[async_trait::async_trait]
 impl InboundPeerRuntime for ScrubRuntime {
+    fn response_policy(
+        &self,
+        _peer_id: &rustain::domain::models::PeerId,
+    ) -> rustain::domain::ports::PeerResponsePolicy {
+        rustain::domain::ports::PeerResponsePolicy {
+            mode: rustain::domain::models::ResponseMode::NotifyAndAuto,
+            auto_response: None,
+        }
+    }
+
     async fn start(
         &self,
         _task: InboundPeerTask,
@@ -328,6 +382,25 @@ async fn harness_with(
     harness_full(policy, provider, security, with_runtime, None).await
 }
 
+/// Same harness with a non-default effective response mode — the draft mode is
+/// the only one that still drives a real turn (auto is a template, wait never
+/// executes), so turn-machinery tests pin it explicitly.
+async fn harness_mode(
+    policy: A2aAdmissionPolicy,
+    provider: Arc<dyn StreamingProvider>,
+    mode: rustain::domain::models::ResponseMode,
+) -> Harness {
+    harness_full_mode(
+        policy,
+        provider,
+        A2aServerSecurity::default(),
+        true,
+        None,
+        mode,
+    )
+    .await
+}
+
 /// Story 18.2 (AC1): same production listener, with the transparency sink's
 /// journal replaceable so a durable-write failure can be driven through the
 /// real front door. Seeding the composition is not a bypass — every assertion
@@ -339,6 +412,26 @@ async fn harness_full(
     security: A2aServerSecurity,
     with_runtime: bool,
     transparency_journal: Option<Arc<dyn RoomJournal>>,
+) -> Harness {
+    harness_full_mode(
+        policy,
+        provider,
+        security,
+        with_runtime,
+        transparency_journal,
+        rustain::domain::models::ResponseMode::NotifyAndAuto,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn harness_full_mode(
+    policy: A2aAdmissionPolicy,
+    provider: Arc<dyn StreamingProvider>,
+    security: A2aServerSecurity,
+    with_runtime: bool,
+    transparency_journal: Option<Arc<dyn RoomJournal>>,
+    mode: rustain::domain::models::ResponseMode,
 ) -> Harness {
     let workspace = tempfile::tempdir().expect("workspace");
     let keys = tempfile::tempdir().expect("keys");
@@ -378,20 +471,30 @@ async fn harness_full(
         id: "a2a-exec-harness".to_owned(),
         ..Conversation::default()
     }));
-    let server = AttachServer::new_with_node_tree(
+    let delivery: Arc<dyn rustain::domain::ports::DeliveryPolicy> = Arc::new(ModePolicy(mode));
+    let bus =
+        rustain::adapters::daemon::server::peer_bus_slot_with_policy(&node_tree, delivery.clone());
+    let journal: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(
+        node_journal.clone(),
+        Some(domain_tx.clone()),
+    ));
+    // Journal-backed, exactly like the daemon composition root: the trusted-
+    // local draft resolution and retraction frames need the durable port.
+    let server = AttachServer::new_with_node_tree_bus_policy_and_journal(
         core.clone(),
         conversation,
         domain_tx.clone(),
         node_tree.clone(),
+        bus,
+        delivery,
+        journal.clone(),
+        node_journal.clone(),
     );
 
     let registry = Arc::new(CapabilityRegistry::new(None));
     let signer = IdentityKeyStore::new(keys.path())
         .load_or_generate()
         .expect("identity");
-
-    let journal: Arc<dyn RoomJournal> =
-        Arc::new(NodeRoomJournal::new(node_journal.clone(), Some(domain_tx)));
     let runtime: Option<Arc<dyn InboundPeerRuntime>> =
         with_runtime.then(|| server.clone() as Arc<dyn InboundPeerRuntime>);
 
@@ -564,14 +667,22 @@ async fn assert_node_terminal(
 #[tokio::test]
 async fn an_accepted_task_runs_as_a_local_peer_node_and_its_result_comes_back() {
     let gate = std::sync::Arc::new(tokio::sync::Notify::new());
-    let h = harness(
+    let mut h = harness_mode(
         A2aAdmissionPolicy::Allow,
         Arc::new(ScriptedProvider {
             chunks: answer_chunks(ANSWER),
             gate: Some(gate.clone()),
         }),
+        rustain::domain::models::ResponseMode::NotifyAndDraft,
     )
     .await;
+    let workspace = h._workspace.path().to_path_buf();
+    let domain_rx = std::mem::replace(&mut h._domain_rx, {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        rx
+    });
+    let (mut operator, attach_shutdown) =
+        attach_operator(h.server.clone(), &workspace, domain_rx).await;
     let client = reqwest::Client::new();
     let endpoint = h.endpoint();
 
@@ -611,20 +722,323 @@ async fn an_accepted_task_runs_as_a_local_peer_node_and_its_result_comes_back() 
         "node id {} must live in the inbound namespace",
         entry.agent_id
     );
+    let node_id = entry.agent_id.as_str().to_owned();
     let node_rx = inbound_status_rx(&h.node_tree).await;
 
-    gate.notify_one();
-    let (completed, seen) = poll_until(&client, &endpoint, "t-1", None, "completed").await;
+    // The provider gate holds the turn open, so `working` is observable
+    // deterministically before release — never a poll-interval race.
+    let (_, seen_working) = poll_until(&client, &endpoint, "t-1", None, "working").await;
     assert!(
-        seen.iter().any(|state| state == "working"),
-        "the wire must advance through `working`; saw {seen:?}"
+        seen_working.iter().any(|state| state == "working"),
+        "the wire must advance through `working`; saw {seen_working:?}"
     );
+    gate.notify_one();
+    // The completed draft parks: nothing crosses to the peer before the
+    // operator resolves it (AC3), and the park projects as auth-required.
+    poll_until(&client, &endpoint, "t-1", None, "auth-required").await;
+    write_frame(
+        &mut operator,
+        &ClientFrame::ResolvePeerDraft {
+            node: node_id.clone(),
+            action: rustain::adapters::daemon::protocol::PeerDraftAction::Approve,
+        },
+    )
+    .await
+    .expect("operator approves the buffered draft");
+
+    let (completed, _) = poll_until(&client, &endpoint, "t-1", None, "completed").await;
     assert_eq!(
         completed["result"]["status"]["message"]["parts"][0]["text"], ANSWER,
         "the served result must be the answer the REAL turn produced"
     );
     assert_node_terminal(node_rx, NodeState::Completed).await;
+    assert!(
+        RoomJournalReader::load_entries(h.node_journal.as_ref())
+            .await
+            .expect("journal loads")
+            .iter()
+            .any(|entry| matches!(
+                &entry.record,
+                rustain::domain::models::JournalRecord::Room(
+                    rustain::domain::models::RoomEvent::PeerDraftResolved {
+                        node,
+                        agent_composed: true,
+                        sent: true,
+                    }
+                ) if node.as_str() == node_id
+            )),
+        "approving an agent draft must journal agent authorship"
+    );
 
+    attach_shutdown.cancel();
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn a_wait_mode_task_answers_auth_required_immediately_then_sends_the_operator_reply() {
+    let mut h = harness_mode(
+        A2aAdmissionPolicy::Allow,
+        Arc::new(ScriptedProvider {
+            chunks: answer_chunks(ANSWER),
+            gate: None,
+        }),
+        rustain::domain::models::ResponseMode::NotifyAndWait,
+    )
+    .await;
+    let workspace = h._workspace.path().to_path_buf();
+    let domain_rx = std::mem::replace(&mut h._domain_rx, {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        rx
+    });
+    let (mut operator, attach_shutdown) =
+        attach_operator(h.server.clone(), &workspace, domain_rx).await;
+    let client = reqwest::Client::new();
+    let endpoint = h.endpoint();
+
+    // AC2: wait mode admits and parks the task; it must not await the human
+    // operator in the request handler.
+    let accepted = tokio::time::timeout(
+        Duration::from_secs(5),
+        rpc(
+            &client,
+            &endpoint,
+            &send_body(1, "summarize the corpus", "t-wait"),
+            None,
+        ),
+    )
+    .await
+    .expect("message/send must not await the operator in wait mode");
+    let initial_state = accepted["result"]["status"]["state"]
+        .as_str()
+        .expect("message/send returns a task state");
+    assert_eq!(initial_state, "auth-required");
+    assert!(
+        !matches!(
+            initial_state,
+            "completed" | "failed" | "canceled" | "rejected"
+        ),
+        "auth-required is a non-terminal parked state"
+    );
+    let (parked, _) = poll_until(&client, &endpoint, "t-wait", None, "auth-required").await;
+    assert_eq!(parked["result"]["status"]["state"], "auth-required");
+    let still_parked = rpc(
+        &client,
+        &endpoint,
+        &task_body(2, "tasks/get", "t-wait"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        still_parked["result"]["status"]["state"], "auth-required",
+        "tasks/get must remain parked until an operator resolves the reply"
+    );
+
+    let entry = h
+        .node_tree
+        .list()
+        .await
+        .into_iter()
+        .find(|entry| entry.subagent_type == rustain::adapters::a2a::exec::INBOUND_SUBAGENT_TYPE)
+        .expect("wait mode registers an inbound peer node");
+    assert_eq!(entry.current_status, NodeState::Waiting);
+    assert_eq!(
+        entry.wait_reason,
+        Some(rustain::domain::models::WaitReason::AwaitingPeerResponse)
+    );
+    let node_id = entry.agent_id.as_str().to_owned();
+    let node_rx = h
+        .node_tree
+        .status_rx(&entry.agent_id)
+        .await
+        .expect("parked node has a status channel");
+
+    write_frame(
+        &mut operator,
+        &ClientFrame::ResolvePeerDraft {
+            node: node_id.clone(),
+            action: rustain::adapters::daemon::protocol::PeerDraftAction::WriteOwn {
+                content: "operator reply".to_owned(),
+            },
+        },
+    )
+    .await
+    .expect("operator supplies the wait-mode reply");
+    let (completed, _) = poll_until(&client, &endpoint, "t-wait", None, "completed").await;
+    assert_eq!(
+        completed["result"]["status"]["message"]["parts"][0]["text"],
+        "operator reply"
+    );
+    assert_node_terminal(node_rx, NodeState::Completed).await;
+    assert!(
+        !h.node_tree
+            .list()
+            .await
+            .iter()
+            .any(|entry| entry.agent_id.as_str() == node_id),
+        "completed inbound node must deregister"
+    );
+
+    attach_shutdown.cancel();
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn an_operator_edited_draft_returns_the_edited_text_and_journals_agent_authorship() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let mut h = harness_mode(
+        A2aAdmissionPolicy::Allow,
+        Arc::new(ScriptedProvider {
+            chunks: answer_chunks(ANSWER),
+            gate: Some(gate.clone()),
+        }),
+        rustain::domain::models::ResponseMode::NotifyAndDraft,
+    )
+    .await;
+    let workspace = h._workspace.path().to_path_buf();
+    let domain_rx = std::mem::replace(&mut h._domain_rx, {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        rx
+    });
+    let (mut operator, attach_shutdown) =
+        attach_operator(h.server.clone(), &workspace, domain_rx).await;
+    let client = reqwest::Client::new();
+    let endpoint = h.endpoint();
+
+    rpc(
+        &client,
+        &endpoint,
+        &send_body(1, "summarize the corpus", "t-edit"),
+        None,
+    )
+    .await;
+    poll_until(&client, &endpoint, "t-edit", None, "working").await;
+    let node_id = h
+        .node_tree
+        .list()
+        .await
+        .into_iter()
+        .find(|entry| entry.subagent_type == rustain::adapters::a2a::exec::INBOUND_SUBAGENT_TYPE)
+        .expect("draft mode registers an inbound peer node")
+        .agent_id
+        .as_str()
+        .to_owned();
+    gate.notify_one();
+    poll_until(&client, &endpoint, "t-edit", None, "auth-required").await;
+    write_frame(
+        &mut operator,
+        &ClientFrame::ResolvePeerDraft {
+            node: node_id.clone(),
+            action: rustain::adapters::daemon::protocol::PeerDraftAction::Edit {
+                content: "edited reply".to_owned(),
+            },
+        },
+    )
+    .await
+    .expect("operator edits the buffered draft");
+    let (completed, _) = poll_until(&client, &endpoint, "t-edit", None, "completed").await;
+    assert_eq!(
+        completed["result"]["status"]["message"]["parts"][0]["text"],
+        "edited reply"
+    );
+    assert!(
+        RoomJournalReader::load_entries(h.node_journal.as_ref())
+            .await
+            .expect("journal loads")
+            .iter()
+            .any(|entry| matches!(
+                &entry.record,
+                rustain::domain::models::JournalRecord::Room(
+                    rustain::domain::models::RoomEvent::PeerDraftResolved {
+                        node,
+                        agent_composed: true,
+                        sent: true,
+                    }
+                ) if node.as_str() == node_id
+            )),
+        "editing an agent draft must journal agent authorship"
+    );
+
+    attach_shutdown.cancel();
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn an_operator_written_draft_returns_the_operator_text_and_journals_human_authorship() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let mut h = harness_mode(
+        A2aAdmissionPolicy::Allow,
+        Arc::new(ScriptedProvider {
+            chunks: answer_chunks(ANSWER),
+            gate: Some(gate.clone()),
+        }),
+        rustain::domain::models::ResponseMode::NotifyAndDraft,
+    )
+    .await;
+    let workspace = h._workspace.path().to_path_buf();
+    let domain_rx = std::mem::replace(&mut h._domain_rx, {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        rx
+    });
+    let (mut operator, attach_shutdown) =
+        attach_operator(h.server.clone(), &workspace, domain_rx).await;
+    let client = reqwest::Client::new();
+    let endpoint = h.endpoint();
+
+    rpc(
+        &client,
+        &endpoint,
+        &send_body(1, "summarize the corpus", "t-write-own"),
+        None,
+    )
+    .await;
+    poll_until(&client, &endpoint, "t-write-own", None, "working").await;
+    let node_id = h
+        .node_tree
+        .list()
+        .await
+        .into_iter()
+        .find(|entry| entry.subagent_type == rustain::adapters::a2a::exec::INBOUND_SUBAGENT_TYPE)
+        .expect("draft mode registers an inbound peer node")
+        .agent_id
+        .as_str()
+        .to_owned();
+    gate.notify_one();
+    poll_until(&client, &endpoint, "t-write-own", None, "auth-required").await;
+    write_frame(
+        &mut operator,
+        &ClientFrame::ResolvePeerDraft {
+            node: node_id.clone(),
+            action: rustain::adapters::daemon::protocol::PeerDraftAction::WriteOwn {
+                content: "operator authored reply".to_owned(),
+            },
+        },
+    )
+    .await
+    .expect("operator writes a replacement reply");
+    let (completed, _) = poll_until(&client, &endpoint, "t-write-own", None, "completed").await;
+    assert_eq!(
+        completed["result"]["status"]["message"]["parts"][0]["text"],
+        "operator authored reply"
+    );
+    assert!(
+        RoomJournalReader::load_entries(h.node_journal.as_ref())
+            .await
+            .expect("journal loads")
+            .iter()
+            .any(|entry| matches!(
+                &entry.record,
+                rustain::domain::models::JournalRecord::Room(
+                    rustain::domain::models::RoomEvent::PeerDraftResolved {
+                        node,
+                        agent_composed: false,
+                        sent: true,
+                    }
+                ) if node.as_str() == node_id
+            )),
+        "operator-written draft must journal human authorship"
+    );
+
+    attach_shutdown.cancel();
     h.stop().await;
 }
 
@@ -756,14 +1170,14 @@ async fn next_approval(stream: &mut tokio::net::UnixStream) -> rustain::domain::
 
 #[tokio::test]
 async fn an_approval_gated_task_answers_auth_required_inside_the_deadline_then_resumes() {
-    let mut h = harness_with(
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mut h = harness_mode(
         A2aAdmissionPolicy::Ask,
         Arc::new(ScriptedProvider {
             chunks: answer_chunks(ANSWER),
-            gate: None,
+            gate: Some(gate.clone()),
         }),
-        A2aServerSecurity::default(),
-        true,
+        rustain::domain::models::ResponseMode::NotifyAndDraft,
     )
     .await;
     let workspace = h._workspace.path().to_path_buf();
@@ -822,6 +1236,32 @@ async fn an_approval_gated_task_answers_auth_required_inside_the_deadline_then_r
     )
     .await
     .expect("grant");
+
+    // The resumed task runs as a draft: the provider gate makes the `working`
+    // window deterministic, then the completed draft parks — auth-required
+    // again, this time awaiting the operator's resolution, not admission.
+    poll_until(&client, &endpoint, "t-1", None, "working").await;
+    let node_id = h
+        .node_tree
+        .list()
+        .await
+        .into_iter()
+        .find(|entry| entry.subagent_type == rustain::adapters::a2a::exec::INBOUND_SUBAGENT_TYPE)
+        .expect("resumed task materializes a peer node")
+        .agent_id
+        .as_str()
+        .to_owned();
+    gate.notify_one();
+    poll_until(&client, &endpoint, "t-1", None, "auth-required").await;
+    write_frame(
+        &mut operator,
+        &ClientFrame::ResolvePeerDraft {
+            node: node_id,
+            action: rustain::adapters::daemon::protocol::PeerDraftAction::Approve,
+        },
+    )
+    .await
+    .expect("operator approves the buffered draft");
 
     let (completed, _) = poll_until(&client, &endpoint, "t-1", None, "completed").await;
     assert_eq!(
@@ -996,7 +1436,7 @@ async fn a_turn_that_errors_reports_failed_without_disclosing_why() {
     const HOST_SECRET: &str = "401 Unauthorized from api.internal.example (key sk-abc)";
 
     let gate = std::sync::Arc::new(tokio::sync::Notify::new());
-    let h = harness(
+    let h = harness_mode(
         A2aAdmissionPolicy::Allow,
         Arc::new(ScriptedProvider {
             chunks: vec![
@@ -1009,6 +1449,7 @@ async fn a_turn_that_errors_reports_failed_without_disclosing_why() {
             ],
             gate: Some(gate.clone()),
         }),
+        rustain::domain::models::ResponseMode::NotifyAndDraft,
     )
     .await;
     let client = reqwest::Client::new();
@@ -1239,13 +1680,19 @@ async fn a_runtime_forbidden_fragment_downgrades_a_real_http_result() {
     let client = reqwest::Client::new();
     let endpoint = format!("http://{addr}/");
 
-    rpc(
+    let immediate = rpc(
         &client,
         &endpoint,
         &send_body(1, "do the task", "scrubbed-result"),
         None,
     )
     .await;
+    assert_eq!(immediate["result"]["status"]["state"], "completed");
+    let immediate_text = immediate["result"]["status"]["message"]["parts"][0]["text"]
+        .as_str()
+        .expect("same-response disclosure text");
+    assert!(immediate_text.contains("host-bound-unavailable"));
+    assert!(!immediate_text.contains(forbidden));
     let (completed, _) = poll_until(&client, &endpoint, "scrubbed-result", None, "completed").await;
     let text = completed["result"]["status"]["message"]["parts"][0]["text"]
         .as_str()
@@ -1324,7 +1771,12 @@ async fn post_insert_start_failure_is_terminal_and_opaque() {
 
 #[tokio::test]
 async fn cancel_reaches_the_running_turn_and_the_node_goes_terminal() {
-    let h = harness(A2aAdmissionPolicy::Allow, Arc::new(HangingProvider)).await;
+    let h = harness_mode(
+        A2aAdmissionPolicy::Allow,
+        Arc::new(HangingProvider),
+        rustain::domain::models::ResponseMode::NotifyAndDraft,
+    )
+    .await;
     let client = reqwest::Client::new();
     let endpoint = h.endpoint();
 
@@ -2175,6 +2627,13 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
         .await
         .expect("register");
         tree.set_state(&node_id, NodeState::Running).await;
+        tree.set_state(&node_id, NodeState::Waiting).await;
+        tree.stamp_wait_reason(
+            &node_id,
+            Some(rustain::domain::models::WaitReason::AwaitingPeerResponse),
+        )
+        .await
+        .expect("the wait-mode checkpoint is durable before restart");
         // …and the process vanishes here. No terminal transition is ever written.
         let _ = Op::Kill;
     }
@@ -2233,7 +2692,7 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
             }),
         ))
     };
-    let server = AttachServer::new_with_node_tree(
+    let server = auto_response_server(
         core,
         Arc::new(Mutex::new(Conversation {
             id: "restart".to_owned(),
@@ -2290,12 +2749,16 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
     assert_ne!(reason, CANCEL_DETAIL);
     assert_eq!(reason, RESTART_DETAIL);
 
-    // …and the node itself is terminal, not left dangling for the next restart.
+    // AC6: restart reconciliation routes the recovered wait through a terminal
+    // transition, which clears the durable wait stamp instead of rendering a
+    // false operator wait beside the failed wire task.
     assert!(
-        tree.list()
-            .await
-            .iter()
-            .any(|entry| entry.agent_id == node_id && entry.current_status == NodeState::Failed)
+        tree.list().await.iter().any(|entry| {
+            entry.agent_id == node_id
+                && entry.current_status == NodeState::Failed
+                && entry.wait_reason.is_none()
+        }),
+        "a restart-failed task must not retain AwaitingPeerResponse"
     );
 
     cancel.cancel();
@@ -2406,7 +2869,7 @@ async fn a_non_loopback_listener_serves_only_over_tls_and_only_with_the_key() {
             }),
         ))
     };
-    let server = AttachServer::new_with_node_tree(
+    let server = auto_response_server(
         core,
         Arc::new(Mutex::new(Conversation {
             id: "tls".to_owned(),
@@ -2670,7 +3133,7 @@ async fn peer_runtime_fixture() -> (
             }),
         ))
     };
-    let server = AttachServer::new_with_node_tree(
+    let server = auto_response_server(
         core,
         Arc::new(Mutex::new(Conversation {
             id: "peer-runtime".to_owned(),
@@ -2694,6 +3157,7 @@ fn peer_envelope(
             correlation_id: CorrelationId::new(correlation),
             kind: rustain::domain::models::MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         },
         body: AgentMessage::new("hello"),
     }
@@ -2725,6 +3189,7 @@ async fn ac2_inbound_peer_delivery_is_refused_with_a_receipt_never_dropped() {
                     .peer_id,
                 text: "do the thing".to_owned(),
                 subagent_type: "a2a-inbound".to_owned(),
+                response_policy: rustain::domain::ports::PeerResponsePolicy::default(),
             },
             cancel.clone(),
         )
@@ -2830,6 +3295,7 @@ async fn ac3_one_bus_slot_and_the_peer_path_honours_the_installed_policy() {
                     .peer_id,
                 text: "do the thing".to_owned(),
                 subagent_type: "a2a-inbound".to_owned(),
+                response_policy: rustain::domain::ports::PeerResponsePolicy::default(),
             },
             cancel.clone(),
         )

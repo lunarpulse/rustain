@@ -38,6 +38,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     conv.messages.push(ChatMessage {
         id: "m2".to_string(),
@@ -51,6 +53,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     conv.messages.push(ChatMessage {
         id: "m3".to_string(),
@@ -64,6 +68,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     conv.messages.push(ChatMessage {
         id: "m4".to_string(),
@@ -77,6 +83,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     conv.messages.push(ChatMessage {
         id: "m5".to_string(),
@@ -90,6 +98,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
 
     conv
@@ -179,6 +189,8 @@ fn test_first_kept_message_id_less_than_two_turns() {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
 
     assert_eq!(compaction::first_kept_message_id(&conv), None);

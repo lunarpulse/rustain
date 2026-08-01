@@ -185,6 +185,10 @@ fn hash_message_content(msg: &crate::domain::models::conversation::ChatMessage) 
     msg.content.hash(&mut hasher);
     msg.content_blocks.hash(&mut hasher);
     msg.stop_reason.hash(&mut hasher);
+    // Story 18.3c — authorship changes the rendered line count (the
+    // `[auto-sent]` marker line); a hash that ignores it would serve a stale
+    // cached height after a draft resolution marks the row.
+    msg.authorship.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -193,6 +197,7 @@ fn compute_message_height(
     has_error: bool,
     is_cancelled: bool,
     _is_bookmarked: bool,
+    agent_composed_marker: bool,
     width: usize,
 ) -> usize {
     // 1 for role line (see docstring — role + bookmark glyph never wraps at
@@ -210,7 +215,11 @@ fn compute_message_height(
     // the suffix would push the last rendered line over width. Since
     // render_message() appends it as its own Line, we always add 1.
     let interrupted_line = if is_cancelled { 1 } else { 0 };
-    1 + content_height + interrupted_line // role line + content + optional [interrupted]
+    // Story 18.3c — `render_message` inserts the `[auto-sent]` marker as its
+    // own Line directly below the role line for every AgentComposed row. The
+    // virtual-scroll invariant (AC6) breaks unless every height path counts it.
+    let marker_line = if agent_composed_marker { 1 } else { 0 };
+    1 + marker_line + content_height + interrupted_line // role + marker + content + optional [interrupted]
 }
 
 /// Render a single message into Line objects.
@@ -249,6 +258,8 @@ fn render_message<'a>(
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::new();
     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
+    let is_agent_composed =
+        msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed;
 
     // Role indicator — may gain a fork marker, a bookmark marker, or both.
     // Fork marker (if any) comes first, then bookmark, then the role label.
@@ -305,6 +316,26 @@ fn render_message<'a>(
         Style::default().fg(role_color).add_modifier(Modifier::BOLD),
     ));
     lines.push(Line::from(role_spans));
+    if is_agent_composed {
+        // CANONICAL Auto-Sent Pattern (`ux-design-specification.md:2141-2151`):
+        // magenta-dotted marker, `[auto-sent]` always visible, the retract
+        // control always visible (consumed form once used). No new border,
+        // glyph, or label — the honest local-scope statement belongs to the
+        // retract confirmation, not this line.
+        let marker = match msg.retracted_at_ms {
+            Some(retracted_at_ms) => {
+                let timestamp =
+                    crate::domain::services::transparency::format_unix_millis(retracted_at_ms);
+                let time = timestamp.get(11..16).unwrap_or("—");
+                format!("┆ [auto-sent]  [retracted {time}]  [✗] Retract (used)")
+            }
+            None => "┆ [auto-sent]  [✗] Retract".to_owned(),
+        };
+        lines.push(Line::from(Span::styled(
+            marker,
+            Style::default().fg(theme.colors.auto_sent_border),
+        )));
+    }
 
     // Content
     if has_error {
@@ -365,7 +396,8 @@ fn render_message<'a>(
             let mut match_cursor: usize = 0;
             let base_style = theme.search_highlight;
             let focused_style = theme.search_highlight_focused;
-            for line in lines.iter_mut().skip(1) {
+            let content_start = if is_agent_composed { 2 } else { 1 };
+            for line in lines.iter_mut().skip(content_start) {
                 *line = apply_search_highlights(
                     line.clone(),
                     q,
@@ -374,6 +406,14 @@ fn render_message<'a>(
                     focused_match_ordinal_in_message,
                     &mut match_cursor,
                 );
+            }
+        }
+    }
+
+    if msg.retracted_at_ms.is_some() {
+        for line in &mut lines {
+            for span in &mut line.spans {
+                span.style = span.style.add_modifier(Modifier::DIM);
             }
         }
     }
@@ -1565,6 +1605,12 @@ fn render_with_search_impl(
                         }
                     };
                     h = layout.height;
+                    if msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed {
+                        // Not reachable today (agent-composed rows carry no
+                        // Turn), but the marker line would break the
+                        // virtual-scroll invariant here too if that changed.
+                        h += 1;
+                    }
                     for offset in &layout.block_offsets {
                         block_boundaries.push(cumulative_offset + offset);
                     }
@@ -1578,6 +1624,7 @@ fn render_with_search_impl(
                         has_error,
                         is_cancelled,
                         is_bookmarked,
+                        msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed,
                         width,
                     );
                     for tc in &msg.tool_calls {
@@ -1616,6 +1663,8 @@ fn render_with_search_impl(
                             has_error,
                             is_cancelled,
                             is_bookmarked,
+                            msg.authorship
+                                == crate::domain::models::MessageAuthorship::AgentComposed,
                             width,
                         );
                         tab_render_state.height_cache.set_message(key, computed);
@@ -1830,6 +1879,8 @@ fn render_with_search_impl(
                             msg.content_blocks.contains(&ContentBlockType::Error),
                             msg.stop_reason == Some(StopReason::Cancelled),
                             is_bookmarked,
+                            msg.authorship
+                                == crate::domain::models::MessageAuthorship::AgentComposed,
                             width,
                         );
                         for (j, line) in msg_lines.into_iter().enumerate() {
@@ -1871,6 +1922,7 @@ fn render_with_search_impl(
                         msg.content_blocks.contains(&ContentBlockType::Error),
                         msg.stop_reason == Some(StopReason::Cancelled),
                         is_bookmarked,
+                        msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed,
                         width,
                     );
                     for (j, line) in msg_lines.into_iter().enumerate() {
@@ -3133,6 +3185,8 @@ mod parts_aware_tests {
                 synthetic: false,
                 images: vec![],
                 origin: crate::domain::models::ChannelKind::Terminal,
+                authorship: Default::default(),
+                retracted_at_ms: None,
             }],
             turns: vec![turn.clone()],
             created_at: 0,
@@ -3455,5 +3509,75 @@ mod parts_aware_tests {
         );
 
         assert_eq!(layout.focused_turn_top, Some(layout.turn_top_offsets[1].1));
+    }
+    #[test]
+    fn agent_composed_height_invariant_matches_rendered_lines() {
+        let message = crate::domain::models::ChatMessage {
+            role: MessageRole::Assistant,
+            content: "generated response".to_owned(),
+            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            ..Default::default()
+        };
+        let theme = Theme::dark();
+        let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
+        let computed = compute_message_height(&message.content, false, false, false, true, 80);
+        assert_eq!(
+            rendered.len(),
+            computed,
+            "the virtual-scroll invariant: every rendered line is counted"
+        );
+        let plain = render_message(
+            &crate::domain::models::ChatMessage {
+                role: MessageRole::Assistant,
+                content: "generated response".to_owned(),
+                ..Default::default()
+            },
+            80,
+            &theme,
+            false,
+            false,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            plain.len() + 1,
+            rendered.len(),
+            "the marker is exactly one line"
+        );
+    }
+
+    #[test]
+    fn auto_sent_and_retracted_rows_keep_authorship_and_content_visible() {
+        let mut message = crate::domain::models::ChatMessage {
+            role: MessageRole::Assistant,
+            content: "generated response".to_owned(),
+            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            ..Default::default()
+        };
+        let theme = Theme::dark();
+        let rendered = render_message(&message, 80, &theme, false, false, None, None, false)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("[auto-sent]"));
+        assert!(rendered.contains("[✗] Retract"));
+        assert!(rendered.contains("generated response"));
+
+        message.retracted_at_ms = Some(1_700_000_123_000);
+        let retracted = render_message(&message, 80, &theme, false, false, None, None, false)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(retracted.contains("[retracted"));
+        assert!(retracted.contains("[✗] Retract (used)"));
+        assert!(retracted.contains("generated response"));
+        assert!(
+            !retracted.contains("remote copies"),
+            "the marker carries no invented label — the local-scope statement\n\
+             belongs to the retract confirmation (AC5)"
+        );
     }
 }

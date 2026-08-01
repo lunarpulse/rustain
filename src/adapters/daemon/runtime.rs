@@ -181,6 +181,8 @@ impl DaemonTurnRuntime {
             synthetic: false,
             images: vec![],
             origin,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
 
         self.drive_preloaded_turn(conversation, domain_tx, turn_origin, turn_cancel)

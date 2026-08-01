@@ -517,51 +517,68 @@ fn ac6_an_unpinned_per_sender_target_is_reported_not_refused() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// AC4 — structural ratchet: the delivery path is NOT wired here
+// AC4 — structural ratchet: the delivery path consumes effective policy
 // ──────────────────────────────────────────────────────────────────
 
-/// AC4 ratchet — `RelationshipDeliveryPolicy::decide` still ignores its header.
-///
-/// AC4 has no behavioural mutant: it asserts an **absence**, so it is proven
-/// structurally per Rule 4, the same shape as 18.3's own
-/// `ac3_ratchet_no_discarded_disposition`.
-///
-/// Story 18.3 established that a policy object installed into the wrong bus *"would
-/// govern local subagent messaging and silently not govern the peer path — the one
-/// direction the feature exists to govern."* Wiring response modes into delivery is
-/// the **obey** half and belongs to 18.3c, where the mode's *behaviour* ships
-/// alongside it. This ratchet makes a partial 18.3c wiring impossible to land here
-/// unnoticed.
-///
-/// `DF-18-3b-DELIVERY-TRIGGER` — trigger-story 18.3c.
+/// Story 18.3c keeps this structural guard deliberately narrow: `decide` owns
+/// relationship consent, while response automation travels through its separate
+/// policy answer. The end-to-end sender-mode keystone is
+/// `conformance_18_3c_response_modes::ac1_pinned_sender_mode_routes_through_bus_and_unpinned_fails_closed`.
 #[test]
-fn ac4_ratchet_relationship_delivery_policy_still_ignores_the_header() {
+fn ac4_ratchet_effective_policy_reaches_delivery_without_overloading_relationship() {
     let source = std::fs::read_to_string("src/domain/ports/agent_message_bus.rs")
         .expect("read agent_message_bus.rs");
 
-    // The parameter is still discarded by name. When 18.3c consumes it, this
-    // assertion is the thing that must be deliberately updated.
     assert!(
-        source.contains("_header: &MessageHeader"),
-        "`RelationshipDeliveryPolicy::decide` no longer discards its header. If Story 18.3c \
-         is wiring `EffectivePolicy` into delivery, update this ratchet and close \
-         DF-18-3b-DELIVERY-TRIGGER; if not, the header was consumed by accident."
+        source.contains("fn response_policy(&self, header: &MessageHeader)")
+            && source.contains("verified_peer_id"),
+        "the delivery policy must derive response automation from the verified sender header"
     );
-
-    // And the signature itself is unchanged — 18.3 made this the enforced peer
-    // path, and churning it now would rework freshly-landed enforcement.
+    assert!(
+        source.contains("EffectivePolicy")
+            && source.contains("sender_policy_for")
+            && source.contains("response_policy"),
+        "the delivery policy must consult EffectivePolicy through sender_policy_for"
+    );
     assert!(
         source.contains("fn decide(") && source.contains("recipient_ownership: OwnershipKind"),
-        "DeliveryPolicy::decide's signature changed; 18-3b must not touch it"
+        "DeliveryPolicy::decide's relationship-disposition signature changed"
     );
+    assert!(
+        source.contains("relationship_disposition(recipient_ownership)"),
+        "response mode must not overload the relationship consent disposition"
+    );
+}
 
-    // No policy type from this story leaked onto the delivery seam.
-    for leaked in ["EffectivePolicy", "ResponseMode", "team_policy"] {
-        assert!(
-            !source.contains(leaked),
-            "`{leaked}` reached the delivery port — that is 18.3c's work, not 18.3b's"
-        );
-    }
+#[test]
+fn ac4_ratchet_daemon_composition_installs_effective_delivery_policy() {
+    let source = std::fs::read_to_string("src/adapters/daemon/mod.rs").expect("read daemon/mod.rs");
+    let production = source
+        .split("async fn run_daemon_foreground(")
+        .nth(1)
+        .expect("production daemon composition root exists");
+    assert!(
+        production.contains("EffectiveDeliveryPolicy::new")
+            && production.contains("peer_bus_slot_with_policy"),
+        "the daemon composition root must install the resolved policy into its one peer bus"
+    );
+    assert!(
+        !production
+            .contains("let peer_bus = crate::adapters::daemon::server::default_peer_bus_slot"),
+        "production must not silently retain the relationship-only default bus"
+    );
+}
+
+#[test]
+fn ac4_ratchet_startup_names_the_semantic_message_type_deferral() {
+    let source = std::fs::read_to_string("src/adapters/daemon/policy_startup.rs")
+        .expect("read policy_startup.rs");
+    assert!(
+        source.contains("MESSAGE_TYPE_DEFERRAL_NOTICE")
+            && source.contains("per-sender response mode is enforced")
+            && source.contains("semantic message type is not carried"),
+        "startup must state that per-sender policy is live while message-type selection remains deferred"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────

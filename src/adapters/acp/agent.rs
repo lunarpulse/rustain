@@ -509,6 +509,8 @@ impl RustainAcpAgent {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -525,6 +527,8 @@ impl RustainAcpAgent {
             synthetic: true,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -659,6 +663,8 @@ impl RustainAcpAgent {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
 
         let mut messages = message_builder::build_api_messages(&conversation);

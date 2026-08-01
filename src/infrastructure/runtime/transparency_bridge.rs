@@ -1,5 +1,5 @@
-//! Effect shell between the event loop and the transparency read seam
-//! (Story 18.2, AC5/AC6).
+//! Effect shell between the event loop and runtime bridge seams
+//! (Stories 18.2 and 18.3c).
 //!
 //! Exists to keep `event_loop.rs` inside its line ratchet
 //! (`EVENT_LOOP_HARD_BUDGET`) and to keep `adapters/tui/handlers/` free of
@@ -11,6 +11,7 @@
 
 use crate::adapters::tui::handlers::team_command::{TeamLogArgs, TeamLogInput};
 use crate::adapters::tui::state::TuiState;
+use crate::domain::models::AppConfig;
 use crate::domain::services::transparency::{
     TransparencyExport, TransparencyFilter, TransparencyReport, TransparencyRow,
 };
@@ -178,6 +179,116 @@ fn filter_rows(
         .filter(|row| filter.matches(row))
         .cloned()
         .collect())
+}
+
+/// One-call shell for the `/fanout` dispatch arm.
+///
+/// Story 18.3c Task 0.7 moved the established command path here unchanged so
+/// `event_loop.rs` retains budget for new behavior. This is an effect shell,
+/// not a second decision core: parsing, request construction, spawn-gate
+/// selection, cancellation, and notice text remain the shipped implementations.
+pub(crate) fn fanout_command(
+    state: &mut TuiState,
+    conversation_id: &str,
+    cmd_arg: Option<&str>,
+    is_streaming: bool,
+    config: &AppConfig,
+    app_state: &AppState,
+) {
+    use crate::adapters::tui::widgets::exceptional_spawn_gate::{GateDecision, gate_decision};
+    use crate::domain::events::AppEvent;
+    use crate::domain::models::NoticeLevel;
+
+    if cmd_arg.map(str::trim) == Some("cancel") {
+        if let Some(cancel) = &state.wave_cancel {
+            if !cancel.is_cancelled() {
+                cancel.cancel();
+                state.rerunning_slot = None;
+                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conversation_id.to_owned()),
+                    level: NoticeLevel::Info,
+                    message: "Fan-out wave cancelled.".to_string(),
+                });
+            } else {
+                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conversation_id.to_owned()),
+                    level: NoticeLevel::Info,
+                    message: "Wave already cancelled.".to_string(),
+                });
+            }
+        } else {
+            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                conversation_id: Some(conversation_id.to_owned()),
+                level: NoticeLevel::Info,
+                message: "No active wave to cancel.".to_string(),
+            });
+        }
+        state.needs_redraw = true;
+    } else if is_streaming {
+        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: Some(conversation_id.to_owned()),
+            level: NoticeLevel::Info,
+            message:
+                "/fanout unavailable while a turn is in progress — try again after it finishes."
+                    .to_string(),
+        });
+        state.needs_redraw = true;
+    } else if state.wave_state.is_some() {
+        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: Some(conversation_id.to_owned()),
+            level: NoticeLevel::Info,
+            message: "A fan-out wave is already in flight — wait for it to finish.".to_string(),
+        });
+        state.needs_redraw = true;
+    } else {
+        match crate::adapters::tui::fanout_spec::parse_fanout(cmd_arg) {
+            Ok(spec) => {
+                let effective_model = state.selected_model.as_deref().unwrap_or(&config.model);
+                match crate::adapters::tui::fanout_spec::to_request(&spec, effective_model) {
+                    Ok(request) => {
+                        let requested = request.spokes.len();
+                        let threshold = config.fanout_spawn_gate_threshold;
+                        match gate_decision(requested, threshold) {
+                            GateDecision::Allow => {
+                                super::event_loop::launch_wave_request(
+                                    state,
+                                    app_state,
+                                    conversation_id.to_owned(),
+                                    request,
+                                );
+                            }
+                            GateDecision::Refuse => {
+                                state.pending_spawn_gate =
+                                    Some(crate::adapters::tui::state::PendingSpawnGate {
+                                        spec,
+                                        requested,
+                                        threshold,
+                                        adjusted: None,
+                                    });
+                                state.needs_redraw = true;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            conversation_id: Some(conversation_id.to_owned()),
+                            level: NoticeLevel::Warning,
+                            message: err.to_string(),
+                        });
+                        state.needs_redraw = true;
+                    }
+                }
+            }
+            Err(msg) => {
+                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conversation_id.to_owned()),
+                    level: NoticeLevel::Warning,
+                    message: msg.to_string(),
+                });
+                state.needs_redraw = true;
+            }
+        }
+    }
 }
 
 /// One-call shell for the `/team` dispatch arm: parse, read, render, emit.

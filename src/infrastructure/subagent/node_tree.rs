@@ -57,9 +57,9 @@ impl std::error::Error for MailboxFull {}
 ///    the invariant with a deterministic counter instead of a timing race
 ///    (Rule 4, the 17.3 RC-A precedent).
 ///
-/// The five legal release paths are: sender self-release, recipient
-/// turn-dispatch, consent-refusal, terminal drain, and — new in 18.3 — the
-/// inbound-A2A peer-node loop.
+/// The six legal release paths are: sender self-release, recipient
+/// turn-dispatch, consent-refusal, terminal drain, the inbound-A2A peer-node
+/// loop, and a notify-and-auto reply sent through the bus.
 #[derive(Clone)]
 pub struct MailboxBudget {
     live: Arc<AtomicUsize>,
@@ -107,7 +107,7 @@ impl MailboxBudget {
     }
 
     /// Release one reserved slot. Must be called exactly once per successful
-    /// `reserve()` on one of the five defined release paths listed on the type.
+    /// `reserve()` on one of the six defined release paths listed on the type.
     ///
     /// `pub(crate)` since Story 18.3 (AC2): releasing is the half of the
     /// protocol that can corrupt the invariant, so it is not reachable from
@@ -2386,6 +2386,7 @@ impl crate::domain::ports::AgentMessageBus for LocalMessageBus {
             .ok_or_else(|| DeliveryError::NotFound(to.clone()))?;
 
         let disposition = self.policy.decide(&env.header, target.ownership);
+        let response_policy = self.policy.response_policy(&env.header);
         let mode = delivery_decision(target.state);
         if mode == DeliveryMode::Refuse {
             return Err(DeliveryError::Refused(RefuseReason::TerminalState));
@@ -2423,7 +2424,12 @@ impl crate::domain::ports::AgentMessageBus for LocalMessageBus {
 
         match target.handle {
             NodeHandle::Local { command_tx, .. } => {
-                match command_tx.try_send(Op::Deliver(AgentDelivery::new(env, mode, disposition))) {
+                match command_tx.try_send(Op::Deliver(AgentDelivery::new_with_response_policy(
+                    env,
+                    mode,
+                    disposition,
+                    response_policy,
+                ))) {
                     Ok(()) => {
                         if discharges_obligation {
                             self.node_tree
@@ -3061,6 +3067,7 @@ mod tests {
                 correlation_id: CorrelationId::new(corr),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
+                verified_peer_id: None,
             },
             AgentMessage::new(content),
         )
@@ -3777,6 +3784,7 @@ mod tests {
                 correlation_id: crate::domain::models::CorrelationId::new("self-release"),
                 kind: crate::domain::models::MessageKind::PeerMessage,
                 sequence: None,
+                verified_peer_id: None,
             },
             crate::domain::models::AgentMessage::new("closed receiver"),
         );

@@ -55,6 +55,17 @@ pub trait VerifiedPeerConsumer: Send + Sync {
         content: AgentMessage,
         peer_id: &PeerId,
     ) -> Result<(), String>;
+
+    async fn ingest_with_policy(
+        &self,
+        recipient: &AgentId,
+        content: AgentMessage,
+        peer_id: &PeerId,
+        response_policy: crate::domain::ports::PeerResponsePolicy,
+    ) -> Result<(), String> {
+        let _ = response_policy;
+        self.ingest(recipient, content, peer_id).await
+    }
 }
 
 /// Shared post-verification RAP delivery seam.
@@ -99,9 +110,10 @@ impl VerifiedPeerFrameHandler {
         envelope: AgentEnvelope<serde_json::Value>,
         peer_id: PeerId,
     ) -> Result<(), PeerDeliveryError> {
-        let local = translate_verified_peer_envelope(envelope)?;
+        let mut local = translate_verified_peer_envelope(envelope)?;
         self.bind_verified_sender(&local.header.sender, &peer_id)
             .await?;
+        local.header.verified_peer_id = Some(peer_id);
         let recipient = local.header.recipient.clone();
         self.ensure_peer_context(recipient.clone()).await?;
 
@@ -209,6 +221,7 @@ impl VerifiedPeerFrameHandler {
                     }
                     crate::domain::models::Op::Deliver(delivery) => {
                         let disposition = delivery.disposition;
+                        let response_policy = delivery.response_policy;
                         let header = delivery.envelope.header;
                         let correlation = header.correlation_id.0.clone();
                         let body = delivery.envelope.body;
@@ -273,7 +286,12 @@ impl VerifiedPeerFrameHandler {
                                             Err(PeerDeliveryError::Transparency)
                                         }
                                         Ok(()) => consumer
-                                            .ingest(&recipient, body, peer_id)
+                                            .ingest_with_policy(
+                                                &recipient,
+                                                body,
+                                                peer_id,
+                                                response_policy,
+                                            )
                                             .await
                                             .map_err(PeerDeliveryError::Consumer),
                                     }
@@ -369,6 +387,7 @@ pub fn translate_verified_peer_envelope(
             correlation_id: envelope.header.correlation_id,
             kind: envelope.header.kind,
             sequence: None,
+            verified_peer_id: None,
         },
         AgentMessage::new(content),
     ))
@@ -635,6 +654,29 @@ mod tests {
         }
     }
 
+    struct FailingIngestConsumer;
+
+    #[async_trait]
+    impl VerifiedPeerConsumer for FailingIngestConsumer {
+        async fn consent(
+            &self,
+            _recipient: &AgentId,
+            _content: &AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<VerifiedPeerConsent, String> {
+            Ok(VerifiedPeerConsent::Accept)
+        }
+
+        async fn ingest(
+            &self,
+            _recipient: &AgentId,
+            _content: AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<(), String> {
+            Err("injected ingest failure".to_owned())
+        }
+    }
+
     struct BrokenRecorder;
 
     #[async_trait]
@@ -724,6 +766,81 @@ mod tests {
         )
     }
 
+    struct FixedResponseMode(crate::domain::models::ResponseMode);
+
+    impl DeliveryPolicy for FixedResponseMode {
+        fn decide(&self, _header: &MessageHeader, ownership: OwnershipKind) -> DeliveryDisposition {
+            crate::domain::models::relationship_disposition(ownership)
+        }
+
+        fn response_policy_for_peer(
+            &self,
+            _peer_id: &PeerId,
+        ) -> crate::domain::ports::PeerResponsePolicy {
+            crate::domain::ports::PeerResponsePolicy {
+                mode: self.0,
+                auto_response: None,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct ModeRecordingConsumer(Mutex<Vec<crate::domain::models::ResponseMode>>);
+
+    #[async_trait]
+    impl VerifiedPeerConsumer for ModeRecordingConsumer {
+        async fn consent(
+            &self,
+            _recipient: &AgentId,
+            _content: &AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<VerifiedPeerConsent, String> {
+            Ok(VerifiedPeerConsent::Accept)
+        }
+
+        async fn ingest(
+            &self,
+            _recipient: &AgentId,
+            _content: AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<(), String> {
+            Err("response policy was discarded".to_owned())
+        }
+
+        async fn ingest_with_policy(
+            &self,
+            _recipient: &AgentId,
+            _content: AgentMessage,
+            _peer_id: &PeerId,
+            response_policy: crate::domain::ports::PeerResponsePolicy,
+        ) -> Result<(), String> {
+            self.0.lock().await.push(response_policy.mode);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn verified_front_door_branches_with_the_bus_selected_response_mode() {
+        let consumer = Arc::new(ModeRecordingConsumer::default());
+        let (handler, _tree, _events) = handler_with(
+            Arc::new(FixedResponseMode(
+                crate::domain::models::ResponseMode::NotifyAndDraft,
+            )),
+            consumer.clone(),
+        );
+        let signed = envelope(MessageKind::PeerMessage, serde_json::json!("hello"));
+        let peer_id = signed.signer.peer_id.clone();
+
+        handler
+            .handle_verified_peer_frame(signed, peer_id)
+            .await
+            .expect("verified delivery reaches the mode-aware consumer");
+        assert_eq!(
+            consumer.0.lock().await.as_slice(),
+            &[crate::domain::models::ResponseMode::NotifyAndDraft]
+        );
+    }
+
     /// Drive the FRONT DOOR — `handle_verified_peer_frame`, the only production
     /// caller of `LocalMessageBus::deliver` — over a real bus and a real
     /// `NodeTree` holding a real registered peer node. Returns whatever receipt
@@ -808,11 +925,11 @@ mod tests {
     /// Drive `n` verified frames through the real front door and report the
     /// peer node's `(reserved_total, released_total, live)` budget counters.
     async fn budget_after(
+        policy: Arc<dyn DeliveryPolicy>,
         consumer: Arc<dyn VerifiedPeerConsumer>,
         n: usize,
     ) -> (usize, usize, usize) {
-        let (handler, tree, _domain_rx) =
-            handler_with(Arc::new(RelationshipDeliveryPolicy), consumer);
+        let (handler, tree, _domain_rx) = handler_with(policy, consumer);
         for i in 0..n {
             let mut signed = envelope(MessageKind::PeerMessage, serde_json::json!("hello"));
             signed.header.correlation_id = CorrelationId::new(format!("corr-{i}"));
@@ -831,28 +948,56 @@ mod tests {
     }
 
     /// [K2] AC2 structural ratchet (Rule 4) — a DETERMINISTIC counter, never a
-    /// timing window. Every slot `LocalMessageBus` reserves must be released
-    /// exactly once, on both the accepted and the consent-refused arm.
-    ///
-    /// The `reserved == n` assertion is the built-in positive control: it makes
-    /// a vacuous pass impossible, because a ratchet that held only by never
-    /// reserving anything would fail it (the "truthful-only-while-empty" class
-    /// the story names).
-    ///
-    /// Mutants -> RED: (a) drop `mailbox_budget.release()` from the arm ->
-    /// released < reserved and live > 0; (b) double-release on the refusal path
-    /// -> released > reserved.
+    /// timing window. All six settlement paths release exactly once: legacy
+    /// relationship acceptance, the three response modes, consent refusal, and
+    /// a consumer failure.
     #[tokio::test]
     async fn ac2_every_reserve_is_matched_by_exactly_one_release() {
-        let cases: Vec<(&str, Arc<dyn VerifiedPeerConsumer>)> = vec![
+        let accepting =
+            || Arc::new(RecordingConsumer(Mutex::new(Vec::new()))) as Arc<dyn VerifiedPeerConsumer>;
+        let cases: Vec<(&str, Arc<dyn DeliveryPolicy>, Arc<dyn VerifiedPeerConsumer>)> = vec![
             (
-                "accepted",
-                Arc::new(RecordingConsumer(Mutex::new(Vec::new()))),
+                "relationship-accepted",
+                Arc::new(RelationshipDeliveryPolicy),
+                accepting(),
             ),
-            ("consent-refused", Arc::new(DecliningConsumer)),
+            (
+                "notify-and-wait",
+                Arc::new(FixedResponseMode(
+                    crate::domain::models::ResponseMode::NotifyAndWait,
+                )),
+                accepting(),
+            ),
+            (
+                "notify-and-draft",
+                Arc::new(FixedResponseMode(
+                    crate::domain::models::ResponseMode::NotifyAndDraft,
+                )),
+                accepting(),
+            ),
+            (
+                "notify-and-auto",
+                Arc::new(FixedResponseMode(
+                    crate::domain::models::ResponseMode::NotifyAndAuto,
+                )),
+                accepting(),
+            ),
+            (
+                "consent-refused",
+                Arc::new(RelationshipDeliveryPolicy),
+                Arc::new(DecliningConsumer),
+            ),
+            (
+                "consumer-error",
+                Arc::new(FixedResponseMode(
+                    crate::domain::models::ResponseMode::NotifyAndAuto,
+                )),
+                Arc::new(FailingIngestConsumer),
+            ),
         ];
-        for (label, consumer) in cases {
-            let (reserved, released, live) = budget_after(consumer, 4).await;
+        assert_eq!(cases.len(), 6, "settlement path inventory changed");
+        for (label, policy, consumer) in cases {
+            let (reserved, released, live) = budget_after(policy, consumer, 4).await;
             assert_eq!(
                 reserved, 4,
                 "{label}: positive control — the deliveries must actually have reserved"

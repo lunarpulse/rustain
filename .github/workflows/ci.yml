@@ -65,6 +65,7 @@ jobs:
         run: |
           cargo test --lib
           cargo test --test conformance_18_3b_policy
+          cargo test --features test-instrumentation --test conformance_18_3c_response_modes
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest
@@ -125,6 +126,7 @@ jobs:
             --test conformance \
             --test conformance_17_2a_node_journal \
             --test conformance_a2a_architecture \
+            --test conformance_18_3c_response_modes \
             --test conformance_transparency \
             --test conformance_transparency_surfacing
 

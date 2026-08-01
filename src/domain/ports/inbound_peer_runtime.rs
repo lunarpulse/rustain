@@ -25,6 +25,7 @@ use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::{AgentId, NodeState, PeerId};
+use crate::domain::ports::PeerResponsePolicy;
 
 /// One admitted inbound task, ready to execute as a local peer node.
 #[derive(Debug, Clone)]
@@ -43,6 +44,8 @@ pub struct InboundPeerTask {
     /// protocol's naming, and so restart reconciliation can select exactly the
     /// nodes this front door owns.
     pub subagent_type: String,
+    /// Response behavior snapshotted when the front door admitted this task.
+    pub response_policy: PeerResponsePolicy,
 }
 
 /// Outcome of raising an admission approval without waiting for it.
@@ -107,6 +110,12 @@ impl std::error::Error for InboundPeerError {}
 /// Execute admitted inbound peer tasks on the local core.
 #[async_trait::async_trait]
 pub trait InboundPeerRuntime: Send + Sync {
+    /// Resolve response automation for a verified transport identity.
+    fn response_policy(&self, peer_id: &PeerId) -> PeerResponsePolicy {
+        let _ = peer_id;
+        PeerResponsePolicy::default()
+    }
+
     /// Register `task.node_id` as a local `Peer`/`Remote` node and start driving
     /// its turn. Returns as soon as the node exists and the turn is spawned —
     /// it never awaits turn completion.

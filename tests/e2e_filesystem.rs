@@ -32,6 +32,8 @@ fn make_simple_conversation(id: &str) -> Conversation {
                 stop_reason: None,
                 images: vec![],
                 origin: rustain::domain::models::ChannelKind::Terminal,
+                authorship: Default::default(),
+                retracted_at_ms: None,
             },
             ChatMessage {
                 synthetic: false,
@@ -45,6 +47,8 @@ fn make_simple_conversation(id: &str) -> Conversation {
                 stop_reason: None,
                 images: vec![],
                 origin: rustain::domain::models::ChannelKind::Terminal,
+                authorship: Default::default(),
+                retracted_at_ms: None,
             },
         ],
         turns: Vec::new(),

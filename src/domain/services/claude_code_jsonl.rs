@@ -164,6 +164,8 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                             synthetic: false,
                             images: vec![],
                             origin: crate::domain::models::ChannelKind::Terminal,
+                            authorship: Default::default(),
+                            retracted_at_ms: None,
                         });
                     }
                     ClaudeCodeContent::Blocks(blocks) => {
@@ -215,6 +217,8 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                                     synthetic: false,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 });
                             }
                             continue;
@@ -344,6 +348,8 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                         synthetic: false,
                         images: vec![],
                         origin: crate::domain::models::ChannelKind::Terminal,
+                        authorship: Default::default(),
+                        retracted_at_ms: None,
                     });
                 } else if let ClaudeCodeContent::Text(text) = content {
                     // Plain text assistant message (less common)
@@ -361,6 +367,8 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                         synthetic: false,
                         images: vec![],
                         origin: crate::domain::models::ChannelKind::Terminal,
+                        authorship: Default::default(),
+                        retracted_at_ms: None,
                     });
                 }
             }

@@ -1885,6 +1885,8 @@ pub(crate) fn finish_plan(
         synthetic: true,
         images: vec![],
         origin: crate::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
     conversation.messages.push(msg);
 

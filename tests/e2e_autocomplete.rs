@@ -264,6 +264,8 @@ fn test_e2e_new_command_creates_fresh_session() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
 
     let original_id = h.conversation.id.clone();

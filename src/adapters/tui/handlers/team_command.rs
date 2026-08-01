@@ -186,6 +186,7 @@ mod tests {
         TransparencyRow {
             seq,
             recorded_at_ms: Some(1_700_000_000_000),
+            retracted_at_ms: None,
             direction: Direction::Outbound,
             kind: TransparencyKind::Rejected,
             peer: "peer-a".to_owned(),

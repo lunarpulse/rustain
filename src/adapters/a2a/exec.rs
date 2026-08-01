@@ -42,13 +42,13 @@ pub enum PendingAuth {
 /// The inverse of `driver::project_rap_to_node_state`, and **lossy by
 /// construction** in both directions:
 ///
-/// * `Waiting` and `Suspended` both collapse to `working`. A remote submitter
-///   has no vocabulary for "parked awaiting a local operator's answer", and A2A
-///   `input-required` would be a lie — it means *the submitter* must respond.
+/// * `Waiting` projects to `auth-required`: the local operator, not the remote
+///   submitter, owes the response. This is distinct from A2A `input-required`.
+/// * `Suspended` collapses to `working`.
 /// * `Created` collapses to `working` rather than `submitted`: by the time a
 ///   node exists we have already accepted, and going backwards on the wire is
 ///   not a legal `RapTaskState` transition.
-/// * `AuthRequired` has no `NodeState` at all; it arrives via [`PendingAuth`].
+/// * Admission `AuthRequired` has no `NodeState`; it arrives via [`PendingAuth`].
 ///
 /// Exhaustive over `NodeState` on purpose (the enum is `#[non_exhaustive]` only
 /// for downstream crates): a new lifecycle state must break this build, not
@@ -61,9 +61,8 @@ pub const fn project_node_to_rap(node: NodeState, pending: PendingAuth) -> RapTa
         return RapTaskState::AuthRequired;
     }
     match node {
-        NodeState::Created | NodeState::Running | NodeState::Waiting | NodeState::Suspended => {
-            RapTaskState::Working
-        }
+        NodeState::Waiting => RapTaskState::AuthRequired,
+        NodeState::Created | NodeState::Running | NodeState::Suspended => RapTaskState::Working,
         NodeState::Completed => RapTaskState::Completed,
         NodeState::Failed => RapTaskState::Failed,
         NodeState::Cancelled => RapTaskState::Canceled,
@@ -587,7 +586,7 @@ mod tests {
         );
         assert_eq!(
             project_node_to_rap(NodeState::Waiting, NoAuth),
-            RapTaskState::Working
+            RapTaskState::AuthRequired
         );
         assert_eq!(
             project_node_to_rap(NodeState::Suspended, NoAuth),

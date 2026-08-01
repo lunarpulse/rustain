@@ -119,6 +119,8 @@ fn add_assistant_msg(conv: &mut Conversation, text: &str) {
         synthetic: true,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
 }
 

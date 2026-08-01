@@ -66,6 +66,8 @@ mod tests {
             stop_reason: None,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -82,6 +84,8 @@ mod tests {
             stop_reason: None,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -98,6 +102,8 @@ mod tests {
             stop_reason: None,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 

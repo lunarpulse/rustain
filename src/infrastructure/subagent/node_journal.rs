@@ -3,6 +3,9 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(test, feature = "test-instrumentation"))]
+static NODE_JOURNAL_LOAD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 use thiserror::Error;
 
 use crate::domain::models::{
@@ -36,6 +39,19 @@ pub struct NodeJournal {
 }
 
 impl NodeJournal {
+    /// Reset the process-local load counter used by the delivery-path ratchet.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn reset_load_count() {
+        NODE_JOURNAL_LOAD_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Number of [`NodeJournal::load`] calls since the latest reset.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[must_use]
+    pub fn load_count() -> usize {
+        NODE_JOURNAL_LOAD_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Open the workspace's durable orchestration room. The deterministic
     /// workspace-derived id lets the singleton process find the same ordered
     /// log after a crash without a second mutable pointer file.
@@ -434,6 +450,8 @@ impl NodeJournal {
     /// Load the canonical prefix. A torn or malformed trailing line is ignored;
     /// corruption anywhere before the tail fails closed.
     pub async fn load(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        NODE_JOURNAL_LOAD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _guard = self.append_guard.lock().await;
         let path = self.path.clone();
         let lock_path = self.lock_path.clone();

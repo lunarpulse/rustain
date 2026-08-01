@@ -53,7 +53,7 @@ use ratatui::layout::Rect;
 /// Separate from shutdown persist timeout (2s) which is more critical.
 const BACKGROUND_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-fn launch_wave_request(
+pub(super) fn launch_wave_request(
     state: &mut TuiState,
     app_state: &AppState,
     conversation_id: crate::domain::models::tab::ConversationId,
@@ -1268,6 +1268,8 @@ pub async fn run(
                                                         synthetic: true,
                                                         images: vec![],
                                                         origin: crate::domain::models::ChannelKind::Terminal,
+                                                        authorship: Default::default(),
+                                                        retracted_at_ms: None,
                                                     }],
                                                     turns: vec![],
                                                     created_at: crate::domain::models::session_meta::now_unix(),
@@ -1517,6 +1519,8 @@ pub async fn run(
                                                 synthetic: false,
                                                 images: vec![],
                                                 origin: crate::domain::models::ChannelKind::Terminal,
+                                                authorship: Default::default(),
+                                                retracted_at_ms: None,
                                             });
                                         }
                                         // Abort the active turn task
@@ -2382,111 +2386,7 @@ pub async fn run(
                                             let _ = app_state.event_bus.emit_domain(ev);
                                         }
                                     } else if cmd_name == "fanout" {
-                                        // Story 14.3b — `/fanout <N> <prompt>`: fan out N identical
-                                        // spokes (DD-B1). FanOutSpec is parsed here (turn-seam DTO)
-                                        // and translated to a ForkJoinRequest at the boundary.
-                                        // Intercepted BEFORE the adapter-override path. The
-                                        // orchestrator emits the 14.3a wave lifecycle events
-                                        // (ForkJoinStarted/SpokeCompleted/SynthesisReady/
-                                        // WaveCancelled) via the event bus; the handlers below
-                                        // render them.
-                                        // Story 14.3a (AC8): `/fanout cancel` explicit floor.
-                                        if cmd_arg.map(|a| a.trim()) == Some("cancel") {
-                                            if let Some(ref cancel) = state.wave_cancel {
-                                                if !cancel.is_cancelled() {
-                                                    cancel.cancel();
-                                                    state.rerunning_slot = None;
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: crate::domain::models::NoticeLevel::Info,
-                                                        message: "Fan-out wave cancelled.".to_string(),
-                                                    });
-                                                } else {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: crate::domain::models::NoticeLevel::Info,
-                                                        message: "Wave already cancelled.".to_string(),
-                                                    });
-                                                }
-                                            } else {
-                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                    conversation_id: Some(conversation.id.clone()),
-                                                    level: crate::domain::models::NoticeLevel::Info,
-                                                    message: "No active wave to cancel.".to_string(),
-                                                });
-                                            }
-                                            state.needs_redraw = true;
-                                        } else if streaming.is_streaming {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: crate::domain::models::NoticeLevel::Info,
-                                                message: "/fanout unavailable while a turn is in progress — try again after it finishes.".to_string(),
-                                            });
-                                            state.needs_redraw = true;
-                                        } else if state.wave_state.is_some() {
-                                            // DN-1 (review): in-flight guard — reject a 2nd `/fanout` while a
-                                            // wave is active (prevents `wave_state` cross-pollution). The
-                                            // wave-id correlation + abort-on-cancel land in 14.3a (the UX
-                                            // consumer + cancel trigger).
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: crate::domain::models::NoticeLevel::Info,
-                                                message: "A fan-out wave is already in flight — wait for it to finish.".to_string(),
-                                            });
-                                            state.needs_redraw = true;
-                                        } else {
-                                            match crate::adapters::tui::fanout_spec::parse_fanout(cmd_arg) {
-                                                Ok(spec) => {
-                                                    use crate::adapters::tui::widgets::exceptional_spawn_gate::{gate_decision, GateDecision};
-                                                    match crate::adapters::tui::fanout_spec::to_request(&spec, effective_model(&state, config)) {
-                                                        Ok(request) => {
-                                                            let requested = request.spokes.len();
-                                                            let threshold = config.fanout_spawn_gate_threshold;
-                                                            match gate_decision(requested, threshold) {
-                                                                GateDecision::Allow => {
-                                                                    launch_wave_request(
-                                                                        &mut state,
-                                                                        &app_state,
-                                                                        conversation.id.clone(),
-                                                                        request,
-                                                                    );
-                                                                }
-                                                                GateDecision::Refuse => {
-                                                                    state.pending_spawn_gate = Some(
-                                                                        crate::adapters::tui::state::PendingSpawnGate {
-                                                                            spec,
-                                                                            requested,
-                                                                            threshold,
-                                                                            adjusted: None,
-                                                                        },
-                                                                    );
-                                                                    state.needs_redraw = true;
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(err) => {
-                                                            // Latent-panic removal (RC-C AC3): surface a
-                                                            // to_request refusal as a notice, mirroring the
-                                                            // parse_fanout error path — never `.expect()` panic.
-                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                                conversation_id: Some(conversation.id.clone()),
-                                                                level: crate::domain::models::NoticeLevel::Warning,
-                                                                message: err.to_string(),
-                                                            });
-                                                            state.needs_redraw = true;
-                                                        }
-                                                    }
-                                                }
-                                                Err(msg) => {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: crate::domain::models::NoticeLevel::Warning,
-                                                        message: msg.to_string(),
-                                                    });
-                                                    state.needs_redraw = true;
-                                                }
-                                            }
-                                        }
+                                        transparency_bridge::fanout_command(&mut state, &conversation.id, cmd_arg, streaming.is_streaming, config, &app_state);
                                     } else if cmd_name == "team" {
                                         transparency_bridge::team_command(&mut state, &conversation.id, cmd_arg, &app_state).await;
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
@@ -3718,6 +3618,8 @@ pub async fn run(
                                                 synthetic: false,
                                                 images: vec![],
                                                 origin: crate::domain::models::ChannelKind::Terminal,
+                                                authorship: Default::default(),
+                                                retracted_at_ms: None,
                                             });
                                         }
                                         // Abort the streaming task
@@ -6465,6 +6367,8 @@ pub async fn run(
                                     synthetic: true,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(synthetic_msg);
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
@@ -6489,6 +6393,8 @@ pub async fn run(
                                     synthetic: true,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(synthetic_msg);
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
@@ -6516,6 +6422,8 @@ pub async fn run(
                                     synthetic: true,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(synthetic_msg);
                             }
@@ -6562,6 +6470,8 @@ pub async fn run(
                                             synthetic: false,
                                             images: vec![],
                                             origin: crate::domain::models::ChannelKind::Terminal,
+                                            authorship: Default::default(),
+                                            retracted_at_ms: None,
                                         };
                                         conversation.messages.push(msg);
                                         turn_id.clone()
@@ -6580,6 +6490,8 @@ pub async fn run(
                                         synthetic: false,
                                         images: vec![],
                                         origin: crate::domain::models::ChannelKind::Terminal,
+                                        authorship: Default::default(),
+                                        retracted_at_ms: None,
                                     };
                                     conversation.messages.push(msg);
                                     id
@@ -6597,6 +6509,8 @@ pub async fn run(
                                     synthetic: false,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(msg);
                                 turn_id.clone()
@@ -6614,6 +6528,8 @@ pub async fn run(
                                     synthetic: false,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(msg);
                                 id
@@ -10874,6 +10790,8 @@ mod tests {
             synthetic: false,
             images,
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -10890,6 +10808,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 

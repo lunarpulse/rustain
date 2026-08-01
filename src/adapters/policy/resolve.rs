@@ -21,6 +21,20 @@ use crate::domain::services::team_policy::{
 };
 
 use super::config::{PolicyConfigError, load_workspace_policies};
+#[cfg(feature = "test-instrumentation")]
+static WORKSPACE_POLICY_LOAD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "test-instrumentation")]
+pub fn reset_workspace_policy_load_count() {
+    WORKSPACE_POLICY_LOAD_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(feature = "test-instrumentation")]
+#[must_use]
+pub fn workspace_policy_load_count() -> usize {
+    WORKSPACE_POLICY_LOAD_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// Resolve and explain a workspace's interaction policy against the exact peer
 /// set the active profile composed.
@@ -33,6 +47,8 @@ pub fn resolve_workspace_policy(
     peers: &[A2aPeerSpec],
     consent: &dyn ConsentProjectionQuery,
 ) -> Result<(EffectivePolicy, PolicyExplanation), PolicyConfigError> {
+    #[cfg(feature = "test-instrumentation")]
+    WORKSPACE_POLICY_LOAD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let files = load_workspace_policies(workspace)?;
     let policy = resolve_effective_policy(&files.individual, files.team.as_ref(), peers);
     let consent_lines = collect_consent_lines(&policy, consent);

@@ -2250,6 +2250,7 @@ mod tests {
                     correlation_id: CorrelationId::new(format!("c{i}")),
                     kind: MessageKind::PeerMessage,
                     sequence: None,
+                    verified_peer_id: None,
                 },
                 AgentMessage::new(format!("msg-{i}")),
             );
@@ -2388,6 +2389,7 @@ mod tests {
                 correlation_id: CorrelationId::new("hostile-1"),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
+                verified_peer_id: None,
             },
             AgentMessage::new("hostile content"),
         );
@@ -2485,6 +2487,7 @@ mod tests {
                     correlation_id: CorrelationId::new("taint-ingest"),
                     kind: MessageKind::PeerMessage,
                     sequence: None,
+                    verified_peer_id: None,
                 },
                 AgentMessage::new("cross-agent data"),
             ),
@@ -2839,6 +2842,7 @@ mod tests {
                 correlation_id: CorrelationId::new("corr-1"),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
+                verified_peer_id: None,
             };
             AgentDelivery::new(
                 Envelope {
@@ -7302,6 +7306,7 @@ mod tests {
                     correlation_id: correlation.clone(),
                     kind: MessageKind::PeerMessage,
                     sequence: None,
+                    verified_peer_id: None,
                 },
                 AgentMessage::new("body"),
             ),
@@ -7366,11 +7371,13 @@ mod tests {
                     correlation_id: CorrelationId::new("c"),
                     kind: MessageKind::PeerMessage,
                     sequence: None,
+                    verified_peer_id: None,
                 },
                 body: AgentMessage::new("x"),
             },
             mode: DeliveryMode::Queue,
             disposition: DeliveryDisposition::MayRefuse,
+            response_policy: Default::default(),
         };
         // This IS the RED-mutant assertion: the disposition check must hold.
         // If someone hardcodes MustReport or removes the check, this fails.
@@ -7730,6 +7737,24 @@ mod tests {
                     let n = it.sym(node.as_str());
                     lines.push(format!(
                         "journal PeerDisclosure node={n} task={task:?} disclosed_bytes={disclosed_bytes}"
+                    ));
+                }
+                RoomEvent::AutoResponseRetracted {
+                    target_seq,
+                    retracted_at_ms,
+                } => {
+                    lines.push(format!(
+                        "journal AutoResponseRetracted target_seq={target_seq} retracted_at_ms={retracted_at_ms}"
+                    ));
+                }
+                RoomEvent::PeerDraftResolved {
+                    node,
+                    agent_composed,
+                    sent,
+                } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal PeerDraftResolved node={n} agent_composed={agent_composed} sent={sent}"
                     ));
                 }
                 RoomEvent::Unrecognized => {

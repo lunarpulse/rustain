@@ -132,6 +132,8 @@ pub struct TransparencyRow {
     /// Wall-clock unix milliseconds, or `None` for a line journaled before
     /// Story 18.2. Renders as `—`, **never** as epoch zero.
     pub recorded_at_ms: Option<i64>,
+    /// First appended retraction timestamp for this row, if any.
+    pub retracted_at_ms: Option<i64>,
     pub direction: Direction,
     pub kind: TransparencyKind,
     /// The remote principal, or `—` when the record carries none.
@@ -156,15 +158,19 @@ impl TransparencyRow {
     #[must_use]
     pub fn one_line(&self) -> String {
         let task = self.task.as_deref().unwrap_or("—");
+        let retracted = self.retracted_at_ms.map_or_else(String::new, |ms| {
+            format!(" [retracted {}]", format_unix_millis(ms))
+        });
         format!(
-            "{} {} {} {} · peer {} · task {} · {}",
+            "{} {} {} {} · peer {} · task {} · {}{}",
             self.direction.glyph(),
             self.direction.label(),
             self.kind.glyph(),
             self.kind.label(),
             self.peer,
             task,
-            self.summary
+            self.summary,
+            retracted
         )
     }
 }
@@ -283,6 +289,9 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             task.clone(),
             format!("disclosed result to peer ({disclosed_bytes} bytes)"),
         ),
+        // Retractions mutate the prior projected row in `fold_transparency`;
+        // they never create a second visible row.
+        RoomEvent::AutoResponseRetracted { .. } => return None,
         RoomEvent::Unrecognized => (
             TransparencyKind::Unknown,
             Direction::Unknown,
@@ -296,6 +305,7 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         seq: entry.seq,
         recorded_at_ms,
         direction,
+        retracted_at_ms: None,
         kind,
         // The peer id is host-derived (a SHA-256 pseudonym), but sanitizing it
         // costs nothing and keeps the invariant "no row field is unsanitized".
@@ -313,7 +323,35 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
 pub fn fold_transparency<'a>(
     entries: impl IntoIterator<Item = &'a JournalEntry>,
 ) -> Vec<TransparencyRow> {
-    entries.into_iter().filter_map(transparency_row).collect()
+    let mut rows: Vec<TransparencyRow> = Vec::new();
+    let mut positions = std::collections::HashMap::<u64, usize>::new();
+    for entry in entries {
+        if let JournalRecord::Room(RoomEvent::AutoResponseRetracted {
+            target_seq,
+            retracted_at_ms,
+        }) = &entry.record
+        {
+            if let Some(index) = positions.get(target_seq).copied()
+                && rows[index].retracted_at_ms.is_none()
+            {
+                rows[index].retracted_at_ms = if *retracted_at_ms == 0 {
+                    entry.has_timestamp().then_some(entry.recorded_at_ms)
+                } else {
+                    Some(*retracted_at_ms)
+                };
+            }
+            continue;
+        }
+        if let Some(row) = transparency_row(entry) {
+            // AC5 retractions name PeerDisclosure rows. Never turn an
+            // admission, refusal, or other projection into a retraction target.
+            if row.kind == TransparencyKind::Disclosed {
+                positions.insert(row.seq, rows.len());
+            }
+            rows.push(row);
+        }
+    }
+    rows
 }
 /// Row filter shared by every transparency renderer.
 ///
@@ -737,6 +775,81 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_retractions_mark_disclosure_once_and_add_no_rows() {
+        let entries = [
+            room_entry(
+                1,
+                1_700_000_000_000,
+                RoomEvent::PeerDisclosure {
+                    peer: Some(peer()),
+                    node: AgentId::from_validated("peer-response-node"),
+                    task: Some("remote-task".to_owned()),
+                    disclosed_bytes: 42,
+                },
+            ),
+            room_entry(
+                2,
+                1_700_000_060_000,
+                RoomEvent::AutoResponseRetracted {
+                    target_seq: 1,
+                    retracted_at_ms: 1_700_000_060_000,
+                },
+            ),
+            room_entry(
+                3,
+                1_700_000_120_000,
+                RoomEvent::AutoResponseRetracted {
+                    target_seq: 1,
+                    retracted_at_ms: 1_700_000_060_000,
+                },
+            ),
+        ];
+
+        let rows = fold_transparency(&entries);
+        assert_eq!(
+            rows.len(),
+            1,
+            "retraction appends must not duplicate or delete"
+        );
+        let row = &rows[0];
+        assert_eq!(row.seq, 1);
+        assert_eq!(row.retracted_at_ms, Some(1_700_000_060_000));
+        assert_eq!(row.task.as_deref(), Some("remote-task"));
+        assert!(row.summary.contains("42 bytes"));
+        assert!(row.one_line().contains("[retracted 2023-11-14 22:14:20Z]"));
+    }
+
+    #[test]
+    fn retract_fold_ignores_non_disclosure_target() {
+        let entries = [
+            room_entry(
+                1,
+                1_700_000_000_000,
+                RoomEvent::RemoteEnvelopeAccepted {
+                    peer: peer(),
+                    node: AgentId::from_validated("a2a-in/peer/task"),
+                    content_hash: ContentHash::from_bytes([0u8; 32]),
+                    direction: Direction::Inbound,
+                    task: Some("remote-task".to_owned()),
+                },
+            ),
+            room_entry(
+                2,
+                1_700_000_060_000,
+                RoomEvent::AutoResponseRetracted {
+                    target_seq: 1,
+                    retracted_at_ms: 1_700_000_060_000,
+                },
+            ),
+        ];
+
+        let rows = fold_transparency(&entries);
+        assert_eq!(rows.len(), 1, "retraction entries never render rows");
+        assert_eq!(rows[0].kind, TransparencyKind::Accepted);
+        assert_eq!(rows[0].retracted_at_ms, None);
+    }
+
+    #[test]
     fn transparency_prefers_persisted_task_and_only_recovers_plain_legacy_suffixes() {
         for (node, expected) in [
             ("a2a-in/submitter/task-7", Some("task-7")),
@@ -929,6 +1042,7 @@ mod tests {
         let row = TransparencyRow {
             seq: 1,
             recorded_at_ms: Some(1),
+            retracted_at_ms: None,
             direction: Direction::Inbound,
             kind: TransparencyKind::Accepted,
             peer: "peer-a".to_owned(),

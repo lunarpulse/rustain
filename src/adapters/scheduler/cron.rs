@@ -394,6 +394,8 @@ async fn run_job(task: CronJobTask) {
             synthetic: false,
             images: vec![],
             origin: ChannelKind::Cron,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         conversation.updated_at = crate::domain::models::session_meta::now_unix();
         conversation.last_response_at = Some(conversation.updated_at);
@@ -418,6 +420,8 @@ async fn run_job(task: CronJobTask) {
             synthetic: true,
             images: vec![],
             origin: ChannelKind::Cron,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         conversation.updated_at = crate::domain::models::session_meta::now_unix();
         conversation.last_response_at = Some(conversation.updated_at);

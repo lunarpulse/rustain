@@ -140,7 +140,7 @@ pub use config::{
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
 pub use conversation::{
-    ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference,
+    ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference, MessageAuthorship,
     generate_conversation_id, generate_message_id,
 };
 #[allow(unused_imports)]

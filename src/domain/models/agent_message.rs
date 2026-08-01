@@ -27,6 +27,9 @@ pub struct MessageHeader {
     pub kind: MessageKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
+    /// Transport-authenticated peer identity. Claimed sender ids never drive policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_peer_id: Option<super::PeerId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +74,8 @@ pub struct AgentDelivery {
     /// time. The recipient's `Op::Deliver` dispatch enforces it: `MayRefuse`
     /// may consent-refuse; `MustReport` must process.
     pub disposition: DeliveryDisposition,
+    /// Response automation selected independently from relationship consent.
+    pub response_policy: crate::domain::ports::PeerResponsePolicy,
 }
 
 impl AgentDelivery {
@@ -79,10 +84,20 @@ impl AgentDelivery {
         mode: DeliveryMode,
         disposition: DeliveryDisposition,
     ) -> Self {
+        Self::new_with_response_policy(envelope, mode, disposition, Default::default())
+    }
+
+    pub(crate) fn new_with_response_policy(
+        envelope: Envelope<AgentMessage>,
+        mode: DeliveryMode,
+        disposition: DeliveryDisposition,
+        response_policy: crate::domain::ports::PeerResponsePolicy,
+    ) -> Self {
         Self {
             envelope,
             mode,
             disposition,
+            response_policy,
         }
     }
 }
@@ -240,6 +255,7 @@ mod tests {
             correlation_id: CorrelationId::new("c-1"),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         };
         let env = Envelope::new(header, AgentMessage::new("hello"));
         let json = serde_json::to_string(&env).unwrap();
