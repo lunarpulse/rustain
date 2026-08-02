@@ -60,6 +60,21 @@ pub struct ImageReference {
     pub original_size: usize,
 }
 
+/// Authorship provenance for a persisted conversation row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageAuthorship {
+    #[default]
+    HumanWritten,
+    AgentComposed,
+}
+
+impl MessageAuthorship {
+    fn is_human_written(&self) -> bool {
+        *self == Self::HumanWritten
+    }
+}
+
 /// A single message in a conversation. Persisted to session files.
 /// Distinct from `Message` which is the provider-agnostic API request format.
 ///
@@ -98,6 +113,12 @@ pub struct ChatMessage {
     /// terminal-only sessions produce byte-identical files (snapshot stability).
     #[serde(default, skip_serializing_if = "is_terminal_origin")]
     pub origin: super::channel_kind::ChannelKind,
+    /// Agent-composed text remains marked even after operator edits.
+    #[serde(default, skip_serializing_if = "MessageAuthorship::is_human_written")]
+    pub authorship: MessageAuthorship,
+    /// Host-local append-only retraction mark; content is intentionally retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retracted_at_ms: Option<i64>,
 }
 
 /// `skip_serializing_if` predicate: the `Terminal` default is omitted from JSON so
@@ -266,6 +287,8 @@ impl Conversation {
                 synthetic: false,
                 images: vec![],
                 origin: crate::domain::models::ChannelKind::Terminal,
+                authorship: Default::default(),
+                retracted_at_ms: None,
             };
 
             if let Some(&idx) = msg_indices.get(&turn.id.0) {
@@ -455,6 +478,8 @@ mod tests {
             synthetic: false,
             images,
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -643,5 +668,23 @@ mod tests {
         let back: PersistedConversation = serde_json::from_str(&json).unwrap();
         let restored = back.to_conversation();
         assert_eq!(restored.plans.get("p1"), Some(&plan));
+    }
+
+    #[test]
+    fn auto_sent_authorship_and_retraction_round_trip_without_legacy_noise() {
+        let legacy = make_chat_message(vec![]);
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        assert!(!legacy_json.contains("authorship"));
+        assert!(!legacy_json.contains("retractedAtMs"));
+
+        let mut marked = legacy;
+        marked.authorship = MessageAuthorship::AgentComposed;
+        marked.retracted_at_ms = Some(1_700_000_123_000);
+        let json = serde_json::to_string(&marked).unwrap();
+        assert!(json.contains("\"authorship\":\"agent-composed\""));
+        assert!(json.contains("\"retractedAtMs\":1700000123000"));
+        let restored: ChatMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.authorship, MessageAuthorship::AgentComposed);
+        assert_eq!(restored.retracted_at_ms, Some(1_700_000_123_000));
     }
 }

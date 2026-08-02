@@ -767,6 +767,8 @@ pub async fn run_ask_core(
         synthetic: false,
         images: vec![],
         origin: crate::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
 
     let messages = message_builder::build_api_messages(&conversation);
@@ -1082,6 +1084,8 @@ pub async fn run_ask_core(
             images: vec![],
             synthetic: false,
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         conversation.updated_at = now_unix();
         conversation.last_response_at = Some(now_unix());

@@ -17,16 +17,44 @@ fn default_park_concurrency() -> usize {
 pub struct JournalEntry {
     pub schema_version: u32,
     pub seq: u64,
+    /// Wall-clock unix milliseconds at which this line was appended
+    /// (Story 18.2, AC2).
+    ///
+    /// **`i64`, not `u64`** — it mirrors [`crate::domain::clock::Clock::wall_now_ms`]
+    /// exactly. A `u64` field would force an `as u64` cast at the stamp site
+    /// that silently maps negative clock skew to a gigantic positive
+    /// timestamp.
+    ///
+    /// **One stamp site.** The value is supplied by the injected clock inside
+    /// the journal's append critical section; emitters never pass it in.
+    /// `#[serde(default)]` (0) marks a line journaled before 18.2 — renderers
+    /// MUST show that as an explicit unknown, never as 1970.
+    #[serde(default)]
+    pub recorded_at_ms: i64,
     pub record: JournalRecord,
 }
 
 impl JournalEntry {
-    pub fn new(seq: u64, record: JournalRecord) -> Self {
+    /// Construct a line stamped with `recorded_at_ms`.
+    ///
+    /// Callers outside the journal's append path have no business minting
+    /// entries: `NodeJournal::append_records_locked` is the sole production
+    /// caller, and it reads the timestamp from the journal's injected clock so
+    /// two emitters can never disagree about when a line was written.
+    pub fn new(seq: u64, record: JournalRecord, recorded_at_ms: i64) -> Self {
         Self {
             schema_version: NODE_JOURNAL_SCHEMA_VERSION,
             seq,
+            recorded_at_ms,
             record,
         }
+    }
+
+    /// `true` when this line predates Story 18.2 and carries no timestamp.
+    /// Renderers use this to print an explicit unknown rather than epoch zero.
+    #[must_use]
+    pub fn has_timestamp(&self) -> bool {
+        self.recorded_at_ms != 0
     }
 }
 

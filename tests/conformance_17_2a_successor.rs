@@ -240,6 +240,7 @@ async fn must_report_obligation_is_stamped_by_delivery_and_journaled_on_terminal
             correlation_id: correlation_id.clone(),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         },
         body: AgentMessage::new("report this result"),
     };
@@ -289,6 +290,7 @@ async fn owner_report_with_matching_correlation_discharges_obligation() {
                 correlation_id: correlation_id.clone(),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
+                verified_peer_id: None,
             },
             body: AgentMessage::new("produce a report"),
         },
@@ -304,6 +306,7 @@ async fn owner_report_with_matching_correlation_discharges_obligation() {
                 correlation_id: correlation_id.clone(),
                 kind: MessageKind::OwnerReport,
                 sequence: None,
+                verified_peer_id: None,
             },
             body: AgentMessage::new("completed report"),
         },

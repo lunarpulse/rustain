@@ -27,6 +27,9 @@ pub struct MessageHeader {
     pub kind: MessageKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
+    /// Transport-authenticated peer identity. Claimed sender ids never drive policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_peer_id: Option<super::PeerId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +74,8 @@ pub struct AgentDelivery {
     /// time. The recipient's `Op::Deliver` dispatch enforces it: `MayRefuse`
     /// may consent-refuse; `MustReport` must process.
     pub disposition: DeliveryDisposition,
+    /// Response automation selected independently from relationship consent.
+    pub response_policy: crate::domain::ports::PeerResponsePolicy,
 }
 
 impl AgentDelivery {
@@ -79,10 +84,20 @@ impl AgentDelivery {
         mode: DeliveryMode,
         disposition: DeliveryDisposition,
     ) -> Self {
+        Self::new_with_response_policy(envelope, mode, disposition, Default::default())
+    }
+
+    pub(crate) fn new_with_response_policy(
+        envelope: Envelope<AgentMessage>,
+        mode: DeliveryMode,
+        disposition: DeliveryDisposition,
+        response_policy: crate::domain::ports::PeerResponsePolicy,
+    ) -> Self {
         Self {
             envelope,
             mode,
             disposition,
+            response_policy,
         }
     }
 }
@@ -103,6 +118,9 @@ pub enum RefuseReason {
     /// attaches the live runner). There is no consumer for a queued delivery,
     /// so accepting it would silently black-hole the message.
     AwaitingResume,
+    /// The recipient has no live consumer for this delivery. This is an
+    /// operational refusal, never a consent-policy decision.
+    Unavailable,
 }
 
 /// Story 14-4a (AC4) — honest outcome enum. `Accepted` is the sole variant:
@@ -143,6 +161,54 @@ pub fn relationship_disposition(ownership: OwnershipKind) -> DeliveryDisposition
         OwnershipKind::Self_(_) | OwnershipKind::Owned => DeliveryDisposition::MustReport,
         OwnershipKind::Peer => DeliveryDisposition::MayRefuse,
     }
+}
+
+/// Story 14-4a (F8/F11), hoisted out of `run_child`'s nested scope by Story
+/// 18.3 (Task 1) so both enforcement shells share one predicate.
+///
+/// Is this recipient **permitted** to consent-refuse? `MayRefuse` (a `Peer`
+/// relationship) says yes; `MustReport` (`Owned`/`Self_`) says no — an owned
+/// recipient owes a report and cannot decline the message.
+///
+/// Deliberately a *permission*, not a refusal. The two shells establish that the
+/// recipient actually declined by different means — the in-process runner
+/// declines every peer delivery outright (a local subagent runner has no peer
+/// consumer), while the RAP peer path declines only when the verified-peer
+/// consumer rejects the ingest. Both ask THIS function whether the relationship
+/// lets that refusal count, so the `MayRefuse` check cannot drift between them.
+///
+/// Effect-free and value-returning per the Decision-Core Pattern (Story 18.0):
+/// the budget release and the receipt emission belong to the shells.
+pub fn may_consent_refuse(disposition: DeliveryDisposition) -> bool {
+    disposition == DeliveryDisposition::MayRefuse
+}
+
+/// The one `MessageRefused` receipt shape, shared by every refusal path.
+///
+/// Story 18.3 (Task 1). The in-process runner and the RAP peer path emit through
+/// different sinks (an `EventBus` vs. the daemon's `domain_tx`), so the
+/// *emission* cannot be shared — but the receipt **value** must be identical, or
+/// a sender learns a different story depending on which recipient refused.
+/// Building it here is what prevents a second refusal path from existing.
+///
+/// Takes the `MessageHeader` rather than the whole `AgentDelivery` because the
+/// RAP peer shell moves `envelope.body` into the verified-peer consumer before
+/// it knows whether the ingest was declined — so no `&AgentDelivery` survives to
+/// the refusal point. The header is everything a receipt needs anyway.
+pub fn refusal_receipt(
+    header: &MessageHeader,
+    recipient: &AgentId,
+    reason: RefuseReason,
+) -> crate::domain::events::AppEvent {
+    crate::domain::events::AppEvent::Subagent(crate::domain::models::SubagentEnvelope::new(
+        header.sender.as_str().to_string(),
+        recipient.clone(),
+        header.kind.clone(),
+        crate::domain::models::SubagentEvent::MessageRefused {
+            correlation_id: header.correlation_id.clone(),
+            reason,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -189,6 +255,7 @@ mod tests {
             correlation_id: CorrelationId::new("c-1"),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         };
         let env = Envelope::new(header, AgentMessage::new("hello"));
         let json = serde_json::to_string(&env).unwrap();

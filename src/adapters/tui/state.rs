@@ -1254,6 +1254,230 @@ impl Default for UsagePanelState {
     }
 }
 
+/// State for the Transparency Log sidebar panel (`Ctrl+X, L`). Story 18.2 AC5.
+///
+/// **Never presents itself as live.** `report` is one point-in-time fold of
+/// the durable room journal under a shared `flock`. It is retained so panel
+/// export writes the exact snapshot the operator is viewing rather than
+/// silently re-reading a later journal state.
+#[derive(Default)]
+pub struct TransparencyPanelState {
+    /// The exact report snapshot displayed by this panel, oldest first.
+    pub report: Option<crate::domain::services::transparency::TransparencyReport>,
+    /// Highest `seq` the operator has actually seen rendered.
+    pub acknowledged_seq: u64,
+    /// Rows newer than `acknowledged_seq`; this is always calculated from the
+    /// unfiltered snapshot so a search cannot hide unread arrivals.
+    pub newer_entries: usize,
+    /// First visible index in the current filtered view.
+    pub scroll_offset: usize,
+    /// Number of filtered rows the renderer can display. The widget refreshes
+    /// this on every draw; input transitions use it to keep selection visible.
+    pub viewport_rows: usize,
+    /// Wall-clock millis of the last report read, rendered as "as of …".
+    pub read_at_ms: Option<i64>,
+    /// A journal read that failed. The panel shows the error rather than an
+    /// empty list, which would read as "nothing happened".
+    pub error: Option<String>,
+    /// Free-text search (`/`), lower-cased.
+    pub search: Option<String>,
+    /// Whether the `/` search input is currently being typed into.
+    pub search_active: bool,
+    /// Expanded row (`Enter` drill-down), by `seq`.
+    pub drill_seq: Option<u64>,
+}
+
+impl TransparencyPanelState {
+    /// Rows in the retained report snapshot, or no rows before the first read.
+    #[must_use]
+    pub fn rows(&self) -> &[crate::domain::services::transparency::TransparencyRow] {
+        self.report
+            .as_ref()
+            .map_or(&[], |report| report.rows.as_slice())
+    }
+
+    fn matches_search(&self, row: &crate::domain::services::transparency::TransparencyRow) -> bool {
+        self.search
+            .as_deref()
+            .filter(|term| !term.is_empty())
+            .is_none_or(|term| row.one_line().to_ascii_lowercase().contains(term))
+    }
+
+    /// Rows after the active search filter, oldest first.
+    pub fn visible_rows(&self) -> Vec<&crate::domain::services::transparency::TransparencyRow> {
+        self.rows()
+            .iter()
+            .filter(|row| self.matches_search(row))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn visible_len(&self) -> usize {
+        self.rows()
+            .iter()
+            .filter(|row| self.matches_search(row))
+            .count()
+    }
+
+    #[must_use]
+    pub fn visible_row(
+        &self,
+        index: usize,
+    ) -> Option<&crate::domain::services::transparency::TransparencyRow> {
+        self.rows()
+            .iter()
+            .filter(|row| self.matches_search(row))
+            .nth(index)
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        self.visible_len().saturating_sub(self.viewport_rows.max(1))
+    }
+
+    /// Clamp the shared sidebar selection and keep it inside the rendered
+    /// viewport. Every panel input transition calls this instead of updating
+    /// selection and scroll independently.
+    pub fn synchronize_selection(&mut self, selected: &mut usize) {
+        let visible_len = self.visible_len();
+        if visible_len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = (*selected).min(visible_len - 1);
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+        let viewport_rows = self.viewport_rows.max(1);
+        if *selected < self.scroll_offset {
+            self.scroll_offset = *selected;
+        } else if *selected >= self.scroll_offset.saturating_add(viewport_rows) {
+            self.scroll_offset = *selected + 1 - viewport_rows;
+        }
+    }
+
+    /// Record the renderer's actual row capacity and reconcile the viewport.
+    pub fn set_viewport_rows(&mut self, viewport_rows: usize, selected: &mut usize) {
+        self.viewport_rows = viewport_rows.max(1);
+        self.synchronize_selection(selected);
+    }
+
+    fn recompute_newer_entries(&mut self) {
+        self.newer_entries = self
+            .rows()
+            .iter()
+            .filter(|row| row.seq > self.acknowledged_seq)
+            .count();
+    }
+
+    /// Store one freshly read report without marking unrendered rows seen.
+    pub fn apply_report(
+        &mut self,
+        report: crate::domain::services::transparency::TransparencyReport,
+        read_at_ms: i64,
+    ) {
+        self.report = Some(report);
+        self.read_at_ms = Some(read_at_ms);
+        self.error = None;
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+        self.recompute_newer_entries();
+    }
+
+    /// Test/legacy convenience for a report without structural findings.
+    pub fn apply_read(
+        &mut self,
+        rows: Vec<crate::domain::services::transparency::TransparencyRow>,
+        read_at_ms: i64,
+    ) {
+        self.apply_report(
+            crate::domain::services::transparency::TransparencyReport {
+                rows,
+                findings: Vec::new(),
+            },
+            read_at_ms,
+        );
+    }
+
+    /// Select the newest boundary. A row is not acknowledged here: only the
+    /// renderer can prove that the selected tail was actually drawn.
+    pub fn open_at_tail(&mut self, selected: &mut usize) {
+        let visible_len = self.visible_len();
+        if visible_len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = visible_len - 1;
+        self.scroll_offset = self.max_scroll_offset();
+    }
+
+    /// Move selection by one filtered row and keep it rendered.
+    pub fn move_selection(&mut self, selected: &mut usize, down: bool) {
+        let visible_len = self.visible_len();
+        if visible_len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = if down {
+            selected.saturating_add(1).min(visible_len - 1)
+        } else {
+            selected.saturating_sub(1)
+        };
+        self.synchronize_selection(selected);
+    }
+
+    /// Enter search input and anchor the filtered list at its first row.
+    pub fn start_search(&mut self, selected: &mut usize) {
+        self.search = Some(String::new());
+        self.search_active = true;
+        self.drill_seq = None;
+        *selected = 0;
+        self.scroll_offset = 0;
+        self.synchronize_selection(selected);
+    }
+
+    /// Apply one printable search character, preserving a valid selection.
+    pub fn append_search(&mut self, selected: &mut usize, key: char) {
+        self.search
+            .get_or_insert_with(String::new)
+            .push(key.to_ascii_lowercase());
+        *selected = 0;
+        self.scroll_offset = 0;
+        self.synchronize_selection(selected);
+    }
+
+    /// Delete one search character when typing.
+    pub fn backspace_search(&mut self, selected: &mut usize) -> bool {
+        if !self.search_active {
+            return false;
+        }
+        if let Some(search) = &mut self.search {
+            search.pop();
+        }
+        *selected = 0;
+        self.scroll_offset = 0;
+        self.synchronize_selection(selected);
+        true
+    }
+
+    /// Stop editing the search while retaining its filter.
+    pub fn commit_search(&mut self, selected: &mut usize) {
+        self.search_active = false;
+        self.synchronize_selection(selected);
+    }
+
+    /// Acknowledge only through the last row currently in the viewport.
+    pub fn acknowledge_rendered_boundary(&mut self) {
+        let end = self
+            .scroll_offset
+            .saturating_add(self.viewport_rows.max(1))
+            .min(self.visible_len());
+        if let Some(row) = end.checked_sub(1).and_then(|index| self.visible_row(index)) {
+            self.acknowledged_seq = self.acknowledged_seq.max(row.seq);
+        }
+        self.recompute_newer_entries();
+    }
+}
+
 /// State for the command palette overlay (Ctrl+P).
 // Covers: UX-DR18
 pub struct CommandPaletteState {
@@ -1422,7 +1646,10 @@ impl WhichKeyState {
             's',
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Agents),
         );
-        chord_map.insert('l', ChordAction::Noop("Log panel — Epic 14".to_string()));
+        chord_map.insert(
+            'l',
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::TransparencyLog),
+        );
         chord_map.insert(
             't',
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Tasks),
@@ -1721,6 +1948,8 @@ pub struct TuiState {
     >,
     /// Usage/cost panel state (Ctrl+X, U) (Story 7.5 AC3).
     pub usage_panel: UsagePanelState,
+    /// Transparency Log panel state (Ctrl+X, L) (Story 18.2 AC5).
+    pub transparency_panel: TransparencyPanelState,
     /// Daily budget warning state (Story 7.5 AC5). `None` when budget disabled.
     pub daily_budget: Option<DailyBudgetState>,
     /// Captured resolved-model from `start_turn_inner`, consumed-and-cleared on
@@ -2121,6 +2350,7 @@ impl TuiState {
             profile_switcher: ProfileSwitcherState::new(),
             active_profile: None,
             usage_panel: UsagePanelState::new(),
+            transparency_panel: TransparencyPanelState::default(),
             daily_budget: None,
             pending_resolved_model: None,
             selected_model: None,

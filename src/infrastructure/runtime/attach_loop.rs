@@ -36,7 +36,9 @@
 
 #![cfg(unix)]
 
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -141,6 +143,8 @@ impl TurnDriver for SocketTurnDriver {
             synthetic,
             images: vec![],
             origin: ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
 
         // row 15 — the daemon owns the turn; no local handle. Cancellation would be
@@ -255,6 +259,8 @@ fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
         synthetic: false,
         images: vec![],
         origin: ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 
@@ -275,7 +281,149 @@ fn system_message(content: impl Into<String>) -> ChatMessage {
         synthetic: true,
         images: vec![],
         origin: ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
+}
+
+// ── Story 18.3c (AC3/AC5) — peer response decision cores ────────────────────
+//
+// The daemon owns every peer draft and every auto-sent row; this client only
+// ever *derives* its card state from the seeded conversation. Never loop-local
+// truth: detach/re-attach replays the pending card exactly (AC3's surface
+// contract), and a second attached client derives the same view.
+
+/// Which stage a pending peer response is in — each renders a different card
+/// and arms a different key set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PeerResponseStage {
+    /// `notify-and-wait`: no draft exists; the operator writes the response.
+    AwaitingOperator,
+    /// `notify-and-draft`, composition still running: nothing to resolve yet.
+    Drafting,
+    /// `notify-and-draft`, buffered and ready for the decision grammar.
+    Ready(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPeerResponse {
+    /// The inbound node's `AgentId` string — the row id's `peer-response-`
+    /// suffix, which is exactly what `ClientFrame::ResolvePeerDraft` names.
+    node: String,
+    stage: PeerResponseStage,
+    /// Additional pendings behind this one (FIFO order is message order).
+    queued: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingConsentApproval {
+    request_id: crate::domain::models::RequestId,
+    tool: String,
+    input_preview: String,
+}
+
+/// The first pending peer-response row, if any. A row is pending iff it is the
+/// wait placeholder, the drafting placeholder, or the unresolved approval card
+/// — settled rows (sent content, a rejected card) never classify.
+fn pending_peer_response(conversation: &Conversation) -> Option<PendingPeerResponse> {
+    use crate::adapters::daemon::response_modes::{
+        AWAITING_RESPONSE_PLACEHOLDER, DRAFT_APPROVAL_PREFIX, DRAFTING_PLACEHOLDER,
+    };
+    let mut pendings = conversation.messages.iter().filter_map(|message| {
+        let node = message.id.strip_prefix("peer-response-")?;
+        if message.content == AWAITING_RESPONSE_PLACEHOLDER {
+            Some((node, PeerResponseStage::AwaitingOperator))
+        } else if message.content == DRAFTING_PLACEHOLDER {
+            Some((node, PeerResponseStage::Drafting))
+        } else {
+            message
+                .content
+                .strip_prefix(DRAFT_APPROVAL_PREFIX)
+                .map(|draft| (node, PeerResponseStage::Ready(draft.to_owned())))
+        }
+    });
+    let (node, stage) = pendings.next()?;
+    Some(PendingPeerResponse {
+        node: node.to_owned(),
+        stage,
+        queued: pendings.count(),
+    })
+}
+
+/// The most recent retract target: an agent-composed row not yet retracted.
+/// Pending draft rows are never candidates — they carry the default
+/// (human-written) authorship until resolution, so AC5's "drafts never show a
+/// retract affordance" holds by construction here.
+fn latest_retractable(conversation: &Conversation) -> Option<ChatMessage> {
+    conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.authorship == crate::domain::models::MessageAuthorship::AgentComposed
+                && message.retracted_at_ms.is_none()
+        })
+        .cloned()
+}
+
+fn preview_line(content: &str, max_chars: usize) -> String {
+    let one_line = content.replace('\n', " ");
+    if one_line.chars().count() <= max_chars {
+        one_line
+    } else {
+        let mut out: String = one_line.chars().take(max_chars.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// The pending-response card, bottom-anchored like the consolidation card.
+/// Labels name exactly the keys the loop dispatches (ADR-16-02 parity).
+fn peer_response_card_lines(pending: &PendingPeerResponse) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::text::Line;
+    let queued = if pending.queued > 0 {
+        format!("  [{} more queued]", pending.queued)
+    } else {
+        String::new()
+    };
+    match &pending.stage {
+        PeerResponseStage::AwaitingOperator => vec![
+            Line::from(format!("Peer is waiting for your response.{queued}")),
+            Line::from("Type your reply below — Enter sends it.  [n] Decline".to_owned()),
+        ],
+        PeerResponseStage::Drafting => vec![Line::from(
+            "Agent is drafting a reply to the peer…".to_owned(),
+        )],
+        PeerResponseStage::Ready(draft) => vec![
+            Line::from(format!("Peer draft: {}", preview_line(draft, 72))),
+            Line::from(format!(
+                "[y] Approve  [e] Edit  [n] Reject  —  or type your own reply + Enter{queued}"
+            )),
+        ],
+    }
+}
+
+fn consent_approval_card_lines(
+    pending: &PendingConsentApproval,
+    queued: usize,
+) -> Vec<ratatui::text::Line<'static>> {
+    let mut lines: Vec<_> = pending
+        .input_preview
+        .lines()
+        .map(|line| ratatui::text::Line::from(line.to_owned()))
+        .collect();
+    if queued > 0 {
+        lines.push(ratatui::text::Line::from(format!("[{queued} more queued]")));
+    }
+    lines
+}
+
+fn retract_confirm_lines(preview: &str) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::text::Line;
+    vec![
+        Line::from(format!("Retract this auto-sent message? {}", preview)),
+        Line::from("[y] Retract — marked in your log, never deleted  [n] Keep".to_owned()),
+    ]
 }
 
 fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
@@ -353,7 +501,7 @@ pub fn apply_client_event(
     conversation: &mut Conversation,
     streaming: &mut StreamingState,
     reducer: &mut ReducerState,
-    status: &mut StatusState,
+    state: &mut TuiState,
     permission_mode: &mut PermissionMode,
     clock: &dyn Clock,
 ) -> bool {
@@ -369,9 +517,9 @@ pub fn apply_client_event(
                 conversation.messages.push(turn_to_chat_message(&committed));
             }
             if let ChunkAction::TurnComplete { .. } = action {
-                *status = StatusState::Idle;
+                state.status = StatusState::Idle;
             } else {
-                *status = StatusState::Streaming;
+                state.status = StatusState::Streaming;
             }
             true
         }
@@ -400,9 +548,12 @@ pub fn apply_client_event(
             }
             true
         }
-        // ModeChanged/SystemNotice/Tool handled above; everything else
-        // (Approval/Mcp*/Capability/ConfigReloaded + any future variant) is not
-        // acted on by the thin client — ignore gracefully, never panic.
+        RawEventKind::DomainEvent(payload) => {
+            crate::adapters::tui::handlers::transparency::apply_domain_event(state, &payload)
+        }
+        // ModeChanged/SystemNotice/Tool/DomainEvent handled above; everything
+        // else (Approval/Mcp*/Capability/ConfigReloaded + any future variant)
+        // is not acted on by the thin client — ignore gracefully, never panic.
         _ => false,
     }
 }
@@ -469,6 +620,14 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     > = None;
     let mut pending_consolidation_token: Option<crate::adapters::daemon::protocol::ProposalToken> =
         None;
+    // Story 18.3c AC3/AC5 — the pending peer response itself is re-derived
+    // from the conversation every frame (never loop-local truth); only the
+    // composer-prefill correlation and the retract confirmation live here.
+    let mut peer_draft_edit_node: Option<String> = None;
+    let mut retract_confirm: Option<(String, String)> = None;
+    // Consent cards are daemon-owned and re-emitted after attach. This FIFO is
+    // only the current socket's rendering order, never the durable truth.
+    let mut pending_consent_approvals = std::collections::VecDeque::<PendingConsentApproval>::new();
 
     // ── Terminal ──
     let mut term = terminal::setup(false)?;
@@ -479,7 +638,8 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
         String,
         crate::adapters::tui::widgets::tool_block::ToolBlockState,
     > = HashMap::new();
-    let feedback_blocks: BTreeMap<String, crate::domain::models::FeedbackBlock> = BTreeMap::new();
+    // Attached clients render the same feedback blocks as the local TUI so
+    // forwarded transparency room/failure events have the same visible result.
 
     use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
     use futures::StreamExt;
@@ -508,7 +668,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 &state.theme,
                 &mut tab_render_state,
                 &tool_block_states,
-                &feedback_blocks,
+                &state.feedback_blocks,
             );
             // Story 12.2d AC3 — render the consolidation card with the IDENTICAL
             // bottom-anchored inline grammar the local TUI uses (bordered + accent,
@@ -520,6 +680,36 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 render_bottom_anchored_card(
                     f.buffer_mut(),
                     card_lines,
+                    state.theme.colors.accent,
+                    layout.chat_pane,
+                );
+            }
+            // Story 18.3c AC3/AC5 — the peer response card (and the retract
+            // confirmation, which takes precedence while open) ride the same
+            // bottom-anchored inline grammar as the consolidation card.
+            use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card;
+            if let Some((_, ref preview)) = retract_confirm {
+                render_bottom_anchored_card(
+                    f.buffer_mut(),
+                    retract_confirm_lines(preview),
+                    state.theme.colors.auto_sent_border,
+                    layout.chat_pane,
+                );
+            } else if let Some(pending) = pending_peer_response(&conversation) {
+                render_bottom_anchored_card(
+                    f.buffer_mut(),
+                    peer_response_card_lines(&pending),
+                    state.theme.colors.accent,
+                    layout.chat_pane,
+                );
+            }
+            if let Some(pending) = pending_consent_approvals.front() {
+                render_bottom_anchored_card(
+                    f.buffer_mut(),
+                    consent_approval_card_lines(
+                        pending,
+                        pending_consent_approvals.len().saturating_sub(1),
+                    ),
                     state.theme.colors.accent,
                     layout.chat_pane,
                 );
@@ -580,7 +770,55 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             maybe_ev = events.next() => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                        // One derivation per key event: the pending peer
+                        // response this client's keys would act on.
+                        let pending_peer = pending_peer_response(&conversation);
+                        // Any further keypress dismisses the retract confirmation.
+                        state.feedback_blocks.remove("peer-retract");
                         match (key.code, key.modifiers) {
+                            // Story 18.3d AC1 — sender-consent Approval Pattern.
+                            // The guard is the daemon-derived pending FIFO, so
+                            // these single-letter keys are inert everywhere else.
+                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && !pending_consent_approvals.is_empty() =>
+                            {
+                                if let Some(pending) = pending_consent_approvals.pop_front() {
+                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
+                                        request_id: pending.request_id,
+                                        outcome: crate::domain::models::ApprovalOutcome::Once,
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('a'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && !pending_consent_approvals.is_empty() =>
+                            {
+                                if let Some(pending) = pending_consent_approvals.pop_front() {
+                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
+                                        request_id: pending.request_id,
+                                        outcome: crate::domain::models::ApprovalOutcome::AlwaysAndSave {
+                                            scope: crate::domain::models::ApprovalScope::Tool(
+                                                pending.tool,
+                                            ),
+                                        },
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
+                                if !m.contains(KeyModifiers::CONTROL)
+                                    && !pending_consent_approvals.is_empty() =>
+                            {
+                                if let Some(pending) = pending_consent_approvals.pop_front() {
+                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
+                                        request_id: pending.request_id,
+                                        outcome: crate::domain::models::ApprovalOutcome::Reject {
+                                            feedback: None,
+                                        },
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
                             // Story 12.2d AC4/AC5 — consolidation card intercept.
                             (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
                                 && pending_consolidation_token.is_some() =>
@@ -608,6 +846,116 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                 pending_consolidation_card = None;
                                 state.needs_redraw = true;
                             }
+                            // Story 18.3c AC5 — the retract confirmation owns
+                            // y/n/Esc while open (Approval grammar, never a
+                            // bare key on a transient surface).
+                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && retract_confirm.is_some() =>
+                            {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't retract here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some((message_id, _)) = retract_confirm.take() {
+                                    let _ = frame_tx.send(ClientFrame::RetractAutoResponse {
+                                        message_id,
+                                        target_seq: None,
+                                    });
+                                    state.feedback_blocks.insert(
+                                        "peer-retract".to_owned(),
+                                        crate::domain::models::FeedbackBlock {
+                                            id: "peer-retract".to_owned(),
+                                            level: crate::domain::models::FeedbackLevel::Info,
+                                            message: "Retracted. Marked in your log — never deleted.\nWhat was already read, was read."
+                                                .to_owned(),
+                                            actions: vec![],
+                                        },
+                                    );
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
+                                if !m.contains(KeyModifiers::CONTROL)
+                                    && retract_confirm.is_some() =>
+                            {
+                                retract_confirm = None;
+                                state.needs_redraw = true;
+                            }
+                            // Story 18.3c AC3 — the draft decision grammar,
+                            // armed only while a Ready draft card owns the
+                            // surface (constraint 4: no bare keys without a
+                            // real non-Input surface owner).
+                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && matches!(&pending_peer, Some(p) if matches!(p.stage, PeerResponseStage::Ready(_))) =>
+                            {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't resolve here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some(p) = &pending_peer {
+                                    let _ = frame_tx.send(ClientFrame::ResolvePeerDraft {
+                                        node: p.node.clone(),
+                                        action: crate::adapters::daemon::protocol::PeerDraftAction::Approve,
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('e'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && matches!(&pending_peer, Some(p) if matches!(p.stage, PeerResponseStage::Ready(_))) =>
+                            {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't edit here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some(p) = &pending_peer
+                                    && let PeerResponseStage::Ready(draft) = &p.stage
+                                {
+                                    // Prefill FROM the draft: submitting this
+                                    // composer resolves as Edit, and the
+                                    // `[auto-sent]` tag survives (AC3).
+                                    input = draft.clone();
+                                    peer_draft_edit_node = Some(p.node.clone());
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('n'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && matches!(&pending_peer, Some(p) if !matches!(p.stage, PeerResponseStage::Drafting)) =>
+                            {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't decline here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some(p) = &pending_peer {
+                                    let _ = frame_tx.send(ClientFrame::ResolvePeerDraft {
+                                        node: p.node.clone(),
+                                        action: crate::adapters::daemon::protocol::PeerDraftAction::Reject,
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            // Story 18.3c AC5 — Ctrl+X opens the retract
+                            // confirmation for the most recent auto-sent row.
+                            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't retract here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some(row) = latest_retractable(&conversation) {
+                                    retract_confirm =
+                                        Some((row.id.clone(), preview_line(&row.content, 48)));
+                                } else {
+                                    state.status = StatusState::Flash {
+                                        message: "no auto-sent message to retract".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                }
+                                state.needs_redraw = true;
+                            }
                             // AC4 — detach (keybinding only, no CLI verb).
                             (KeyCode::Esc, _)
                             | (KeyCode::Char('d'), KeyModifiers::CONTROL)
@@ -622,23 +970,49 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                         remaining_ms: 1500,
                                     };
                                 } else if !input.trim().is_empty() {
-                                    let sub = UserSubmission {
-                                        text: std::mem::take(&mut input),
-                                        images: vec![],
-                                        synthetic: false,
-                                        activation_set: None,
-                                        agent_snapshot: None,
-                                        turn_cancel: CancellationToken::new(),
-                                    };
-                                    let view = TurnViewState {
-                                        conversation: &mut conversation,
-                                        streaming: &mut streaming,
-                                        state: &mut state,
-                                        active_turn: &mut active_turn,
-                                        session_manager: &mut session_manager,
-                                    };
-                                    driver.submit(sub, view).await;
-                                    auto_scroll = true;
+                                    let text = std::mem::take(&mut input);
+                                    if let Some(node) = peer_draft_edit_node.take() {
+                                        // Prefilled FROM the draft (the [e]
+                                        // path): resolves as Edit, the
+                                        // `[auto-sent]` tag survives (AC3).
+                                        let _ = frame_tx.send(ClientFrame::ResolvePeerDraft {
+                                            node,
+                                            action: crate::adapters::daemon::protocol::PeerDraftAction::Edit {
+                                                content: text,
+                                            },
+                                        });
+                                    } else if let Some(p) = &pending_peer
+                                        && !matches!(p.stage, PeerResponseStage::Drafting)
+                                    {
+                                        // Blank-composer "write my own" — the
+                                        // ONLY tag-clearing path, and the
+                                        // daemon journals it as such (AC3's
+                                        // tag-laundering rule).
+                                        let _ = frame_tx.send(ClientFrame::ResolvePeerDraft {
+                                            node: p.node.clone(),
+                                            action: crate::adapters::daemon::protocol::PeerDraftAction::WriteOwn {
+                                                content: text,
+                                            },
+                                        });
+                                    } else {
+                                        let sub = UserSubmission {
+                                            text,
+                                            images: vec![],
+                                            synthetic: false,
+                                            activation_set: None,
+                                            agent_snapshot: None,
+                                            turn_cancel: CancellationToken::new(),
+                                        };
+                                        let view = TurnViewState {
+                                            conversation: &mut conversation,
+                                            streaming: &mut streaming,
+                                            state: &mut state,
+                                            active_turn: &mut active_turn,
+                                            session_manager: &mut session_manager,
+                                        };
+                                        driver.submit(sub, view).await;
+                                        auto_scroll = true;
+                                    }
                                 }
                             }
                             (KeyCode::Backspace, _) => {
@@ -686,7 +1060,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             &mut conversation,
                             &mut streaming,
                             &mut reducer,
-                            &mut state.status,
+                            &mut state,
                             &mut permission_mode,
                             &clock,
                         );
@@ -700,8 +1074,20 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     Ok(Some(DaemonFrame::Error(e))) => {
                         conversation.messages.push(system_message(format!("[daemon error] {e}")));
                     }
+                    Ok(Some(DaemonFrame::ApprovalRequest {
+                        tool,
+                        request_id,
+                        input_preview,
+                        ..
+                    })) if tool == "a2a/sender-consent" => {
+                        pending_consent_approvals.push_back(PendingConsentApproval {
+                            request_id,
+                            tool,
+                            input_preview,
+                        });
+                        state.needs_redraw = true;
+                    }
                     Ok(Some(DaemonFrame::ApprovalRequest { tool, request_id, .. })) => {
-                        // Rich approval card over attach is 12.2d; surface it honestly.
                         conversation.messages.push(system_message(format!(
                             "[approval needed] {tool} (id {}) — approve from the local TUI for now.",
                             request_id.0
@@ -757,6 +1143,120 @@ mod tests {
     use std::time::Instant;
     use tokio::net::UnixStream;
 
+    #[test]
+    fn consent_card_queue_indicator_is_derived_from_the_daemon_fifo() {
+        let pending = PendingConsentApproval {
+            request_id: crate::domain::models::RequestId::new(),
+            tool: "a2a/sender-consent".to_owned(),
+            input_preview: "Consent required\n[y] Allow once  [a] Always allow  [n] Decline"
+                .to_owned(),
+        };
+        let text = consent_approval_card_lines(&pending, 2)
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("[2 more queued]"));
+        assert!(text.contains("[y] Allow once  [a] Always allow  [n] Decline"));
+    }
+
+    // ── Story 18.3c (AC3/AC5) — peer response decision-core coverage ────────
+
+    fn peer_row(id: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            id: id.to_owned(),
+            role: MessageRole::Assistant,
+            content: content.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pending_classification_covers_every_stage_and_only_pending_rows() {
+        use crate::adapters::daemon::response_modes::{
+            AWAITING_RESPONSE_PLACEHOLDER, DRAFT_APPROVAL_PREFIX, DRAFTING_PLACEHOLDER,
+        };
+        let conversation = Conversation {
+            messages: vec![
+                peer_row("peer-response-node-a", AWAITING_RESPONSE_PLACEHOLDER),
+                peer_row("peer-response-node-b", DRAFTING_PLACEHOLDER),
+                peer_row(
+                    "peer-response-node-c",
+                    &format!("{DRAFT_APPROVAL_PREFIX}draft body"),
+                ),
+                peer_row("peer-response-node-d", "already sent"),
+                peer_row("peer-response-node-e", "[draft rejected]\nsomething"),
+            ],
+            ..Default::default()
+        };
+        let pending = pending_peer_response(&conversation).expect("a pending exists");
+        assert_eq!(pending.node, "node-a", "FIFO is message order");
+        assert_eq!(pending.stage, PeerResponseStage::AwaitingOperator);
+        assert_eq!(pending.queued, 2, "settled rows never classify as pending");
+    }
+
+    #[test]
+    fn ready_stage_strips_the_approval_prefix() {
+        use crate::adapters::daemon::response_modes::DRAFT_APPROVAL_PREFIX;
+        let conversation = Conversation {
+            messages: vec![peer_row(
+                "peer-response-node-c",
+                &format!("{DRAFT_APPROVAL_PREFIX}draft body"),
+            )],
+            ..Default::default()
+        };
+        let pending = pending_peer_response(&conversation).expect("ready draft");
+        assert_eq!(
+            pending.stage,
+            PeerResponseStage::Ready("draft body".to_owned())
+        );
+        assert_eq!(pending.queued, 0);
+    }
+
+    #[test]
+    fn no_pending_rows_means_no_card() {
+        let conversation = Conversation {
+            messages: vec![peer_row("peer-response-node-d", "already sent")],
+            ..Default::default()
+        };
+        assert_eq!(pending_peer_response(&conversation), None);
+    }
+
+    #[test]
+    fn retract_target_is_the_latest_unretracted_agent_composed_row() {
+        let mut latest = peer_row("peer-response-node-b", "second auto reply");
+        latest.authorship = crate::domain::models::MessageAuthorship::AgentComposed;
+        let mut older = peer_row("peer-response-node-a", "first auto reply");
+        older.authorship = crate::domain::models::MessageAuthorship::AgentComposed;
+        older.retracted_at_ms = Some(123);
+        let conversation = Conversation {
+            messages: vec![peer_row("human-1", "operator text"), older, latest.clone()],
+            ..Default::default()
+        };
+        let target = latest_retractable(&conversation).expect("a retract target");
+        assert_eq!(target.id, latest.id);
+        // …and once it is retracted, no target remains.
+        let conversation = Conversation {
+            messages: vec![{
+                let mut row = target;
+                row.retracted_at_ms = Some(456);
+                row
+            }],
+            ..Default::default()
+        };
+        assert!(latest_retractable(&conversation).is_none());
+    }
+
+    #[test]
+    fn preview_collapses_newlines_and_bounds_length() {
+        assert_eq!(preview_line("short", 10), "short");
+        assert_eq!(preview_line("line one\nline two", 80), "line one line two");
+        let bounded = preview_line(&"x".repeat(200), 10);
+        assert_eq!(bounded.chars().count(), 10);
+        assert!(bounded.ends_with('…'));
+    }
+
     /// Compile-time proof of the shared origination seam (Q3): `SocketTurnDriver`
     /// IS a `TurnDriver`, so `run_attached` originates turns through the same
     /// `driver.submit(...)` door the local loop's `submit_turn!` macro uses (AC3).
@@ -778,6 +1278,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -948,7 +1450,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Streaming;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Streaming;
         let mut mode = PermissionMode::Normal;
 
         apply_client_event(
@@ -959,7 +1462,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -973,11 +1476,11 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
-        assert_eq!(status, StatusState::Idle);
+        assert_eq!(state.status, StatusState::Idle);
         let last = conversation
             .messages
             .last()
@@ -992,7 +1495,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Streaming;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Streaming;
         let mut mode = PermissionMode::Normal;
 
         apply_client_event(
@@ -1015,7 +1519,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1092,7 +1596,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Idle;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Idle;
         let mut mode = PermissionMode::Normal;
 
         let before = conversation.messages.len();
@@ -1108,7 +1613,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1124,7 +1629,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1135,11 +1640,61 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
         assert_eq!(conversation.messages.last().unwrap().content, "after");
+    }
+
+    #[test]
+    fn forwarded_room_event_reaches_attached_tui_feedback() {
+        let clock = SystemClock::default();
+        let mut conversation = Conversation::default();
+        let mut streaming = StreamingState::default();
+        let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
+        let mut state = TuiState::new(80, 24);
+        let mut mode = PermissionMode::Normal;
+
+        let redraw = apply_client_event(
+            RawEvent {
+                conversation_id: None,
+                timestamp_ms: 0,
+                kind: RawEventKind::DomainEvent(crate::domain::events::DomainEventPayload::Room(
+                    crate::domain::models::RoomEvent::RemoteEnvelopeRejected {
+                        peer: crate::domain::models::PeerId::from_public_key(&[7; 32])
+                            .expect("valid test peer"),
+                        reason: crate::domain::models::RejectReason::Policy {
+                            detail: "blocked by policy".to_owned(),
+                        },
+                        task: Some("remote-task-7".to_owned()),
+                        direction: crate::domain::models::Direction::Inbound,
+                    },
+                )),
+            },
+            &mut conversation,
+            &mut streaming,
+            &mut reducer,
+            &mut state,
+            &mut mode,
+            &clock,
+        );
+
+        assert!(
+            redraw,
+            "a forwarded room refusal changes attached TUI feedback"
+        );
+        let block = state
+            .feedback_blocks
+            .values()
+            .next()
+            .expect("attached TUI renders a transparency feedback block");
+        assert!(
+            block.message.contains("blocked by policy"),
+            "{}",
+            block.message
+        );
+        assert!(block.id.contains("remote-task-7"), "{}", block.id);
     }
 
     /// Test 6a (read-only true-by-absence) — the client→daemon protocol has NO
@@ -1158,6 +1713,8 @@ mod tests {
             | ClientFrame::ApprovalResponse { .. }
             | ClientFrame::InputResponse { .. }
             | ClientFrame::ConsolidationResolve { .. }
+            | ClientFrame::ResolvePeerDraft { .. }
+            | ClientFrame::RetractAutoResponse { .. }
             | ClientFrame::PeerEnvelope(_)
             | ClientFrame::Detach => {}
         }
@@ -1282,7 +1839,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Idle;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Idle;
         let mut mode = PermissionMode::Normal;
 
         apply_client_event(
@@ -1297,7 +1855,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );

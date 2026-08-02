@@ -516,9 +516,20 @@ pub enum CompactionPurpose {
 /// Live reactivity payload derived from the canonical durable room event.
 /// Persistence always goes through `NodeJournal`; this bus payload is never a
 /// second writable store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum DomainEventPayload {
     Room(crate::domain::models::RoomEvent),
+    /// Story 18.2 (AC1) — a transparency record could not be made durable.
+    ///
+    /// Carries the **running total**, not "one more failure": journal failures
+    /// arrive in bursts, and one transcript row per failed refusal would bury
+    /// the transcript exactly when the operator needs to read it. The handler
+    /// keys a single `FeedbackBlock` on a stable id so this count increments
+    /// in place — one latched row, not N rows.
+    TransparencyJournalFailed {
+        failures: u64,
+        detail: String,
+    },
 }
 
 impl From<crate::domain::models::RoomEvent> for DomainEventPayload {

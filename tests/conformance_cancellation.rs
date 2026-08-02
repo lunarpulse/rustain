@@ -382,6 +382,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             tool_exposure: None,
             skill_exposure: None,
             sandbox_adapter: None,
+            serve_a2a: None,
         },
         None,
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),

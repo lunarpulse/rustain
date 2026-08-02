@@ -40,7 +40,7 @@ fn make_conversation(messages: Vec<(MessageRole, &str)>) -> Conversation {
                 synthetic: false,
                 id: format!(
                     "msg-{
-                }",
+            }",
                     i
                 ),
                 role,
@@ -52,6 +52,8 @@ fn make_conversation(messages: Vec<(MessageRole, &str)>) -> Conversation {
                 stop_reason: None,
                 images: vec![],
                 origin: rustain::domain::models::ChannelKind::Terminal,
+                authorship: Default::default(),
+                retracted_at_ms: None,
             })
             .collect(),
         turns: Vec::new(),

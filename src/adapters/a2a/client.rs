@@ -213,7 +213,7 @@ fn is_loopback_host(host: url::Host<&str>) -> bool {
     }
 }
 
-fn is_json_content_type(value: &str) -> bool {
+pub(crate) fn is_json_content_type(value: &str) -> bool {
     let media_type = value
         .split(';')
         .next()

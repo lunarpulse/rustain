@@ -65,6 +65,8 @@ fn make_msg(role: MessageRole, content: &str) -> ChatMessage {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 
@@ -439,6 +441,8 @@ fn ac7_reject_appends_synthetic_message() {
         synthetic: true,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
     assert!(msg.synthetic);
     assert_eq!(msg.role, MessageRole::User);
@@ -596,6 +600,8 @@ fn ac10_export_renders_plan() {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
 
     let mut plans = HashMap::new();
@@ -664,6 +670,8 @@ fn ac10_export_renders_multiple_plans_per_message() {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
 
     let mut plans = HashMap::new();
@@ -728,6 +736,8 @@ fn ac10_search_indexes_plan() {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
 
     let mut plans = HashMap::new();

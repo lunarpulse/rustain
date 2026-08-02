@@ -20,16 +20,21 @@ use crate::domain::models::RoomEvent;
 /// Failure surface for a room-event record reached through the seam. Kept in
 /// `domain/` so the trait carries no infra error type.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RoomJournalError {
     /// The journal append failed. Carries a sanitized message. The bus emit
     /// is NOT attempted when the durable write fails (durable-first).
     Append(String),
+    /// The journal could not be read back (Story 18.2, AC3). A viewer shows
+    /// the error; it never renders a partial fold as if it were complete.
+    Read(String),
 }
 
 impl std::fmt::Display for RoomJournalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Append(msg) => write!(f, "room journal append failed: {msg}"),
+            Self::Read(msg) => write!(f, "room journal read failed: {msg}"),
         }
     }
 }
@@ -43,4 +48,25 @@ pub trait RoomJournal: Send + Sync {
     /// bus — in that exact order. A journal failure returns `Err` and the
     /// event is never emitted to the bus.
     async fn record_event(&self, event: RoomEvent) -> Result<(), RoomJournalError>;
+}
+
+/// Read side of the room journal (Story 18.2, AC3).
+///
+/// `RoomJournal` above is **write-only** — it exists so an adapter can append
+/// durably without holding a concrete `NodeJournal`. A viewer needs the
+/// mirror image, and for the same reason: `adapters/tui` must not import
+/// `infrastructure/subagent`, so it reaches the durable stream through this
+/// port and folds the result with
+/// [`crate::domain::services::transparency::fold_transparency`].
+///
+/// **Not a subscription.** `load_entries` is a point-in-time read under a
+/// shared `flock`: consistent, but the daemon can append between two calls. A
+/// surface built on this must never present itself as *live*.
+#[async_trait::async_trait]
+pub trait RoomJournalReader: Send + Sync {
+    /// Every durable line in the room journal, in `seq` order, with atomic
+    /// batches already flattened.
+    async fn load_entries(
+        &self,
+    ) -> Result<Vec<crate::domain::models::JournalEntry>, RoomJournalError>;
 }

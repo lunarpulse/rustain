@@ -23,7 +23,7 @@ use crate::domain::errors::TransitionError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     ChannelKind, ChatMessage, Conversation, CronConfig, CronJob, HealthSummary, MessageRole,
-    StopReason, StreamChunk, generate_message_id,
+    StopReason, StreamChunk, TurnOrigin, generate_message_id,
 };
 use crate::domain::ports::{ChannelPort, SchedulerPort, StoragePort};
 
@@ -330,6 +330,7 @@ async fn run_job(task: CronJobTask) {
         ChannelKind::Cron,
         &mut conversation,
         &job_tx,
+        TurnOrigin::Cron,
         child_cancel.clone(),
     );
     if let Err(e) = task.storage.save_conversation(&conversation).await {
@@ -393,6 +394,8 @@ async fn run_job(task: CronJobTask) {
             synthetic: false,
             images: vec![],
             origin: ChannelKind::Cron,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         conversation.updated_at = crate::domain::models::session_meta::now_unix();
         conversation.last_response_at = Some(conversation.updated_at);
@@ -417,6 +420,8 @@ async fn run_job(task: CronJobTask) {
             synthetic: true,
             images: vec![],
             origin: ChannelKind::Cron,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         conversation.updated_at = crate::domain::models::session_meta::now_unix();
         conversation.last_response_at = Some(conversation.updated_at);
@@ -938,6 +943,8 @@ mod tests {
             ),
             approval,
             workspace: workspace.to_path_buf(),
+            #[cfg(feature = "mcp")]
+            mcp_task_runtimes: Vec::new(),
         })
     }
 
@@ -1014,6 +1021,8 @@ mod tests {
             ),
             approval,
             workspace: workspace.to_path_buf(),
+            #[cfg(feature = "mcp")]
+            mcp_task_runtimes: Vec::new(),
         })
     }
 

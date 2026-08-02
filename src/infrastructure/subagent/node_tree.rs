@@ -40,22 +40,56 @@ impl std::fmt::Display for MailboxFull {
 impl std::error::Error for MailboxFull {}
 
 /// Story 14-4a (AC1) — shared atomic mailbox budget for reserve-at-admission.
-/// Wraps an `Arc<AtomicUsize>` so `AgentHandle` (which is `Clone`) can share
-/// the budget across the bus and the runner. Budget = atomics only (no lock;
-/// ratchet constraint: untagged `std::sync` locks == 4).
+/// Shares an `Arc` so `AgentHandle` (which is `Clone`) can hand the same budget
+/// to both the bus and the runner. Budget = atomics only (no lock; ratchet
+/// constraint: untagged `std::sync` locks == 4).
+///
+/// Story 18.3 (AC2) closes `DF-CR-14-4a-4` + `DF-CR-14-4a-5`, two naked P2s with
+/// no target story. The release protocol lived **only in prose** and `release`
+/// was fully `pub`, so any holder — including code outside this crate — could
+/// release a slot it never reserved, guarded by nothing but a `debug_assert!`.
+/// Two changes close it:
+///
+/// 1. `release` is now `pub(crate)`. The corruption vector was an out-of-crate
+///    holder; in-crate release sites are the enumerated protocol paths.
+/// 2. Under test instrumentation the budget counts LIFETIME reserves and
+///    releases, so `every_reserve_is_matched_by_exactly_one_release` can prove
+///    the invariant with a deterministic counter instead of a timing race
+///    (Rule 4, the 17.3 RC-A precedent).
+///
+/// The six legal release paths are: sender self-release, recipient
+/// turn-dispatch, consent-refusal, terminal drain, the inbound-A2A peer-node
+/// loop, and a notify-and-auto reply sent through the bus.
 #[derive(Clone)]
-pub struct MailboxBudget(Arc<AtomicUsize>);
+pub struct MailboxBudget {
+    live: Arc<AtomicUsize>,
+    /// Lifetime count of successful `reserve()` calls.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    reserved_total: Arc<AtomicUsize>,
+    /// Lifetime count of `release()` CALLS — attempts, not successes, so a
+    /// double-release drives this above `reserved_total` even when the second
+    /// call underflows and is rejected.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    released_total: Arc<AtomicUsize>,
+}
 
 impl MailboxBudget {
     pub fn new() -> Self {
-        Self(Arc::new(AtomicUsize::new(0)))
+        Self {
+            live: Arc::new(AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            reserved_total: Arc::new(AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            released_total: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Atomically reserve one slot. Returns `Ok(())` if the count was below
     /// `MAILBOX_CAP`, or `Err(MailboxFull)` if full. `fetch_update` closes the
     /// TOCTOU window: two concurrent senders at 63/64 → exactly one succeeds.
     pub fn reserve(&self) -> Result<(), MailboxFull> {
-        self.0
+        let outcome = self
+            .live
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 if current < MAILBOX_CAP {
                     Some(current + 1)
@@ -64,15 +98,25 @@ impl MailboxBudget {
                 }
             })
             .map(|_| ())
-            .map_err(|_| MailboxFull)
+            .map_err(|_| MailboxFull);
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        if outcome.is_ok() {
+            self.reserved_total.fetch_add(1, Ordering::AcqRel);
+        }
+        outcome
     }
 
     /// Release one reserved slot. Must be called exactly once per successful
-    /// `reserve()` on one of the defined release paths (sender self-release,
-    /// recipient turn-dispatch, consent-refusal, or terminal drain).
-    pub fn release(&self) {
+    /// `reserve()` on one of the six defined release paths listed on the type.
+    ///
+    /// `pub(crate)` since Story 18.3 (AC2): releasing is the half of the
+    /// protocol that can corrupt the invariant, so it is not reachable from
+    /// outside this crate.
+    pub(crate) fn release(&self) {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        self.released_total.fetch_add(1, Ordering::AcqRel);
         let result = self
-            .0
+            .live
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 if current > 0 { Some(current - 1) } else { None }
             });
@@ -84,7 +128,19 @@ impl MailboxBudget {
 
     /// Current reservation count (for debug assertions and tests).
     pub fn current(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.live.load(Ordering::Acquire)
+    }
+
+    /// Lifetime successful reserves. Instrumentation for the AC2 ratchet.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn reserved_total(&self) -> usize {
+        self.reserved_total.load(Ordering::Acquire)
+    }
+
+    /// Lifetime `release()` calls. Instrumentation for the AC2 ratchet.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn released_total(&self) -> usize {
+        self.released_total.load(Ordering::Acquire)
     }
 }
 
@@ -120,6 +176,9 @@ pub struct NodeTree {
     /// subsequent `validate` calls — once revoke completes, no later validate
     /// may observe the pre-revoke state (Story 14.6 AC5 TOCTOU probe).
     on_cascade_kill: Arc<dyn Fn(&AgentId) + Send + Sync>,
+    /// Story 18.1b, AC2b — see [`MutationCounters`].
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    mutations: Arc<MutationCounters>,
 }
 
 struct NodeTreeInner {
@@ -196,6 +255,19 @@ pub struct AgentHandle {
     /// self-released on failed `try_send`. Every `AgentHandle` for the same
     /// agent shares the same `Arc`.
     pub mailbox_budget: MailboxBudget,
+}
+
+/// Per-tree mutation counters (Story 18.1b, AC2b).
+///
+/// Deliberately **per instance**, not a process-global static: the integration
+/// suite runs several servers concurrently in one process, and a global counter
+/// would make "this refusal mutated nothing" read another test's registrations.
+/// A ratchet that can be tripped by an unrelated test is not a ratchet.
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Debug, Default)]
+pub struct MutationCounters {
+    registrations: std::sync::atomic::AtomicU64,
+    state_mutations: std::sync::atomic::AtomicU64,
 }
 
 /// Snapshot DTO for the TUI panel. Deterministic sort by agent_id.
@@ -442,6 +514,8 @@ impl NodeTree {
             journal: None,
             host_binding: HostBinding::new("local", "unknown"),
             on_cascade_kill: Arc::new(|_| {}),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            mutations: Arc::new(MutationCounters::default()),
         }
     }
 
@@ -453,6 +527,8 @@ impl NodeTree {
             journal: None,
             host_binding: HostBinding::new("local", "unknown"),
             on_cascade_kill: Arc::new(|_| {}),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            mutations: Arc::new(MutationCounters::default()),
         }
     }
 
@@ -467,6 +543,8 @@ impl NodeTree {
             journal: None,
             host_binding: HostBinding::new("local", "unknown"),
             on_cascade_kill: Arc::new(|_| {}),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            mutations: Arc::new(MutationCounters::default()),
         }
     }
 
@@ -776,6 +854,31 @@ impl NodeTree {
         .await
     }
 
+    /// Story 18.1b, AC2b (Rule 4). "A refused inbound task mutates nothing" is a
+    /// *structural* property: correct code simply never reaches these entries, so
+    /// no behavioural test can force the mutant RED — a refusal that also
+    /// registered a node would still answer `rejected` on the wire and stay
+    /// green. The proof is therefore a deterministic counter on the two mutation
+    /// entries themselves, never a timing window.
+    ///
+    /// Placed HERE rather than in the A2A adapter on purpose: a counter that the
+    /// adapter increments only proves the adapter's own call site behaved, and a
+    /// mutant that reaches `register_peer` by another route would sail past it.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn registration_count(&self) -> u64 {
+        self.mutations
+            .registrations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Node state mutations attempted against THIS tree.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn state_mutation_count(&self) -> u64 {
+        self.mutations
+            .state_mutations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn register_with_identity(
         &self,
         agent_id: AgentId,
@@ -784,6 +887,10 @@ impl NodeTree {
         ownership: OwnershipKind,
         origin: NodeOrigin,
     ) -> Result<(), SubagentError> {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        self.mutations
+            .registrations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self.inner.write().await;
         if guard.tearing_down.contains(&parent) {
             return Err(SubagentError::Internal(format!(
@@ -1832,6 +1939,10 @@ impl NodeTree {
         agent_id: &AgentId,
         target: NodeState,
     ) -> Result<(), SetStateError> {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        self.mutations
+            .state_mutations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self.inner.write().await;
         let idempotent_sender = guard.status_senders.get(agent_id).cloned();
         let current;
@@ -2275,6 +2386,7 @@ impl crate::domain::ports::AgentMessageBus for LocalMessageBus {
             .ok_or_else(|| DeliveryError::NotFound(to.clone()))?;
 
         let disposition = self.policy.decide(&env.header, target.ownership);
+        let response_policy = self.policy.response_policy(&env.header);
         let mode = delivery_decision(target.state);
         if mode == DeliveryMode::Refuse {
             return Err(DeliveryError::Refused(RefuseReason::TerminalState));
@@ -2312,7 +2424,12 @@ impl crate::domain::ports::AgentMessageBus for LocalMessageBus {
 
         match target.handle {
             NodeHandle::Local { command_tx, .. } => {
-                match command_tx.try_send(Op::Deliver(AgentDelivery::new(env, mode, disposition))) {
+                match command_tx.try_send(Op::Deliver(AgentDelivery::new_with_response_policy(
+                    env,
+                    mode,
+                    disposition,
+                    response_policy,
+                ))) {
                     Ok(()) => {
                         if discharges_obligation {
                             self.node_tree
@@ -2950,6 +3067,7 @@ mod tests {
                 correlation_id: CorrelationId::new(corr),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
+                verified_peer_id: None,
             },
             AgentMessage::new(content),
         )
@@ -3641,6 +3759,43 @@ mod tests {
             .find(|entry| entry.agent_id == node)
             .map(|entry| entry.current_status);
         assert_eq!(status, Some(NodeState::Completed));
+    }
+
+    #[tokio::test]
+    async fn failed_handoff_self_releases_exactly_once() {
+        let tree = NodeTree::new();
+        let node = AgentId::from_validated("closed-mailbox");
+        // `dummy_handle` deliberately drops its receiver.
+        tree.register(node.clone(), AgentId::root(), dummy_handle(node.clone(), 1))
+            .await
+            .unwrap();
+        let target = tree
+            .delivery_target(&node)
+            .await
+            .expect("registered target");
+        let bus = LocalMessageBus::new(
+            tree,
+            std::sync::Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+        );
+        let envelope = crate::domain::models::Envelope::new(
+            crate::domain::models::MessageHeader {
+                sender: AgentId::root(),
+                recipient: node.clone(),
+                correlation_id: crate::domain::models::CorrelationId::new("self-release"),
+                kind: crate::domain::models::MessageKind::PeerMessage,
+                sequence: None,
+                verified_peer_id: None,
+            },
+            crate::domain::models::AgentMessage::new("closed receiver"),
+        );
+
+        assert!(
+            bus.deliver(&node, envelope).await.is_err(),
+            "closed receiver must fail the handoff"
+        );
+        assert_eq!(target.mailbox_budget.reserved_total(), 1);
+        assert_eq!(target.mailbox_budget.released_total(), 1);
+        assert_eq!(target.mailbox_budget.current(), 0);
     }
 
     // t4 (release-on-turn-dispatch) and t6 (consent-receipt correlation)

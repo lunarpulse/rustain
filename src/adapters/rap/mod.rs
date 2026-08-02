@@ -5,8 +5,8 @@ mod wire;
 
 pub use key_store::{IdentityKeyStore, KeyStoreError};
 pub use peer_delivery::{
-    MAX_PEER_MESSAGE_BYTES, PeerDeliveryError, VerifiedPeerConsumer, VerifiedPeerFrameHandler,
-    translate_verified_peer_envelope,
+    MAX_PEER_MESSAGE_BYTES, PeerDeliveryError, VerifiedPeerConsent, VerifiedPeerConsumer,
+    VerifiedPeerFrameHandler, translate_verified_peer_envelope,
 };
 pub use transport::RapTransport;
 pub use wire::{

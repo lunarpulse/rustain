@@ -187,6 +187,16 @@ pub struct ProposedFact {
     pub fact: crate::domain::models::MemoryFact,
 }
 
+/// Trusted-local resolution of a daemon-owned peer response draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PeerDraftAction {
+    Approve,
+    Edit { content: String },
+    Reject,
+    WriteOwn { content: String },
+}
+
 /// Client → daemon frames.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -245,6 +255,19 @@ pub enum ClientFrame {
     /// `accept: true` = promote all retained proposals; `false` = decline all.
     /// The token must match the daemon's retained entry (confused-deputy guard).
     ConsolidationResolve { token: ProposalToken, accept: bool },
+    ResolvePeerDraft {
+        node: String,
+        action: PeerDraftAction,
+    },
+    /// Same-host, append-only retraction of one persisted agent-composed row.
+    /// Only a trusted-local read-write attachment may dispatch it.
+    /// `target_seq` is `None` on every normal dispatch: the daemon derives the
+    /// journaled disclosure seq itself and merely validates a supplied value.
+    RetractAutoResponse {
+        message_id: String,
+        #[serde(default)]
+        target_seq: Option<u64>,
+    },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
 }

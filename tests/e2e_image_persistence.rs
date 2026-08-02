@@ -38,6 +38,8 @@ fn make_message_with_images(
         stop_reason: None,
         images,
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 

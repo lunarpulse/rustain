@@ -75,6 +75,7 @@ pub mod subagent_view;
 pub mod tab;
 pub mod taint;
 pub mod task_handle;
+pub mod team_policy;
 pub mod tool_call;
 pub mod tool_descriptor;
 pub mod tool_policy;
@@ -94,6 +95,7 @@ pub mod waiting_hazard;
 #[allow(unused_imports)]
 pub use a2a_peer_spec::{
     A2aPeerSource, A2aPeerSpec, A2aPeerSpecError, PinnedKey, PinnedKeyAlgorithm, TrustTier,
+    alias_pseudonym,
 };
 pub use agent::{
     ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
@@ -102,8 +104,8 @@ pub use agent::{
 #[allow(unused_imports)]
 pub use agent_message::{
     AgentDelivery, AgentMessage, CorrelationId, DeliveryDisposition, DeliveryMode, DeliveryOutcome,
-    Envelope, MessageHeader, MessageKind, RefuseReason, delivery_decision,
-    relationship_disposition,
+    Envelope, MessageHeader, MessageKind, RefuseReason, delivery_decision, may_consent_refuse,
+    refusal_receipt, relationship_disposition,
 };
 #[allow(unused_imports)]
 pub use agent_node::{
@@ -138,7 +140,7 @@ pub use config::{
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
 pub use conversation::{
-    ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference,
+    ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference, MessageAuthorship,
     generate_conversation_id, generate_message_id,
 };
 #[allow(unused_imports)]
@@ -180,9 +182,9 @@ pub use orchestration::{
 };
 #[allow(unused_imports)]
 pub use orchestration_room::{
-    ApprovalView, HostBinding, NodeView, OrchestrationRoom, OrchestrationRoomId, RejectReason,
-    RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution, WaveId,
-    WaveOutcome, WaveView,
+    ApprovalView, Direction, HostBinding, NodeView, OrchestrationRoom, OrchestrationRoomId,
+    RejectReason, RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution,
+    WaveId, WaveOutcome, WaveView,
 };
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
@@ -283,6 +285,15 @@ pub use subagent_envelope::{SubagentEnvelope, SubagentEvent};
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]
 pub use taint::{ProvenanceTag, TaintDecision};
+#[allow(unused_imports)]
+pub use team_policy::{
+    DEFAULT_DIGEST_INTERVAL_MINUTES, DeferredKey, EffectivePolicy, INDIVIDUAL_POLICY_FILE,
+    IndividualDefaults, IndividualPolicy, InteractionPolicySnapshot, MSGTYPE_DEFERRAL,
+    MessageTypeOverride, NotificationUrgency, PolicySource, Resolved, ResponseMode, SenderBinding,
+    SenderIdentity, SenderIdentityConflict, SenderOverride, SenderPolicy, SharingBreadth,
+    TEAM_POLICY_FILE, TeamDefaults, TeamOverrides, TeamPolicy, TeamTransparency,
+    TransparencyInvariant,
+};
 #[allow(unused_imports)]
 pub use tool_call::{
     ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,

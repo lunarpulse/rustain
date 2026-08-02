@@ -139,6 +139,9 @@ pub enum InputAction {
     SetDensityMode(crate::domain::models::visual::DensityMode),
     /// Open or toggle a sidebar panel (Ctrl+X, T for Tasks).
     OpenPanel(crate::domain::models::visual::PanelType),
+    /// Export the exact transparency report snapshot currently rendered by the
+    /// sidebar panel.
+    ExportTransparency,
     /// Copy task result/error from drill-down detail view (Story 6-3 AC8).
     CopyTaskResult {
         plan_id: Option<String>,
@@ -1356,6 +1359,19 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     _ => InputAction::Ignored,
                 };
             }
+            if _panel == crate::domain::models::visual::PanelType::TransparencyLog && c != '\u{1b}'
+            {
+                match crate::adapters::tui::handlers::transparency::panel_key(state, c) {
+                    crate::adapters::tui::handlers::transparency::PanelKeyAction::Consumed => {
+                        state.needs_redraw = true;
+                        return InputAction::Consumed;
+                    }
+                    crate::adapters::tui::handlers::transparency::PanelKeyAction::Export => {
+                        return InputAction::ExportTransparency;
+                    }
+                    crate::adapters::tui::handlers::transparency::PanelKeyAction::Ignored => {}
+                }
+            }
             match c {
                 'j' => {
                     let moved = if _panel == crate::domain::models::visual::PanelType::Tasks {
@@ -1455,6 +1471,23 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     if _panel == crate::domain::models::visual::PanelType::Agents
                         && state.agent_panel_state.drill_down_agent.is_some() =>
                 {
+                    InputAction::Consumed
+                }
+                '\u{1b}'
+                    if _panel == crate::domain::models::visual::PanelType::TransparencyLog
+                        && crate::adapters::tui::handlers::transparency::clear_transient(state) =>
+                {
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                '\n' | '\r'
+                    if _panel == crate::domain::models::visual::PanelType::TransparencyLog =>
+                {
+                    crate::adapters::tui::handlers::transparency::toggle_drill(
+                        state,
+                        state.sidebar_selected,
+                    );
+                    state.needs_redraw = true;
                     InputAction::Consumed
                 }
                 'q' => InputAction::Quit,
@@ -1923,6 +1956,18 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             }
             _ => InputAction::Consumed,
         };
+    }
+
+    if matches!(
+        state.focus,
+        FocusState::Sidebar {
+            panel: crate::domain::models::visual::PanelType::TransparencyLog,
+            ..
+        }
+    ) && crate::adapters::tui::handlers::transparency::panel_special_key(state, key)
+    {
+        state.needs_redraw = true;
+        return InputAction::Consumed;
     }
 
     match key {
@@ -2477,6 +2522,14 @@ fn insert_newline(state: &mut TuiState) {
 
 /// Submit the current input buffer as a message.
 // Covers: UX-DR77
+/// Test seam: `submit_message` is the production parser that decides whether a
+/// `/command` reaches its event-loop dispatch arm or falls through to the
+/// user-defined-command path. Integration keystones MUST enter here — a
+/// handler-only test stays green while the command is silently dead.
+pub fn submit_message_for_test(state: &mut TuiState) -> InputAction {
+    submit_message(state)
+}
+
 fn submit_message(state: &mut TuiState) -> InputAction {
     let text = state.input_buffer.clone();
     state.input_history.push(text.clone());
@@ -2620,6 +2673,18 @@ fn submit_message(state: &mut TuiState) -> InputAction {
             // and dispatches an EMPTY turn (provider 400 "Empty input messages"),
             // so the wave never launched. Caught by the 14.3c AI-12.3 human smoke.
             if cmd_name == "fanout" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
+            // /team log: render the A2A transparency log in-chat (Story 18.2
+            // AC6). Route as ExecuteCommand — mirroring /context and /fanout —
+            // so the event-loop `/team` dispatch arm sees the sub-verb and
+            // flags. WITHOUT this entry `/team log` falls through to
+            // SubmitWithContext, resolves no command file, and silently never
+            // runs: the exact 14.3c failure `/fanout` shipped with.
+            if cmd_name == "team" {
                 return InputAction::ExecuteCommand {
                     name: cmd_name,
                     args,
@@ -5107,6 +5172,111 @@ mod tests {
         assert_ne!(
             rendered_completed, 99,
             "render must NOT read the poisoned push counter"
+        );
+    }
+    #[test]
+    fn transparency_panel_routes_special_keys_search_navigation_and_export() {
+        use crate::domain::models::visual::PanelType;
+        use crate::domain::models::{Direction as RoomDirection, FocusState};
+        use crate::domain::services::transparency::{TransparencyKind, TransparencyRow};
+
+        let row = |seq, summary: &str| TransparencyRow {
+            seq,
+            recorded_at_ms: Some(seq as i64),
+            retracted_at_ms: None,
+            direction: RoomDirection::Inbound,
+            kind: TransparencyKind::Rejected,
+            peer: "peer-a".to_owned(),
+            task: Some(format!("task-{seq}")),
+            summary: summary.to_owned(),
+            provenance: None,
+        };
+        let mut state = TuiState::new(160, 40);
+        state.focus = FocusState::Sidebar {
+            panel: PanelType::TransparencyLog,
+            selected: 0,
+        };
+        state
+            .transparency_panel
+            .apply_read(vec![row(1, "jammed"), row(2, "known")], 10);
+        state.sidebar_entry_count = 2;
+        state
+            .transparency_panel
+            .synchronize_selection(&mut state.sidebar_selected);
+
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::KeyPress('/')),
+            InputAction::Consumed
+        );
+        assert!(state.transparency_panel.search_active);
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
+        assert_eq!(state.transparency_panel.search.as_deref(), Some("jk"));
+        let _ = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(state.transparency_panel.search.as_deref(), Some("j"));
+        let _ = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(state.transparency_panel.search.as_deref(), Some(""));
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+        assert!(!state.transparency_panel.search_active);
+
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+        assert_eq!(state.sidebar_selected, 1);
+        assert!(
+            state.transparency_panel.scroll_offset <= state.sidebar_selected
+                && state.sidebar_selected
+                    < state.transparency_panel.scroll_offset
+                        + state.transparency_panel.viewport_rows.max(1),
+            "selected row must stay within the rendered viewport"
+        );
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+        assert_eq!(state.transparency_panel.drill_seq, Some(2));
+
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert!(
+            state.transparency_panel.search.is_none(),
+            "Esc clears filter first"
+        );
+        assert_eq!(state.transparency_panel.drill_seq, Some(2));
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert!(
+            state.transparency_panel.drill_seq.is_none(),
+            "Esc then unwinds drill"
+        );
+        assert!(matches!(state.focus, FocusState::Sidebar { .. }));
+
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
+        assert_eq!(state.sidebar_selected, 1);
+        // 'G' SELECTS the tail; it must not ACKNOWLEDGE it. Acknowledgement is
+        // a render-time effect (`widgets::transparency_panel::render` ->
+        // `acknowledge_rendered_boundary`) because a row that was never painted
+        // was never seen — the invariant stated verbatim at
+        // `transparency_panel.rs:343-346`. Story 18.2's review moved the ack to
+        // render and updated the widget test but not this one, which kept
+        // asserting the keystroke-time value and shipped RED (repaired in 18.3
+        // Task 0.5). Mutant: move the ack back into the 'G' arm -> RED here.
+        assert_eq!(
+            state.transparency_panel.acknowledged_seq, 0,
+            "selecting the tail must not acknowledge it before render"
+        );
+        // Positive control: the mechanism can fire, through the same call the
+        // renderer makes once the rows have a viewport to be painted into.
+        state
+            .transparency_panel
+            .set_viewport_rows(2, &mut state.sidebar_selected);
+        state.transparency_panel.acknowledge_rendered_boundary();
+        assert_eq!(
+            state.transparency_panel.acknowledged_seq, 2,
+            "the rendered boundary is what acknowledges"
+        );
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::KeyPress('e')),
+            InputAction::ExportTransparency
         );
     }
 }

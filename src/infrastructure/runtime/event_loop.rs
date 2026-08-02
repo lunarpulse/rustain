@@ -46,13 +46,14 @@ use crate::adapters::tui::widgets::{
     which_key_bar,
 };
 use crate::domain::services::session_index::SessionIndex;
+use crate::infrastructure::runtime::transparency_bridge;
 use ratatui::layout::Rect;
 
 /// Timeout for background tasks (title generation, session save).
 /// Separate from shutdown persist timeout (2s) which is more critical.
 const BACKGROUND_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-fn launch_wave_request(
+pub(super) fn launch_wave_request(
     state: &mut TuiState,
     app_state: &AppState,
     conversation_id: crate::domain::models::tab::ConversationId,
@@ -1267,6 +1268,8 @@ pub async fn run(
                                                         synthetic: true,
                                                         images: vec![],
                                                         origin: crate::domain::models::ChannelKind::Terminal,
+                                                        authorship: Default::default(),
+                                                        retracted_at_ms: None,
                                                     }],
                                                     turns: vec![],
                                                     created_at: crate::domain::models::session_meta::now_unix(),
@@ -1516,6 +1519,8 @@ pub async fn run(
                                                 synthetic: false,
                                                 images: vec![],
                                                 origin: crate::domain::models::ChannelKind::Terminal,
+                                                authorship: Default::default(),
+                                                retracted_at_ms: None,
                                             });
                                         }
                                         // Abort the active turn task
@@ -2285,87 +2290,7 @@ pub async fn run(
                                         }
                                     } else if cmd_name == "config" {
                                         handlers::config_slash::handle_config_slash(&mut state, cmd_arg, &app_state.event_bus);
-                                    } else if cmd_name == "memory"
-                                        && cmd_arg.map(str::trim) == Some("consolidate")
-                                    {
-                                        // Story 11.2a — `/memory consolidate` propose→confirm flow
-                                        // (completes 11.2 AC4). Intercepted HERE, BEFORE the
-                                        // adapter-override path below; otherwise
-                                        // `port_dimension_from_command_name("memory")` would route it
-                                        // into handle_apply_adapter_override and error as "unknown
-                                        // adapter 'consolidate'". Dispatches a structured background
-                                        // model sub-turn (NOT AgentThenSubmit — that would let the
-                                        // model auto-approve `remember_fact`, bypassing the user
-                                        // confirm AC4 requires) and surfaces a propose→confirm review
-                                        // card. Daily-log entries are NEVER deleted (AC4).
-                                        if streaming.is_streaming {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: crate::domain::models::NoticeLevel::Info,
-                                                message: "Consolidation unavailable while a turn is in progress — try again after it finishes.".to_string(),
-                                            });
-                                            state.needs_redraw = true;
-                                        } else {
-                                            let memory = app_state.agent_core.memory.load_full();
-                                            match memory.recent(30).await {
-                                                Ok(entries) if entries.is_empty() => {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: crate::domain::models::NoticeLevel::Info,
-                                                        message: "Nothing to consolidate yet — no recent activity recorded.".to_string(),
-                                                    });
-                                                    state.needs_redraw = true;
-                                                }
-                                                Ok(entries) => {
-                                                    let prompt_body = crate::domain::services::consolidation::build_proposal_prompt(&entries);
-                                                    let payload = handlers::consolidation::ConsolidationPayload {
-                                                        provider: provider.clone(),
-                                                        model: config.model.clone(),
-                                                        prompt_body,
-                                                        conversation_id: conversation.id.clone(),
-                                                        domain_tx: domain_tx.clone(),
-                                                    };
-                                                    tokio::spawn(handlers::consolidation::run_consolidation(payload));
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: crate::domain::models::NoticeLevel::Info,
-                                                        message: "Reviewing recent activity for durable facts…".to_string(),
-                                                    });
-                                                    state.needs_redraw = true;
-                                                }
-                                                Err(e) => {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: crate::domain::models::NoticeLevel::Warning,
-                                                        message: format!("Consolidation failed: {e}"),
-                                                    });
-                                                    state.needs_redraw = true;
-                                                }
-                                            }
-                                        }
-                                    } else if let Some(query) = handlers::forget_command::parse_forget_query(cmd_name, cmd_arg) {
-                                        // Story 11.4a (AC-R0) — `/memory forget <fuzzy text>`.
-                                        // Intercepted HERE, BEFORE the adapter-override path (like
-                                        // `/memory consolidate` at :2011) so it isn't routed into
-                                        // handle_apply_adapter_override. Logic lives in the handler to
-                                        // respect the AC-4 line budget; NOTHING is purged until confirm.
-                                        if streaming.is_streaming {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: crate::domain::models::NoticeLevel::Info,
-                                                message: "Memory forget unavailable while a turn is in progress — try again after it finishes.".to_string(),
-                                            });
-                                            state.needs_redraw = true;
-                                        } else {
-                                            let result = if query.is_empty() {
-                                                None
-                                            } else {
-                                                Some(app_state.agent_core.memory.load_full().forget_candidates(&query, handlers::forget_command::FORGET_CANDIDATE_LIMIT).await)
-                                            };
-                                            for ev in handlers::forget_command::handle_forget_command(&mut state, &conversation.id, &query, result) {
-                                                let _ = app_state.event_bus.emit_domain(ev);
-                                            }
-                                        }
+                                    } else if transparency_bridge::memory_command(&mut state, &conversation.id, cmd_name, cmd_arg, streaming.is_streaming, config, &app_state, &provider, &domain_tx).await {
                                     } else if cmd_name == "context" {
                                         // Story 11.4 (AC6/AC7) — `/context show | off | on`.
                                         // Intercepted HERE, BEFORE the adapter-override path below
@@ -2381,111 +2306,9 @@ pub async fn run(
                                             let _ = app_state.event_bus.emit_domain(ev);
                                         }
                                     } else if cmd_name == "fanout" {
-                                        // Story 14.3b — `/fanout <N> <prompt>`: fan out N identical
-                                        // spokes (DD-B1). FanOutSpec is parsed here (turn-seam DTO)
-                                        // and translated to a ForkJoinRequest at the boundary.
-                                        // Intercepted BEFORE the adapter-override path. The
-                                        // orchestrator emits the 14.3a wave lifecycle events
-                                        // (ForkJoinStarted/SpokeCompleted/SynthesisReady/
-                                        // WaveCancelled) via the event bus; the handlers below
-                                        // render them.
-                                        // Story 14.3a (AC8): `/fanout cancel` explicit floor.
-                                        if cmd_arg.map(|a| a.trim()) == Some("cancel") {
-                                            if let Some(ref cancel) = state.wave_cancel {
-                                                if !cancel.is_cancelled() {
-                                                    cancel.cancel();
-                                                    state.rerunning_slot = None;
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: crate::domain::models::NoticeLevel::Info,
-                                                        message: "Fan-out wave cancelled.".to_string(),
-                                                    });
-                                                } else {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: crate::domain::models::NoticeLevel::Info,
-                                                        message: "Wave already cancelled.".to_string(),
-                                                    });
-                                                }
-                                            } else {
-                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                    conversation_id: Some(conversation.id.clone()),
-                                                    level: crate::domain::models::NoticeLevel::Info,
-                                                    message: "No active wave to cancel.".to_string(),
-                                                });
-                                            }
-                                            state.needs_redraw = true;
-                                        } else if streaming.is_streaming {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: crate::domain::models::NoticeLevel::Info,
-                                                message: "/fanout unavailable while a turn is in progress — try again after it finishes.".to_string(),
-                                            });
-                                            state.needs_redraw = true;
-                                        } else if state.wave_state.is_some() {
-                                            // DN-1 (review): in-flight guard — reject a 2nd `/fanout` while a
-                                            // wave is active (prevents `wave_state` cross-pollution). The
-                                            // wave-id correlation + abort-on-cancel land in 14.3a (the UX
-                                            // consumer + cancel trigger).
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: crate::domain::models::NoticeLevel::Info,
-                                                message: "A fan-out wave is already in flight — wait for it to finish.".to_string(),
-                                            });
-                                            state.needs_redraw = true;
-                                        } else {
-                                            match crate::adapters::tui::fanout_spec::parse_fanout(cmd_arg) {
-                                                Ok(spec) => {
-                                                    use crate::adapters::tui::widgets::exceptional_spawn_gate::{gate_decision, GateDecision};
-                                                    match crate::adapters::tui::fanout_spec::to_request(&spec, effective_model(&state, config)) {
-                                                        Ok(request) => {
-                                                            let requested = request.spokes.len();
-                                                            let threshold = config.fanout_spawn_gate_threshold;
-                                                            match gate_decision(requested, threshold) {
-                                                                GateDecision::Allow => {
-                                                                    launch_wave_request(
-                                                                        &mut state,
-                                                                        &app_state,
-                                                                        conversation.id.clone(),
-                                                                        request,
-                                                                    );
-                                                                }
-                                                                GateDecision::Refuse => {
-                                                                    state.pending_spawn_gate = Some(
-                                                                        crate::adapters::tui::state::PendingSpawnGate {
-                                                                            spec,
-                                                                            requested,
-                                                                            threshold,
-                                                                            adjusted: None,
-                                                                        },
-                                                                    );
-                                                                    state.needs_redraw = true;
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(err) => {
-                                                            // Latent-panic removal (RC-C AC3): surface a
-                                                            // to_request refusal as a notice, mirroring the
-                                                            // parse_fanout error path — never `.expect()` panic.
-                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                                conversation_id: Some(conversation.id.clone()),
-                                                                level: crate::domain::models::NoticeLevel::Warning,
-                                                                message: err.to_string(),
-                                                            });
-                                                            state.needs_redraw = true;
-                                                        }
-                                                    }
-                                                }
-                                                Err(msg) => {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: crate::domain::models::NoticeLevel::Warning,
-                                                        message: msg.to_string(),
-                                                    });
-                                                    state.needs_redraw = true;
-                                                }
-                                            }
-                                        }
+                                        transparency_bridge::fanout_command(&mut state, &conversation.id, cmd_arg, streaming.is_streaming, config, &app_state);
+                                    } else if cmd_name == "team" {
+                                        transparency_bridge::team_command(&mut state, &conversation.id, cmd_arg, &app_state).await;
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
                                         match cmd_arg.map(str::trim).filter(|s: &&str| !s.is_empty()) {
@@ -3715,6 +3538,8 @@ pub async fn run(
                                                 synthetic: false,
                                                 images: vec![],
                                                 origin: crate::domain::models::ChannelKind::Terminal,
+                                                authorship: Default::default(),
+                                                retracted_at_ms: None,
                                             });
                                         }
                                         // Abort the streaming task
@@ -3967,6 +3792,8 @@ pub async fn run(
                                             if state.sidebar_selected >= state.sidebar_entry_count && state.sidebar_entry_count > 0 {
                                                 state.sidebar_selected = state.sidebar_entry_count - 1;
                                             }
+                                        } else if panel_type == PanelType::TransparencyLog {
+                                            transparency_bridge::open_panel(&app_state, &mut state).await;
                                         }
                                         state.focus = FocusState::Sidebar {
                                             panel: panel_type,
@@ -3987,6 +3814,9 @@ pub async fn run(
                                             message: narrow_msg,
                                         });
                                     }
+                                }
+                                InputAction::ExportTransparency => {
+                                    transparency_bridge::export_command(&app_state, &mut state, &conversation.id).await;
                                 }
                                 InputAction::OpenSidebarConversation => {
                                     if state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents) {
@@ -6457,6 +6287,8 @@ pub async fn run(
                                     synthetic: true,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(synthetic_msg);
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
@@ -6481,6 +6313,8 @@ pub async fn run(
                                     synthetic: true,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(synthetic_msg);
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
@@ -6508,6 +6342,8 @@ pub async fn run(
                                     synthetic: true,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(synthetic_msg);
                             }
@@ -6554,6 +6390,8 @@ pub async fn run(
                                             synthetic: false,
                                             images: vec![],
                                             origin: crate::domain::models::ChannelKind::Terminal,
+                                            authorship: Default::default(),
+                                            retracted_at_ms: None,
                                         };
                                         conversation.messages.push(msg);
                                         turn_id.clone()
@@ -6572,6 +6410,8 @@ pub async fn run(
                                         synthetic: false,
                                         images: vec![],
                                         origin: crate::domain::models::ChannelKind::Terminal,
+                                        authorship: Default::default(),
+                                        retracted_at_ms: None,
                                     };
                                     conversation.messages.push(msg);
                                     id
@@ -6589,6 +6429,8 @@ pub async fn run(
                                     synthetic: false,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(msg);
                                 turn_id.clone()
@@ -6606,6 +6448,8 @@ pub async fn run(
                                     synthetic: false,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
+                                    authorship: Default::default(),
+                                    retracted_at_ms: None,
                                 };
                                 conversation.messages.push(msg);
                                 id
@@ -8253,6 +8097,12 @@ pub async fn run(
                         });
                         state.needs_redraw = true;
                     }
+                    // Story 18.2 (AC4) — first `DomainEvent` consumer: room
+                    // events reached nothing before this arm.
+                    AppEvent::DomainEvent(payload) => {
+                        handlers::transparency::apply_domain_event(&mut state, &payload);
+                        state.needs_redraw = true;
+                    }
                     _ => {
                         state.needs_redraw = true;
                     }
@@ -9248,6 +9098,12 @@ fn render(
                                 is_focused,
                                 state.sidebar_selected,
                                 theme,
+                            );
+                        }
+                        Some(crate::domain::models::visual::PanelType::TransparencyLog) => {
+                            crate::adapters::tui::widgets::transparency_panel::render(
+                                sidebar_area, frame.buffer_mut(), &mut state.transparency_panel,
+                                state.sidebar_selected, &state.focus, theme,
                             );
                         }
                     }
@@ -10854,6 +10710,8 @@ mod tests {
             synthetic: false,
             images,
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -10870,6 +10728,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 

@@ -233,6 +233,7 @@ mod tests {
             tool_exposure: None,
             skill_exposure: None,
             sandbox_adapter: None,
+            serve_a2a: None,
         }
     }
 

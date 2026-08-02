@@ -554,7 +554,33 @@ fn test_import_site_count_pinned() {
     // textual site is a `#[cfg(test)]` constructor binding an in-memory
     // `NodeTree` as the seam in unit tests. The real boundary is unchanged
     // (proven by `test_domain_no_adapter_or_infra_imports`).
-    const EXPECTED: usize = 23;
+    // 23 -> 25 (Story 18.1b): TWO new textual sites, both DOC-COMMENT ONLY —
+    // neither file imports or holds a `NodeTree`. (1) `adapters/a2a/admission.rs`
+    // — the admission decision core's doc names `NodeTree` in the list of things
+    // it does NOT touch (that "no NodeTree mutation" claim is the whole point of
+    // the Decision-Core split, so naming it is load-bearing documentation).
+    // (2) `adapters/a2a/exec.rs` — names `NodeTree::list()` when explaining why
+    // inbound and outbound peer nodes carry different `subagent_type` markers.
+    //
+    // The inbound execution seam itself adds NO concrete coupling: the A2A
+    // adapter reaches execution only through the `InboundPeerRuntime` port
+    // (`domain/ports/inbound_peer_runtime.rs`, which names no `NodeTree`), and
+    // the only implementor is `adapters/daemon/server.rs` — already counted.
+    // 25 -> 26 (Story 18.2, corrected by Story 18.3b): ONE new textual site,
+    // DOC-COMMENT ONLY — `infrastructure/subagent/node_journal.rs:90` names
+    // `NodeTree::with_journal` / `with_host_binding` when documenting the builder
+    // convention it follows. The journal holds no `NodeTree` and imports none.
+    //
+    // This pin was RED ON DISK from 18-2 onward: the count reached 26 at `9d098a5`
+    // and `EXPECTED` stayed 25, so neither 18-2's nor 18.3's recorded gates were
+    // actually green here. Bisected across 05fba4d=23 / 6ca43eb=25 / 9d098a5=26 and
+    // corrected in 18-3b rather than relabelled as deferred work (Rule 3: a
+    // reachable failure is a defect). Story 18.3b itself adds ZERO NodeTree sites —
+    // verified by diffing the file set against a stashed baseline.
+    //
+    // Not covered by `ratchet-signoff-guard.yml`, which gates only the seven named
+    // constants in `tests/conformance.rs`.
+    const EXPECTED: usize = 26;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

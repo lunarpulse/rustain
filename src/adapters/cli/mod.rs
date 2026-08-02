@@ -10,6 +10,7 @@ pub mod init;
 pub mod migrate;
 pub mod profile;
 pub mod session;
+pub mod team;
 #[cfg(feature = "openai")]
 pub mod update_catalog;
 pub mod util;

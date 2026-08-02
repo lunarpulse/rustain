@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::adapters::cli::session::SessionAction;
+use crate::adapters::cli::team::TeamAction;
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// Rustain — terminal-native AI coding agent.
@@ -76,6 +77,17 @@ pub struct Cli {
     /// platforms) or `"landlock"` (Linux + `sandbox` cargo feature only).
     #[arg(long, global = true, value_parser = ["noop", "landlock"])]
     pub sandbox_adapter: Option<String>,
+    /// Serve this instance as a loopback-only A2A endpoint. An explicit address
+    /// uses `--serve-a2a=127.0.0.1:PORT`; the default is 127.0.0.1:8080.
+    #[arg(
+        long,
+        global = true,
+        value_name = "ADDR",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "127.0.0.1:8080"
+    )]
+    pub serve_a2a: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -210,6 +222,14 @@ pub enum Command {
     Session {
         #[command(subcommand)]
         action: SessionAction,
+    },
+    /// Inspect A2A team activity (Story 18.2, FR95 / NFR67).
+    /// `team log` prints every recorded inbound and outbound A2A interaction
+    /// for this workspace, folded from the durable room journal. Read-only,
+    /// offline-safe, and non-billable.
+    Team {
+        #[command(subcommand)]
+        action: TeamAction,
     },
 }
 

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
-use crate::adapters::cli::commands::{AuthAction, Cli, Command, ConfigAction, ProfileAction};
+use crate::adapters::cli::commands::{
+    AuthAction, Cli, Command, ConfigAction, DaemonAction, ProfileAction,
+};
 use crate::adapters::cli::session::SessionAction;
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::ledger::FileUsageLedger;
@@ -49,19 +51,52 @@ impl std::fmt::Display for SubcommandExit {
 
 impl std::error::Error for SubcommandExit {}
 
-fn ensure_a2a_feature_enabled(peers: &[crate::domain::models::A2aPeerSpec]) -> Result<()> {
+fn ensure_a2a_feature_enabled(
+    peers: &[crate::domain::models::A2aPeerSpec],
+    serve_requested: bool,
+) -> Result<()> {
     #[cfg(feature = "a2a")]
     {
-        let _ = peers;
+        let _ = (peers, serve_requested);
         Ok(())
     }
     #[cfg(not(feature = "a2a"))]
     {
-        if peers.is_empty() {
+        if peers.is_empty() && !serve_requested {
             Ok(())
         } else {
-            anyhow::bail!("A2A peers are configured, but this build has the `a2a` feature disabled")
+            anyhow::bail!(
+                "A2A peers or serving are configured, but this build has the `a2a` feature disabled"
+            )
         }
+    }
+}
+
+/// Decision-Core (Story 18.0 pattern): effect-free, value-returning.
+///
+/// Command intercepts run in source order, so a combination that both branches
+/// would claim silently drops one of the two modes. Story 18.1a refused every
+/// combination for exactly that reason. Story 18.1b makes ONE of them real:
+/// `daemon` composes the A2A listener as a sibling task inside its own
+/// lifecycle, so the pair is genuinely served, not silently halved. Every other
+/// subcommand is still refused.
+fn evaluate_serve_a2a_combination(
+    serve_requested: bool,
+    subcommand: Option<&Command>,
+) -> Result<()> {
+    if !serve_requested {
+        return Ok(());
+    }
+    match subcommand {
+        None
+        | Some(Command::Daemon {
+            action: DaemonAction::Start { .. } | DaemonAction::Run,
+        }) => Ok(()),
+        Some(_) => anyhow::bail!(
+            "--serve-a2a can run standalone or combined with `rustain daemon`, but not with \
+             this subcommand: the command intercepts run in source order, so one of the two \
+             modes would be silently discarded"
+        ),
     }
 }
 
@@ -82,7 +117,7 @@ mod a2a_feature_tests {
     #[test]
     fn configured_peer_matches_the_compile_time_feature_policy() {
         let peer = configured_peer();
-        let result = ensure_a2a_feature_enabled(std::slice::from_ref(&peer));
+        let result = ensure_a2a_feature_enabled(std::slice::from_ref(&peer), false);
         #[cfg(feature = "a2a")]
         assert!(result.is_ok());
         #[cfg(not(feature = "a2a"))]
@@ -92,7 +127,55 @@ mod a2a_feature_tests {
                 .to_string()
                 .contains("feature disabled")
         );
-        assert!(ensure_a2a_feature_enabled(&[]).is_ok());
+        assert!(ensure_a2a_feature_enabled(&[], false).is_ok());
+        let serve_result = ensure_a2a_feature_enabled(&[], true);
+        #[cfg(feature = "a2a")]
+        assert!(serve_result.is_ok());
+        #[cfg(not(feature = "a2a"))]
+        assert!(serve_result.is_err());
+    }
+
+    #[test]
+    fn serve_a2a_pairs_with_daemon_and_refuses_to_shadow_anything_else() {
+        use super::{Command, evaluate_serve_a2a_combination};
+        use crate::adapters::cli::commands::DaemonAction;
+
+        let start = Command::Daemon {
+            action: DaemonAction::Start { foreground: true },
+        };
+        let run = Command::Daemon {
+            action: DaemonAction::Run,
+        };
+        assert!(evaluate_serve_a2a_combination(false, None).is_ok());
+        assert!(evaluate_serve_a2a_combination(true, None).is_ok());
+        assert!(evaluate_serve_a2a_combination(false, Some(&start)).is_ok());
+        // These are the only daemon actions that compose the sibling listener.
+        assert!(evaluate_serve_a2a_combination(true, Some(&start)).is_ok());
+        assert!(evaluate_serve_a2a_combination(true, Some(&run)).is_ok());
+        for action in [
+            DaemonAction::Stop,
+            DaemonAction::Status { json: false },
+            DaemonAction::Attach { plain: false },
+            DaemonAction::Install {
+                print: false,
+                system: false,
+            },
+            DaemonAction::Uninstall { system: false },
+        ] {
+            let daemon = Command::Daemon { action };
+            assert!(
+                evaluate_serve_a2a_combination(true, Some(&daemon))
+                    .expect_err("a daemon action that does not start the listener must fail loud")
+                    .to_string()
+                    .contains("not with this subcommand")
+            );
+        }
+        assert!(
+            evaluate_serve_a2a_combination(true, Some(&Command::Init))
+                .expect_err("a combination that drops one mode must fail loud")
+                .to_string()
+                .contains("not with this subcommand")
+        );
     }
 }
 
@@ -160,7 +243,14 @@ pub async fn run() -> Result<()> {
         tool_exposure: cli.tool_exposure.clone(),
         skill_exposure: cli.skill_exposure.clone(),
         sandbox_adapter: cli.sandbox_adapter.clone(),
+        serve_a2a: cli.serve_a2a.clone(),
     };
+
+    // Story 18.1a — refuse an unserveable combination BEFORE any command
+    // intercept runs. Placed here because the intercepts return in source order,
+    // so a check sited next to the serve intercept would already have been
+    // skipped by the daemon branch above it. Story 18.1b permits `daemon`.
+    evaluate_serve_a2a_combination(cli.serve_a2a.is_some(), cli.command.as_ref())?;
 
     // 3. Load config — two-pass for story 8.2 chicken-and-egg resolution (AC-15).
     //
@@ -427,6 +517,46 @@ pub async fn run() -> Result<()> {
             }
         }
     }
+
+    // Story 18.2 (AC6) — `rustain team log`. Intercepted here, BEFORE provider
+    // construction: reading the transparency log is offline-safe, read-only
+    // and non-billable, exactly like `session list`.
+    if let Some(Command::Team { action }) = &cli.command {
+        let crate::adapters::cli::team::TeamAction::Log {
+            filter,
+            json,
+            export,
+        } = action;
+        let workspace = paths::workspace_dir()?;
+        let reader: Arc<dyn crate::domain::ports::RoomJournalReader> = Arc::new(
+            crate::infrastructure::subagent::WorkspaceJournalReader::open_workspace(&workspace),
+        );
+        let service = crate::infrastructure::transparency::TransparencyService::new(
+            reader,
+            workspace.clone(),
+        );
+        let result: anyhow::Result<()> = async {
+            let report = service.report().await?;
+            let export_summary = if *export {
+                Some(service.export_report(&report).await?)
+            } else {
+                None
+            };
+            let mut stdout = std::io::stdout();
+            crate::adapters::cli::team::log::render_team_log(
+                filter.as_deref(),
+                *json,
+                &report,
+                export_summary.as_ref(),
+                &mut stdout,
+            )
+        }
+        .await;
+        return result.map_err(|e| {
+            eprintln!("rustain: team log failed: {e}");
+            SubcommandExit(SubcommandExit::GENERIC).into()
+        });
+    }
     if let Some(Command::Doctor {
         terminal,
         adapters,
@@ -442,13 +572,14 @@ pub async fn run() -> Result<()> {
             .into_iter()
             .map(|(id, provider)| (id, Some(provider)))
             .collect();
-        // Story 13.2b: resolve MCP servers from active profile (mirrors `providers` threading).
-        let mcp_servers = {
+        // Resolve every profile-backed doctor input once so the policy check sees
+        // the same effective A2A peer set as runtime composition.
+        let (mcp_servers, a2a_peers) = {
             use crate::domain::ports::ProfileResolver;
             profile_resolver_swap
                 .load()
                 .resolve_active()
-                .map(|p| p.mcp_servers.clone())
+                .map(|profile| (profile.mcp_servers.clone(), profile.a2a_peers.clone()))
                 .unwrap_or_default()
         };
         return crate::adapters::cli::doctor::run_doctor(
@@ -457,6 +588,7 @@ pub async fn run() -> Result<()> {
             json,
             provider_pairs,
             mcp_servers,
+            a2a_peers,
         )
         .await
         .map_err(|e| {
@@ -779,29 +911,40 @@ pub async fn run() -> Result<()> {
     // construction + terminal setup: the daemon is headless (no TUI, no
     // provider layer in 12.1a) and `start` re-execs a detached child. The memory
     // adapter name is resolved from the active profile so the headless daemon
-    // body composes the SAME memory sink the TUI would (build_daemon_memory).
     if let Some(Command::Daemon { action }) = cli.command.clone() {
+        // Story 18.1b — `--serve-a2a` is honoured HERE, inside daemon mode: the
+        // listener becomes a sibling task sharing the daemon's node tree, core
+        // and event bus, which is the only composition that can execute inbound
+        // tasks. `evaluate_serve_a2a_combination` already cleared the pair.
+        if cli.serve_a2a.is_some() {
+            ensure_a2a_feature_enabled(&[], true)?;
+        }
         use crate::domain::models::profile::PortDimension;
         let workspace = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
-        let resolved_selection = profile_resolver_arc.resolve_active().map(|r| r.selection);
+        let resolved_profile = profile_resolver_arc.resolve_active();
+        let resolved_selection = resolved_profile.as_ref().map(|profile| &profile.selection);
         let memory_adapter = resolved_selection
-            .as_ref()
-            .and_then(|sel| {
-                sel.dimensions
+            .and_then(|selection| {
+                selection
+                    .dimensions
                     .get(&PortDimension::Memory)
-                    .map(|a| a.adapter.clone())
+                    .map(|adapter| adapter.adapter.clone())
             })
             .unwrap_or_else(|| "noop".to_string());
-        // Story 12.2b — the daemon composes its full turn runtime (lazily) from the
-        // active profile selection, so thread it through (not just the memory name).
-        let selection = resolved_selection.unwrap_or_default();
+        let selection = resolved_selection.cloned().unwrap_or_default();
+        let a2a_peers = resolved_profile
+            .as_ref()
+            .map(|profile| profile.a2a_peers.clone())
+            .unwrap_or_default();
         return crate::adapters::daemon::run_daemon(
             action,
             workspace,
             app_config,
             memory_adapter,
             selection,
+            a2a_peers,
+            cli.serve_a2a.clone(),
         )
         .await
         .map_err(|e| {
@@ -810,6 +953,61 @@ pub async fn run() -> Result<()> {
         });
     }
 
+    // Story 18.1a — loopback A2A server intercept, standalone. Reached only when
+    // there is no subcommand: `daemon` handles the combined form above.
+    //
+    // Standalone serves DISCOVERY only. It has no `DaemonCore`, so it has no
+    // peer-turn path to run an inbound task on, and admission answers a policy
+    // verdict naming `rustain daemon start --serve-a2a=<addr>` rather than
+    // pretending a capability it does not have.
+    if let Some(addr) = cli.serve_a2a.clone() {
+        ensure_a2a_feature_enabled(&[], true)?;
+        #[cfg(feature = "a2a")]
+        {
+            let workspace = std::env::current_dir()
+                .map_err(|e| anyhow::anyhow!("Failed to get current directory: {e}"))?;
+            let node_journal = std::sync::Arc::new(
+                crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("opening node journal for standalone A2A: {error}")
+                    })?,
+            );
+            let room: std::sync::Arc<dyn crate::domain::ports::RoomJournal> = std::sync::Arc::new(
+                crate::infrastructure::subagent::NodeRoomJournal::new(node_journal, None),
+            );
+            // Standalone discovery-only serve has no event loop, so the
+            // latched journal-failure condition has nowhere to surface: the
+            // sink still fails closed and logs at `error!`. It also admits no
+            // tasks, so the only records it could lose are refusals.
+            let transparency = std::sync::Arc::new(
+                crate::adapters::a2a::transparency::TransparencySink::new(room),
+            );
+            return crate::adapters::a2a::server::run(
+                addr,
+                app_config,
+                workspace,
+                None,
+                transparency,
+                None,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("A2A server failed: {e:#}");
+                // AC4a's refusal has to reach the operator, not just the
+                // log: `SubcommandExit` carries only an exit code, so a
+                // bare map would turn "non-loopback bind refused, see
+                // 18-1b" into a silent exit 1.
+                eprintln!("rustain: A2A server failed: {e:#}");
+                SubcommandExit(SubcommandExit::GENERIC).into()
+            });
+        }
+        #[cfg(not(feature = "a2a"))]
+        {
+            let _ = addr;
+            unreachable!("ensure_a2a_feature_enabled rejects serving without the feature");
+        }
+    }
     // Story 14.7 — ACP server intercept. MUST run before provider construction
     // and terminal setup: stdout is the JSON-RPC transport.
     if let Some(Command::Acp { client }) = cli.command.clone() {
@@ -1332,7 +1530,7 @@ pub async fn run() -> Result<()> {
     let resolved = profile_resolver_arc
         .resolve_active()
         .expect("post-Pass-2 toml_resolver always has resolve_active populated");
-    ensure_a2a_feature_enabled(&resolved.a2a_peers)?;
+    ensure_a2a_feature_enabled(&resolved.a2a_peers, false)?;
     let compose_ctx = crate::infrastructure::composition::ComposeContext {
         workspace_path: workspace_path.clone(),
         project_context: project_context.clone(),
@@ -1462,6 +1660,11 @@ pub async fn run() -> Result<()> {
     // out of the subagent subsystem entirely, so `/fanout` is unavailable there
     // by construction.
     let mut orchestrator: Option<Arc<dyn crate::domain::ports::Orchestrator>> = None;
+    // Story 18.2 (AC3) — the TUI's read seam onto the durable room journal.
+    // Captured here because the journal is opened inside the composite-toolset
+    // branch below; the TUI receives the domain port, never the concrete
+    // `NodeJournal`.
+    let mut journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>> = None;
     // Story 10.2 — wire subagent provider into CompositeToolsetAdapter
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
@@ -1533,6 +1736,8 @@ pub async fn run() -> Result<()> {
                     .await
                     .expect("NodeJournal creation failed"),
             );
+            journal_reader =
+                Some(node_journal.clone() as Arc<dyn crate::domain::ports::RoomJournalReader>);
             let orchestration_clock = Arc::new(crate::domain::clock::SystemClock::default())
                 as Arc<dyn crate::domain::clock::Clock>;
             let authority_ledger = Arc::new(
@@ -1633,7 +1838,12 @@ pub async fn run() -> Result<()> {
                 provider.set_delegation_runtime(Arc::new(
                     crate::adapters::a2a::driver::A2aDelegationRuntime::new(
                         subagent_registry.as_ref().clone(),
-                        Some(node_journal.clone()),
+                        Arc::new(
+                            crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
+                                node_journal.clone(),
+                                Some(domain_tx.clone()),
+                            ),
+                        ),
                         domain_tx.clone(),
                     ),
                 ));
@@ -1995,7 +2205,7 @@ pub async fn run() -> Result<()> {
     #[cfg(feature = "meta-search")]
     let catalog_registry_for_app_state = _catalog_registry.clone();
 
-    let (app_state, domain_rx) = AppState::new(
+    let (mut app_state, domain_rx) = AppState::new(
         event_bus,
         domain_rx,
         approval_runtime.clone(),
@@ -2017,6 +2227,17 @@ pub async fn run() -> Result<()> {
         #[cfg(feature = "meta-search")]
         catalog_registry_for_app_state,
     );
+    // Story 18.2 (AC3): the transparency read seam. Assigned after
+    // construction rather than passed positionally — `AppState::new` already
+    // takes 19 arguments and a 20th buys nothing.
+    app_state.transparency = journal_reader.map(|reader| {
+        Arc::new(
+            crate::infrastructure::transparency::TransparencyService::new(
+                reader,
+                workspace_path.clone(),
+            ),
+        )
+    });
 
     // 5d. Use the same storage adapter constructed above for session management.
     // Both tools and the event loop share one FileSystemStorage instance pointing

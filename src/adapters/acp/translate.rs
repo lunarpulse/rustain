@@ -931,6 +931,8 @@ mod tests {
                 completed_at_ms: None,
                 status: None,
             }],
+            authorship: Default::default(),
+            retracted_at_ms: None,
             ..Default::default()
         };
         let updates = message_to_replay_updates(&message, Path::new("/repo"));

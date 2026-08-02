@@ -23,15 +23,21 @@ use crate::domain::models::AppConfig;
 #[cfg(unix)]
 mod attach_client;
 #[cfg(unix)]
+pub(crate) mod consent;
+#[cfg(unix)]
 mod crash;
 #[cfg(unix)]
 mod lifecycle;
 #[cfg(unix)]
 mod pidfile;
 #[cfg(unix)]
+mod policy_startup;
+#[cfg(unix)]
 mod procargs;
 #[cfg(unix)]
 pub mod protocol;
+#[cfg(unix)]
+pub(crate) mod response_modes;
 #[cfg(unix)]
 pub mod runtime;
 #[cfg(unix)]
@@ -46,6 +52,8 @@ mod session_queue;
 mod socket;
 #[cfg(unix)]
 pub mod status;
+#[cfg(unix)]
+pub(crate) mod urgency;
 
 #[cfg(unix)]
 pub use lifecycle::{duration_until_next, emit_session_boundary};
@@ -59,19 +67,41 @@ pub async fn run_daemon(
     config: AppConfig,
     memory_adapter: String,
     selection: crate::domain::models::profile::ProfileSelection,
+    a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
+    // Story 18.1b — `--serve-a2a=ADDR` combined with daemon mode. The A2A
+    // listener runs as a sibling `tokio::spawn` inside this daemon's lifecycle,
+    // sharing its `NodeTree`, `DaemonCore` and event bus. There is no second
+    // core.
+    serve_a2a: Option<String>,
 ) -> Result<()> {
     #[cfg(unix)]
     {
         match action {
             DaemonAction::Start { foreground } => {
                 if foreground {
-                    run_daemon_foreground(workspace, config, memory_adapter, selection).await
+                    run_daemon_foreground(
+                        workspace,
+                        config,
+                        memory_adapter,
+                        selection,
+                        a2a_peers,
+                        serve_a2a,
+                    )
+                    .await
                 } else {
-                    run_daemon_start(workspace, config).await
+                    run_daemon_start(workspace, config, serve_a2a).await
                 }
             }
             DaemonAction::Run => {
-                run_daemon_foreground(workspace, config, memory_adapter, selection).await
+                run_daemon_foreground(
+                    workspace,
+                    config,
+                    memory_adapter,
+                    selection,
+                    a2a_peers,
+                    serve_a2a,
+                )
+                .await
             }
             DaemonAction::Stop => run_daemon_stop(workspace).await,
             // Story 12.2c — default to the rich multi-channel TUI; `--plain` keeps
@@ -94,7 +124,14 @@ pub async fn run_daemon(
     }
     #[cfg(not(unix))]
     {
-        let _ = (action, workspace, config, memory_adapter, selection);
+        let _ = (
+            action,
+            workspace,
+            config,
+            memory_adapter,
+            selection,
+            serve_a2a,
+        );
         windows_not_supported()
     }
 }
@@ -121,7 +158,11 @@ use pidfile::{DaemonPidFile, GuardOutcome};
 /// legal between fork and exec). The parent waits for the readiness handshake
 /// (the child writing its PID file) within the NFR47 3s budget, then returns.
 #[cfg(unix)]
-async fn run_daemon_start(workspace: PathBuf, config: AppConfig) -> Result<()> {
+async fn run_daemon_start(
+    workspace: PathBuf,
+    config: AppConfig,
+    serve_a2a: Option<String>,
+) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -166,10 +207,14 @@ async fn run_daemon_start(workspace: PathBuf, config: AppConfig) -> Result<()> {
 
     let mut cmd = Command::new(exe);
     // Forward the resolved profile so the child composes the SAME memory adapter.
-    cmd.arg("--profile")
-        .arg(&config.active_profile)
-        .arg("daemon")
-        .arg("__run");
+    cmd.arg("--profile").arg(&config.active_profile);
+    // Story 18.1b — the detached child is the process that actually serves, so
+    // the flag has to travel with it. `--serve-a2a` uses `require_equals`, so it
+    // must be passed as one `=`-joined argument.
+    if let Some(addr) = serve_a2a.as_deref() {
+        cmd.arg(format!("--serve-a2a={addr}"));
+    }
+    cmd.arg("daemon").arg("__run");
     cmd.current_dir(&workspace);
     // Lineage nonce injection (Story 12.1c P1): generate the nonce HERE and pass it to
     // the child via the environment so the live daemon *carries* it (observable via
@@ -232,8 +277,53 @@ async fn run_daemon_foreground(
     config: AppConfig,
     memory_adapter: String,
     selection: crate::domain::models::profile::ProfileSelection,
+    a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
+    serve_a2a: Option<String>,
 ) -> Result<()> {
     config.daemon.validate().map_err(|e| anyhow::anyhow!(e))?;
+
+    // One read supplies both replay-folded consent and restart-safe digest
+    // state. Neither projection re-reads the journal on delivery.
+    let journal_reader =
+        crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+            &workspace,
+        );
+    let journal_entries = crate::domain::ports::RoomJournalReader::load_entries(&journal_reader)
+        .await
+        .context("failed to load policy and urgency journal projections")?;
+    let consent_projection = std::sync::Arc::new(
+        crate::adapters::policy::JournalConsentProjection::from_entries(&journal_entries),
+    );
+    let effective_policy = policy_startup::validate_startup_policies(
+        &workspace,
+        &a2a_peers,
+        consent_projection.as_ref(),
+    )?;
+    if !effective_policy.deferred_overrides.is_empty() {
+        tracing::info!(
+            message_type = "policy_deferred_override",
+            count = effective_policy.deferred_overrides.len(),
+            "policy contains accepted-but-unenforced sender overrides"
+        );
+    }
+    let effective_policy = std::sync::Arc::new(effective_policy);
+    // The admission value only feeds the authority-widening WARNING — a
+    // malformed optional-listener config must not be fatal to daemon startup
+    // (previously it could only break the feature-gated A2A listener itself).
+    match crate::adapters::a2a::config::parse_workspace_a2a_server_config(
+        &workspace.join(".rustain").join("a2a.json"),
+    ) {
+        Ok(config) => {
+            let admission = config.map_or_else(Default::default, |server| server.admission);
+            policy_startup::report_auto_authority_widening(
+                admission,
+                &effective_policy,
+                &a2a_peers,
+                consent_projection.as_ref(),
+            );
+        }
+        Err(error) => policy_startup::report_unknown_admission_posture(&error),
+    }
 
     let pid_path = crate::infrastructure::paths::daemon_pid_path(&workspace)?;
     let socket_path = crate::infrastructure::paths::daemon_socket_path(&workspace)?;
@@ -281,9 +371,10 @@ async fn run_daemon_foreground(
             .await
             .map_err(|error| anyhow::anyhow!("opening node journal: {error}"))?,
     );
+    let clock: std::sync::Arc<dyn crate::domain::clock::Clock> =
+        std::sync::Arc::new(crate::domain::clock::SystemClock::default());
     let now_fn = {
-        use crate::domain::clock::Clock;
-        let clock = std::sync::Arc::new(crate::domain::clock::SystemClock::default());
+        let clock = clock.clone();
         std::sync::Arc::new(move || clock.wall_now_ms())
     };
     let node_tree =
@@ -415,13 +506,94 @@ async fn run_daemon_foreground(
         }
     };
 
-    let server = crate::adapters::daemon::server::AttachServer::new_with_node_tree(
-        core.clone(),
-        conversation.clone(),
-        domain_tx,
-        node_tree,
+    // The room journal is shared by peer transparency and the same-host
+    // response action dispatcher. Both write through the same durable port.
+    let reader: std::sync::Arc<dyn crate::domain::ports::RoomJournalReader> = node_journal.clone();
+    let journal: std::sync::Arc<dyn crate::domain::ports::RoomJournal> = std::sync::Arc::new(
+        crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
+            node_journal,
+            Some(domain_tx.clone()),
+        ),
     );
+    let urgency_router = std::sync::Arc::new(crate::adapters::daemon::urgency::UrgencyRouter::new(
+        clock,
+        journal.clone(),
+        &journal_entries,
+        i64::from(effective_policy.digest_interval_minutes).saturating_mul(60_000),
+    ));
+
+    // Story 18.3c (AC1) — the composition root installs the already-resolved
+    // effective policy into the ONE bus consumed by verified peer delivery.
+    // Relationship disposition remains a separate decision inside the policy.
+    let delivery_policy: std::sync::Arc<dyn crate::domain::ports::DeliveryPolicy> =
+        std::sync::Arc::new(crate::domain::ports::EffectiveDeliveryPolicy::new(
+            effective_policy.clone(),
+        ));
+    let peer_bus = crate::adapters::daemon::server::peer_bus_slot_with_policy(
+        &node_tree,
+        delivery_policy.clone(),
+    );
+    let server =
+        crate::adapters::daemon::server::AttachServer::new_with_node_tree_bus_policy_journal_and_urgency(
+            core.clone(),
+            conversation.clone(),
+            domain_tx.clone(),
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            journal.clone(),
+            reader.clone(),
+            Some(consent_projection.clone()),
+            Some(urgency_router.clone()),
+        );
+    if let Some(batch) = urgency_router
+        .flush_pending_on_start()
+        .await
+        .context("failed to journal pending startup digest")?
+    {
+        server
+            .surface_digest_batch(batch)
+            .await
+            .context("failed to surface pending startup digest")?;
+    }
+    let urgency_shutdown = tokio_util::sync::CancellationToken::new();
+    let urgency_task = tokio::spawn(crate::adapters::daemon::urgency::run_digest_flusher(
+        urgency_router,
+        std::sync::Arc::downgrade(&server),
+        urgency_shutdown.child_token(),
+    ));
+
+    // The recorder is mandatory for every live verified peer frame, regardless
+    // of whether the optional HTTP A2A listener is enabled.
+    let notices: std::sync::Arc<dyn crate::domain::ports::EventEmitter> = std::sync::Arc::new(
+        crate::infrastructure::runtime::event_bus::ChannelEmitter::new(domain_tx.clone()),
+    );
+    let transparency = std::sync::Arc::new(
+        crate::adapters::a2a::transparency::TransparencySink::new(journal)
+            .with_reader(reader)
+            .with_notices(notices),
+    );
+    server
+        .configure_peer_recorder(transparency.clone()
+            as std::sync::Arc<dyn crate::domain::ports::PeerInteractionRecorder>)
+        .await;
     arm_node_recovery_harness(&server).await?;
+
+    // Story 18.1b, AC5b — the A2A listener is a SIBLING `tokio::spawn` inside
+    // this daemon's lifecycle. It shares this `node_tree`, this
+    // `Arc<DaemonCore>` and this `domain_tx` through `AttachServer` (which is
+    // the `InboundPeerRuntime`), so an inbound A2A task runs on exactly the peer-turn
+    // path the Unix socket drives. There is no second core and no second tree.
+    let a2a_shutdown = tokio_util::sync::CancellationToken::new();
+    let a2a_task = spawn_a2a_listener(
+        serve_a2a,
+        &workspace,
+        &config,
+        server.clone(),
+        transparency,
+        a2a_shutdown.child_token(),
+    )
+    .await?;
 
     let rt = DaemonRuntime {
         config: config.clone(),
@@ -477,11 +649,150 @@ async fn run_daemon_foreground(
 
     let result = lifecycle::run_lifecycle(rt).await;
 
+    urgency_shutdown.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), urgency_task).await;
+
+    a2a_shutdown.cancel();
+    if let Some(task) = a2a_task {
+        // Bounded: a listener that will not stop must not hold the daemon's exit
+        // hostage — the process is going away regardless.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+    }
+
     // Belt-and-suspenders: ensure the PID file is gone even if the loop errored
     // before its own cleanup ran.
     pidfile::remove(&pid_path);
     drop(singleton);
     result
+}
+
+/// Await the A2A listener's bind/configuration handshake before publishing the
+/// daemon's PID readiness marker.
+#[cfg(all(unix, feature = "a2a"))]
+async fn wait_for_a2a_listener_ready(
+    ready: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
+) -> Result<()> {
+    match ready.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => anyhow::bail!("A2A listener failed to start: {error}"),
+        Err(error) => {
+            anyhow::bail!("A2A listener exited before reporting readiness: {error}")
+        }
+    }
+}
+
+#[cfg(all(test, unix, feature = "a2a"))]
+mod a2a_listener_readiness_tests {
+    use super::wait_for_a2a_listener_ready;
+
+    #[tokio::test]
+    async fn listener_startup_errors_block_daemon_readiness() {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        ready_tx
+            .send(Err("TLS configuration is invalid".to_owned()))
+            .expect("receiver remains available");
+
+        let error = wait_for_a2a_listener_ready(ready_rx)
+            .await
+            .expect_err("listener startup error must fail daemon startup");
+
+        assert_eq!(
+            error.to_string(),
+            "A2A listener failed to start: TLS configuration is invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_listener_readiness_blocks_daemon_readiness() {
+        let (ready_tx, ready_rx) =
+            tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
+        drop(ready_tx);
+
+        let error = wait_for_a2a_listener_ready(ready_rx)
+            .await
+            .expect_err("a dropped readiness sender must fail daemon startup");
+
+        assert!(
+            error
+                .to_string()
+                .contains("exited before reporting readiness")
+        );
+    }
+}
+
+/// Compose and spawn the A2A listener alongside the daemon, when `--serve-a2a`
+/// asked for it.
+///
+/// Returns `Ok(None)` when the flag is absent (or the build lacks the `a2a`
+/// feature), so the daemon runs exactly as before.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+async fn spawn_a2a_listener(
+    addr: Option<String>,
+    workspace: &std::path::Path,
+    config: &AppConfig,
+    server: std::sync::Arc<crate::adapters::daemon::server::AttachServer>,
+    transparency: std::sync::Arc<crate::adapters::a2a::transparency::TransparencySink>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    let Some(addr) = addr else {
+        let _ = (workspace, config, server, transparency, shutdown);
+        return Ok(None);
+    };
+    #[cfg(not(feature = "a2a"))]
+    {
+        let _ = (workspace, config, server, transparency, shutdown);
+        anyhow::bail!(
+            "--serve-a2a={addr} was requested but this build has the `a2a` feature disabled"
+        );
+    }
+    #[cfg(feature = "a2a")]
+    {
+        use crate::domain::ports::InboundPeerRuntime;
+        let runtime: std::sync::Arc<dyn InboundPeerRuntime> = server;
+        let workspace = workspace.to_path_buf();
+        let config = config.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let listener_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                result = crate::adapters::a2a::server::run(
+                    addr,
+                    config,
+                    workspace,
+                    Some(runtime),
+                    transparency,
+                    Some(ready_tx),
+                ) => {
+                    match result {
+                        Ok(()) if listener_shutdown.is_cancelled() => {
+                            tracing::debug!("daemon A2A listener stopped during shutdown");
+                        }
+                        Ok(()) => {
+                            tracing::error!("daemon A2A listener stopped unexpectedly");
+                        }
+                        Err(error) if listener_shutdown.is_cancelled() => {
+                            tracing::debug!("daemon A2A listener stopped during shutdown: {error:#}");
+                        }
+                        Err(error) => {
+                            tracing::error!("daemon A2A listener stopped: {error:#}");
+                        }
+                    }
+                }
+                () = listener_shutdown.cancelled() => {}
+            }
+        });
+
+        match wait_for_a2a_listener_ready(ready_rx).await {
+            Ok(()) => Ok(Some(task)),
+            Err(error) => {
+                shutdown.cancel();
+                task.abort();
+                let _ = task.await;
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Real-process crash arming seam used by the Story 17.2a L2 harness. The

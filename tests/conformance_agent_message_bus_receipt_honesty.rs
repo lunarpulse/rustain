@@ -20,18 +20,26 @@ fn ac1_mailbox_cap_constant_exists() {
     );
 }
 
-/// AC1 — MailboxBudget is atomics-only (no std::sync lock). Behavioral: this
-/// exercises the real `MailboxBudget` (new/reserve/release/current) rather than
-/// asserting on source text, so it would still pass after any internal
-/// refactor that preserves the public atomic contract.
+/// AC1 — `MailboxBudget` is atomics-only, and reserve/current are observable
+/// from outside the crate while **release is not**.
+///
+/// Story 18.3 (AC2) rewrote this test rather than deleting it. `release()` used
+/// to be fully `pub`, so this test released a slot directly — which is exactly
+/// the corruption vector `DF-CR-14-4a-5` named: any holder could release a slot
+/// it never reserved. `release` is now `pub(crate)`, so the out-of-crate half of
+/// that hazard is gone by construction and this test can no longer perform it.
+/// What remains observable here is the reserve side and the live count; the
+/// exactly-one-release invariant is proven in-crate by
+/// `every_reserve_is_matched_by_exactly_one_release`, which can read the
+/// instrumentation counters.
 #[test]
 fn ac1_mailbox_budget_is_atomics_only() {
     let budget = rustain::infrastructure::subagent::MailboxBudget::new();
     assert_eq!(budget.current(), 0);
     assert!(budget.reserve().is_ok());
-    assert_eq!(budget.current(), 1);
-    budget.release();
-    assert_eq!(budget.current(), 0);
+    assert_eq!(budget.current(), 1, "a reserve must be observable");
+    assert!(budget.reserve().is_ok());
+    assert_eq!(budget.current(), 2, "reserves accumulate");
 }
 
 /// AC3 grep-ratchet: `let _disposition = self.policy` == 0 (Murat's
@@ -273,6 +281,7 @@ async fn ac5_real_tree_wiring_behavioral() {
             correlation_id: CorrelationId::new("wiring"),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         },
         body: AgentMessage::new("hello"),
     };
@@ -311,6 +320,7 @@ async fn ac5_mutant_empty_tree_returns_not_found() {
             correlation_id: CorrelationId::new("mutant"),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         },
         body: AgentMessage::new("hello"),
     };

@@ -87,6 +87,8 @@ fn test_chat_pane_shows_user_message() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -136,6 +138,8 @@ fn test_chat_pane_shows_assistant_message() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -270,6 +274,8 @@ fn test_chat_pane_user_message_before_typing_indicator() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }]);
     let streaming = StreamingState {
         is_streaming: true,
@@ -332,6 +338,8 @@ fn test_chat_pane_error_displays_in_red() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -445,7 +453,7 @@ fn test_feedback_block_visible_with_auto_scroll() {
             role: MessageRole::User,
             content: format!(
                 "User message {
-            }",
+        }",
                 i
             ),
             content_blocks: vec![],
@@ -455,6 +463,8 @@ fn test_feedback_block_visible_with_auto_scroll() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         })
         .collect();
     let conversation = make_conversation(messages);
@@ -540,6 +550,8 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();

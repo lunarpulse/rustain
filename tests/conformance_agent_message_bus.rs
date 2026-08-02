@@ -42,6 +42,7 @@ fn ac5_header_shape_round_trip_no_sequence_by_default() {
             correlation_id: CorrelationId::new("corr-42"),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         },
         body: AgentMessage::new("status?"),
     };

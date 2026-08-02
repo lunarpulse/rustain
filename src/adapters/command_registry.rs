@@ -153,6 +153,13 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            SlashCommandDef {
+                name: "team".to_string(),
+                description: "A2A transparency log: /team log [--filter=…] [--json] [--export]"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,

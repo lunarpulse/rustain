@@ -3,10 +3,12 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, VerifyingKey};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::adapters::rap::AgentSigner;
 use crate::domain::models::{PinnedKey, PinnedKeyAlgorithm};
 
+use super::card::ServedAgentCard;
 use super::error::A2aError;
 
 #[derive(Deserialize)]
@@ -15,10 +17,30 @@ struct SignatureEntry {
     signature: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ProtectedHeader {
     alg: String,
     kid: Option<String>,
+}
+
+pub fn sign_card(card: &ServedAgentCard, signer: &AgentSigner) -> Result<String, A2aError> {
+    let kid = signer.identity().peer_id.to_string();
+    let protected_bytes = serde_jcs::to_vec(&ProtectedHeader {
+        alg: "EdDSA".to_owned(),
+        kid: Some(kid),
+    })
+    .map_err(|error| A2aError::Canonicalization(error.to_string()))?;
+    let protected = URL_SAFE_NO_PAD.encode(protected_bytes);
+    let payload =
+        serde_jcs::to_vec(card).map_err(|error| A2aError::Canonicalization(error.to_string()))?;
+    let payload = URL_SAFE_NO_PAD.encode(payload);
+    let mut signing_input = Vec::with_capacity(protected.len() + 1 + payload.len());
+    signing_input.extend_from_slice(protected.as_bytes());
+    signing_input.push(b'.');
+    signing_input.extend_from_slice(payload.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(signer.sign_detached(&signing_input).as_bytes());
+    let signed = card.clone().with_signature(protected, signature);
+    serde_jcs::to_string(&signed).map_err(|error| A2aError::Canonicalization(error.to_string()))
 }
 
 pub(crate) fn decode_verifying_key(pinned: &PinnedKey) -> Result<VerifyingKey, A2aError> {

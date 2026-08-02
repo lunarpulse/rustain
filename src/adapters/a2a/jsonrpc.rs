@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 
 use super::error::A2aError;
 
+/// Standard JSON-RPC parse error.
+pub const CODE_PARSE_ERROR: i64 = -32700;
+/// Standard JSON-RPC invalid-request error.
+pub const CODE_INVALID_REQUEST: i64 = -32600;
+/// Standard JSON-RPC invalid-params error.
+pub const CODE_INVALID_PARAMS: i64 = -32602;
 /// Standard JSON-RPC method-not-found (captured by the spike).
 pub const CODE_METHOD_NOT_FOUND: i64 = -32601;
 /// Internal error; the v1.0 agent returns this for an unsupported `A2A-Version`.
@@ -42,6 +48,65 @@ impl JsonRpcRequest {
             id,
             method: method.into(),
             params,
+        }
+    }
+}
+
+/// Inbound JSON-RPC request shape. Kept separate from [`JsonRpcRequest`] so the
+/// client can retain a numeric monotonic id while the server echoes any valid
+/// JSON-RPC scalar id.
+#[derive(Debug, Clone, Deserialize)]
+pub struct JsonRpcInboundRequest {
+    pub jsonrpc: String,
+    #[serde(default)]
+    pub id: serde_json::Value,
+    pub method: String,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: &'static str,
+    pub id: serde_json::Value,
+    pub result: serde_json::Value,
+}
+
+impl JsonRpcResponse {
+    pub fn new(id: serde_json::Value, result: serde_json::Value) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonRpcError {
+    pub code: i64,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonRpcErrorResponse {
+    pub jsonrpc: &'static str,
+    pub id: serde_json::Value,
+    pub error: JsonRpcError,
+}
+
+impl JsonRpcErrorResponse {
+    pub fn new(id: serde_json::Value, code: i64, message: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            error: JsonRpcError {
+                code,
+                message: message.into(),
+                data: None,
+            },
         }
     }
 }

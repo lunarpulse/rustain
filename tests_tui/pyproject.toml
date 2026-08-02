@@ -61,6 +61,7 @@ markers = [
     "story_11: Story 11 — Memory Adapters & Context Assembly (memory/context commands)",
     "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
     "subagent: Tests that exercise in-process subagent spawning / the task tool",
+    "story_18_2: Story 18-2 — Transparency & Visible Surfacing (Ctrl+X L panel, /team log)",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest

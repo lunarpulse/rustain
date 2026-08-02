@@ -38,6 +38,8 @@ fn test_e2e_recovery_prompt_renders() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     h.conversation.messages.push(ChatMessage {
         synthetic: false,
@@ -51,6 +53,8 @@ fn test_e2e_recovery_prompt_renders() {
         stop_reason: Some(StopReason::EndTurn),
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     h.conversation.title = "Test Chat".to_string();
 
@@ -117,6 +121,8 @@ fn test_e2e_recovery_enter_continues() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     h.state.feedback_blocks.insert(
         "recovery".to_string(),
@@ -168,6 +174,8 @@ fn test_e2e_recovery_n_starts_fresh() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     h.conversation.title = "Old Title".to_string();
     h.state.active_feedback_id = Some("recovery".to_string());
@@ -266,6 +274,8 @@ fn test_e2e_context_rebuild_api_messages() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
     h.conversation.messages.push(ChatMessage {
         synthetic: false,
@@ -279,6 +289,8 @@ fn test_e2e_context_rebuild_api_messages() {
         stop_reason: Some(StopReason::EndTurn),
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
 
     // Build context from prior messages (excluding the new user message)
@@ -300,6 +312,8 @@ fn test_e2e_context_rebuild_api_messages() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
 
     // Build API messages and attach context_prefix to the new user message
@@ -369,6 +383,8 @@ fn test_e2e_context_rebuild_strips_xml_in_api() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
         ChatMessage {
             synthetic: false,
@@ -384,6 +400,8 @@ fn test_e2e_context_rebuild_strips_xml_in_api() {
             stop_reason: Some(StopReason::EndTurn),
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
     ];
 
@@ -433,6 +451,8 @@ fn test_e2e_context_rebuild_reversed_xml_tags_no_panic() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }];
 
     // Should not panic — this was a bug before Fix #3
@@ -460,6 +480,8 @@ fn test_e2e_context_rebuild_nested_xml_tags() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }];
 
     // Should not panic with nested tags
@@ -493,6 +515,8 @@ async fn test_e2e_crash_detection_full_cycle() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }],
         turns: Vec::new(),
         created_at: 1700000000,
@@ -668,6 +692,8 @@ fn test_e2e_recovered_conversation_renders() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
         ChatMessage {
             synthetic: false,
@@ -681,6 +707,8 @@ fn test_e2e_recovered_conversation_renders() {
             stop_reason: Some(StopReason::EndTurn),
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
         ChatMessage {
             synthetic: false,
@@ -694,6 +722,8 @@ fn test_e2e_recovered_conversation_renders() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
         ChatMessage {
             synthetic: false,
@@ -707,6 +737,8 @@ fn test_e2e_recovered_conversation_renders() {
             stop_reason: Some(StopReason::Cancelled), // Partial — crashed mid-response,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
     ];
     h.conversation.title = "Rust Discussion".to_string();
