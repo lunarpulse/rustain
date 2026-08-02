@@ -338,4 +338,20 @@ mod tests {
         assert_eq!(config.api_keys, Some(vec!["A2A_ROTATED_KEY".to_owned()]));
         assert_eq!(config.advertised_host.as_deref(), Some("a2a.internal:9443"));
     }
+
+    /// AC5 (B5): a malformed `a2a.json` must error, never silently fall back to
+    /// `Default::default()` (= `Deny`) — that silent fallback was the
+    /// authority-widening-warning mute the AC5 defect fixes. A trailing comma
+    /// or smart quote must surface as a parse error so the daemon warns
+    /// unconditionally. (The warning *logic* is covered by `policy_startup`'s
+    /// `should_warn_auto_authority_widening` positive-control tests.)
+    #[test]
+    fn malformed_a2a_json_fails_rather_than_silently_defaulting_to_deny() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("a2a.json");
+        std::fs::write(&path, "{ \"server\": { \"admission\": \"allow\", } }")
+            .expect("write malformed config");
+        parse_workspace_a2a_server_config(&path)
+            .expect_err("malformed a2a.json must error, not silently default to Deny");
+    }
 }

@@ -336,12 +336,10 @@ pub(crate) async fn team_command(
                 let _ = app_state.event_bus.emit_domain(event);
             }
         }
-        TeamCommandArgs::Trust(target) => {
-            match change_sender_consent(app_state, &target, true).await {
-                Ok(message) => handler::show_team_status(state, message),
-                Err(message) => emit_team_warning(state, conversation_id, app_state, message),
-            }
-        }
+        TeamCommandArgs::Trust => match load_team_status(app_state).await {
+            Ok(message) => handler::show_team_status(state, message),
+            Err(message) => emit_team_warning(state, conversation_id, app_state, message),
+        },
         TeamCommandArgs::Untrust(target) => {
             match change_sender_consent(app_state, &target, false).await {
                 Ok(message) => handler::show_team_status(state, message),

@@ -66,6 +66,7 @@ jobs:
           cargo test --lib
           cargo test --test conformance_18_3b_policy
           cargo test --features test-instrumentation --test conformance_18_3c_response_modes
+          cargo test --test conformance_18_3d_consent
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest

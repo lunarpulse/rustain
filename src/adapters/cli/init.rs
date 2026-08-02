@@ -619,6 +619,48 @@ mod tests {
     }
 
     #[test]
+    fn policy_only_existing_file_is_preserved_without_overwrite() {
+        // B7: the overwrite guard must protect an existing
+        // a2a-interaction.toml even when config.toml and settings.json do not
+        // yet exist. A mutant that drops `policy_existed` from the guard
+        // would compute overwrite=true here (no config/settings exist) and
+        // silently overwrite operator policy — this test goes RED for it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        let workspace = tmp.path().join("workspace");
+        let policy_dir = workspace.join(".rustain");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        let policy_path = policy_dir.join("a2a-interaction.toml");
+        // Distinct from the safe-pole defaults so an overwrite is detectable.
+        let original = b"# operator-authored\n[interaction.defaults]\nresponse_mode = \"notify-and-auto\"\nnotification = \"immediate\"\n";
+        std::fs::write(&policy_path, original).unwrap();
+
+        let mut input = std::io::Cursor::new(b"n\n".to_vec());
+        let mut output = Vec::new();
+        run_init_with_io(
+            Some(config_dir),
+            Some(workspace.clone()),
+            true,
+            None,
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&policy_path).unwrap(),
+            original,
+            "policy-only existing file must be preserved byte-for-byte without confirmation"
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("a2a-interaction.toml: preserved"),
+            "summary must report the policy-only file as preserved"
+        );
+    }
+
+    #[test]
     fn confirmed_policy_overwrite_replaces_with_selected_values() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config_dir = tmp.path().join("config");

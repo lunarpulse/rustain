@@ -1109,9 +1109,30 @@ mod tests {
         ));
     }
     #[test]
-    fn provenance_snapshot_remains_stable_when_live_policy_changes() {
-        let peer = crate::domain::models::PeerId::from_public_key(&[21u8; 32]).unwrap();
-        let snapshot = crate::domain::models::InteractionPolicySnapshot::default();
+    fn provenance_snapshot_is_rendered_from_its_stored_value_not_recomputed() {
+        use crate::domain::models::{
+            InteractionPolicySnapshot, NotificationUrgency, PolicySource, Resolved, ResponseMode,
+        };
+        // A real, NON-default snapshot captured at decision time: a team urgency
+        // floor raised the member's authored `queue` to `immediate`.
+        let snapshot = InteractionPolicySnapshot {
+            sender_label: None,
+            response: Resolved {
+                value: ResponseMode::NotifyAndWait,
+                source: PolicySource::Default,
+                individual: ResponseMode::NotifyAndWait,
+                team: None,
+            },
+            notification: Resolved {
+                value: NotificationUrgency::Immediate,
+                source: PolicySource::TeamRaised {
+                    file: ".rustain/team-policy.toml".to_owned(),
+                },
+                individual: NotificationUrgency::Queue,
+                team: Some(NotificationUrgency::Immediate),
+            },
+        };
+        let peer = crate::domain::models::PeerId::from_public_key(&[31u8; 32]).unwrap();
         let row = transparency_row(&room_entry(
             1,
             10,
@@ -1119,30 +1140,29 @@ mod tests {
                 peer: Some(peer),
                 node: crate::domain::models::AgentId::from_validated("node-provenance"),
                 task: Some("task-provenance".to_owned()),
-                notification: crate::domain::models::NotificationUrgency::Queue,
+                notification: NotificationUrgency::Queue,
                 provenance: snapshot,
             },
         ))
         .unwrap();
+        // Re-rendering the SAME row must use its STORED snapshot. A mutant that
+        // recomputes provenance at render time, or stamps every interaction with
+        // the default snapshot, would lose the team-floor clause here.
         let before = render_export(std::slice::from_ref(&row));
-
-        let _live_policy_changed_afterward = crate::domain::models::InteractionPolicySnapshot {
-            notification: crate::domain::models::Resolved {
-                value: crate::domain::models::NotificationUrgency::Immediate,
-                source: crate::domain::models::PolicySource::TeamRaised {
-                    file: ".rustain/team-policy.toml".to_owned(),
-                },
-                individual: crate::domain::models::NotificationUrgency::Queue,
-                team: Some(crate::domain::models::NotificationUrgency::Immediate),
-            },
-            ..Default::default()
-        };
-        let after = render_export(&[row]);
-
-        assert_eq!(before, after, "rendering must use the stored snapshot");
-        assert!(before.contains("response: notify-and-wait · via default"));
-        assert!(before.contains("notification: queue · via default"));
-        assert!(!before.contains("team-policy.toml"));
+        let after = render_export(std::slice::from_ref(&row));
+        assert_eq!(
+            before, after,
+            "rendering must be a pure function of the stored row"
+        );
+        assert!(
+            before.contains("raised from queue by team floor"),
+            "the stored team-floor provenance must render: {before}"
+        );
+        assert!(before.contains("team-policy.toml"), "{before}");
+        assert!(
+            !before.contains("notification: immediate · via default"),
+            "a stored non-default snapshot must not render as default: {before}"
+        );
     }
 
     #[test]

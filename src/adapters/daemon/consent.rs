@@ -2,16 +2,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{Mutex, oneshot};
 
 use crate::adapters::policy::JournalConsentProjection;
 use crate::domain::clock::Clock;
 use crate::domain::models::{
-    DeliveryDisposition, PeerId, RequestId, RoomEvent, may_consent_refuse,
+    DeliveryDisposition, EffectivePolicy, PeerId, RequestId, RoomEvent, may_consent_refuse,
 };
 use crate::domain::ports::{
-    ConsentProjectionQuery, ConsentState, InboundApprovalDecision, RoomJournal,
+    ConsentProjectionQuery, ConsentState, InboundApprovalDecision, RoomJournal, RoomJournalReader,
 };
 
 struct PendingSender {
@@ -31,6 +32,9 @@ pub(crate) struct PendingConsentManager {
     projection: Arc<JournalConsentProjection>,
     journal: Arc<dyn RoomJournal>,
     clock: Arc<dyn Clock>,
+    reader: Option<Arc<dyn RoomJournalReader>>,
+    last_seq: AtomicU64,
+    policy: tokio::sync::Mutex<Option<Arc<EffectivePolicy>>>,
     pending: Mutex<HashMap<PeerId, PendingSender>>,
     always_requests: Mutex<HashSet<RequestId>>,
 }
@@ -40,11 +44,15 @@ impl PendingConsentManager {
         projection: Arc<JournalConsentProjection>,
         journal: Arc<dyn RoomJournal>,
         clock: Arc<dyn Clock>,
+        reader: Option<Arc<dyn RoomJournalReader>>,
     ) -> Self {
         Self {
             projection,
             journal,
             clock,
+            reader,
+            last_seq: AtomicU64::new(0),
+            policy: tokio::sync::Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             always_requests: Mutex::new(HashSet::new()),
         }
@@ -61,6 +69,21 @@ impl PendingConsentManager {
         let (decision_tx, decision) = oneshot::channel();
         if !may_consent_refuse(disposition) {
             let _ = decision_tx.send(InboundApprovalDecision::AllowOnce);
+            return PendingConsentRegistration {
+                pending: false,
+                first_for_sender: false,
+                decision,
+            };
+        }
+        // D1: refresh the cached fold from the durable journal before deciding,
+        // so a `/team untrust` issued from another client takes effect live.
+        self.refresh_projection().await;
+        // F2: a TOML `[interaction.overrides]` entry implies consent (the
+        // operator authored it). Checked before the journaled projection per
+        // the AC1 precedence rule; only an applicable (pinned, matching)
+        // override implies consent.
+        if self.toml_implies_consent(&sender).await {
+            let _ = decision_tx.send(InboundApprovalDecision::AllowAlways);
             return PendingConsentRegistration {
                 pending: false,
                 first_for_sender: false,
@@ -113,6 +136,52 @@ impl PendingConsentManager {
 
     pub(crate) async fn take_granted(&self, request_id: &RequestId) -> bool {
         self.always_requests.lock().await.remove(request_id)
+    }
+
+    /// Drop a sender's pending group without resolving it. Used when admission
+    /// setup failed before a card could render, so the next delivery retries.
+    pub(crate) async fn drop_pending(&self, sender: &PeerId) {
+        self.pending.lock().await.remove(sender);
+    }
+
+    /// Re-fold the cached projection from the durable journal when it has
+    /// advanced (D1). Idempotent and best-effort: a read error leaves the cached
+    /// snapshot in place. The sync query contract is unchanged.
+    async fn refresh_projection(&self) {
+        let Some(reader) = &self.reader else {
+            return;
+        };
+        let entries = match reader.load_entries().await {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "consent projection refresh failed; proceeding with cached state"
+                );
+                return;
+            }
+        };
+        let max_seq = entries.last().map(|entry| entry.seq).unwrap_or(0);
+        if max_seq > self.last_seq.load(Ordering::Acquire) {
+            self.projection.replace_from(&entries);
+            self.last_seq.store(max_seq, Ordering::Release);
+        }
+    }
+
+    /// Install the resolved effective policy so the gate can honour TOML
+    /// overrides as implied consent (F2). Called once after composition.
+    pub(crate) async fn set_effective_policy(&self, policy: Arc<EffectivePolicy>) {
+        *self.policy.lock().await = Some(policy);
+    }
+
+    /// `true` when an applicable (pinned, matching) TOML override implies
+    /// consent for `sender`. Unpinned/mismatched overrides do not apply.
+    async fn toml_implies_consent(&self, sender: &PeerId) -> bool {
+        let guard = self.policy.lock().await;
+        let Some(policy) = guard.as_ref() else {
+            return false;
+        };
+        crate::domain::services::team_policy::sender_policy_for(policy, sender).is_some()
     }
 
     /// Resolve the sender's whole waiting group. `AllowAlways` is fail-closed:
@@ -212,6 +281,7 @@ mod tests {
             projection.clone(),
             journal,
             Arc::new(crate::domain::clock::MockClock::at_wall_ms(42)),
+            None,
         ));
         (manager, projection)
     }

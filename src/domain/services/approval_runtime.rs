@@ -190,6 +190,29 @@ impl ApprovalRuntime {
         self.events.subscribe()
     }
 
+    /// Pending sender-consent requests (tool `a2a/sender-consent`) with their
+    /// peer id (F10). The approval gate uses this after a broadcast `Lagged` to
+    /// re-render cards the bus dropped, so a never-expiring consent request
+    /// cannot hang silently with no card on screen.
+    pub async fn pending_sender_consent(
+        &self,
+    ) -> Vec<(RequestId, crate::domain::models::PeerId, ToolRisk)> {
+        let pending = self.pending.read().await;
+        pending
+            .values()
+            .filter_map(|record| {
+                if record.request.tool != "a2a/sender-consent" {
+                    return None;
+                }
+                let peer_id = match &record.request.source {
+                    ApprovalSource::RemotePeer { peer_id, .. } => peer_id.clone(),
+                    _ => return None,
+                };
+                Some((record.request.id.clone(), peer_id, record.request.risk))
+            })
+            .collect()
+    }
+
     /// Request approval for a tool call.
     /// Returns `(Some(id), rx)` for slow-path, `(None, rx)` for fast-path.
     ///

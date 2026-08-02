@@ -251,6 +251,16 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     description: "A2A transparency log (also Ctrl+X, L)",
                     available: true,
                 },
+                HelpBinding {
+                    key: "/team trust",
+                    description: "List effective peer-consent grants (journaled vs TOML-implied)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/team untrust <peer>",
+                    description: "Revoke standing consent for a peer (alias or PeerId)",
+                    available: true,
+                },
             ],
         },
         HelpCategory {

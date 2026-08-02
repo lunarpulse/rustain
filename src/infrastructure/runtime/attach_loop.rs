@@ -413,7 +413,9 @@ fn consent_approval_card_lines(
         .map(|line| ratatui::text::Line::from(line.to_owned()))
         .collect();
     if queued > 0 {
-        lines.push(ratatui::text::Line::from(format!("[{queued} more queued]")));
+        lines.push(ratatui::text::Line::from(format!(
+            "  [{queued} more queued]"
+        )));
     }
     lines
 }
@@ -687,7 +689,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             // Story 18.3c AC3/AC5 — the peer response card (and the retract
             // confirmation, which takes precedence while open) ride the same
             // bottom-anchored inline grammar as the consolidation card.
-            use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card;
+            use crate::adapters::tui::widgets::inline_card::{
+                render_bottom_anchored_card, render_bottom_anchored_decision_card,
+            };
             if let Some((_, ref preview)) = retract_confirm {
                 render_bottom_anchored_card(
                     f.buffer_mut(),
@@ -704,7 +708,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 );
             }
             if let Some(pending) = pending_consent_approvals.front() {
-                render_bottom_anchored_card(
+                render_bottom_anchored_decision_card(
                     f.buffer_mut(),
                     consent_approval_card_lines(
                         pending,
@@ -1290,6 +1294,7 @@ mod tests {
             permission_mode: PermissionMode::Normal,
             channels: vec![ChannelKind::Terminal],
             blocked_actions_waiting: blocked,
+            pending_consent_cards: 0,
         }
     }
 

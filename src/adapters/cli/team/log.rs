@@ -44,6 +44,8 @@ struct JsonRow<'a> {
     peer: &'a str,
     task: Option<&'a str>,
     summary: &'a str,
+    response_clause: Option<String>,
+    notification_clause: Option<String>,
 }
 
 /// Render one previously-read transparency report for `rustain team log`.
@@ -87,6 +89,8 @@ pub fn render_team_log(
                     peer: &row.peer,
                     task: row.task.as_deref(),
                     summary: &row.summary,
+                    response_clause: row.provenance.as_ref().map(|p| p.response_clause()),
+                    notification_clause: row.provenance.as_ref().map(|p| p.notification_clause()),
                 })
                 .collect(),
         };
@@ -107,6 +111,10 @@ pub fn render_team_log(
     } else {
         for row in &rows {
             writeln!(out, "{} {}", row.timestamp_label(), row.one_line())?;
+            if let Some(provenance) = &row.provenance {
+                writeln!(out, "  {}", provenance.response_clause())?;
+                writeln!(out, "  {}", provenance.notification_clause())?;
+            }
         }
     }
     if let Some(summary) = export {

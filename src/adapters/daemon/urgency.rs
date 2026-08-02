@@ -168,6 +168,20 @@ impl UrgencyRouter {
         self.state.lock().await.queue.drain(..).collect()
     }
 
+    /// Snapshot the idle queue without draining (F12): the caller drains only
+    /// after the batch is successfully surfaced, so a surface failure retries
+    /// instead of discarding queued interactions.
+    pub(crate) async fn idle_queue_snapshot(&self) -> Vec<SurfaceInteraction> {
+        self.state.lock().await.queue.iter().cloned().collect()
+    }
+
+    /// Remove the oldest `count` queued interactions after they were surfaced.
+    pub(crate) async fn drain_idle_queue(&self, count: usize) {
+        let mut state = self.state.lock().await;
+        let drop = count.min(state.queue.len());
+        state.queue.drain(..drop);
+    }
+
     pub(crate) async fn pending_digest_count(&self) -> usize {
         self.state.lock().await.digest.len()
     }
@@ -175,43 +189,54 @@ impl UrgencyRouter {
     /// Deadline comparison is deliberately the first decision inside the fold:
     /// an empty accumulator cannot short-circuit the clock read.
     pub(crate) async fn flush_due(&self) -> Result<Option<DigestBatch>, RoomJournalError> {
-        self.flush(false).await
+        Ok(self.prepare_flush(false).await)
     }
 
     pub(crate) async fn flush_pending_on_start(
         &self,
     ) -> Result<Option<DigestBatch>, RoomJournalError> {
-        self.flush(true).await
+        Ok(self.prepare_flush(true).await)
     }
 
-    async fn flush(&self, force: bool) -> Result<Option<DigestBatch>, RoomJournalError> {
+    /// Prepare a digest batch without journaling or draining (F4). The caller
+    /// surfaces the batch, then [`Self::commit_flush`] journals
+    /// `PeerDigestFlushed` and drains the surfaced items — so a surface
+    /// failure retries instead of recording a flush the operator never saw.
+    /// The deadline check stays first so an empty accumulator cannot
+    /// short-circuit the clock read.
+    async fn prepare_flush(&self, force: bool) -> Option<DigestBatch> {
         let now = self.clock.wall_now_ms();
+        let state = self.state.lock().await;
+        let deadline_elapsed =
+            now.saturating_sub(state.last_flush_at_ms) >= self.digest_interval_ms;
+        if !force && !deadline_elapsed {
+            return None;
+        }
+        if state.digest.is_empty() {
+            return None;
+        }
+        let items: Vec<_> = state.digest.clone().into_iter().collect();
+        Some(DigestBatch {
+            items,
+            flushed_at_ms: now,
+        })
+    }
+
+    /// Journal the flush and drain only the surfaced items, after the batch was
+    /// successfully delivered. Newer arrivals stay for the next flush.
+    pub(crate) async fn commit_flush(&self, batch: &DigestBatch) -> Result<(), RoomJournalError> {
         let _append_order = self.append_order.lock().await;
-        let count = {
-            let state = self.state.lock().await;
-            let deadline_elapsed =
-                now.saturating_sub(state.last_flush_at_ms) >= self.digest_interval_ms;
-            if !force && !deadline_elapsed {
-                return Ok(None);
-            }
-            if state.digest.is_empty() {
-                return Ok(None);
-            }
-            state.digest.len()
-        };
         self.journal
             .record_event(RoomEvent::PeerDigestFlushed {
-                flushed_at: now,
-                count,
+                flushed_at: batch.flushed_at_ms,
+                count: batch.items.len(),
             })
             .await?;
         let mut state = self.state.lock().await;
-        let items = state.digest.drain(..count).collect();
-        state.last_flush_at_ms = now;
-        Ok(Some(DigestBatch {
-            items,
-            flushed_at_ms: now,
-        }))
+        let drop = batch.items.len().min(state.digest.len());
+        state.digest.drain(..drop);
+        state.last_flush_at_ms = batch.flushed_at_ms;
+        Ok(())
     }
 }
 
@@ -233,8 +258,16 @@ pub(crate) async fn run_digest_flusher(
                         let Some(server) = server.upgrade() else {
                             break;
                         };
-                        if let Err(error) = server.surface_digest_batch(batch).await {
-                            tracing::error!(%error, "failed to surface peer digest");
+                        match server.surface_digest_batch(batch.clone()).await {
+                            Ok(()) => {
+                                if let Err(error) = router.commit_flush(&batch).await {
+                                    tracing::error!(%error, "failed to journal peer digest flush");
+                                }
+                            }
+                            Err(error) => tracing::error!(
+                                %error,
+                                "failed to surface peer digest; will retry on the next tick"
+                            ),
                         }
                     }
                     Ok(None) => {}
@@ -332,6 +365,9 @@ mod tests {
         clock.advance(Duration::from_secs(60));
         let batch = router.flush_due().await.unwrap().expect("deadline flush");
         assert_eq!(batch.items.len(), 1);
+        // F4: the flush is journaled + drained only after the batch is
+        // surfaced (here, the test stands in for a successful surface).
+        router.commit_flush(&batch).await.unwrap();
         assert!(
             router.flush_due().await.unwrap().is_none(),
             "no double flush"

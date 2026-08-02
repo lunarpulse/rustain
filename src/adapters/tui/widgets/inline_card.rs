@@ -31,3 +31,28 @@ pub fn render_bottom_anchored_card(
     let para = Paragraph::new(lines).block(block);
     Widget::render(para, card_area, buf);
 }
+
+/// Render `lines` as a **double-border** decision card anchored to the bottom
+/// of `chat_pane` (`╔═╗`/`╚═╝` decision tier). Used by the sender-consent card
+/// per the 18-3d preflight ruling (mirror `fork_confirm`'s chrome); the shared
+/// [`render_bottom_anchored_card`] stays single-border for action/inline cards.
+pub fn render_bottom_anchored_decision_card(
+    buf: &mut Buffer,
+    lines: Vec<Line<'_>>,
+    accent: Color,
+    chat_pane: Rect,
+) {
+    let card_height = (lines.len() as u16 + 2).min(chat_pane.height);
+    let card_area = Rect {
+        x: chat_pane.x,
+        y: chat_pane.y + chat_pane.height.saturating_sub(card_height),
+        width: chat_pane.width,
+        height: card_height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Double)
+        .border_style(Style::default().fg(accent));
+    let para = Paragraph::new(lines).block(block);
+    Widget::render(para, card_area, buf);
+}

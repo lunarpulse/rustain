@@ -80,6 +80,22 @@ impl JournalConsentProjection {
             Arc::new(next)
         });
     }
+
+    /// Atomically replace the cached fold with a fresh fold of `entries` (D1).
+    ///
+    /// The daemon's manager calls this before each admission decision when the
+    /// durable journal has advanced (e.g. an operator ran `/team untrust` from
+    /// another client), so revocation takes effect live without a restart. The
+    /// query stays synchronous and effect-free; only the cached snapshot moves.
+    pub fn replace_from(&self, entries: &[JournalEntry]) {
+        let mut states = HashMap::new();
+        for entry in entries {
+            if let JournalRecord::Room(event) = &entry.record {
+                apply_to_map(&mut states, event);
+            }
+        }
+        self.states.store(Arc::new(states));
+    }
 }
 
 impl ConsentProjectionQuery for JournalConsentProjection {

@@ -546,15 +546,22 @@ async fn run_daemon_foreground(
             Some(consent_projection.clone()),
             Some(urgency_router.clone()),
         );
+    server
+        .configure_consent_policy(effective_policy.clone())
+        .await;
     if let Some(batch) = urgency_router
         .flush_pending_on_start()
         .await
-        .context("failed to journal pending startup digest")?
+        .context("failed to prepare pending startup digest")?
     {
         server
-            .surface_digest_batch(batch)
+            .surface_digest_batch(batch.clone())
             .await
             .context("failed to surface pending startup digest")?;
+        urgency_router
+            .commit_flush(&batch)
+            .await
+            .context("failed to journal pending startup digest")?;
     }
     let urgency_shutdown = tokio_util::sync::CancellationToken::new();
     let urgency_task = tokio::spawn(crate::adapters::daemon::urgency::run_digest_flusher(

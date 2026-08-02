@@ -22,7 +22,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team trust <alias-or-peer-id> | /team untrust <alias-or-peer-id> | /team status";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team trust | /team untrust <alias-or-peer-id>";
 
 /// What the dispatch arm already did on the caller's behalf.
 pub struct TeamLogInput {
@@ -46,7 +46,7 @@ pub struct TeamLogArgs {
 #[derive(Debug, PartialEq, Eq)]
 pub enum TeamCommandArgs {
     Log(TeamLogArgs),
-    Trust(String),
+    Trust,
     Untrust(String),
     Status,
 }
@@ -57,20 +57,24 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
     let mut tokens = arg.split_whitespace();
     let verb = tokens.next().unwrap_or("log");
     match verb {
-        "trust" | "untrust" => {
+        "trust" => {
+            if tokens.next().is_some() {
+                return Err(format!(
+                    "'/team trust' lists effective grants and takes no arguments. Use: {USAGE}"
+                ));
+            }
+            Ok(TeamCommandArgs::Trust)
+        }
+        "untrust" => {
             let target = tokens
                 .next()
                 .ok_or_else(|| format!("Missing peer target. Use: {USAGE}"))?;
             if tokens.next().is_some() {
                 return Err(format!(
-                    "Expected one alias or PeerId after '{verb}'. Use: {USAGE}"
+                    "Expected one alias or PeerId after 'untrust'. Use: {USAGE}"
                 ));
             }
-            if verb == "trust" {
-                Ok(TeamCommandArgs::Trust(target.to_owned()))
-            } else {
-                Ok(TeamCommandArgs::Untrust(target.to_owned()))
-            }
+            Ok(TeamCommandArgs::Untrust(target.to_owned()))
         }
         "status" => {
             if tokens.next().is_some() {
@@ -215,8 +219,14 @@ pub fn resolve_peer_target(
     peers
         .iter()
         .find(|peer| peer.id == target)
-        .map(crate::domain::models::A2aPeerSpec::resolved_identity)
-        .ok_or_else(|| format!("Unknown peer '{target}'. Use a configured alias or a full PeerId."))
+        .and_then(crate::domain::models::A2aPeerSpec::pinned_identity)
+        .ok_or_else(|| {
+            format!(
+                "'{target}' has no usable pinned identity. Standing consent must key on a \
+                 transport-authenticated PeerId, never a rename-unstable alias. Pin the peer \
+                 (pinned_key) or supply a full PeerId."
+            )
+        })
 }
 
 /// Persistent in-chat policy/consent summary for `/team status`.
@@ -249,12 +259,21 @@ pub fn render_team_status(
     }
     status.push_str("\nPeers:");
     for (label, sender) in identities {
-        let state = match projection.consent_for(&sender) {
-            ConsentState::Trusted => "trusted",
-            ConsentState::Revoked => "revoked",
-            ConsentState::None => "not granted",
+        let consent = projection.consent_for(&sender);
+        let source = match consent {
+            ConsentState::Trusted => "trusted (journaled)".to_owned(),
+            ConsentState::Revoked => "revoked".to_owned(),
+            ConsentState::None => {
+                if crate::domain::services::team_policy::sender_policy_for(policy, &sender)
+                    .is_some()
+                {
+                    "consent implied by TOML override".to_owned()
+                } else {
+                    "not granted".to_owned()
+                }
+            }
         };
-        status.push_str(&format!("\n- {label} ({sender}): {state}"));
+        status.push_str(&format!("\n- {label} ({sender}): {source}"));
     }
     status
 }
@@ -452,11 +471,14 @@ mod tests {
     }
 
     #[test]
-    fn consent_subcommands_require_exactly_one_target_and_status_takes_none() {
+    fn trust_lists_takes_no_argument_untrust_takes_a_target() {
+        // `/team trust` is a read-only listing (review D2): it takes no
+        // argument and never grants. Only `/team untrust <sender>` mutates.
         assert_eq!(
-            parse_team_command(Some("trust alice")),
-            Ok(TeamCommandArgs::Trust("alice".to_owned()))
+            parse_team_command(Some("trust")),
+            Ok(TeamCommandArgs::Trust)
         );
+        assert!(parse_team_command(Some("trust alice")).is_err());
         assert_eq!(
             parse_team_command(Some("untrust 1220abcd")),
             Ok(TeamCommandArgs::Untrust("1220abcd".to_owned()))
@@ -465,32 +487,51 @@ mod tests {
             parse_team_command(Some("status")),
             Ok(TeamCommandArgs::Status)
         );
-        assert!(parse_team_command(Some("trust")).is_err());
         assert!(parse_team_command(Some("trust alice extra")).is_err());
         assert!(parse_team_command(Some("status extra")).is_err());
     }
 
     #[test]
-    fn aliases_resolve_to_stable_identity_and_status_shows_effective_state() {
-        let peer = crate::domain::models::A2aPeerSpec {
+    fn pinned_alias_resolves_unpinned_rejected_and_status_annotates_source() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let pinned = crate::domain::models::A2aPeerSpec {
             id: "alice".to_owned(),
             url: crate::domain::models::RedactedUrl::new("https://alice.example/a2a".to_owned()),
+            pinned_key: Some(crate::domain::models::PinnedKey::new(
+                crate::domain::models::PinnedKeyAlgorithm::EdDsa,
+                URL_SAFE_NO_PAD.encode([7u8; 32]),
+                None,
+            )),
+            source: crate::domain::models::A2aPeerSource::Workspace,
+        };
+        let identity = pinned.pinned_identity().unwrap();
+        // F3: a pinned alias resolves to its transport-authenticated PeerId.
+        assert_eq!(
+            resolve_peer_target("alice", std::slice::from_ref(&pinned)).unwrap(),
+            identity
+        );
+        // A raw PeerId string resolves even with no configured peers.
+        assert_eq!(
+            resolve_peer_target(identity.as_str(), &[]).unwrap(),
+            identity
+        );
+        assert!(resolve_peer_target("unknown", std::slice::from_ref(&pinned)).is_err());
+        // F3: an unpinned alias is rejected — standing consent must key on a pin,
+        // never a rename-unstable alias pseudonym.
+        let unpinned = crate::domain::models::A2aPeerSpec {
+            id: "bob".to_owned(),
+            url: crate::domain::models::RedactedUrl::new("https://bob.example/a2a".to_owned()),
             pinned_key: None,
             source: crate::domain::models::A2aPeerSource::Workspace,
         };
-        let sender = peer.resolved_identity();
-        assert_eq!(
-            resolve_peer_target("alice", std::slice::from_ref(&peer)).unwrap(),
-            sender
-        );
-        assert_eq!(resolve_peer_target(sender.as_str(), &[]).unwrap(), sender);
-        assert!(resolve_peer_target("unknown", std::slice::from_ref(&peer)).is_err());
+        assert!(resolve_peer_target("bob", std::slice::from_ref(&unpinned)).is_err());
 
         let entries = vec![crate::domain::models::JournalEntry::new(
             1,
             crate::domain::models::JournalRecord::Room(
                 crate::domain::models::RoomEvent::ConsentGranted {
-                    sender: Some(sender),
+                    sender: Some(identity),
                     granted_at: 10,
                 },
             ),
@@ -500,16 +541,17 @@ mod tests {
         let policy = crate::domain::services::team_policy::resolve_effective_policy(
             &crate::domain::models::IndividualPolicy::default(),
             None,
-            std::slice::from_ref(&peer),
+            std::slice::from_ref(&pinned),
         );
 
-        let status = render_team_status(&policy, &projection, &[peer]);
+        let status = render_team_status(&policy, &projection, std::slice::from_ref(&pinned));
         assert!(
             status.contains("Response mode: notify-and-wait"),
             "{status}"
         );
         assert!(status.contains("Notification urgency: queue"), "{status}");
         assert!(status.contains("alice"), "{status}");
-        assert!(status.contains("trusted"), "{status}");
+        // D2: journaled grants are source-annotated.
+        assert!(status.contains("trusted (journaled)"), "{status}");
     }
 }

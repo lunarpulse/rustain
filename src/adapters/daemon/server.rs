@@ -546,6 +546,7 @@ impl AttachServer {
                         projection,
                         Arc::clone(journal),
                         Arc::clone(&clock),
+                        room_journal_reader.clone(),
                     ))
                 });
         Arc::new_cyclic(|_weak| Self {
@@ -579,6 +580,17 @@ impl AttachServer {
             room_journal_reader,
             inbound_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
+    }
+
+    /// Install the resolved effective policy so the consent gate honours TOML
+    /// overrides as implied consent (F2).
+    pub async fn configure_consent_policy(
+        &self,
+        policy: std::sync::Arc<crate::domain::models::EffectivePolicy>,
+    ) {
+        if let Some(manager) = &self.pending_consent {
+            manager.set_effective_policy(policy).await;
+        }
     }
 
     pub fn node_tree(&self) -> crate::infrastructure::subagent::NodeTree {
@@ -760,9 +772,14 @@ impl AttachServer {
                         self.turn_complete.notify_waiters();
                     }
                     if let Some(router) = &self.urgency_router {
-                        let queued = router.take_idle_queue().await;
-                        if let Err(error) = self.surface_queued_interactions(queued).await {
-                            tracing::error!(%error, "failed to surface queued peer interactions");
+                        let queued = router.idle_queue_snapshot().await;
+                        let count = queued.len();
+                        match self.surface_queued_interactions(queued).await {
+                            Ok(()) => router.drain_idle_queue(count).await,
+                            Err(error) => tracing::error!(
+                                %error,
+                                "failed to surface queued peer interactions; will retry at next idle"
+                            ),
                         }
                     }
                 }
@@ -983,6 +1000,7 @@ impl AttachServer {
         };
 
         // Snapshot for immediate render (AC2).
+        let pending_consent_count = self.pending_consent_cards.lock().await.len();
         let snapshot = {
             let conv = self.conversation.lock().await;
             AttachSnapshot {
@@ -991,6 +1009,7 @@ impl AttachServer {
                 permission_mode: self.core.security.current_mode(),
                 channels: vec![ChannelKind::Terminal],
                 blocked_actions_waiting: self.blocked_waiting.load(Ordering::SeqCst),
+                pending_consent_cards: pending_consent_count,
             }
         };
         if write_frame(
@@ -2047,6 +2066,7 @@ impl AttachServer {
         let _turn_guard = self.turn_serial.lock().await;
         *self.active_channel_origin.lock().await = origin;
         *self.pending_channel_response_tx.lock().await = response_tx;
+        self.operator_turn_active.store(true, Ordering::Release);
 
         let rt = match self.core.ensure_runtime().await {
             Ok(rt) => rt,
@@ -2054,6 +2074,7 @@ impl AttachServer {
                 tracing::error!(error = %e, "daemon: building turn runtime failed");
                 self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
                     .await;
+                self.operator_turn_active.store(false, Ordering::Release);
                 *self.active_channel_origin.lock().await = ChannelKind::Terminal;
                 return Err(e.to_string());
             }
@@ -2077,6 +2098,7 @@ impl AttachServer {
             tracing::warn!(error = ?e, "daemon turn task failed");
             self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
                 .await;
+            self.operator_turn_active.store(false, Ordering::Release);
             *self.active_channel_origin.lock().await = ChannelKind::Terminal;
             return Err(e.to_string());
         }
@@ -2088,6 +2110,7 @@ impl AttachServer {
         }
         self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
             .await;
+        self.operator_turn_active.store(false, Ordering::Release);
         *self.active_channel_origin.lock().await = ChannelKind::Terminal;
         Ok(())
     }
@@ -2554,8 +2577,35 @@ async fn run_approval_gate(
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!(
                     missed = n,
-                    "approval gate lagged — missed requests may hang"
+                    "approval gate lagged — re-scanning pending consent cards"
                 );
+                // F10: a missed `Requested` leaves a never-expiring consent card
+                // unrendered, so the peer hangs on auth-required with no card.
+                // Re-insert + re-send any pending consent request the broadcast
+                // dropped; cards already tracked are left as-is.
+                for (id, peer_id, risk) in approval.pending_sender_consent().await {
+                    let mut cards = pending_consent_cards.lock().await;
+                    if cards.contains_key(&id) {
+                        continue;
+                    }
+                    let frame = DaemonFrame::ApprovalRequest {
+                        request_id: id.clone(),
+                        tool: "a2a/sender-consent".to_owned(),
+                        input_preview:
+                            crate::infrastructure::runtime::transparency_bridge::consent_card_text(
+                                &peer_id,
+                            ),
+                        risk,
+                    };
+                    cards.insert(id.clone(), frame.clone());
+                    drop(cards);
+                    let writer = { registry.lock().await.writer_tx() };
+                    if let Some(tx) = writer {
+                        let _ = tx.try_send(frame);
+                    }
+                    // No writer → the card stays pending for the next attach,
+                    // identical to the Requested path's no-writer branch.
+                }
                 continue;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -3167,10 +3217,12 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                         super::urgency::UrgencyRoute::Immediate(_) => true,
                         super::urgency::UrgencyRoute::Queued => {
                             if !self.operator_turn_active.load(Ordering::Acquire) {
-                                let queued = router.take_idle_queue().await;
+                                let queued = router.idle_queue_snapshot().await;
+                                let count = queued.len();
                                 self.surface_queued_interactions(queued).await.map_err(
                                     |error| InboundPeerError::Unavailable(error.to_string()),
                                 )?;
+                                router.drain_idle_queue(count).await;
                             }
                             false
                         }
@@ -3422,11 +3474,16 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 return Ok(InboundApprovalTicket { pending, decision });
             }
 
-            let runtime = self
-                .core
-                .ensure_runtime()
-                .await
-                .map_err(|error| InboundPeerError::Unavailable(error.to_string()))?;
+            let runtime = match self.core.ensure_runtime().await {
+                Ok(rt) => rt,
+                Err(error) => {
+                    // F9: admission setup failed before a card could render —
+                    // drop the pending waiter so the next delivery retries
+                    // instead of joining an orphaned group that never resolves.
+                    manager.drop_pending(peer_id).await;
+                    return Err(InboundPeerError::Unavailable(error.to_string()));
+                }
+            };
             self.ensure_approval_gate(runtime.approval.clone());
             let conversation_id = self.conversation.lock().await.id.clone();
             let card = manager
@@ -4442,6 +4499,120 @@ mod tests {
             unrelated.decision.await.unwrap(),
             InboundApprovalDecision::Decline
         );
+    }
+
+    /// F8 behavioral keystone: grant via the card → delivery stops prompting →
+    /// a `ConsentRevoked` appended out-of-band (e.g. `/team untrust` from
+    /// another client) → the next delivery prompts again. This is the cycle the
+    /// source-grep "wiring" tests cannot prove, and it exercises the D1 live
+    /// journal refold. Every step is bounded — a mutant that fails to refresh
+    /// must FAIL this test, never hang.
+    #[tokio::test]
+    async fn consent_revocation_via_journal_takes_effect_live_and_re_prompts() {
+        use crate::domain::models::{ApprovalOutcome, ApprovalScope, RoomEvent};
+        use crate::domain::ports::{ConsentProjectionQuery, ConsentState, InboundApprovalDecision};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let runtime = core.ensure_runtime().await.unwrap();
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "consent-revoke".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let journal = Arc::new(RecordingJournal::default());
+        let projection = Arc::new(crate::adapters::policy::JournalConsentProjection::default());
+        let server = journaled_server_with_projection(
+            core,
+            conversation,
+            domain_tx,
+            journal.clone(),
+            projection.clone(),
+        );
+        let (writer_tx, mut writer_rx) = mpsc::channel(8);
+        server.registry.lock().await.conns.push(Conn {
+            id: 1,
+            tx: writer_tx,
+            mode: AttachMode::ReadWrite,
+        });
+        let sender = test_signer(200).identity().peer_id.clone();
+
+        // First contact: a consent card is rendered.
+        let first = server
+            .request_admission_approval(&sender, "first task")
+            .await
+            .unwrap();
+        assert!(first.pending);
+        let request_id = match writer_rx.recv().await.unwrap() {
+            DaemonFrame::ApprovalRequest { request_id, .. } => request_id,
+            frame => panic!("expected consent card, got {frame:?}"),
+        };
+
+        // Grant via [a] (AlwaysAndSave on the sender-consent tool). The manager
+        // persists ConsentGranted first, then resolves the ticket Once.
+        let mut approval_events = runtime.approval.subscribe();
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::ApprovalResponse {
+                    request_id: request_id.clone(),
+                    outcome: ApprovalOutcome::AlwaysAndSave {
+                        scope: ApprovalScope::Tool("a2a/sender-consent".to_owned()),
+                    },
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+        match approval_events.recv().await.unwrap() {
+            ApprovalRuntimeEvent::Resolved { outcome, .. } => {
+                assert_eq!(outcome, ApprovalOutcome::Once);
+            }
+            event => panic!("expected sender-consent resolution, got {event:?}"),
+        }
+        assert_eq!(projection.consent_for(&sender), ConsentState::Trusted);
+
+        // Delivery no longer prompts: a new task from this sender short-circuits.
+        let trusted = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            server.request_admission_approval(&sender, "second task"),
+        )
+        .await
+        .expect("trusted sender must resolve without hanging")
+        .unwrap();
+        assert!(!trusted.pending);
+
+        // Wait for the grant's watcher to clear the pending group, so the next
+        // register for this sender is first-contact (requests a fresh card)
+        // rather than joining the already-resolved group.
+        let manager = server.pending_consent.as_ref().unwrap().clone();
+        while manager.waiting_count(&sender).await > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+
+        // Out-of-band revocation — mimics `/team untrust` written by another
+        // client. D1's register-time refold must pick this up live.
+        journal.events.lock().await.push(RoomEvent::ConsentRevoked {
+            sender: Some(sender.clone()),
+            revoked_at: 99,
+        });
+
+        // The next delivery MUST prompt again — the revocation takes effect
+        // without a daemon restart.
+        let re_prompted = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            server.request_admission_approval(&sender, "third task"),
+        )
+        .await
+        .expect("a mutant that fails to refresh the projection must FAIL, not hang")
+        .unwrap();
+        assert!(
+            re_prompted.pending,
+            "revocation must re-prompt the next delivery (live projection refresh)"
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer_rx.recv())
+            .await
+            .expect("the re-prompted consent card must be sent to the writer");
     }
 
     #[tokio::test]

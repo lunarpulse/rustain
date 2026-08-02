@@ -105,6 +105,12 @@ pub struct AttachSnapshot {
     /// (AC6 #5 — "N actions waiting on you"). The transcript-render of the
     /// individual skipped actions is 12.2c; 12.2b emits the count.
     pub blocked_actions_waiting: usize,
+    /// Count of sender-consent cards outstanding and awaiting the designated
+    /// writer (F5). Read-only mirrors render this as a passive "N consent
+    /// decisions pending" notice; only the ReadWrite writer receives the
+    /// actionable card frames.
+    #[serde(default)]
+    pub pending_consent_cards: usize,
 }
 
 /// A protocol-level error reported to the peer (and surfaced to the user).
@@ -493,6 +499,7 @@ mod tests {
                     permission_mode: PermissionMode::Normal,
                     channels: vec![ChannelKind::Terminal],
                     blocked_actions_waiting: 2,
+                    pending_consent_cards: 0,
                 },
             },
             DaemonFrame::Event(RawEvent {
