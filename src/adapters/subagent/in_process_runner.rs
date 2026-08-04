@@ -7784,6 +7784,20 @@ mod tests {
                         "journal ConsentRevoked sender={sender:?} revoked_at={revoked_at}"
                     ));
                 }
+                RoomEvent::RoomRoleGranted {
+                    peer,
+                    role,
+                    granted_at,
+                } => {
+                    lines.push(format!(
+                        "journal RoomRoleGranted peer={peer:?} role={role:?} granted_at={granted_at}"
+                    ));
+                }
+                RoomEvent::RoomRoleRevoked { peer, revoked_at } => {
+                    lines.push(format!(
+                        "journal RoomRoleRevoked peer={peer:?} revoked_at={revoked_at}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

@@ -56,6 +56,7 @@ pub mod provider;
 pub mod provider_capabilities;
 pub mod redacted_url;
 pub mod redaction;
+pub mod room_role;
 pub mod router;
 pub mod sandbox;
 pub mod search_hit;
@@ -201,6 +202,8 @@ pub use plan::{
     PlanTaskStatus, TaskResult,
 };
 pub use redacted_url::RedactedUrl;
+#[allow(unused_imports)]
+pub use room_role::{RoomEditDecision, RoomEditKind, RoomRole};
 pub use sandbox::SandboxPolicy;
 pub use secret::SecretString;
 #[allow(unused_imports)]

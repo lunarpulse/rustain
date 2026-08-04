@@ -14,7 +14,7 @@ const PREFIX_SCOPE_MAP: &[(char, PaletteScope)] = &[
 /// Slash commands that have *graduated* to a direct chord. The palette row
 /// must name it (`ux-design-specification.md` graduation convention): a
 /// discoverable command that hides its faster path teaches the slow one.
-const SLASH_SHORTCUTS: &[(&str, &str)] = &[("team", "Ctrl+X, L")];
+const SLASH_SHORTCUTS: &[(&str, &str)] = &[("team", "Ctrl+X, L"), ("room", "Ctrl+X, R")];
 
 /// Registry of command palette entries.
 /// Populated lazily from `CommandRegistry` on first Ctrl+P.
@@ -483,7 +483,7 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 37); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team
+        assert_eq!(reg.all_entries().len(), 38); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/clear"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
@@ -501,7 +501,7 @@ mod tests {
         );
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 37); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team
+        assert_eq!(reg.all_entries().len(), 38); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room
     }
 
     #[test]
@@ -517,19 +517,19 @@ mod tests {
         assert_eq!(reg.all_entries().len(), 1);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.slash_entries.len(), 37); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team
+        assert_eq!(reg.slash_entries.len(), 38); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room
         assert_eq!(reg.registered_entries.len(), 1);
-        assert_eq!(reg.all_entries().len(), 38);
+        assert_eq!(reg.all_entries().len(), 39);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 38);
+        assert_eq!(reg.all_entries().len(), 39);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
-        assert_eq!(reg.all_entries().len(), 39);
+        assert_eq!(reg.all_entries().len(), 40);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 39);
+        assert_eq!(reg.all_entries().len(), 40);
     }
 }

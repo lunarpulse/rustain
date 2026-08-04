@@ -96,6 +96,14 @@ pub enum TransparencyKind {
     ConsentGranted,
     /// Operator revoked durable consent from one authenticated sender.
     ConsentRevoked,
+    /// Operator granted a **room role** to a peer (Story 18.3a). Distinct
+    /// from [`Self::ConsentGranted`]: a room role governs room edits, not
+    /// message delivery.
+    RoomRoleGranted,
+    /// Operator withdrew a peer's room role. Distinct from
+    /// [`Self::ConsentRevoked`] (standing delivery consent) and from FR158's
+    /// trust-set revocation, which is Story 18.4's own variant.
+    RoomRoleRevoked,
     /// Interaction became visible in the audit spine before interruption routing.
     InteractionSurfaced,
     /// A batch of prior digest-tier interactions was shown to the operator.
@@ -117,6 +125,8 @@ impl TransparencyKind {
             Self::Disclosed => "⇢",
             Self::ConsentGranted => "+",
             Self::ConsentRevoked => "−",
+            Self::RoomRoleGranted => "⊕",
+            Self::RoomRoleRevoked => "⊖",
             Self::InteractionSurfaced => "!",
             Self::DigestFlushed => "≋",
             _ => "·",
@@ -133,6 +143,8 @@ impl TransparencyKind {
             Self::Disclosed => "disclosed",
             Self::ConsentGranted => "consent-granted",
             Self::ConsentRevoked => "consent-revoked",
+            Self::RoomRoleGranted => "room-role-granted",
+            Self::RoomRoleRevoked => "room-role-revoked",
             Self::InteractionSurfaced => "surfaced",
             Self::DigestFlushed => "digest-flushed",
             _ => "unknown",
@@ -353,6 +365,27 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             None,
             "operator revoked durable sender consent".to_owned(),
         ),
+        // Journaled fact, not enforcement claim: the summary says what the
+        // journal knows ("the operator granted role R at T"), never what the
+        // peer can or cannot now do (`addendum` OPEN-DR-3).
+        RoomEvent::RoomRoleGranted { peer, role, .. } => (
+            TransparencyKind::RoomRoleGranted,
+            Direction::Unknown,
+            peer.as_ref()
+                .map(|peer| peer.as_str().to_owned())
+                .unwrap_or_else(|| "unknown-peer".to_owned()),
+            None,
+            format!("operator granted room role '{}'", role.label()),
+        ),
+        RoomEvent::RoomRoleRevoked { peer, .. } => (
+            TransparencyKind::RoomRoleRevoked,
+            Direction::Unknown,
+            peer.as_ref()
+                .map(|peer| peer.as_str().to_owned())
+                .unwrap_or_else(|| "unknown-peer".to_owned()),
+            None,
+            "operator revoked room role".to_owned(),
+        ),
         // Retractions mutate the prior projected row in `fold_transparency`;
         // they never create a second visible row.
         RoomEvent::AutoResponseRetracted { .. } => return None,
@@ -421,7 +454,7 @@ pub fn fold_transparency<'a>(
 /// Row filter shared by every transparency renderer.
 ///
 /// Grammar: `direction=inbound|outbound|unknown`,
-/// `kind=accepted|refused|awaiting-approval|status-query|disclosed|unknown`,
+/// `kind=accepted|refused|awaiting-approval|status-query|disclosed|room-role-granted|room-role-revoked|unknown`,
 /// `peer=<substring>`, or a bare substring matched against the whole row.
 /// `direction` and `kind` may appear once; repeated peer and bare-text terms
 /// are ANDed.
@@ -483,11 +516,14 @@ impl TransparencyFilter {
                         "awaiting-approval" => TransparencyKind::AwaitingApproval,
                         "status-query" => TransparencyKind::StatusQueried,
                         "disclosed" => TransparencyKind::Disclosed,
+                        "room-role-granted" => TransparencyKind::RoomRoleGranted,
+                        "room-role-revoked" => TransparencyKind::RoomRoleRevoked,
                         "unknown" => TransparencyKind::Unknown,
                         _ => {
                             return Err(format!(
                                 "unknown kind `{value}` — valid: accepted, refused, \
-                                 awaiting-approval, status-query, disclosed, unknown"
+                                 awaiting-approval, status-query, disclosed, room-role-granted, \
+                                 room-role-revoked, unknown"
                             ));
                         }
                     }));
@@ -1163,6 +1199,33 @@ mod tests {
             !before.contains("notification: immediate · via default"),
             "a stored non-default snapshot must not render as default: {before}"
         );
+    }
+
+    #[test]
+    fn room_role_kinds_are_filterable_by_their_rendered_labels() {
+        for kind in [
+            TransparencyKind::RoomRoleGranted,
+            TransparencyKind::RoomRoleRevoked,
+        ] {
+            let row = TransparencyRow {
+                seq: 1,
+                recorded_at_ms: Some(1),
+                retracted_at_ms: None,
+                direction: Direction::Unknown,
+                kind,
+                peer: "peer-a".to_owned(),
+                task: None,
+                summary: "room role changed".to_owned(),
+                provenance: None,
+            };
+            let spec = format!("kind={}", kind.label());
+            assert!(
+                TransparencyFilter::parse(&spec)
+                    .expect("rendered room-role label must parse")
+                    .matches(&row),
+                "{spec} must select its row"
+            );
+        }
     }
 
     #[test]

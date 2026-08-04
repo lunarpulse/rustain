@@ -38,6 +38,7 @@ pub mod profile_loader;
 pub mod profile_serializer;
 pub mod redaction_mask;
 pub mod reducer;
+pub mod room_role;
 pub mod sandbox_narrowing;
 pub mod search;
 pub mod secret_scan;

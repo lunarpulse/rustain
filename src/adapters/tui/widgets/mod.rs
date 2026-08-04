@@ -19,6 +19,7 @@ pub mod model_selector;
 pub mod orchestration_glyph;
 pub mod result_row;
 pub mod rewind_confirm;
+pub mod room_panel;
 pub mod sidebar;
 pub mod synthesis_block;
 pub mod wave_overlay;

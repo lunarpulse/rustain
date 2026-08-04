@@ -261,6 +261,26 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     description: "Revoke standing consent for a peer (alias or PeerId)",
                     available: true,
                 },
+                HelpBinding {
+                    key: "/room",
+                    description: "Durable room replay, read-only (also Ctrl+X, R)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/room role list",
+                    description: "Show journaled room roles (owner/editor/viewer)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/room role grant <peer> <role>",
+                    description: "Record a room role for a configured peer (room edits only)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/room role revoke <peer>",
+                    description: "Record withdrawal of a peer's room role",
+                    available: true,
+                },
             ],
         },
         HelpCategory {
@@ -289,6 +309,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 HelpBinding {
                     key: "Ctrl+X, L",
                     description: "Transparency Log panel",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+X, R",
+                    description: "Durable Room panel (read-only replay)",
                     available: true,
                 },
                 HelpBinding {

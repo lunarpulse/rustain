@@ -12,9 +12,11 @@
 pub mod config;
 pub mod consent;
 pub mod resolve;
+pub mod room_role;
 
 pub use config::{PolicyConfigError, PolicyFiles, load_workspace_policies};
 pub use consent::{EmptyConsentProjection, JournalConsentProjection};
 pub use resolve::{collect_consent_lines, resolve_workspace_policy};
 #[cfg(feature = "test-instrumentation")]
 pub use resolve::{reset_workspace_policy_load_count, workspace_policy_load_count};
+pub use room_role::JournalRoomRoleProjection;

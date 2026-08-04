@@ -88,6 +88,15 @@ pub struct AppState {
     /// journal (a non-subagent composition). Set at the composition root
     /// rather than passed positionally: `new` already takes 19 arguments.
     pub transparency: Option<Arc<crate::infrastructure::transparency::TransparencyService>>,
+    /// Story 18.3a (AC4) — live-refolded room-role projection over the one
+    /// journal. Always present: [`crate::adapters::policy::JournalRoomRoleProjection::inert`]
+    /// is the honest composition for a workspace with no journal (every
+    /// principal answers the least-privileged role) and it keeps every
+    /// consumer free of `Option` juggling on an authority decision.
+    ///
+    /// Assigned at the composition root after construction, for the same
+    /// reason as `transparency` above.
+    pub room_roles: Arc<crate::adapters::policy::JournalRoomRoleProjection>,
 }
 
 impl AppState {
@@ -144,6 +153,7 @@ impl AppState {
                 #[cfg(feature = "meta-search")]
                 catalog_registry,
                 transparency: None,
+                room_roles: Arc::new(crate::adapters::policy::JournalRoomRoleProjection::inert()),
             },
             domain_rx,
         )

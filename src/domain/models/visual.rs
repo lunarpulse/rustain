@@ -120,6 +120,10 @@ pub enum PanelType {
     /// in the render dispatch, so a missed site fails to compile.
     /// `OverlayType` has `_` arms everywhere and would silently do nothing.
     TransparencyLog,
+    /// Story 18.3a (AC1) — `Ctrl+X, R`. The durable orchestration room,
+    /// folded from the one journal via `OrchestrationRoom::project_for_host`.
+    /// Read-only and honestly stale; it is a replay, never a live object.
+    Room,
 }
 
 /// Target of a delete confirmation dialog.

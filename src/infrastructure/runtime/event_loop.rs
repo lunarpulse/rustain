@@ -2309,6 +2309,8 @@ pub async fn run(
                                         transparency_bridge::fanout_command(&mut state, &conversation.id, cmd_arg, streaming.is_streaming, config, &app_state);
                                     } else if cmd_name == "team" {
                                         transparency_bridge::team_command(&mut state, &conversation.id, cmd_arg, &app_state).await;
+                                    } else if cmd_name == "room" {
+                                        crate::infrastructure::runtime::room_bridge::room_command(&mut state, &conversation.id, cmd_arg, &app_state).await;
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
                                         match cmd_arg.map(str::trim).filter(|s: &&str| !s.is_empty()) {
@@ -3794,6 +3796,8 @@ pub async fn run(
                                             }
                                         } else if panel_type == PanelType::TransparencyLog {
                                             transparency_bridge::open_panel(&app_state, &mut state).await;
+                                        } else if panel_type == PanelType::Room {
+                                            crate::infrastructure::runtime::room_bridge::open_panel(&app_state, &mut state).await;
                                         }
                                         state.focus = FocusState::Sidebar {
                                             panel: panel_type,
@@ -3826,6 +3830,15 @@ pub async fn run(
                                             state.agent_panel_state.pending_kill_confirm = None;
                                             state.needs_redraw = true;
                                         }
+                                        continue;
+                                    }
+                                    // History is the only remaining panel whose
+                                    // Enter action resolves a conversation.
+                                    if state.sidebar_panel
+                                        != Some(
+                                            crate::domain::models::visual::PanelType::History,
+                                        )
+                                    {
                                         continue;
                                     }
                                     // Resolve conversation ID from sidebar selection
@@ -8229,6 +8242,27 @@ pub async fn run(
 
                 // Update elapsed_ms for Executing state each tick
                 let tick_ms = state.theme.timing.tick_interval_ms;
+
+                // The Room is an honest replay, not a subscription. While it
+                // is open, observe the durable head at 1 Hz without replacing
+                // the anchored fold; a newer head becomes the boundary marker.
+                if state.sidebar_visible
+                    && state.sidebar_panel
+                        == Some(crate::domain::models::visual::PanelType::Room)
+                {
+                    if state.room_panel.head_poll_due(
+                        tick_ms,
+                        crate::infrastructure::runtime::room_bridge::ROOM_HEAD_POLL_INTERVAL_MS,
+                    ) {
+                        crate::infrastructure::runtime::room_bridge::refresh_head(
+                            &app_state,
+                            &mut state,
+                        )
+                        .await;
+                    }
+                } else {
+                    state.room_panel.reset_head_poll();
+                }
                 if let StatusState::Executing { elapsed_ms, .. } = &mut state.status {
                     *elapsed_ms += tick_ms;
                     state.needs_redraw = true;
@@ -9106,6 +9140,12 @@ fn render(
                                 state.sidebar_selected, &state.focus, theme,
                             );
                         }
+                        Some(crate::domain::models::visual::PanelType::Room) => {
+                            crate::adapters::tui::widgets::room_panel::render(
+                                sidebar_area, frame.buffer_mut(), &mut state.room_panel,
+                                state.sidebar_selected, &state.focus, theme,
+                            );
+                        }
                     }
                 }
 
@@ -9173,6 +9213,16 @@ fn render(
                                 is_focused,
                                 state.sidebar_selected,
                                 theme,
+                            );
+                        }
+                        // Hand-written, NOT compiler-surfaced: the `_` arm below
+                        // makes this match non-exhaustive, so a missing `Room`
+                        // arm would compile clean and render nothing in
+                        // Dashboard density (Story 18.3a AC1).
+                        Some(crate::domain::models::visual::PanelType::Room) => {
+                            crate::adapters::tui::widgets::room_panel::render(
+                                panel_area, frame.buffer_mut(), &mut state.room_panel,
+                                state.sidebar_selected, &state.focus, theme,
                             );
                         }
                         _ => {

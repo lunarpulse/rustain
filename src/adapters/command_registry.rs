@@ -155,7 +155,14 @@ impl CommandRegistry {
             },
             SlashCommandDef {
                 name: "team".to_string(),
-                description: "A2A team interactions: /team log [--filter=…] [--json] [--export] | /team trust (list grants) | /team untrust <alias-or-peer-id>"
+                description: "A2A team interactions: /team log (transparency log) [--filter=…] [--json] [--export] | /team trust (list grants) | /team untrust <alias-or-peer-id>"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "room".to_string(),
+                description: "Durable orchestration room (read-only replay, also Ctrl+X, R): /room | /room role list | /room role grant <alias-or-peer-id> <owner|editor|viewer> | /room role revoke <alias-or-peer-id>"
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,

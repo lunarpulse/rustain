@@ -1,6 +1,6 @@
 //! Durable single-writer JSONL journal for one orchestration room.
 
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
 #[cfg(any(test, feature = "test-instrumentation"))]
@@ -562,6 +562,42 @@ impl WorkspaceJournalReader {
     }
 }
 
+fn latest_valid_seq(path: &Path) -> Result<u64, JournalError> {
+    const CHUNK_BYTES: u64 = 8 * 1024;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut position = file.metadata()?.len();
+    let mut suffix = Vec::new();
+
+    while position > 0 {
+        let chunk_len = position.min(CHUNK_BYTES);
+        position -= chunk_len;
+        file.seek(std::io::SeekFrom::Start(position))?;
+        let mut combined = vec![0u8; chunk_len as usize];
+        file.read_exact(&mut combined)?;
+        combined.extend_from_slice(&suffix);
+
+        let mut end = combined.len();
+        while let Some(newline) = combined[..end].iter().rposition(|byte| *byte == b'\n') {
+            if let Some(seq) = parse_tail_seq(&combined[newline + 1..end]) {
+                return Ok(seq);
+            }
+            end = newline;
+        }
+        suffix = combined[..end].to_vec();
+    }
+
+    Ok(parse_tail_seq(&suffix).unwrap_or(0))
+}
+
+fn parse_tail_seq(line: &[u8]) -> Option<u64> {
+    let start = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
+    let end = line.iter().rposition(|byte| !byte.is_ascii_whitespace())? + 1;
+    serde_json::from_slice::<JournalEntry>(&line[start..end])
+        .ok()
+        .map(|entry| entry.seq)
+}
+
 #[async_trait::async_trait]
 impl crate::domain::ports::RoomJournalReader for WorkspaceJournalReader {
     async fn load_entries(
@@ -572,6 +608,22 @@ impl crate::domain::ports::RoomJournalReader for WorkspaceJournalReader {
             .await
             .expect("read-only journal load task panicked")
             .map_err(|error| crate::domain::ports::RoomJournalError::Read(error.to_string()))
+    }
+
+    async fn latest_seq(&self) -> Result<u64, crate::domain::ports::RoomJournalError> {
+        let reader = self.clone();
+        tokio::task::spawn_blocking(move || {
+            match std::fs::File::open(&reader.path) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                Err(error) => return Err(JournalError::Io(error)),
+            }
+            let _lock = FileLock::acquire_existing_shared(&reader.lock_path)?;
+            latest_valid_seq(&reader.path)
+        })
+        .await
+        .expect("read-only journal head task panicked")
+        .map_err(|error| crate::domain::ports::RoomJournalError::Read(error.to_string()))
     }
 }
 
@@ -591,6 +643,18 @@ impl crate::domain::ports::RoomJournalReader for NodeJournal {
         self.load()
             .await
             .map_err(|error| crate::domain::ports::RoomJournalError::Read(error.to_string()))
+    }
+
+    async fn latest_seq(&self) -> Result<u64, crate::domain::ports::RoomJournalError> {
+        let path = self.path.clone();
+        let lock_path = self.lock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = FileLock::acquire_existing_shared(&lock_path)?;
+            latest_valid_seq(&path)
+        })
+        .await
+        .expect("journal head task panicked")
+        .map_err(|error| crate::domain::ports::RoomJournalError::Read(error.to_string()))
     }
 }
 
@@ -979,6 +1043,7 @@ mod workspace_reader_tests {
             !workspace.path().join(".rustain").exists(),
             "a read-only observer must not create a workspace, journal, or lock"
         );
+        assert_eq!(reader.latest_seq().await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1001,6 +1066,19 @@ mod workspace_reader_tests {
             std::fs::read(&reader.lock_path).unwrap(),
             b"do-not-truncate",
             "shared observer locking must not truncate an existing writer lock"
+        );
+
+        assert_eq!(reader.latest_seq().await.unwrap(), 1);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&reader.path)
+            .unwrap()
+            .write_all(b"{\"torn\":")
+            .unwrap();
+        assert_eq!(
+            reader.latest_seq().await.unwrap(),
+            1,
+            "a malformed crash tail must not hide the last valid sequence"
         );
     }
 }

@@ -2230,7 +2230,7 @@ pub async fn run() -> Result<()> {
     // Story 18.2 (AC3): the transparency read seam. Assigned after
     // construction rather than passed positionally — `AppState::new` already
     // takes 19 arguments and a 20th buys nothing.
-    app_state.transparency = journal_reader.map(|reader| {
+    app_state.transparency = journal_reader.clone().map(|reader| {
         Arc::new(
             crate::infrastructure::transparency::TransparencyService::new(
                 reader,
@@ -2238,6 +2238,15 @@ pub async fn run() -> Result<()> {
             ),
         )
     });
+    // Story 18.3a (AC4): the room-role projection's holder. Bound to the same
+    // read side of the same one journal — no second store. It refolds on a
+    // high-water sequence compare before every `/room role` read and decision,
+    // so a grant or revocation appended by any writer takes effect without a
+    // restart (18.3d's shipped defect was exactly the missing half of this).
+    if let Some(reader) = journal_reader {
+        app_state.room_roles =
+            Arc::new(crate::adapters::policy::JournalRoomRoleProjection::with_reader(reader));
+    }
 
     // 5d. Use the same storage adapter constructed above for session management.
     // Both tools and the event loop share one FileSystemStorage instance pointing

@@ -67,6 +67,8 @@ jobs:
           cargo test --test conformance_18_3b_policy
           cargo test --features test-instrumentation --test conformance_18_3c_response_modes
           cargo test --test conformance_18_3d_consent
+          cargo test --test conformance_18_3a_room
+          cargo test --test e2e_help_overlay
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest

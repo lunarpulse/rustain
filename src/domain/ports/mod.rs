@@ -57,6 +57,8 @@ mod recall_provider;
 #[allow(unused_imports)]
 mod room_journal;
 #[allow(unused_imports)]
+mod room_role_projection;
+#[allow(unused_imports)]
 mod sandbox;
 #[allow(unused_imports)]
 mod scheduler;
@@ -128,6 +130,7 @@ pub use provider::{ProbeOutcome, StreamingProvider};
 pub use provider_info::ProviderInfoPort;
 pub use recall_provider::RecallProviderPort;
 pub use room_journal::{RoomJournal, RoomJournalError, RoomJournalReader};
+pub use room_role_projection::{RoomRoleProjectionQuery, RoomRoleState};
 pub use sandbox::SandboxManager;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;

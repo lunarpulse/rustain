@@ -1478,6 +1478,207 @@ impl TransparencyPanelState {
     }
 }
 
+/// State for the durable-room viewer panel (`Ctrl+X, R` / `/room`).
+/// Story 18.3a, AC1.
+///
+/// **Never presents itself as live.** `room` is one point-in-time fold of the
+/// durable room journal under a shared `flock`, produced by
+/// [`crate::domain::models::OrchestrationRoom::project_for_host`]. The header
+/// says "as of <time>" and the boundary counts entries it has not shown.
+#[derive(Default)]
+pub struct RoomPanelState {
+    /// The exact host-honest fold displayed by this panel.
+    pub room: Option<crate::domain::models::OrchestrationRoom>,
+    /// Host id the fold was derived against — the "here" that makes a foreign
+    /// binding host-bound (AC2). Rendered so the operator can see which host
+    /// the honesty claim is relative to.
+    pub host_id: String,
+    /// Highest journal `seq` the operator has actually seen **rendered**.
+    /// Only the renderer advances it: a row is acknowledged when it was drawn,
+    /// never when it was merely read.
+    pub read_seq: u64,
+    /// Highest journal `seq` represented by `room`.
+    pub folded_seq: u64,
+    /// Highest journal `seq` observed at the durable head. It may be newer than
+    /// `folded_seq` while the viewport remains anchored to its current replay.
+    pub latest_seq: u64,
+    /// Observed head entries that are newer than `read_seq`.
+    pub newer_entries: usize,
+    /// Unrecognized `RoomEvent` tags in the journal. Rendered as an explicit
+    /// unknown row, never silently dropped (UX-DR-ROOM-01).
+    pub unknown_records: usize,
+    /// First visible index in the current view.
+    pub scroll_offset: usize,
+    /// Rows the renderer can display; refreshed on every draw.
+    pub viewport_rows: usize,
+    /// Wall-clock millis of the last read, rendered as "as of …".
+    pub read_at_ms: Option<i64>,
+    /// A journal read that failed. Shown instead of an empty list, which would
+    /// read as "nothing happened".
+    pub error: Option<String>,
+    /// `true` when this session composed no orchestration journal at all.
+    /// Distinct from "the journal is empty" — the first zero-state of three.
+    pub not_attached: bool,
+    /// Top row and selected row from the last painted Room viewport. These are
+    /// per-panel identities, unlike the shared numeric sidebar selection.
+    anchor_node: Option<crate::domain::models::AgentId>,
+    selected_node: Option<crate::domain::models::AgentId>,
+    /// Accumulator for the one-second durable-head check while Room is open.
+    head_poll_elapsed_ms: u64,
+}
+
+impl RoomPanelState {
+    /// Node rows in stable id order. Empty before the first read.
+    #[must_use]
+    pub fn nodes(&self) -> Vec<&crate::domain::models::NodeView> {
+        self.room
+            .as_ref()
+            .map(|room| room.nodes().values().collect())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn visible_len(&self) -> usize {
+        self.room.as_ref().map_or(0, |room| room.nodes().len())
+    }
+
+    /// Which of the three distinguishable zero-states applies, if any.
+    #[must_use]
+    pub fn zero_state(&self) -> Option<RoomZeroState> {
+        if self.not_attached {
+            return Some(RoomZeroState::NotAttached);
+        }
+        let room = self.room.as_ref()?;
+        if room.nodes().is_empty() {
+            return Some(RoomZeroState::NoNodes);
+        }
+        room.nodes()
+            .values()
+            .all(|view| view.state.is_terminal())
+            .then_some(RoomZeroState::AllTerminal)
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        self.visible_len().saturating_sub(self.viewport_rows.max(1))
+    }
+
+    /// Clamp the shared sidebar selection into the rendered viewport.
+    pub fn synchronize_selection(&mut self, selected: &mut usize) {
+        let len = self.visible_len();
+        if len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = (*selected).min(len - 1);
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+        let viewport_rows = self.viewport_rows.max(1);
+        if *selected < self.scroll_offset {
+            self.scroll_offset = *selected;
+        } else if *selected >= self.scroll_offset.saturating_add(viewport_rows) {
+            self.scroll_offset = *selected + 1 - viewport_rows;
+        }
+    }
+
+    /// Record the renderer's actual row capacity and reconcile the viewport.
+    pub fn set_viewport_rows(&mut self, viewport_rows: usize, selected: &mut usize) {
+        self.viewport_rows = viewport_rows.max(1);
+        self.synchronize_selection(selected);
+    }
+
+    /// Store one freshly folded durable read without moving the reader's
+    /// identity anchors.
+    pub fn apply_read(
+        &mut self,
+        room: crate::domain::models::OrchestrationRoom,
+        host_id: String,
+        max_seq: u64,
+        unknown_records: usize,
+        read_at_ms: i64,
+        selected: &mut usize,
+    ) {
+        let anchor_index = self
+            .anchor_node
+            .as_ref()
+            .and_then(|id| room.nodes().keys().position(|candidate| candidate == id));
+        let selected_index = self
+            .selected_node
+            .as_ref()
+            .and_then(|id| room.nodes().keys().position(|candidate| candidate == id));
+
+        self.folded_seq = max_seq;
+        self.latest_seq = max_seq;
+        self.newer_entries = usize::try_from(max_seq.saturating_sub(self.read_seq)).unwrap_or(0);
+        self.room = Some(room);
+        self.host_id = host_id;
+        self.unknown_records = unknown_records;
+        self.read_at_ms = Some(read_at_ms);
+        self.error = None;
+        self.not_attached = false;
+        if let Some(index) = anchor_index {
+            self.scroll_offset = index;
+        }
+        if let Some(index) = selected_index {
+            *selected = index;
+        }
+        self.synchronize_selection(selected);
+    }
+
+    /// Remember exactly which rows the last render anchored and selected.
+    pub fn record_rendered_viewport(
+        &mut self,
+        anchor: Option<crate::domain::models::AgentId>,
+        selected: Option<crate::domain::models::AgentId>,
+    ) {
+        self.anchor_node = anchor;
+        self.selected_node = selected;
+    }
+
+    /// Observe the journal head without replacing the anchored replay.
+    pub fn observe_head(&mut self, max_seq: u64) -> bool {
+        let prior = self.newer_entries;
+        self.latest_seq = max_seq;
+        self.newer_entries = usize::try_from(max_seq.saturating_sub(self.read_seq)).unwrap_or(0);
+        self.error = None;
+        self.newer_entries != prior
+    }
+
+    /// Advance the low-frequency head-poll clock.
+    pub fn head_poll_due(&mut self, tick_ms: u64, interval_ms: u64) -> bool {
+        self.head_poll_elapsed_ms = self.head_poll_elapsed_ms.saturating_add(tick_ms);
+        if self.head_poll_elapsed_ms < interval_ms {
+            return false;
+        }
+        self.head_poll_elapsed_ms %= interval_ms;
+        true
+    }
+
+    pub fn reset_head_poll(&mut self) {
+        self.head_poll_elapsed_ms = 0;
+    }
+
+    /// Mark only the currently folded replay seen. A newer observed head stays
+    /// pending until a later reopen folds and renders it.
+    pub fn acknowledge_rendered_boundary(&mut self) {
+        self.read_seq = self.folded_seq;
+        self.newer_entries =
+            usize::try_from(self.latest_seq.saturating_sub(self.read_seq)).unwrap_or(0);
+    }
+}
+
+/// The three zero-states a durable room can be in. A blank pane cannot tell
+/// them apart, and that indistinguishability is the failure this exists to
+/// prevent (`RV/review-completeness.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomZeroState {
+    /// No orchestration journal is composed in this session.
+    NotAttached,
+    /// The journal is readable and holds no node registrations.
+    NoNodes,
+    /// Every node in the room has reached a terminal state.
+    AllTerminal,
+}
+
 /// State for the command palette overlay (Ctrl+P).
 // Covers: UX-DR18
 pub struct CommandPaletteState {
@@ -1649,6 +1850,12 @@ impl WhichKeyState {
         chord_map.insert(
             'l',
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::TransparencyLog),
+        );
+        // Lower-case on purpose: `lookup_chord` lowercases the key, so an
+        // uppercase `'R'` entry would be unreachable.
+        chord_map.insert(
+            'r',
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Room),
         );
         chord_map.insert(
             't',
@@ -1950,6 +2157,8 @@ pub struct TuiState {
     pub usage_panel: UsagePanelState,
     /// Transparency Log panel state (Ctrl+X, L) (Story 18.2 AC5).
     pub transparency_panel: TransparencyPanelState,
+    /// Durable room viewer panel state (Ctrl+X, R / `/room`) (Story 18.3a AC1).
+    pub room_panel: RoomPanelState,
     /// Daily budget warning state (Story 7.5 AC5). `None` when budget disabled.
     pub daily_budget: Option<DailyBudgetState>,
     /// Captured resolved-model from `start_turn_inner`, consumed-and-cleared on
@@ -2351,6 +2560,7 @@ impl TuiState {
             active_profile: None,
             usage_panel: UsagePanelState::new(),
             transparency_panel: TransparencyPanelState::default(),
+            room_panel: RoomPanelState::default(),
             daily_budget: None,
             pending_resolved_model: None,
             selected_model: None,

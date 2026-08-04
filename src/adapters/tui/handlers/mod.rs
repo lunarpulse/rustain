@@ -38,6 +38,7 @@ pub mod model_switch;
 pub mod notice;
 pub mod profile_switch;
 pub mod render_error;
+pub mod room_command;
 pub mod scroll;
 pub mod search;
 pub mod shared;

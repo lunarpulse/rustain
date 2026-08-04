@@ -16,6 +16,7 @@ use crate::domain::models::artifact::{
 use crate::domain::models::invocation_fingerprint::InvocationFingerprint;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::peer_identity::PeerId;
+use crate::domain::models::room_role::RoomRole;
 use crate::domain::models::team_policy::{InteractionPolicySnapshot, NotificationUrgency};
 use crate::domain::models::tool_call::ApprovalSource;
 
@@ -363,6 +364,55 @@ pub enum RoomEvent {
         #[serde(default)]
         revoked_at: i64,
     },
+    /// Durable operator grant of a **room role** to a configured peer
+    /// (Story 18.3a, AC4). Produced by `/room role grant <alias-or-peer-id>
+    /// <role>` acting on an entry that already exists in `a2a.json`.
+    ///
+    /// # Three revocations, three meanings — never merge them
+    ///
+    /// The room journal carries three distinct withdrawal facts and a fold
+    /// that cannot tell them apart is a fold that lies to `/team log`:
+    ///
+    /// 1. [`RoomEvent::ConsentRevoked`] (Story 18.3d, `/team untrust`) —
+    ///    *one sender's standing A2A consent* is withdrawn, so the next
+    ///    inbound message re-prompts. An application-level operator act about
+    ///    delivery, not about the room.
+    /// 2. [`RoomEvent::RoomRoleRevoked`] (this story, `/room role revoke`) —
+    ///    a peer's **room role** is withdrawn: they may no longer make room
+    ///    edits. Says nothing about delivery or transport.
+    /// 3. FR158 trust-set revocation (Stories 18.4/18.4a, `peer revoke --now`)
+    ///    — the peer leaves the *allowlist*, so envelope verification rejects
+    ///    its next frame, valid signature notwithstanding. **18.4 authors its
+    ///    own variant for that**; it is not a second producer of this one.
+    ///
+    /// ⛔ No rekey consequence. Nothing here implies cryptographic exclusion,
+    /// key rotation, or that already-delivered bytes are recalled
+    /// (`DF-18-CRYPTO-CLUSTER` C4). This is a journaled fact — *"X was granted
+    /// role R at T"* — never an enforcement claim.
+    RoomRoleGranted {
+        /// Stable authenticated peer identity. A missing value from a
+        /// forward-written or malformed record is a projection no-op: a role
+        /// grant never manufactures an identity.
+        #[serde(default)]
+        peer: Option<PeerId>,
+        /// Defaults to [`RoomRole::Viewer`] — least privilege — when the field
+        /// is absent or carries a role string this build cannot read.
+        #[serde(default)]
+        role: RoomRole,
+        #[serde(default)]
+        granted_at: i64,
+    },
+    /// Durable operator withdrawal of a peer's room role (Story 18.3a, AC4).
+    ///
+    /// See [`RoomEvent::RoomRoleGranted`] for the three-way revocation
+    /// boundary this variant exists to keep distinct. Revoking a peer that was
+    /// never granted a role is a fold no-op that does not synthesize identity.
+    RoomRoleRevoked {
+        #[serde(default)]
+        peer: Option<PeerId>,
+        #[serde(default)]
+        revoked_at: i64,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -627,13 +677,21 @@ impl OrchestrationRoom {
                     view.resolved_tickets.entry(artifact).or_insert(outcome);
                 }
             }
+            // Room-scoped operator facts with no node, wave, artifact or
+            // approval to attach to. Each has a dedicated adapter fold that
+            // keys on its own variant: consent →
+            // `adapters::policy::JournalConsentProjection`, room roles →
+            // `adapters::policy::JournalRoomRoleProjection`. Folding them
+            // here as well would put the same fact in two read models.
             RoomEvent::PeerDisclosure { .. }
             | RoomEvent::AutoResponseRetracted { .. }
             | RoomEvent::PeerDraftResolved { .. }
             | RoomEvent::PeerInteractionSurfaced { .. }
             | RoomEvent::PeerDigestFlushed { .. }
             | RoomEvent::ConsentGranted { .. }
-            | RoomEvent::ConsentRevoked { .. } => {}
+            | RoomEvent::ConsentRevoked { .. }
+            | RoomEvent::RoomRoleGranted { .. }
+            | RoomEvent::RoomRoleRevoked { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

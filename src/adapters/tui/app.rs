@@ -2320,6 +2320,20 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
+        DomainKey::Enter
+            if matches!(
+                state.focus,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Room,
+                    ..
+                }
+            ) =>
+        {
+            // The durable Room is a read-only replay. It has no Enter action;
+            // falling through would route this index into conversation history.
+            InputAction::Consumed
+        }
+
         DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { .. }) => {
             // Open selected conversation — event loop resolves ID from session_index
             InputAction::OpenSidebarConversation
@@ -2685,6 +2699,16 @@ fn submit_message(state: &mut TuiState) -> InputAction {
             // SubmitWithContext, resolves no command file, and silently never
             // runs: the exact 14.3c failure `/fanout` shipped with.
             if cmd_name == "team" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
+            // /room: the durable-room viewer and its role subcommands (Story
+            // 18.3a AC1/AC4). Same reason as `team` above — WITHOUT this entry
+            // `/room` falls through to SubmitWithContext, resolves no command
+            // file, and silently never runs.
+            if cmd_name == "room" {
                 return InputAction::ExecuteCommand {
                     name: cmd_name,
                     args,
@@ -5174,6 +5198,19 @@ mod tests {
             "render must NOT read the poisoned push counter"
         );
     }
+    #[test]
+    fn enter_is_inert_in_the_read_only_room_panel() {
+        let mut state = TuiState::new(160, 40);
+        state.focus = FocusState::Sidebar {
+            panel: crate::domain::models::visual::PanelType::Room,
+            selected: 0,
+        };
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
+            InputAction::Consumed
+        );
+    }
+
     #[test]
     fn transparency_panel_routes_special_keys_search_navigation_and_export() {
         use crate::domain::models::visual::PanelType;

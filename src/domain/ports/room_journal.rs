@@ -69,4 +69,18 @@ pub trait RoomJournalReader: Send + Sync {
     async fn load_entries(
         &self,
     ) -> Result<Vec<crate::domain::models::JournalEntry>, RoomJournalError>;
+
+    /// Highest durable sequence currently visible at the journal head.
+    ///
+    /// The default preserves compatibility for in-memory readers. Filesystem
+    /// adapters should override this with a tail read so a viewer can observe
+    /// head advancement without reparsing the whole journal.
+    async fn latest_seq(&self) -> Result<u64, RoomJournalError> {
+        Ok(self
+            .load_entries()
+            .await?
+            .last()
+            .map(|entry| entry.seq)
+            .unwrap_or(0))
+    }
 }
