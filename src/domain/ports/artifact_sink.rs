@@ -6,9 +6,14 @@
 //! hexagonal rule: `adapters/mcp` may NOT import `infrastructure/` (arch guard
 //! #1, `src/adapters/mcp/mod.rs`), so the first artifact an adapter ever
 //! produces rides a one-method port implemented at the composition root. The
-//! impl supplies `authority` + `host` (orchestrator-only fields the adapter
-//! cannot reach — see story Task 6 / C4) and journals `ArtifactCreated` +
+//! impl supplies `authority` + `host` + the operator's `AgentId` address
+//! (orchestrator-only fields the adapter cannot reach — see story Task 6 / C4,
+//! and Story 18.3a-b AC1 for the addressee) and journals `ArtifactCreated` +
 //! `TicketAssigned` durably-first, bus-second.
+//!
+//! ⛔ **This signature does not widen for the addressee.** Who must act on the
+//! ticket is an orchestrator fact, not an adapter one; adding a parameter here
+//! would hand the MCP adapter a say in it (ADR-11-3 rule 3).
 //!
 //! No dead methods (R-9): the single production caller is the MCP task driver's
 //! `Waiting` transition.

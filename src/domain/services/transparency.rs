@@ -396,6 +396,13 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             None,
             "unrecognised record — written by a newer build".to_owned(),
         ),
+        // ⛔ `TicketAssigned` / `TicketResolved` fall through here **by
+        // decision, not by omission** (Story 18.3a-b). The transparency log is
+        // the peer-interaction surface; a ticket is a local agent→human fact,
+        // and 17.5b, 18.2 and 18.3a all left it out. Adding a
+        // `TransparencyKind` is a six-touch-point change and would move both
+        // hard-pinned `== 7` fixtures in `tests/conformance_transparency.rs`.
+        // Precedent for omission: `AutoResponseRetracted` above.
         _ => return None,
     };
     Some(TransparencyRow {

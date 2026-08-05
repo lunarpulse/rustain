@@ -12,7 +12,7 @@
 //! field to those would additionally require a format-version bump this story
 //! does not take.
 
-use crate::domain::models::{RoomEditDecision, RoomEditKind, RoomRole};
+use crate::domain::models::{AgentId, RoomEditDecision, RoomEditKind, RoomRole};
 
 /// May `role` perform `edit` in the room?
 ///
@@ -26,6 +26,39 @@ pub fn room_edit_decision(role: RoomRole, edit: RoomEditKind) -> RoomEditDecisio
         (RoomRole::Owner, _) => RoomEditDecision::Allow,
         (RoomRole::Editor, RoomEditKind::DurableContent) => RoomEditDecision::Allow,
         _ => RoomEditDecision::Deny,
+    }
+}
+
+/// Which room role does `principal` hold locally?
+///
+/// Story 18.3a-b (AC2) — this replaces 18.3a's `LOCAL_OPERATOR_ROLE`
+/// placeholder. The answer is no longer a constant asserted about an
+/// unnamed actor; it is **derived from a named principal**. The local
+/// operator — the human at this keyboard, addressed by
+/// [`AgentId::local_operator`] — owns the workspace, the journal file and the
+/// process, so they are the room's [`RoomRole::Owner`] by construction.
+///
+/// Fail-closed for everyone else: any other principal gets
+/// [`RoomRole::default`] (`Viewer`), never a guess. A second addressable human
+/// is a Rule-3 deferred capability — nothing can construct one today (no
+/// transport until 18.4, no second local principal), and when one arrives it
+/// arrives with a journaled grant, not with this function.
+///
+/// ⛔ **Identity is equality, never a parse.** `AgentId` segment 0 is a route
+/// discriminator, not an identity (`ADR-18-3b-01` D1): three production path
+/// shapes exist, so a `segments().next() == "operator"` check would be right
+/// for one and silently wrong for two.
+///
+/// ⛔ This answers *who holds which room role*. Turning a role into a verdict
+/// stays [`room_edit_decision`]'s job, and neither may reach a
+/// `CapabilityToken`, an `AuthorityProvider` decision, or an approval
+/// fingerprint.
+#[must_use]
+pub fn local_room_role(principal: &AgentId) -> RoomRole {
+    if principal == &AgentId::local_operator() {
+        RoomRole::Owner
+    } else {
+        RoomRole::default()
     }
 }
 
@@ -56,5 +89,31 @@ mod tests {
         let second = room_edit_decision(RoomRole::Editor, RoomEditKind::DurableContent);
         assert_eq!(first, second);
         assert!(first.is_allowed());
+    }
+
+    /// Story 18.3a-b AC2 — the acting principal is named, and only the
+    /// reserved operator address answers `Owner`.
+    ///
+    /// Mutant this must turn RED: return `RoomRole::Owner` unconditionally
+    /// (i.e. reinstate 18.3a's placeholder constant behind a principal-shaped
+    /// signature) → every non-operator principal would become a room owner.
+    #[test]
+    fn only_the_reserved_operator_address_holds_owner_locally() {
+        assert_eq!(local_room_role(&AgentId::local_operator()), RoomRole::Owner);
+        for other in [
+            AgentId::root(),
+            AgentId::new(),
+            AgentId::from_peer_path("mcp/s-srv").expect("valid peer path"),
+        ] {
+            assert_eq!(
+                local_room_role(&other),
+                RoomRole::Viewer,
+                "{other} is not the local operator and must hold no room authority"
+            );
+            assert_eq!(
+                room_edit_decision(local_room_role(&other), RoomEditKind::RoleAssignment),
+                RoomEditDecision::Deny
+            );
+        }
     }
 }

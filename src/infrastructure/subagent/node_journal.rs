@@ -1120,15 +1120,24 @@ impl crate::domain::ports::RoomJournal for NodeRoomJournal {
 }
 
 /// 17.5b — `ArtifactSink` impl backed by the real `ArtifactStore` +
-/// `NodeJournal`. The composition root supplies the coordinator `authority`
-/// and `host` (orchestrator-only fields the MCP adapter cannot reach — story
-/// Task 6 / C4). Writes `ArtifactCreated` then `TicketAssigned`,
-/// durable-first / bus-second, mirroring `persist_room_event`.
+/// `NodeJournal`. The composition root supplies the coordinator `authority`,
+/// the `host` and — since 18.3a-b — the `operator` address: orchestrator-only
+/// fields the MCP adapter structurally cannot reach (story Task 6 / C4).
+/// Writes `ArtifactCreated` then `TicketAssigned`, durable-first / bus-second,
+/// mirroring `persist_room_event`.
+///
+/// ⛔ **The `ArtifactSink` trait signature does not change.** The addressee is
+/// a third field of exactly the kind `authority` and `host` already are, so no
+/// port widens (ADR-11-3 rule 3) and no dead method appears (R-9).
 pub struct JournalArtifactSink {
     store: std::sync::Arc<dyn crate::domain::ports::ArtifactStore>,
     room: std::sync::Arc<dyn crate::domain::ports::RoomJournal>,
     authority: crate::domain::models::CapabilityTokenId,
     host: crate::domain::models::HostBinding,
+    /// Durable address of the human this sink files blocking work to
+    /// (18.3a-b, AC1). A constructor parameter, never a setter
+    /// (`ADR-18-3-01` D4): the composition root owns the slot.
+    operator: crate::domain::models::AgentId,
 }
 
 impl JournalArtifactSink {
@@ -1137,12 +1146,14 @@ impl JournalArtifactSink {
         room: std::sync::Arc<dyn crate::domain::ports::RoomJournal>,
         authority: crate::domain::models::CapabilityTokenId,
         host: crate::domain::models::HostBinding,
+        operator: crate::domain::models::AgentId,
     ) -> Self {
         Self {
             store,
             room,
             authority,
             host,
+            operator,
         }
     }
 }
@@ -1155,7 +1166,9 @@ impl crate::domain::ports::ArtifactSink for JournalArtifactSink {
         node: &crate::domain::models::AgentId,
         body: serde_json::Value,
     ) -> Result<crate::domain::models::ArtifactId, crate::domain::ports::ArtifactSinkError> {
-        use crate::domain::models::{ArtifactKind, EvidenceArtifactDraft, RoomEvent};
+        use crate::domain::models::{
+            ArtifactKind, EvidenceArtifactDraft, RoomEvent, TicketAddressee,
+        };
         use crate::domain::ports::{ArtifactSinkError, RoomJournal};
         let bytes = serde_json::to_vec(&body)
             .map_err(|e| ArtifactSinkError::Write(format!("serialize body: {e}")))?;
@@ -1184,6 +1197,12 @@ impl crate::domain::ports::ArtifactSink for JournalArtifactSink {
             .record_event(RoomEvent::TicketAssigned {
                 node: node.clone(),
                 artifact: id.clone(),
+                // FR152: the ticket records **who must act**, and the variant
+                // carries the authority consequence — addressing a human is a
+                // durable attribution and grants nothing.
+                to: Some(TicketAddressee::Operator {
+                    id: self.operator.clone(),
+                }),
             })
             .await
             .map_err(|e| ArtifactSinkError::Write(e.to_string()))?;

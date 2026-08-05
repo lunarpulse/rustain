@@ -1331,6 +1331,7 @@ pub fn build_daemon_core(
                             room,
                             coordinator_authority.id,
                             artifact_host,
+                            crate::domain::models::AgentId::local_operator(),
                         ),
                     );
                     task_runtime.set_artifact_sink(sink);

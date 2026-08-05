@@ -2075,6 +2075,7 @@ pub async fn run() -> Result<()> {
                         sink_room,
                         root_authority.id,
                         artifact_host.clone(),
+                        crate::domain::models::AgentId::local_operator(),
                     ));
                 for runtime in &mcp_task_runtimes {
                     runtime.set_artifact_sink(sink.clone());

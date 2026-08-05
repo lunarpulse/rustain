@@ -1562,6 +1562,7 @@ mod tests {
                     "local",
                     format!("workspace:{}", dir.path().display()),
                 ),
+                AgentId::local_operator(),
             ),
         ));
         Fixture {

@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Agent identifier syntax failure.
+///
+/// `#[non_exhaustive]` per the project's additive-evolution discipline
+/// (`ADR-18-3-01`, NFR68): downstream crates may not match exhaustively, while
+/// in-crate matches stay exhaustive and keep surfacing every new variant at
+/// compile time.
+#[non_exhaustive]
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum AgentIdError {
     #[error("agent id must not be empty")]
@@ -12,6 +18,8 @@ pub enum AgentIdError {
     EmbeddedSeparator,
     #[error("agent id segment must not be reserved root sentinel")]
     ReservedRoot,
+    #[error("agent id must not equal reserved operator sentinel")]
+    ReservedOperator,
     #[error("peer agent id path must include peer id and at least one child segment")]
     PeerPathTooShort,
 }
@@ -37,6 +45,39 @@ impl AgentId {
     /// Sentinel for the root agent (used in PermissionChain recursion-guard comparisons).
     pub fn root() -> Self {
         Self(String::from("root"))
+    }
+
+    /// The durable address of the local human operator (Story 18.3a-b, AC2 —
+    /// FR152).
+    ///
+    /// A **reserved** single-segment sentinel: [`AgentId::validate_path`]
+    /// rejects the complete ID `"operator"`, this constructor bypasses
+    /// validation by direct construction, and [`Deserialize`] special-cases the
+    /// sentinel so the operator's own address survives a journal round-trip.
+    ///
+    /// Exact reservation makes the address **unforgeable by any agent-id
+    /// constructor** without invalidating legacy paths: [`AgentId::new`] cannot
+    /// collide, [`AgentId::from_peer_path`] always produces two or more
+    /// segments, and fallible single-ID constructors reject the complete
+    /// sentinel. A nested path such as `"peer/operator"` remains valid and is
+    /// not equal to this address.
+    ///
+    /// ⚠ **Unforgeable by constructor, NOT by file write.** Anything that can
+    /// append to the room journal can write a line naming this address; see
+    /// `DF-18-2-AUTHENTICATED-JOURNAL`. Do not read more into it than that.
+    ///
+    /// ⛔ **Identity is equality against this value, never a parse.** `AgentId`
+    /// segment 0 is a route discriminator, not an identity (`ADR-18-3b-01`
+    /// D1) — three production path shapes exist and an inspection of segment 0
+    /// is right for one of them and silently wrong for two.
+    ///
+    /// This is an **address**, not an authority tier. The operator's authority
+    /// root stays the in-process, non-serializable `OwnershipKind::Self_`, and
+    /// the operator is deliberately **not** registered in the `NodeTree`:
+    /// `Self_` nodes are excluded from the journal by design, so a node
+    /// registered that way would emit no `NodeRegistered` at all.
+    pub fn local_operator() -> Self {
+        Self(String::from("operator"))
     }
 
     /// Build an id from an already-domain-owned string.
@@ -73,21 +114,21 @@ impl AgentId {
 
     /// Build an id by joining `segs` with `'/'`.
     ///
-    /// Crate-private and panicking on malformed segments (non-empty, no embedded
-    /// `/`, none equal to the `"root"` sentinel). Public callers must validate
-    /// via [`AgentId::parse`] or [`AgentId::from_peer_path`].
+    /// Crate-private and panicking when the joined path is empty, contains an
+    /// empty or reserved `"root"` segment, or equals the reserved `"operator"`
+    /// sentinel. Public callers must validate via [`AgentId::parse`] or
+    /// [`AgentId::from_peer_path`].
     pub(crate) fn from_segments(segs: &[&str]) -> Self {
         let id = segs.join("/");
         Self::validate_path(&id, false).expect("AgentId segments must be syntactically valid");
         Self(id)
     }
 
-    /// Parse an arbitrary string into a validated `AgentId` (non-panicking).
-    ///
     /// This is the public, fallible constructor for untrusted input. It rejects
-    /// empty ids, empty segments, embedded separators, and the reserved `"root"`
-    /// sentinel. For trusted domain-owned strings, internal code uses the
-    /// crate-private `from_validated`; for the root sentinel use [`AgentId::root`].
+    /// empty ids, empty segments, embedded separators, the reserved `"root"`
+    /// segment, and the exact `"operator"` sentinel. For trusted domain-owned
+    /// strings, internal code uses the crate-private `from_validated`; for the
+    /// sentinels use [`AgentId::root`] / [`AgentId::local_operator`].
     pub fn parse(s: &str) -> Result<Self, AgentIdError> {
         Self::validate_path(s, false)?;
         Ok(Self(s.to_string()))
@@ -96,6 +137,9 @@ impl AgentId {
     fn validate_path(path: &str, peer_path: bool) -> Result<(), AgentIdError> {
         if path.is_empty() {
             return Err(AgentIdError::Empty);
+        }
+        if path == "operator" {
+            return Err(AgentIdError::ReservedOperator);
         }
         let mut count = 0usize;
         for segment in path.split('/') {
@@ -124,10 +168,11 @@ impl<'de> Deserialize<'de> for AgentId {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        // The "root" sentinel (only constructable via AgentId::root) must
-        // survive a serde round-trip; everything else runs full path validation
-        // so malformed ids cannot enter the domain over the wire.
-        if s != "root" {
+        // The reserved sentinels — "root" (only constructable via
+        // AgentId::root) and "operator" (only via AgentId::local_operator) —
+        // must survive a serde round-trip; everything else runs full path
+        // validation so malformed ids cannot enter the domain over the wire.
+        if s != "root" && s != "operator" {
             Self::validate_path(&s, false).map_err(serde::de::Error::custom)?;
         }
         Ok(Self(s))
@@ -266,5 +311,48 @@ mod tests {
         // Embedded leading/trailing separators and empty segments rejected.
         assert!(serde_json::from_str::<AgentId>("\"/leading\"").is_err());
         assert!(serde_json::from_str::<AgentId>("\"trailing/\"").is_err());
+    }
+
+    /// Story 18.3a-b AC2 — the exact operator sentinel is reserved while
+    /// previously-valid nested paths remain replayable.
+    ///
+    /// Mutants this must turn RED:
+    ///   1. Omit the exact-path rejection of `"operator"` →
+    ///      `AgentId::parse("operator")` succeeds and any agent can forge the
+    ///      operator's address.
+    ///   2. Omit the `Deserialize` special-case → the operator's own address
+    ///      fails to deserialize from a journal it just wrote.
+    #[test]
+    fn the_operator_sentinel_is_reserved_unforgeable_and_survives_serde() {
+        let operator = AgentId::local_operator();
+        assert_eq!(operator.as_str(), "operator");
+        assert!(operator.is_local());
+
+        // Mutant 1: no other constructor may produce it.
+        assert!(matches!(
+            AgentId::parse("operator"),
+            Err(AgentIdError::ReservedOperator)
+        ));
+        assert!(matches!(
+            AgentId::try_from(String::from("operator")),
+            Err(AgentIdError::ReservedOperator)
+        ));
+        // Nested segments remain valid: they were accepted before this sentinel
+        // was introduced and can already exist in durable journals.
+        let nested = AgentId::from_peer_path("peer/operator").expect("legacy nested path");
+        assert_ne!(nested, operator);
+        let nested_json = serde_json::to_string(&nested).expect("serialize nested path");
+        let nested_back: AgentId =
+            serde_json::from_str(&nested_json).expect("deserialize nested path");
+        assert_eq!(nested_back, nested);
+        // Positive control: exact reservation is not a prefix match.
+        assert!(AgentId::parse("operators").is_ok());
+        assert!(AgentId::parse("peer/operator-2").is_ok());
+
+        // Mutant 2: the sentinel must survive its own journal round-trip.
+        let json = serde_json::to_string(&operator).expect("serialize");
+        assert_eq!(json, r#""operator""#);
+        let back: AgentId = serde_json::from_str(&json).expect("deserialize sentinel");
+        assert_eq!(back, operator);
     }
 }

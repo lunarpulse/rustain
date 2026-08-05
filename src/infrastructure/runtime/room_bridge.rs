@@ -21,10 +21,10 @@
 use crate::adapters::tui::handlers::room_command::{self as handler, RoomCommandArgs};
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::{
-    A2aPeerSpec, PeerId, RoomEditDecision, RoomEditKind, RoomEvent, RoomRole,
+    A2aPeerSpec, AgentId, PeerId, RoomEditDecision, RoomEditKind, RoomEvent, RoomRole,
 };
 use crate::domain::ports::{RoomJournalReader, RoomRoleProjectionQuery, RoomRoleState};
-use crate::domain::services::room_role::room_edit_decision;
+use crate::domain::services::room_role::{local_room_role, room_edit_decision};
 use crate::infrastructure::runtime::app_state::AppState;
 
 /// Message shown when the workspace has no orchestration journal at all.
@@ -36,20 +36,27 @@ const NO_JOURNAL: &str =
 /// anchored viewport.
 pub(crate) const ROOM_HEAD_POLL_INTERVAL_MS: u64 = 1_000;
 
-/// The acting principal's room role in cut 1.
+/// The principal acting on `/room role`.
 ///
-/// **A documented placeholder, journaled to nothing.** There is no local
-/// operator principal in the tree — `PeerId` has no constructor that names the
-/// local self, and operator identity belongs to story **18-3a-b**, which is
-/// this placeholder's named trigger-story. Until then the operator at this
-/// keyboard is the room's owner by construction: they own the workspace, the
-/// journal file, and the process.
+/// **Story 18.3a-b (AC2) retired 18.3a's placeholder role constant here** —
+/// its name is deliberately not repeated, because a structural ratchet in
+/// `tests/conformance_18_3a_b_addressing.rs` asserts this file no longer
+/// mentions it at all. 18.3a asserted `RoomRole::Owner` about an actor it
+/// could not name, because no local operator identity existed in the tree.
+/// One now does:
+/// [`AgentId::local_operator`] is a reserved, unforgeable address, and the
+/// role is **derived** from it by
+/// [`crate::domain::services::room_role::local_room_role`] rather than
+/// asserted. The answer is still `Owner` — the human at this keyboard owns the
+/// workspace, the journal file and the process — but it is now an answer about
+/// a named principal, and a different principal reaching this path gets
+/// `Viewer` and is refused.
 ///
-/// It is deliberately asymmetric with the *target*, which is a real configured
-/// `A2aPeerSpec`. Recorded in `ADR-18-3a-01` as deferred capability (Rule 3),
-/// not a defect: no invariant fails, because no other principal can reach this
-/// code path in cut 1.
-const LOCAL_OPERATOR_ROLE: RoomRole = RoomRole::Owner;
+/// [`room_edit_decision`] remains the only thing that turns a role into a
+/// verdict.
+fn acting_principal() -> AgentId {
+    AgentId::local_operator()
+}
 
 /// One-call shell for the `/room` dispatch arm.
 pub(crate) async fn room_command(
@@ -352,7 +359,7 @@ async fn change_room_role(
         &app_state.compose_snapshot.workspace_path,
         &app_state.compose_snapshot.a2a_peers,
         &app_state.room_roles,
-        LOCAL_OPERATOR_ROLE,
+        &acting_principal(),
         target,
         role,
         chrono::Utc::now().timestamp_millis(),
@@ -369,9 +376,15 @@ async fn change_room_role(
 /// Record one room-role change durably, and reflect it in the live projection.
 ///
 /// The gated edit, and the **first and only production caller** of
-/// [`room_edit_decision`]. `role: Some(_)` grants, `None` revokes. Returns the
-/// operator message plus the event that was actually appended — `None` when
-/// the act was a no-op, so the caller emits nothing to the bus.
+/// [`room_edit_decision`] and of
+/// [`crate::domain::services::room_role::local_room_role`]. `role: Some(_)`
+/// grants, `None` revokes. Returns the operator message plus the event that was
+/// actually appended — `None` when the act was a no-op, so the caller emits
+/// nothing to the bus.
+///
+/// `acting` is a **principal**, not a role: the role is derived here so the
+/// keystone that enters this seam exercises the derivation on the production
+/// path (18.3a-b AC2).
 ///
 /// Takes its collaborators explicitly rather than reaching into `AppState`,
 /// mirroring `transparency_bridge::persist_sender_consent`: it is the seam the
@@ -381,13 +394,17 @@ async fn persist_room_role(
     workspace: &std::path::Path,
     peers: &[A2aPeerSpec],
     projection: &crate::adapters::policy::JournalRoomRoleProjection,
-    acting_role: RoomRole,
+    acting: &AgentId,
     target: &str,
     role: Option<RoomRole>,
     now: i64,
 ) -> Result<(String, Option<RoomEvent>), String> {
     // The gate. Effect-free decision core, one call, before anything durable.
-    if room_edit_decision(acting_role, RoomEditKind::RoleAssignment) != RoomEditDecision::Allow {
+    // Two cores, one each: `local_room_role` answers *which role*,
+    // `room_edit_decision` answers *may it*.
+    if room_edit_decision(local_room_role(acting), RoomEditKind::RoleAssignment)
+        != RoomEditDecision::Allow
+    {
         return Err(
             "Room roles may only be changed by a room owner. This is a room-edit permission \
              and grants no execution authority."
@@ -621,7 +638,7 @@ mod tests {
             workspace.path(),
             &peers,
             &projection,
-            RoomRole::Owner,
+            &acting_principal(),
             &target,
             Some(RoomRole::Editor),
             10,
@@ -639,7 +656,7 @@ mod tests {
             workspace.path(),
             &peers,
             &projection,
-            RoomRole::Owner,
+            &acting_principal(),
             &target,
             Some(RoomRole::Editor),
             11,
@@ -654,7 +671,7 @@ mod tests {
             workspace.path(),
             &peers,
             &projection,
-            RoomRole::Owner,
+            &acting_principal(),
             &target,
             None,
             12,
@@ -675,7 +692,7 @@ mod tests {
             workspace.path(),
             &peers,
             &projection,
-            RoomRole::Owner,
+            &acting_principal(),
             &target,
             None,
             13,
@@ -693,7 +710,7 @@ mod tests {
             workspace.path(),
             &peers,
             &projection,
-            RoomRole::Owner,
+            &acting_principal(),
             &target,
             Some(RoomRole::Owner),
             14,
@@ -762,7 +779,7 @@ mod tests {
             workspace.path(),
             &peers,
             &projection,
-            RoomRole::Owner,
+            &acting_principal(),
             "peer-regression",
             Some(RoomRole::Owner),
             10,
@@ -789,20 +806,31 @@ mod tests {
         );
     }
 
-    /// AC3's gate, reached through the production caller: a non-owner acting
-    /// principal is refused, and **nothing durable is written**.
+    /// AC3's gate, reached through the production caller: a principal that is
+    /// **not** the local operator is refused, and **nothing durable is
+    /// written**.
+    ///
+    /// Story 18.3a-b AC2 rewrote this from a loop over non-owner *roles* to a
+    /// loop over non-operator *principals* — the placeholder it used to assert
+    /// about is gone, and the derivation now runs on this exact production
+    /// path. Mutant: make `local_room_role` return `Owner` unconditionally →
+    /// every principal below is admitted and this test fires.
     #[tokio::test]
-    async fn a_non_owner_cannot_assign_roles_and_creates_no_journal() {
+    async fn a_non_operator_principal_cannot_assign_roles_and_creates_no_journal() {
         let workspace = tempfile::TempDir::new().unwrap();
         let peer = crate::domain::models::PeerId::from_public_key(&[22u8; 32]).unwrap();
         let projection = projection_for(workspace.path());
 
-        for acting in [RoomRole::Editor, RoomRole::Viewer, RoomRole::Unknown] {
+        for acting in [
+            AgentId::root(),
+            AgentId::new(),
+            AgentId::from_peer_path("mcp/s-srv").expect("valid peer path"),
+        ] {
             let error = persist_room_role(
                 workspace.path(),
                 &[],
                 &projection,
-                acting,
+                &acting,
                 peer.as_str(),
                 Some(RoomRole::Owner),
                 10,
@@ -832,7 +860,7 @@ mod tests {
             workspace.path(),
             &[],
             &projection,
-            RoomRole::Owner,
+            &acting_principal(),
             peer.as_str(),
             Some(RoomRole::Editor),
             10,
@@ -881,7 +909,7 @@ mod tests {
             workspace.path(),
             &peers,
             &projection,
-            RoomRole::Owner,
+            &acting_principal(),
             peer.as_str(),
             Some(RoomRole::Editor),
             10,

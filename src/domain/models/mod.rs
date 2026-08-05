@@ -77,6 +77,7 @@ pub mod tab;
 pub mod taint;
 pub mod task_handle;
 pub mod team_policy;
+pub mod ticket_addressee;
 pub mod tool_call;
 pub mod tool_descriptor;
 pub mod tool_policy;
@@ -227,6 +228,7 @@ pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use subagent_error::{SpawnLimitKind, SubagentError};
 pub use subagent_view::{AgentRowView, OwnershipKind, WireOwnershipKind};
 pub use task_handle::{Op, TaskHandle};
+pub use ticket_addressee::TicketAddressee;
 pub use tool_policy::ToolPolicy;
 pub use trace_context::TraceContext;
 #[allow(unused_imports)]

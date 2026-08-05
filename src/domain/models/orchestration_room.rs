@@ -18,6 +18,7 @@ use crate::domain::models::node_state::NodeState;
 use crate::domain::models::peer_identity::PeerId;
 use crate::domain::models::room_role::RoomRole;
 use crate::domain::models::team_policy::{InteractionPolicySnapshot, NotificationUrgency};
+use crate::domain::models::ticket_addressee::TicketAddressee;
 use crate::domain::models::tool_call::ApprovalSource;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -276,14 +277,39 @@ pub enum RoomEvent {
     },
     /// 17.5b — an MCP task filed a blocking input-request ticket to the
     /// operator (FR152's shape, adopted early per R-14). Carries the artifact
-    /// handle produced for the elicitation. Ships WITHOUT a `to:` field (there
-    /// is exactly one operator today; 18.3a adds `to: AgentPath`).
+    /// handle produced for the elicitation. Shipped WITHOUT a `to:` field;
+    /// **18.3a-b adds `to: Option<TicketAddressee>`** — an `AgentId`-keyed
+    /// variant, not an `AgentPath` (ruling A1: `AgentId` is already the
+    /// path-capable addressing type, NFR68 hook #1, and this story mints no
+    /// second one).
     ///
-    /// **Replay contract (NFR70(d)):** when 18.3a adds `to:`, that field MUST
-    /// be `#[serde(default)]` so a ticket journaled by 17.5b replays unchanged.
+    /// **Replay contract (NFR70(d)):** a ticket journaled by 17.5b — no `to`
+    /// key at all — replays unchanged, and an unaddressed ticket written by
+    /// this build re-serializes to the byte-identical 17.5b shape.
+    ///
+    /// ⚠ **Which attribute does which, measured not assumed (18.3a-b).**
+    /// `skip_serializing_if = "Option::is_none"` is the **load-bearing** half:
+    /// drop it and an unaddressed ticket emits `"to":null`, which
+    /// `ticket_assigned_serializes_without_a_to_field` catches. `#[serde(default)]`
+    /// is **defence in depth, not the mechanism** — serde already resolves a
+    /// missing `Option<T>` field to `None` via its `missing_field` helper, so
+    /// dropping it changes nothing *today*. It is kept because it states the
+    /// intent and because it becomes load-bearing the moment `to` stops being
+    /// an `Option`. The replay guarantee itself is pinned behaviourally, on a
+    /// 17.5b byte literal, in `tests/conformance_18_3a_b_addressing.rs`.
+    ///
+    /// ⛔ **No `assigned_at`.** Ordering is [`JournalEntry::seq`] and time is
+    /// [`JournalEntry::recorded_at_ms`]; the journal envelope owns wall-clock
+    /// at **one stamp site** and emitters never pass it in. A per-event
+    /// timestamp would be a second stamp site for one fact.
+    ///
+    /// [`JournalEntry::seq`]: crate::domain::models::JournalEntry::seq
+    /// [`JournalEntry::recorded_at_ms`]: crate::domain::models::JournalEntry::recorded_at_ms
     TicketAssigned {
         node: AgentId,
         artifact: ArtifactId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<TicketAddressee>,
     },
     /// Resolve a previously assigned ticket. The artifact id is the stable
     /// idempotency key: duplicate replay must neither reopen the ticket nor
@@ -659,7 +685,17 @@ impl OrchestrationRoom {
                     view.mcp_task = Some((server, task));
                 }
             }
-            RoomEvent::TicketAssigned { node, artifact } => {
+            // `to` is bound and ignored: the addressee is **durable-only** in
+            // this cut. `NodeView.open_tickets` stays `Vec<ArtifactId>` — the
+            // only consumer that wanted an addressee in the read model was a
+            // cross-node inbox sort, and that surface deferred whole
+            // (`DF-18-3a-b-INBOX-SURFACE`). Widening it here is a mutant the
+            // byte-identical-fold assertion catches.
+            RoomEvent::TicketAssigned {
+                node,
+                artifact,
+                to: _,
+            } => {
                 if let Some(view) = self.nodes.get_mut(&node)
                     && !view.open_tickets.contains(&artifact)
                     && !view.resolved_tickets.contains_key(&artifact)
@@ -739,6 +775,9 @@ mod tests {
         let assigned = RoomEvent::TicketAssigned {
             node: node.clone(),
             artifact: artifact.clone(),
+            to: Some(TicketAddressee::Operator {
+                id: AgentId::local_operator(),
+            }),
         };
         let events = vec![
             RoomEvent::NodeRegistered {
@@ -761,6 +800,9 @@ mod tests {
         let assigned = RoomEvent::TicketAssigned {
             node: node.clone(),
             artifact: artifact.clone(),
+            to: Some(TicketAddressee::Operator {
+                id: AgentId::local_operator(),
+            }),
         };
         let resolved = RoomEvent::TicketResolved {
             node: node.clone(),
@@ -794,8 +836,19 @@ mod tests {
     }
 
     /// NFR70(d): a `TicketAssigned` journaled by 17.5b (no `to:` field) must
-    /// round-trip through serde unchanged. When 18.3a adds `to: AgentPath`
-    /// `#[serde(default)]`, this byte-identical event must still deserialize.
+    /// round-trip through serde unchanged. 18.3a-b added
+    /// `to: Option<TicketAddressee>` as `#[serde(default,
+    /// skip_serializing_if = "Option::is_none")]`, so an unaddressed ticket
+    /// still serializes to the byte-identical 17.5b shape and this gate stayed
+    /// green — its assertions were never amended.
+    ///
+    /// **This test is AC1's primary mutant-killer.** Drop `skip_serializing_if`
+    /// and the `!json.contains("\"to\"")` assertion fires on `"to":null` —
+    /// observed RED. (Dropping `#[serde(default)]` alone is **not** caught, and
+    /// nothing else catches it either: serde resolves a missing `Option<T>`
+    /// field to `None` regardless. See the variant doc.)
+    /// ⛔ Do not delete or weaken it. If you find yourself rewriting the
+    /// assertions, you have chosen the wrong serde shape.
     #[test]
     fn ticket_assigned_serializes_without_a_to_field() {
         let node = AgentId::from_validated("mcp/s-srv/t-task");
@@ -803,6 +856,7 @@ mod tests {
         let event = RoomEvent::TicketAssigned {
             node: node.clone(),
             artifact: artifact.clone(),
+            to: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         // The 17.5b wire shape carries `node` + `artifact` + the `event` tag,

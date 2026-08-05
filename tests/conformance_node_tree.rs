@@ -577,10 +577,19 @@ fn test_import_site_count_pinned() {
     // corrected in 18-3b rather than relabelled as deferred work (Rule 3: a
     // reachable failure is a defect). Story 18.3b itself adds ZERO NodeTree sites —
     // verified by diffing the file set against a stashed baseline.
+    // 26 -> 27 (Story 18.3a-b): ONE new textual site, DOC-COMMENT ONLY —
+    // `domain/models/agent_id.rs` names `NodeTree` in `AgentId::local_operator`'s
+    // doc to record ruling A3: the operator gets a durable *address* and is
+    // deliberately NOT registered as a node, because `OwnershipKind::Self_`
+    // nodes are journal-excluded at five sites, so a `Self_`-registered operator
+    // would emit no `NodeRegistered` and a ticket would address a node the room
+    // has never seen. That sentence is the reason a future author does not
+    // re-derive the blocker, so it stays and the pin moves. The domain model
+    // holds no `NodeTree`, imports none, and could not — it is `infrastructure`.
     //
     // Not covered by `ratchet-signoff-guard.yml`, which gates only the seven named
     // constants in `tests/conformance.rs`.
-    const EXPECTED: usize = 26;
+    const EXPECTED: usize = 27;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

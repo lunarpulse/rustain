@@ -7712,7 +7712,14 @@ mod tests {
                         "journal McpTaskBound node={n} server={server:?} task={task:?}"
                     ));
                 }
-                RoomEvent::TicketAssigned { node, artifact } => {
+                // 18.3a-b: `to` is bound and ignored so the deterministic
+                // transcript line stays byte-identical. Rendering it here would
+                // move every golden-trace assertion in this file.
+                RoomEvent::TicketAssigned {
+                    node,
+                    artifact,
+                    to: _,
+                } => {
                     let n = it.sym(node.as_str());
                     lines.push(format!(
                         "journal TicketAssigned node={n} artifact={artifact}"

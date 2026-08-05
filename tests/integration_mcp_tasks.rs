@@ -84,6 +84,7 @@ async fn task_fixture(server_id: &str) -> TaskFixture {
         room,
         coordinator_authority.id,
         artifact_host,
+        AgentId::local_operator(),
     ));
     runtime.set_artifact_sink(sink);
 
@@ -337,6 +338,29 @@ async fn input_required_drives_a_durable_waiting_node_with_a_ticket() {
         body.get("key").and_then(serde_json::Value::as_str),
         Some("confirm"),
         "the durable ticket must preserve the inputResponses correlation key"
+    );
+
+    // Story 18.3a-b (AC1) — reached through the real production trigger (the
+    // MCP task driver's `Waiting` transition), the journaled ticket records
+    // WHO MUST ACT. Read off the durable line, not off the value passed in.
+    let journaled = fx.journal.load().await.expect("read the durable journal");
+    let addressee = journaled
+        .iter()
+        .find_map(|entry| match &entry.record {
+            rustain::domain::models::JournalRecord::Room(RoomEvent::TicketAssigned {
+                artifact: journaled_artifact,
+                to,
+                ..
+            }) if journaled_artifact == artifact => Some(to.clone()),
+            _ => None,
+        })
+        .expect("the Waiting transition journals a TicketAssigned for this artifact");
+    assert_eq!(
+        addressee,
+        Some(rustain::domain::models::TicketAddressee::Operator {
+            id: rustain::domain::models::AgentId::local_operator()
+        }),
+        "an elicitation filed by a real MCP task must be durably addressed to the operator"
     );
 
     fx.client.disconnect().await.expect("disconnect");

@@ -77,6 +77,16 @@ fn room_role_defaults_and_absorbs_unknown_wire_values_without_widening() {
 /// exhaustively prove "a room role never widens execution authority", so a
 /// negative source ratchet does it: the capability/authority seams must not
 /// mention `RoomRole` at all.
+///
+/// **Extended by Story 18.3a-b (AC3 ratchet #2)** with the addressing
+/// vocabulary. The same argument applies verbatim: a ticket addressee is a
+/// durable attribution and a room role is a room-edit permission; neither may
+/// contribute to a `CapabilityToken`, an `AuthorityProvider` decision, or an
+/// approval fingerprint. Mutant: reference `TicketAddressee` from
+/// `capability_token.rs` → this fires.
+///
+/// ⚑ Extend this needle list rather than adding a second test — one ratchet,
+/// one place to look.
 #[test]
 fn room_role_never_reaches_the_capability_or_authority_seams() {
     for relative in [
@@ -85,12 +95,15 @@ fn room_role_never_reaches_the_capability_or_authority_seams() {
     ] {
         let path = format!("{}{relative}", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        assert!(
-            !source.contains("RoomRole"),
-            "{relative} references RoomRole — a room role must never contribute to a \
-             CapabilityToken, an AuthorityProvider decision, or an approval fingerprint \
-             (epics.md contracted scope: roles govern room edits only)"
-        );
+        for needle in ["RoomRole", "TicketAddressee", "local_operator"] {
+            assert!(
+                !source.contains(needle),
+                "{relative} references {needle} — a room role and a ticket addressee must never \
+                 contribute to a CapabilityToken, an AuthorityProvider decision, or an approval \
+                 fingerprint (epics.md contracted scope: roles govern room edits only; FR152: \
+                 addressing a human is a zero-authority attribution)"
+            );
+        }
     }
 }
 
