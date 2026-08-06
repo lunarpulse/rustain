@@ -2311,6 +2311,10 @@ pub async fn run(
                                         transparency_bridge::team_command(&mut state, &conversation.id, cmd_arg, &app_state).await;
                                     } else if cmd_name == "room" {
                                         crate::infrastructure::runtime::room_bridge::room_command(&mut state, &conversation.id, cmd_arg, &app_state).await;
+                                    } else if cmd_name == "artifacts" {
+                                        crate::infrastructure::runtime::artifact_bridge::artifacts_command(&mut state, &conversation.id, cmd_arg, &app_state, security.current_mode()).await;
+                                    } else if cmd_name == "artifact" {
+                                        crate::infrastructure::runtime::artifact_bridge::artifact_command(&mut state, &conversation.id, cmd_arg, &app_state, security.current_mode()).await;
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
                                         match cmd_arg.map(str::trim).filter(|s: &&str| !s.is_empty()) {
@@ -3798,6 +3802,12 @@ pub async fn run(
                                             transparency_bridge::open_panel(&app_state, &mut state).await;
                                         } else if panel_type == PanelType::Room {
                                             crate::infrastructure::runtime::room_bridge::open_panel(&app_state, &mut state).await;
+                                        } else if panel_type == PanelType::Artifacts {
+                                            // Without this arm `Ctrl+X, E` makes the panel
+                                            // visible with `sidebar_entry_count` untouched —
+                                            // a blank pane, and it COMPILES CLEAN because
+                                            // this is an `if / else if` chain, not a match.
+                                            crate::infrastructure::runtime::artifact_bridge::open_panel(&app_state, &mut state, security.current_mode()).await;
                                         }
                                         state.focus = FocusState::Sidebar {
                                             panel: panel_type,
@@ -9146,6 +9156,12 @@ fn render(
                                 state.sidebar_selected, &state.focus, theme,
                             );
                         }
+                        Some(crate::domain::models::visual::PanelType::Artifacts) => {
+                            crate::adapters::tui::widgets::artifacts_panel::render(
+                                sidebar_area, frame.buffer_mut(), &mut state.artifacts_panel,
+                                state.sidebar_selected, &state.focus, theme,
+                            );
+                        }
                     }
                 }
 
@@ -9222,6 +9238,18 @@ fn render(
                         Some(crate::domain::models::visual::PanelType::Room) => {
                             crate::adapters::tui::widgets::room_panel::render(
                                 panel_area, frame.buffer_mut(), &mut state.room_panel,
+                                state.sidebar_selected, &state.focus, theme,
+                            );
+                        }
+                        // Hand-written, NOT compiler-surfaced, for the same
+                        // reason as `Room` above: a missing `Artifacts` arm
+                        // compiles clean, renders nothing in Dashboard density,
+                        // and then falls through the `_` arm's `Agents`
+                        // re-check so the WRONG panel may paint (Story 18.3a-c
+                        // AC3, headline mutant).
+                        Some(crate::domain::models::visual::PanelType::Artifacts) => {
+                            crate::adapters::tui::widgets::artifacts_panel::render(
+                                panel_area, frame.buffer_mut(), &mut state.artifacts_panel,
                                 state.sidebar_selected, &state.focus, theme,
                             );
                         }

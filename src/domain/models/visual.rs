@@ -124,6 +124,16 @@ pub enum PanelType {
     /// folded from the one journal via `OrchestrationRoom::project_for_host`.
     /// Read-only and honestly stale; it is a replay, never a live object.
     Room,
+    /// Story 18.3a-c (AC3) — `Ctrl+X, E` (`e` for **E**vidence, FR149's own
+    /// term; the type is `EvidenceArtifact`). The durable artifact list with
+    /// one-level `depends_on` lineage and, for patches, the apply *decision*
+    /// that governs each one.
+    ///
+    /// Same reasoning as [`Self::Room`] for being a `PanelType`: the sidebar
+    /// render dispatch matches it exhaustively, so a missed site fails to
+    /// compile. ⚠ The **dashboard** dispatch has a `_` arm and does not — that
+    /// site is hand-written and pinned by a structural ratchet.
+    Artifacts,
 }
 
 /// Target of a delete confirmation dialog.

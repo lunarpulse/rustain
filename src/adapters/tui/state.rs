@@ -1679,6 +1679,278 @@ pub enum RoomZeroState {
     AllTerminal,
 }
 
+/// The four distinguishable zero-states of the `/artifacts` surface.
+///
+/// One more than the Room panel's three, and the extra one is the point: a
+/// room can hold artifacts and still have nothing left to review, which reads
+/// identically to "no artifacts" on a blank pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactsZeroState {
+    /// No orchestration journal is composed in this session.
+    NotAttached,
+    /// The journal is readable and holds no artifacts yet.
+    NoArtifacts,
+    /// Artifacts exist, but none of them is a patch.
+    NoPatches,
+    /// Every patch in the room has a recorded verdict.
+    AllReviewed,
+}
+
+/// State for the durable artifact list (`Ctrl+X, E` / `/artifacts`).
+///
+/// Story 18.3a-c (AC3). Deliberately shaped like [`RoomPanelState`]: one
+/// host-honest fold, an "as of" stamp, per-panel identity anchors, and no head
+/// poll. The `/room` head-poll chrome is **not** copied — it is fed by a 1 Hz
+/// tick this surface does not have, and copying the string without the wiring
+/// ships an unreachable line (`DF-18-3a-c-ARTIFACT-HEAD-POLL`).
+///
+/// ⚠ [`Default`] is hand-written, not derived: `PermissionMode` has no
+/// `Default` and must not acquire one here — a security mode's default is a
+/// decision, not a convenience. The unread panel fails closed to
+/// `PermissionMode::Plan`, whose disposition is `RefusedPlanMode` for every
+/// patch, so a panel that has never been folded can never claim a patch
+/// applies.
+pub struct ArtifactsPanelState {
+    /// The exact host-honest fold displayed by this panel.
+    pub room: Option<crate::domain::models::OrchestrationRoom>,
+    /// Host id the fold was derived against, rendered as "here:".
+    pub host_id: String,
+    /// Highest journal `seq` represented by `room`.
+    pub folded_seq: u64,
+    /// Unrecognized `RoomEvent` tags in the journal — records whose *tag* this
+    /// build cannot read, distinct from a recognized record carrying a field
+    /// *value* it cannot read (which renders in its own row).
+    pub unknown_records: usize,
+    /// Wall-clock millis of the last read, rendered as "as of …".
+    pub read_at_ms: Option<i64>,
+    /// A journal read that failed. Shown instead of an empty list, which would
+    /// read as "nothing happened".
+    pub error: Option<String>,
+    /// `true` when this session composed no orchestration journal at all.
+    pub not_attached: bool,
+    /// The merge-back policy the apply path uses, carried so the row's
+    /// `(policy)` clause and the gate cannot disagree.
+    pub policy: crate::domain::services::patch_review::MergeBackPolicy,
+    /// The permission mode the fold was rendered under. Read from the same
+    /// `SecurityPort` the orchestrator's apply path consults.
+    pub permission_mode: crate::domain::models::PermissionMode,
+    /// First visible index in the current view.
+    pub scroll_offset: usize,
+    /// Rows the renderer can display; refreshed on every draw.
+    pub viewport_rows: usize,
+    /// Top and selected artifact from the last painted viewport. Per-panel
+    /// identities, unlike the shared numeric sidebar selection.
+    anchor_artifact: Option<crate::domain::models::ArtifactId>,
+    selected_artifact: Option<crate::domain::models::ArtifactId>,
+}
+
+impl Default for ArtifactsPanelState {
+    fn default() -> Self {
+        Self {
+            room: None,
+            host_id: String::new(),
+            folded_seq: 0,
+            unknown_records: 0,
+            read_at_ms: None,
+            error: None,
+            not_attached: false,
+            policy: crate::domain::services::patch_review::MergeBackPolicy::default(),
+            permission_mode: crate::domain::models::PermissionMode::Plan,
+            scroll_offset: 0,
+            viewport_rows: 0,
+            anchor_artifact: None,
+            selected_artifact: None,
+        }
+    }
+}
+
+impl ArtifactsPanelState {
+    /// Every artifact in the fold, in the projection's own deterministic
+    /// `ArtifactId`-lexicographic order. The fold preserves no other order, and
+    /// re-sorting by recency here would be a second read model.
+    #[must_use]
+    pub fn artifacts(&self) -> Vec<&crate::domain::models::ArtifactRef> {
+        self.room
+            .as_ref()
+            .map(|room| room.artifacts().values().collect())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn visible_len(&self) -> usize {
+        self.room.as_ref().map_or(0, |room| room.artifacts().len())
+    }
+
+    /// The id prefix of the artifact at `index`, for the `Enter` drill-down.
+    ///
+    /// Returns the same [`crate::adapters::tui::widgets::artifacts_panel::ID_PREFIX_LEN`]
+    /// prefix the row renders, so the key path and the typed path resolve
+    /// through the identical `resolve_artifact` rule — including its
+    /// ambiguous-prefix refusal.
+    #[must_use]
+    pub fn selected_id_prefix(&self, index: usize) -> Option<String> {
+        self.artifacts()
+            .get(index)
+            .map(|artifact| crate::adapters::tui::widgets::artifacts_panel::id_prefix(&artifact.id))
+    }
+
+    /// Which of the four distinguishable zero-states applies, if any.
+    #[must_use]
+    pub fn zero_state(&self) -> Option<ArtifactsZeroState> {
+        if self.not_attached {
+            return Some(ArtifactsZeroState::NotAttached);
+        }
+        let room = self.room.as_ref()?;
+        if room.artifacts().is_empty() {
+            return Some(ArtifactsZeroState::NoArtifacts);
+        }
+        let patches: Vec<_> = room
+            .artifacts()
+            .values()
+            .filter(|artifact| artifact.kind == crate::domain::models::ArtifactKind::Patch)
+            .collect();
+        if patches.is_empty() {
+            return Some(ArtifactsZeroState::NoPatches);
+        }
+        patches
+            .iter()
+            .all(|artifact| {
+                matches!(
+                    artifact.review,
+                    Some(crate::domain::models::ReviewStatus::Reviewed { .. })
+                )
+            })
+            .then_some(ArtifactsZeroState::AllReviewed)
+    }
+
+    /// Rendered lines one artifact occupies: its row plus one lineage line per
+    /// `depends_on` edge. The viewport is measured in **lines, not artifacts** —
+    /// counting artifacts lets a lineage-bearing selection sit below the
+    /// clipped area while `Enter` still acts on it.
+    fn block_lines(&self, index: usize) -> usize {
+        self.artifacts()
+            .get(index)
+            .map_or(1, |artifact| 1 + artifact.depends_on.len())
+    }
+
+    /// Smallest scroll offset whose window fully contains `selected`'s block.
+    fn first_fitting_offset(&self, selected: usize) -> usize {
+        let viewport = self.viewport_rows.max(1);
+        let mut used = 0usize;
+        let mut start = selected;
+        loop {
+            let lines = self.block_lines(start);
+            if used + lines > viewport {
+                // `start` does not fit whole; begin after it — unless it IS the
+                // selection, whose block is taller than the viewport and can
+                // only clip its top.
+                return if start == selected {
+                    selected
+                } else {
+                    start + 1
+                };
+            }
+            used += lines;
+            if start == 0 {
+                return 0;
+            }
+            start -= 1;
+        }
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        let len = self.visible_len();
+        if len == 0 {
+            return 0;
+        }
+        // The bottom-most offset with no dead space: the smallest offset whose
+        // blocks still fill (or overflow) the viewport, in lines.
+        self.first_fitting_offset(len - 1).min(len - 1)
+    }
+
+    /// Clamp the shared sidebar selection into the rendered viewport.
+    pub fn synchronize_selection(&mut self, selected: &mut usize) {
+        let len = self.visible_len();
+        if len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = (*selected).min(len - 1);
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+        if *selected < self.scroll_offset {
+            self.scroll_offset = *selected;
+        } else {
+            // Line-aware: the selection's whole block (row + lineage lines)
+            // must fit inside the viewport, or navigation moves onto an
+            // artifact the operator cannot see.
+            let fitting = self.first_fitting_offset(*selected);
+            if self.scroll_offset < fitting {
+                self.scroll_offset = fitting;
+            }
+        }
+    }
+
+    /// Record the renderer's actual row capacity and reconcile the viewport.
+    pub fn set_viewport_rows(&mut self, viewport_rows: usize, selected: &mut usize) {
+        self.viewport_rows = viewport_rows.max(1);
+        self.synchronize_selection(selected);
+    }
+
+    /// Store one freshly folded durable read without moving the reader's
+    /// identity anchors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_read(
+        &mut self,
+        room: crate::domain::models::OrchestrationRoom,
+        host_id: String,
+        max_seq: u64,
+        unknown_records: usize,
+        read_at_ms: i64,
+        policy: crate::domain::services::patch_review::MergeBackPolicy,
+        permission_mode: crate::domain::models::PermissionMode,
+        selected: &mut usize,
+    ) {
+        let anchor_index = self.anchor_artifact.as_ref().and_then(|id| {
+            room.artifacts()
+                .keys()
+                .position(|candidate| candidate == id)
+        });
+        let selected_index = self.selected_artifact.as_ref().and_then(|id| {
+            room.artifacts()
+                .keys()
+                .position(|candidate| candidate == id)
+        });
+
+        self.folded_seq = max_seq;
+        self.room = Some(room);
+        self.host_id = host_id;
+        self.unknown_records = unknown_records;
+        self.read_at_ms = Some(read_at_ms);
+        self.policy = policy;
+        self.permission_mode = permission_mode;
+        self.error = None;
+        self.not_attached = false;
+        if let Some(index) = anchor_index {
+            self.scroll_offset = index;
+        }
+        if let Some(index) = selected_index {
+            *selected = index;
+        }
+        self.synchronize_selection(selected);
+    }
+
+    /// Remember exactly which rows the last render anchored and selected.
+    pub fn record_rendered_viewport(
+        &mut self,
+        anchor: Option<crate::domain::models::ArtifactId>,
+        selected: Option<crate::domain::models::ArtifactId>,
+    ) {
+        self.anchor_artifact = anchor;
+        self.selected_artifact = selected;
+    }
+}
+
 /// State for the command palette overlay (Ctrl+P).
 // Covers: UX-DR18
 pub struct CommandPaletteState {
@@ -1856,6 +2128,13 @@ impl WhichKeyState {
         chord_map.insert(
             'r',
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Room),
+        );
+        // `e` for **E**vidence — FR149's own term, and the type is
+        // `EvidenceArtifact`. `a` was already Adapters. Lower-case for the same
+        // reason as `r` above.
+        chord_map.insert(
+            'e',
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Artifacts),
         );
         chord_map.insert(
             't',
@@ -2159,6 +2438,9 @@ pub struct TuiState {
     pub transparency_panel: TransparencyPanelState,
     /// Durable room viewer panel state (Ctrl+X, R / `/room`) (Story 18.3a AC1).
     pub room_panel: RoomPanelState,
+    /// Durable artifact list panel state (Ctrl+X, E / `/artifacts`) (Story
+    /// 18.3a-c AC3).
+    pub artifacts_panel: ArtifactsPanelState,
     /// Daily budget warning state (Story 7.5 AC5). `None` when budget disabled.
     pub daily_budget: Option<DailyBudgetState>,
     /// Captured resolved-model from `start_turn_inner`, consumed-and-cleared on
@@ -2561,6 +2843,7 @@ impl TuiState {
             usage_panel: UsagePanelState::new(),
             transparency_panel: TransparencyPanelState::default(),
             room_panel: RoomPanelState::default(),
+            artifacts_panel: ArtifactsPanelState::default(),
             daily_budget: None,
             pending_resolved_model: None,
             selected_model: None,

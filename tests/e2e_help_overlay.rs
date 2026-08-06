@@ -111,8 +111,9 @@ fn test_e2e_help_overlay_shows_categories() {
     // Height was increased from 50→65 in Story 3-6a (INPUT section expansion),
     // from 65→85 in Story 4-4 (SEARCH & BOOKMARKS category: 11 new bindings),
     // from 85→110 for S16.6 (VIM FOLD & MOTION: 11 bindings) + PERMISSIONS (6 bindings),
-    // and from 110→116 in Story 18.3a (`/room` viewer + 3 role sub-verbs + Ctrl+X, R).
-    let mut h = TestHarness::with_size(100, 116);
+    // from 110→116 in Story 18.3a (`/room` viewer + 3 role sub-verbs + Ctrl+X, R),
+    // and from 116→121 in Story 18.3a-c (`/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E).
+    let mut h = TestHarness::with_size(100, 121);
 
     h.press_key(DomainKey::Esc);
     h.type_char('?');
@@ -177,6 +178,49 @@ fn room_help_bindings_are_scroll_reachable_at_a_realistic_viewport() {
     );
 }
 
+/// Story 18.3a-c — the artifact bindings must be reachable by scrolling at a
+/// realistic 80×24 viewport, not merely present in a 121-row harness. Copied
+/// from `room_help_bindings_are_scroll_reachable_at_a_realistic_viewport`
+/// (Story 18.3a) rather than folded into it: each story's bindings should fail
+/// on their own line.
+#[test]
+fn artifact_help_bindings_are_scroll_reachable_at_a_realistic_viewport() {
+    let mut h = TestHarness::with_size(80, 24);
+    h.press_key(DomainKey::Esc);
+    h.type_char('?');
+
+    let expected = [
+        "/artifacts",
+        "/artifact show <id>",
+        "/artifact review <id> <verdict>",
+        "Ctrl+X, E",
+        "Quit (from chat focus)",
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..200 {
+        h.terminal
+            .draw(|frame| {
+                help_overlay::render(frame, frame.area(), &h.state.help_overlay, &h.theme, false);
+            })
+            .unwrap();
+        let screen = h.screen_text();
+        for target in expected {
+            if screen.contains(target) {
+                seen.insert(target);
+            }
+        }
+        if seen.len() == expected.len() {
+            break;
+        }
+        h.type_char('j');
+    }
+    assert_eq!(
+        seen.len(),
+        expected.len(),
+        "every artifact binding and the bottom sentinel must be reachable: {seen:?}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AC3: tmux/screen Compatibility Notice
 // ═══════════════════════════════════════════════════════════════════════════
@@ -193,8 +237,9 @@ fn test_e2e_help_overlay_shows_tmux_warning() {
 
     // Use larger terminal to fit tmux warning without scrolling.
     // Height bumped 60→85 (S4.4), 85→100 (S6.0d), 100→120 (S16.8 SCROLL & MOUSE category),
-    // 120→126 (Story 18.3a: `/room` viewer + 3 role sub-verbs + Ctrl+X, R).
-    let mut h = TestHarness::with_size(100, 126);
+    // 120→126 (Story 18.3a: `/room` viewer + 3 role sub-verbs + Ctrl+X, R),
+    // 126→131 (Story 18.3a-c: `/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E).
+    let mut h = TestHarness::with_size(100, 131);
     h.press_key(DomainKey::Esc);
     h.type_char('?');
 

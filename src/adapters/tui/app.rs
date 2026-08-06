@@ -2334,6 +2334,34 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
+        DomainKey::Enter
+            if matches!(
+                state.focus,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Artifacts,
+                    ..
+                }
+            ) =>
+        {
+            // ⛔ NOT the Room panel's inert-`Enter` rule. This surface has write
+            // verbs, and a focused row whose `Enter` does nothing teaches the
+            // operator that the panel is dead. `Enter` drills into the selected
+            // artifact through the SAME `/artifact show` dispatch arm the typed
+            // command uses — one path, not a second one.
+            match state
+                .artifacts_panel
+                .selected_id_prefix(state.sidebar_selected)
+            {
+                Some(prefix) => InputAction::ExecuteCommand {
+                    name: "artifact".to_owned(),
+                    args: Some(format!("show {prefix}")),
+                },
+                // An empty or zero-state panel still consumes the key: falling
+                // through would route this index into conversation history.
+                None => InputAction::Consumed,
+            }
+        }
+
         DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { .. }) => {
             // Open selected conversation — event loop resolves ID from session_index
             InputAction::OpenSidebarConversation
@@ -2709,6 +2737,18 @@ fn submit_message(state: &mut TuiState) -> InputAction {
             // `/room` falls through to SubmitWithContext, resolves no command
             // file, and silently never runs.
             if cmd_name == "room" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
+            // /artifacts and /artifact: the durable artifact list, its
+            // drill-down and the patch-review verdict verb (Story 18.3a-c
+            // AC3/AC5). Same reason as `room` above — and BOTH spellings need
+            // an entry: an unlisted `/artifact` silently never runs while
+            // `/artifacts` keeps working, which reads as "the verdict verb is
+            // broken" rather than "the verdict verb was never routed".
+            if cmd_name == "artifacts" || cmd_name == "artifact" {
                 return InputAction::ExecuteCommand {
                     name: cmd_name,
                     args,

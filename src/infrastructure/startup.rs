@@ -1665,6 +1665,14 @@ pub async fn run() -> Result<()> {
     // branch below; the TUI receives the domain port, never the concrete
     // `NodeJournal`.
     let mut journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>> = None;
+    // Story 18.3a-c (AC5) — the verdict verb's narrow domain port. Captured
+    // here for the same reason as `journal_reader`: the merge-back service and
+    // the artifact store are constructed inside the composite-toolset branch
+    // below and then MOVED into the fork-join executor, so what the TUI needs
+    // must be retained before the move. The TUI receives the domain port, never
+    // the concrete `PatchMergeBack`.
+    let mut patch_review_recorder: Option<Arc<dyn crate::domain::ports::PatchReviewRecorder>> =
+        None;
     // Story 10.2 — wire subagent provider into CompositeToolsetAdapter
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
@@ -2089,6 +2097,31 @@ pub async fn run() -> Result<()> {
                     event_bus.clone(),
                     Arc::new(crate::adapters::merge_back::GitPatchApplier),
                 ));
+            // Story 17.3c (D1): preserve the pre-isolation direct-write
+            // contract — user-originated fanout edits auto-apply through the
+            // journal-authoritative gate; self-originated stay review-gated.
+            //
+            // ⚑ Story 18.3a-c (AC4): bound to a `let` rather than written
+            // inline, because the SAME value now reaches two consumers — the
+            // executor's apply path and the operator-facing row annotation.
+            // `DF-18-3a-MERGEBACK-POLICY-VISIBILITY` requires the explainer to
+            // be "sourced from the same resolver the apply path uses"; a second
+            // literal here would be the drift it exists to prevent.
+            let merge_back_policy = crate::domain::services::patch_review::MergeBackPolicy {
+                auto_approve_user_originated: true,
+            };
+            // Story 18.3a-c (AC5): the TUI's verdict verb needs the store and
+            // the merge-back service, both of which the executor is about to
+            // take ownership of. Clone the `Arc`s BEFORE the move; the port is
+            // handed to the composition root's `AppState` slot below.
+            patch_review_recorder = Some(std::sync::Arc::new(
+                crate::infrastructure::orchestrator::JournalPatchReview::new(
+                    patch_merge_back.clone(),
+                    artifact_store.clone(),
+                    merge_back_policy,
+                ),
+            )
+                as std::sync::Arc<dyn crate::domain::ports::PatchReviewRecorder>);
             let fork_join_executor = Arc::new(
                 crate::infrastructure::orchestrator::ForkJoinExecutor::new(
                     runner.clone(),
@@ -2102,12 +2135,7 @@ pub async fn run() -> Result<()> {
                 .with_supervisor(supervisor)
                 .with_artifact_store(artifact_store, artifact_host)
                 .with_patch_merge_back(patch_merge_back)
-                // Story 17.3c (D1): preserve the pre-isolation direct-write
-                // contract — user-originated fanout edits auto-apply through the
-                // journal-authoritative gate; self-originated stay review-gated.
-                .with_merge_back_policy(crate::domain::services::patch_review::MergeBackPolicy {
-                    auto_approve_user_originated: true,
-                })
+                .with_merge_back_policy(merge_back_policy)
                 .with_permission_source(security.clone()),
             );
             let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> =
@@ -2248,6 +2276,12 @@ pub async fn run() -> Result<()> {
         app_state.room_roles =
             Arc::new(crate::adapters::policy::JournalRoomRoleProjection::with_reader(reader));
     }
+    // Story 18.3a-c (AC5): the verdict verb's port slot. Carries the SAME
+    // `PatchMergeBack`, the SAME `ArtifactStore` and the SAME `MergeBackPolicy`
+    // the fork-join executor was composed with, cloned above before the move —
+    // so the surface and the apply path can never be reading two different
+    // stores or describing two different policies.
+    app_state.patch_review = patch_review_recorder;
 
     // 5d. Use the same storage adapter constructed above for session management.
     // Both tools and the event loop share one FileSystemStorage instance pointing

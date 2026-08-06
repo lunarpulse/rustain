@@ -97,6 +97,17 @@ pub struct AppState {
     /// Assigned at the composition root after construction, for the same
     /// reason as `transparency` above.
     pub room_roles: Arc<crate::adapters::policy::JournalRoomRoleProjection>,
+    /// Story 18.3a-c (AC5) — the narrow domain port the `/artifact` surfaces
+    /// record verdicts and read bodies through. `None` when the workspace
+    /// composed no merge-back service (a non-subagent composition), in which
+    /// case there are no patches to review either.
+    ///
+    /// Assigned at the composition root, which owns the slot (`ADR-18-3-01`
+    /// D4): there is **no setter** — `AppState` exposes no `with_*` method that
+    /// could rebind it from anywhere else — for the same reason, and in exactly
+    /// the shape, `transparency` and `room_roles` above use. `AppState::new`
+    /// already takes 19 arguments and a 20th buys nothing.
+    pub patch_review: Option<std::sync::Arc<dyn crate::domain::ports::PatchReviewRecorder>>,
 }
 
 impl AppState {
@@ -154,6 +165,7 @@ impl AppState {
                 catalog_registry,
                 transparency: None,
                 room_roles: Arc::new(crate::adapters::policy::JournalRoomRoleProjection::inert()),
+                patch_review: None,
             },
             domain_rx,
         )

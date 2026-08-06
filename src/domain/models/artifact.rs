@@ -138,6 +138,24 @@ pub enum ArtifactKind {
     /// 17.5b — an MCP task's elicitation request, filed to the scarce human
     /// as a ticket (FR152). The first artifact kind produced by an adapter.
     InputRequest,
+    /// A kind string this build does not understand.
+    ///
+    /// FR149 declares the kind list *"a starting set, not a ceiling"* (owner
+    /// ruling 2026-07-20, `ADR-17-5-02` D8), so a newer build may write a kind
+    /// this one has never heard of. Without this arm serde fails the nested
+    /// value, `parse_entries` rejects the whole line, and one forward record
+    /// takes every other record in the file with it — `RoomEvent`'s own
+    /// `#[serde(other)]` cannot rescue it, because the `event` tag matched a
+    /// *known* variant and the failure is one level below the fallback.
+    ///
+    /// ⚠ **Deserialize-only.** `#[serde(other)]` has no serialize side, so this
+    /// variant re-serializes as `"unknown"` and does **not** round-trip the
+    /// original string. Harmless for the reason
+    /// [`crate::domain::models::TicketAddressee`]'s doc already gives: the
+    /// journal is append-only and never rewritten, so nothing round-trips this
+    /// variant back to disk.
+    #[serde(other)]
+    Unknown,
 }
 
 #[non_exhaustive]
@@ -149,6 +167,21 @@ pub enum ReviewStatus {
         reviewer: AgentId,
         verdict: ReviewVerdict,
     },
+    /// A review status this build does not understand. Same forward-compat
+    /// argument as [`ArtifactKind::Unknown`]; legal here because the enum is
+    /// internally tagged (`tag = "status"`), which is serde's documented
+    /// `#[serde(other)]` path.
+    ///
+    /// ⚠ **Deserialize-only**, and it *shadows*: because the tag resolves the
+    /// whole enum, serde never reads a `verdict` field on an unknown-status
+    /// line, so an unknown [`ReviewVerdict`] can only be exercised where
+    /// nothing shadows it (`RoomEvent::PatchReviewed`).
+    ///
+    /// ⛔ **Fail-closed at the gate.** An unreadable review state resolves to
+    /// [`crate::domain::services::patch_review::PatchDisposition::AwaitingReview`],
+    /// never to an applying disposition.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Metadata supplied before the adapter computes the canonical content hash.

@@ -167,6 +167,20 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            SlashCommandDef {
+                name: "artifacts".to_string(),
+                description: "Durable artifact list with depends-on lineage (read-only replay, also Ctrl+X, E): /artifacts"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "artifact".to_string(),
+                description: "Inspect or review one durable artifact: /artifact show <id> | /artifact review <id> approve|request-changes|reject (records a verdict; applying arrives with 18-3a-d)"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,

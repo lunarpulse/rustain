@@ -99,6 +99,22 @@ pub enum ReviewVerdict {
     Approved,
     ChangesRequested,
     Rejected,
+    /// A verdict string this build does not understand.
+    ///
+    /// Same forward-compat argument as [`crate::domain::models::ArtifactKind::Unknown`]:
+    /// without this arm a single newer `PatchReviewed` line fails serde and
+    /// takes the whole journal file with it, because `RoomEvent`'s
+    /// `#[serde(other)] Unrecognized` only catches an unknown `event` tag and
+    /// this failure is one level below it.
+    ///
+    /// ⚠ **Deserialize-only** — re-serializes as `"unknown"`. Harmless: the
+    /// journal is append-only and never rewritten.
+    ///
+    /// ⛔ **Fail-closed at the gate.** An unreadable verdict is not an
+    /// approval; it resolves to
+    /// [`crate::domain::services::patch_review::PatchDisposition::AwaitingReview`].
+    #[serde(other)]
+    Unknown,
 }
 
 /// Durable outcome of an operator ticket. This is projected on the producing
@@ -643,7 +659,14 @@ impl OrchestrationRoom {
                     && view.producer == producer
                 {
                     view.kind = ArtifactKind::Patch;
-                    view.review = Some(ReviewStatus::Pending);
+                    // Fail-closed: never clobber a review state the journal
+                    // already recorded. In particular a `ReviewStatus::Unknown`
+                    // written by a newer build must not be erased into
+                    // `Pending`, where the shipped merge-back policy would read
+                    // an unreadable state as auto-appliable (Story 18.3a-c AC1).
+                    if view.review.is_none() {
+                        view.review = Some(ReviewStatus::Pending);
+                    }
                 }
             }
             RoomEvent::PatchReviewed {

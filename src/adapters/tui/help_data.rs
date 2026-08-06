@@ -281,6 +281,21 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     description: "Record withdrawal of a peer's room role",
                     available: true,
                 },
+                HelpBinding {
+                    key: "/artifacts",
+                    description: "Durable artifact list with lineage, read-only (also Ctrl+X, E)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/artifact show <id>",
+                    description: "Drill into one artifact: kind, lineage, apply decision, policy",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/artifact review <id> <verdict>",
+                    description: "Record approve|request-changes|reject; applying arrives with 18-3a-d",
+                    available: true,
+                },
             ],
         },
         HelpCategory {
@@ -314,6 +329,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 HelpBinding {
                     key: "Ctrl+X, R",
                     description: "Durable Room panel (read-only replay)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+X, E",
+                    description: "Artifacts panel (Evidence, read-only replay)",
                     available: true,
                 },
                 HelpBinding {

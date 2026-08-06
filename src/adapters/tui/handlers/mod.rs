@@ -22,6 +22,7 @@ use crate::domain::ports::StreamingProvider;
 #[cfg(feature = "a2a")]
 pub mod a2a_catalog;
 pub mod adapter_override;
+pub mod artifact_command;
 pub mod bookmark;
 pub mod budget;
 pub mod compact_slash;
