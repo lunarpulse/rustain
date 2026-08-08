@@ -1,4 +1,5 @@
 pub mod agent_message_bus;
+pub mod apply_lock;
 pub mod clock_util;
 pub mod composition;
 pub mod config;

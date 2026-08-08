@@ -71,6 +71,7 @@ jobs:
           cargo test --test conformance_18_3a_b_addressing
           cargo test --test conformance_18_3a_c_artifacts
           cargo test --test e2e_help_overlay
+          cargo test --test conformance_18_3a_d_apply
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest
@@ -134,7 +135,9 @@ jobs:
             --test conformance_18_3c_response_modes \
             --test conformance_18_3a_c_artifacts \
             --test conformance_transparency \
-            --test conformance_transparency_surfacing
+            --test conformance_transparency_surfacing \
+            --test conformance_18_3a_d_apply \
+            --test conformance_cow_mergeback
 
       # The other half of the contract: the ungated guards assert that A2A is OFF by
       # default and that only config parsing compiles without the feature. Those claims

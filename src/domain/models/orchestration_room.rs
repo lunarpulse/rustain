@@ -197,6 +197,81 @@ impl Direction {
     }
 }
 
+/// Outcome of one `git apply` attempt against the One-Ring workspace
+/// (Story 18.3a-d, FR160(c)).
+///
+/// ⚠ **Crash-recovery marker, not an audit trail.** The room journal is
+/// Landlock-enforced but **not** authenticated
+/// (`DF-18-2-AUTHENTICATED-JOURNAL`), so whoever can write the file can forge
+/// a [`RoomEvent::PatchApplyResolved`] carrying [`ApplyOutcome::Applied`] for
+/// an apply that actually died halfway — converting
+/// [`ApplyState::Indeterminate`] into a clean bill of health. These records
+/// are honest **under a trusted-filesystem assumption**; they are never
+/// evidence, authenticated or tamper-evident.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyOutcome {
+    /// `git apply` succeeded and the working tree carries the delta.
+    Applied,
+    /// The patch is well formed but did not apply cleanly. The working tree is
+    /// unchanged — `git apply` is atomic across hunks and `--reject` is never
+    /// requested.
+    Conflict,
+    /// The apply mechanism could not start or complete, or the body was
+    /// rejected as malformed.
+    Failed,
+    /// An outcome value written by a newer build.
+    ///
+    /// ⚑ **Mandatory, and not decoration.** Without it an unknown outcome
+    /// string fails the *whole journal line*, and [`RoomEvent`]'s own
+    /// `#[serde(other)] Unrecognized` cannot rescue it: the `event` tag
+    /// matched a known variant, so the failure is one level below that
+    /// fallback. Same finding as Story 18.3a-c's `ReviewStatus::Unknown`.
+    ///
+    /// ⚠ **Deserialize-only** — re-serializes as `"unknown"`, which is
+    /// harmless because the journal is append-only and never rewritten.
+    ///
+    /// ⛔ **Never read as success.** [`ApplyState::Resolved`] preserves it and
+    /// every consumer fails closed.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Journal-projected apply state of one patch artifact (Story 18.3a-d).
+///
+/// The lattice **preserves** the outcome instead of collapsing it: cut 2
+/// (`18-3a-e`) renders a per-outcome row vocabulary, and a collapsed
+/// `Failed { retryable }` would throw that distinction away while carrying a
+/// field that is constant. Not serialized: this is a projection of the
+/// journal, never a second store (`ADR-17-CC-01`, `ADR-17-CC-02`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ApplyState {
+    /// ⛔ **"No apply record in THIS journal" — never "never applied".**
+    /// Every journal written before Story 18.3a-d carries no apply records at
+    /// all, so a patch the `/fanout` merge-back arm already applied projects
+    /// as `NeverAttempted`. That is `DF-18-3a-d-PRE-RECORD-ERA`, owned by
+    /// `18-3a-e`. ⛔ Do not "fix" it by making this variant refuse — that
+    /// refuses every genuinely new patch too.
+    #[default]
+    NeverAttempted,
+    /// A [`RoomEvent::PatchApplyStarted`] with no matching
+    /// [`RoomEvent::PatchApplyResolved`]: the process died inside the apply
+    /// window, so the working tree may or may not carry the delta. The honest
+    /// answer is "unknown" — recovery is a projection, never a repair
+    /// (`ARCHITECTURE-SPINE.md` AD-12).
+    ///
+    /// ⚠ **Cut 1 ships the latch and not the release**
+    /// (`DF-18-3a-d-INDETERMINATE-CLEARING`). Nothing in this build can clear
+    /// it, so the artifact is refused on every subsequent retry, permanently.
+    /// That is correct for a cut with no operator in it; the clearing verb is
+    /// `18-3a-e`'s. ⛔ "Make `Indeterminate` fail open" is forbidden as the
+    /// fix — it fails open on a workspace write whose outcome is unknown.
+    Indeterminate,
+    /// The apply completed and recorded its outcome.
+    Resolved(ApplyOutcome),
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
@@ -455,6 +530,46 @@ pub enum RoomEvent {
         #[serde(default)]
         revoked_at: i64,
     },
+    /// Write-ahead marker: an apply of `artifact` is about to mutate the
+    /// One-Ring workspace (Story 18.3a-d — FR160(c), NFR70(c)).
+    ///
+    /// Appended **and flushed before**
+    /// [`crate::domain::ports::PatchApplier::apply`] is invoked, so a crash
+    /// inside the apply window leaves a durable trace instead of a silent
+    /// divergence between the working tree and the room. A `PatchApplyStarted`
+    /// with no matching [`RoomEvent::PatchApplyResolved`] folds to
+    /// [`ApplyState::Indeterminate`] — never to success.
+    ///
+    /// ⛔ **No `applier` identity field in this cut.**
+    /// `PatchMergeBack::apply` is the sole `git apply` path and has exactly
+    /// one production caller, so the field would have exactly one possible
+    /// value. `18-3a-e` adds `#[serde(default)] applier: Option<AgentId>`
+    /// additively — the [`RoomEvent::TicketAssigned`] `to` pattern.
+    PatchApplyStarted {
+        artifact: ArtifactId,
+        /// Best-effort preimage witness: the workspace revision observed just
+        /// before the mutation, via `PatchApplier::revision`.
+        ///
+        /// 🔴 `None` is a first-class honest value and **never** fails an
+        /// apply. `git rev-parse HEAD` legitimately fails on a repository with
+        /// no commits, and `git apply` works outside a repository entirely, so
+        /// a non-git or pre-first-commit workspace is a supported case rather
+        /// than an error. An audit field must never become load bearing for
+        /// control flow.
+        #[serde(default)]
+        workspace_revision: Option<String>,
+    },
+    /// The apply of `artifact` returned, carrying its outcome (Story 18.3a-d).
+    ///
+    /// Appended after [`crate::domain::ports::PatchApplier::apply`] returns,
+    /// on **both** the success and the failure path: skipping it on error
+    /// would leave a merely-conflicting apply projecting as
+    /// [`ApplyState::Indeterminate`] instead of a resolved failure, which is
+    /// the strictly worse lie.
+    PatchApplyResolved {
+        artifact: ArtifactId,
+        outcome: ApplyOutcome,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -526,6 +641,16 @@ pub struct OrchestrationRoom {
     nodes: BTreeMap<AgentId, NodeView>,
     waves: Vec<WaveView>,
     artifacts: BTreeMap<ArtifactId, ArtifactRef>,
+    /// Journal-projected apply state, keyed by patch artifact (Story 18.3a-d).
+    ///
+    /// 🔴 **A separate map, deliberately — not a field on `ArtifactRef`.**
+    /// `EvidenceArtifact` is content-addressed **immutable** metadata living
+    /// in the `ArtifactStore`; apply state is **journal-projected mutable**
+    /// state. Mixing them violates `ADR-17-CC-02` (the store holds handles and
+    /// bodies, the journal holds the mutable projection). Keeping it separate
+    /// also lets the fold record an apply for an artifact this projection has
+    /// never seen, instead of silently dropping it.
+    apply_state: BTreeMap<ArtifactId, ApplyState>,
     approvals: Vec<ApprovalView>,
     remote_rejections: Vec<RemoteRejectionView>,
 }
@@ -578,6 +703,18 @@ impl OrchestrationRoom {
 
     pub fn artifacts(&self) -> &BTreeMap<ArtifactId, ArtifactRef> {
         &self.artifacts
+    }
+
+    /// Apply state per patch artifact (Story 18.3a-d). An artifact absent from
+    /// this map is [`ApplyState::NeverAttempted`] — read it through
+    /// `copied().unwrap_or_default()` so the lattice stays total at the call
+    /// site.
+    ///
+    /// The production reader is `PatchMergeBack::apply`, which refuses
+    /// [`ApplyState::Indeterminate`]: this accessor is a guard input, not a
+    /// display surface.
+    pub fn apply_state(&self) -> &BTreeMap<ArtifactId, ApplyState> {
+        &self.apply_state
     }
 
     pub fn approvals(&self) -> &[ApprovalView] {
@@ -677,6 +814,26 @@ impl OrchestrationRoom {
                 if let Some(view) = self.artifacts.get_mut(&artifact) {
                     view.review = Some(ReviewStatus::Reviewed { reviewer, verdict });
                 }
+            }
+            // 🔴 Both apply arms fold **UNCONDITIONALLY**, into a map of their
+            // own. ⛔ Do not wrap them in `if let Some(view) =
+            // self.artifacts.get_mut(&artifact)` the way the `PatchReviewed`
+            // arm directly above does: that guard silently swallows an event
+            // for an artifact this projection has not seen, and an apply
+            // record for an unknown artifact is a genuine anomaly that must
+            // stay visible rather than vanish.
+            RoomEvent::PatchApplyStarted { artifact, .. } => {
+                self.apply_state.insert(artifact, ApplyState::Indeterminate);
+            }
+            // Last write wins per artifact, exactly as `PatchReviewed` does.
+            // That is the non-vacuous half of NFR70(d): a journal carrying a
+            // repeated Started/Resolved pair for one artifact folds to a
+            // single state. ⛔ Never accumulate, and ⛔ never add an
+            // idempotency guard that hides a second record from the projection
+            // while it sits in the log.
+            RoomEvent::PatchApplyResolved { artifact, outcome } => {
+                self.apply_state
+                    .insert(artifact, ApplyState::Resolved(outcome));
             }
             RoomEvent::RemoteEnvelopeAccepted {
                 node, content_hash, ..

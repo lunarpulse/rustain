@@ -7805,6 +7805,23 @@ mod tests {
                         "journal RoomRoleRevoked peer={peer:?} revoked_at={revoked_at}"
                     ));
                 }
+                // 18.3a-d: rendered for completeness. No golden in this file
+                // performs an apply (the flat-root harness runs with
+                // `auto_approve_user_originated: false`), so no pinned
+                // transcript moves.
+                RoomEvent::PatchApplyStarted {
+                    artifact,
+                    workspace_revision,
+                } => {
+                    lines.push(format!(
+                        "journal PatchApplyStarted artifact={artifact:?} workspace_revision={workspace_revision:?}"
+                    ));
+                }
+                RoomEvent::PatchApplyResolved { artifact, outcome } => {
+                    lines.push(format!(
+                        "journal PatchApplyResolved artifact={artifact:?} outcome={outcome:?}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }
