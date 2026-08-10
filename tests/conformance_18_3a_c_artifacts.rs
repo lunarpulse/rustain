@@ -578,6 +578,7 @@ fn the_artifact_commands_route_as_execute_commands_not_missing_custom_commands()
     for (input, expected_name) in [
         ("/artifacts", "artifacts"),
         ("/artifact show a3f2c1", "artifact"),
+        ("/artifact apply a3f2c1", "artifact"),
         ("/artifact review a3f2c1 approve", "artifact"),
         ("/artifact review a3f2c1 request-changes", "artifact"),
         ("/artifact review a3f2c1 reject", "artifact"),
@@ -717,7 +718,7 @@ fn the_artifact_surface_is_discoverable_with_its_chord_and_every_subverb() {
         .iter()
         .find(|entry| entry.name == "/artifact")
         .expect("/artifact is in the palette");
-    for subverb in ["/artifact show", "/artifact review"] {
+    for subverb in ["/artifact show", "/artifact review", "/artifact apply"] {
         assert!(verb.description.contains(subverb), "{verb:?}");
     }
 
@@ -730,6 +731,7 @@ fn the_artifact_surface_is_discoverable_with_its_chord_and_every_subverb() {
         "/artifacts",
         "/artifact show <id>",
         "/artifact review <id> <verdict>",
+        "/artifact apply <id>",
         "Ctrl+X, E",
     ] {
         let binding = bindings
@@ -779,7 +781,11 @@ fn the_panel_renders_every_kind_with_real_lineage_at_both_densities() {
             "{width}: never claims live: {painted}"
         );
         assert!(painted.contains("aaaaaa"), "{width}: {painted}");
-        assert!(painted.contains("bbbbbb"), "{width}: {painted}");
+        if width == 36 {
+            assert!(painted.contains("no reviewer"), "{width}: {painted}");
+        } else {
+            assert!(painted.contains("bbbbbb"), "{width}: {painted}");
+        }
         assert!(painted.contains("cccccc"), "{width}: {painted}");
         assert!(
             painted.contains("└ depends on aaaaaa"),
@@ -859,7 +865,7 @@ async fn the_artifacts_command_reaches_a_painted_buffer_through_the_real_dispatc
             .expect("append");
     }
 
-    let app_state = artifact_app_state(workspace.path(), None);
+    let app_state = artifact_app_state(workspace.path(), None, None);
     let mut state = TuiState::new(120, 40);
 
     // The named front door: real input routing, not a constructed action.
@@ -894,7 +900,11 @@ async fn the_artifacts_command_reaches_a_painted_buffer_through_the_real_dispatc
         let painted = paint(&mut state.artifacts_panel, width);
         assert!(painted.contains("as of"), "{width}: {painted}");
         assert!(painted.contains("aaaaaa"), "{width}: {painted}");
-        assert!(painted.contains("bbbbbb"), "{width}: {painted}");
+        if width == 36 {
+            assert!(painted.contains("no reviewer"), "{width}: {painted}");
+        } else {
+            assert!(painted.contains("bbbbbb"), "{width}: {painted}");
+        }
         assert!(painted.contains("cccccc"), "{width}: {painted}");
         assert!(
             painted.contains("└ depends on aaaaaa"),
@@ -1033,19 +1043,14 @@ fn every_disposition_renders_its_exact_suffix_through_a_real_fold() {
 
     let mut cases: Vec<(&str, ArtifactRef, MergeBackPolicy, PermissionMode)> = Vec::new();
 
-    // Applies — POSITIVE CONTROL, no refusal clause. Ruling P1's wording.
+    // Applies — POSITIVE CONTROL: the confirmed operator door exists.
     let mut applies = artifact('b', ArtifactKind::Patch, "spoke-2");
     applies.provenance = vec![ProvenanceTag::SelfOriginated];
     applies.review = Some(ReviewStatus::Reviewed {
         reviewer: agent("jun"),
         verdict: ReviewVerdict::Approved,
     });
-    cases.push((
-        "approved — no apply path yet",
-        applies,
-        none,
-        PermissionMode::Yolo,
-    ));
+    cases.push(("applies", applies, none, PermissionMode::Yolo));
 
     // AutoApplies — the inverse hazard, and the COMMON case in production.
     let pending = artifact('b', ArtifactKind::Patch, "spoke-2");
@@ -1145,7 +1150,7 @@ fn the_awaiting_review_row_matches_the_ux_line_and_renders_pending_exactly_once(
         &MergeBackPolicy::default(),
     );
     assert_eq!(
-        rendered, "patch bbbbbb · pending · from spoke-2  ▲ no reviewer",
+        rendered, "patch bbbbbb · pending · from spoke-2 · apply: never attempted  ▲ no reviewer",
         "UX-DR-ROOM-08's rendered shape, with the addendum's illustrative column padding \
          collapsed to `/room`'s existing two-space hazard separator"
     );
@@ -1162,20 +1167,15 @@ fn the_awaiting_review_row_matches_the_ux_line_and_renders_pending_exactly_once(
     );
 }
 
-/// **AC4 eighth mutant (ruling P1's own).** Render `· applies` for `Applies`
-/// and this fires. It is not enough to check the new string: the assertion also
-/// proves `AutoApplies` still renders its `(policy)` clause, so the two rows
-/// stayed distinguishable across the tense boundary.
+/// **AC4 eighth mutant.** Eligible and policy-driven rows use distinct tense:
+/// `applies` names what confirmation can do; `auto-applies (policy)` names the
+/// fan-out path.
 #[test]
-fn no_row_claims_a_workspace_write_this_build_cannot_perform() {
+fn eligible_rows_name_the_confirmed_apply_front_door() {
     use rustain::adapters::tui::widgets::artifacts_panel::decision_suffix;
 
     let applies = decision_suffix(PatchDisposition::Applies).expect("suffix");
-    assert_eq!(applies, "approved — no apply path yet");
-    assert!(
-        !applies.contains("applies"),
-        "`· applies` describes a write nothing in this build can perform (ruling P1): {applies}"
-    );
+    assert_eq!(applies, "applies");
     let auto = decision_suffix(PatchDisposition::AutoApplies).expect("suffix");
     assert_eq!(
         auto, "auto-applies (policy)",
@@ -1211,12 +1211,11 @@ fn flipping_the_merge_back_policy_moves_the_rendered_annotation() {
     assert!(off.contains("▲ no reviewer"), "{off}");
 }
 
-/// **AC4 drill-down.** `/artifact show <id>` renders the effective policy and
-/// the permission mode alongside the decision, and it owes the eligible-patch
-/// wording verbatim so the terse row suffix cannot over-claim on screen.
+/// **AC4 drill-down.** `/artifact show <id>` renders the effective policy,
+/// permission mode, front-door eligibility, and journal-projected outcome.
 #[test]
-fn the_drill_down_names_the_policy_and_never_claims_the_worktree_changed() {
-    use rustain::adapters::tui::handlers::artifact_command::{NO_APPLY_PATH_NOTE, render_show};
+fn the_drill_down_names_policy_eligibility_and_apply_state() {
+    use rustain::adapters::tui::handlers::artifact_command::{disposition_sentence, render_show};
 
     let mut applies = artifact('b', ArtifactKind::Patch, "spoke-2");
     applies.provenance = vec![ProvenanceTag::SelfOriginated];
@@ -1240,7 +1239,12 @@ fn the_drill_down_names_the_policy_and_never_claims_the_worktree_changed() {
         },
         Ok(b"diff --git a/x b/x\n"),
     );
-    assert!(rendered.contains(NO_APPLY_PATH_NOTE), "{rendered}");
+    let expected_decision = disposition_sentence(PatchDisposition::Applies);
+    let decision = rendered
+        .lines()
+        .find_map(|line| line.strip_prefix("  decision  "))
+        .expect("drill-down decision");
+    assert_eq!(decision, expected_decision, "{rendered}");
     assert!(
         rendered.contains("auto_approve_user_originated = true"),
         "OPEN-DR-4: the effective policy is surfaced, sourced from the value the apply \
@@ -1305,8 +1309,8 @@ async fn the_verdict_verb_appends_durably_and_moves_the_row_on_the_next_fold() {
         .expect("the verdict verb records");
     assert!(message.contains("recorded approved"), "{message}");
     assert!(
-        message.contains("Nothing was applied to the workspace"),
-        "⛔ no wording may claim the working tree changed: {message}"
+        message.contains("Nothing was applied yet") && message.contains("/artifact apply <id>"),
+        "approval must point to the separate confirmed write: {message}"
     );
     assert!(matches!(event, Some(RoomEvent::PatchReviewed { .. })));
 
@@ -1394,7 +1398,11 @@ async fn the_verdict_command_reaches_the_journal_through_the_real_dispatch_path(
         !harness.policy().auto_approve_user_originated,
         "the pre-verdict disposition is only AwaitingReview under a policy-off composition"
     );
-    let app_state = artifact_app_state(harness.workspace.path(), Some(harness.recorder.clone()));
+    let app_state = artifact_app_state(
+        harness.workspace.path(),
+        Some(harness.recorder.clone()),
+        None,
+    );
     let mut state = TuiState::new(120, 40);
 
     let before = harness.journal_lines();
@@ -1467,6 +1475,84 @@ async fn the_verdict_command_reaches_the_journal_through_the_real_dispatch_path(
 
     // ⛔ Nothing outside `.rustain/` was written.
     harness.assert_no_write_outside_rustain();
+}
+
+#[tokio::test]
+async fn apply_command_previews_without_mutation_then_accept_runs_the_real_effect_arm() {
+    use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_test};
+    use rustain::adapters::tui::handlers::artifact_command::resolve_apply_card;
+    use rustain::adapters::tui::state::TuiState;
+    use rustain::domain::events::DomainInputEvent;
+
+    let harness = VerdictHarness::new().await;
+    std::fs::write(harness.workspace.path().join("x"), "").expect("empty target");
+    let patch = harness.capture_self_originated_patch().await;
+    harness
+        .review(&patch.id.as_str()[..6], ReviewVerdict::Approved)
+        .await
+        .expect("approve");
+    let executor = Some(harness.merge_back.clone()
+        as std::sync::Arc<dyn rustain::domain::ports::PatchApplyExecutor>);
+    let app_state = artifact_app_state(
+        harness.workspace.path(),
+        Some(harness.recorder.clone()),
+        executor,
+    );
+    let mut state = TuiState::new(120, 40);
+    let before = harness.journal_lines();
+
+    state.input_buffer = format!("/artifact apply {}", &patch.id.as_str()[..6]);
+    let InputAction::ExecuteCommand { name, args } = submit_message_for_test(&mut state) else {
+        panic!("apply command must route to ExecuteCommand");
+    };
+    assert_eq!(name, "artifact");
+    rustain::infrastructure::runtime::artifact_bridge::artifact_command(
+        &mut state,
+        "conv",
+        args.as_deref(),
+        &app_state,
+        PermissionMode::Yolo,
+    )
+    .await;
+
+    let card = state.pending_apply_card.as_ref().expect("decision card");
+    assert!(
+        card.files.iter().any(|path| path == "x"),
+        "{:?}",
+        card.files
+    );
+    assert_eq!(card.workspace, harness.workspace.path());
+    assert_eq!(
+        std::fs::read_to_string(harness.workspace.path().join("x")).expect("target"),
+        "",
+        "opening the card must not mutate the workspace"
+    );
+    assert_eq!(
+        harness.journal_lines(),
+        before,
+        "no apply record before accept"
+    );
+
+    assert_eq!(
+        handle_input(&mut state, &DomainInputEvent::KeyPress('y')),
+        InputAction::ApplyCardAccept
+    );
+    let card = resolve_apply_card(&mut state, true).expect("accepted card");
+    rustain::infrastructure::runtime::artifact_bridge::apply_confirmed_card(
+        &mut state,
+        &app_state,
+        card,
+        PermissionMode::Yolo,
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(harness.workspace.path().join("x")).expect("applied file"),
+        "x\n"
+    );
+    let after = harness.journal_lines();
+    assert_eq!(after.len(), before.len() + 2, "Started + Resolved");
+    assert!(after[before.len()].contains("\"applier\":\"operator\""));
+    assert!(after[before.len() + 1].contains("\"outcome\":\"applied\""));
 }
 
 /// **AC5 second mutant (ruling P3's, the preflight's highest-value find).**
@@ -1586,22 +1672,25 @@ fn the_room_edit_core_denies_a_viewer_durable_content_edits() {
 #[test]
 fn every_durable_write_in_the_artifact_bridge_routes_through_the_room_edit_gate() {
     let bridge = artifact_bridge_source();
-    let gate = bridge
+    let review = &bridge[bridge
+        .find("pub async fn record_verdict(")
+        .expect("review seam")..];
+    let review_gate = review
         .find("room_edit_decision(local_room_role(acting), RoomEditKind::DurableContent)")
-        .expect("the DurableContent gate is the first production caller of this seam");
-    let recorder = bridge
-        .find("recorder\n        .record_verdict(")
-        .expect("the durable append goes through the port");
-    assert!(
-        gate < recorder,
-        "the room-edit gate must PRECEDE the durable append"
-    );
-    // Exactly one durable-write path exists, and it is the gated one.
-    assert_eq!(
-        bridge.matches(".record_verdict(").count(),
-        1,
-        "a second durable-write path would need its own gate"
-    );
+        .expect("review gate");
+    let recorder = review.find(".record_verdict(").expect("review port call");
+    assert!(review_gate < recorder, "review gate precedes its port");
+
+    let apply = &bridge[bridge
+        .find("pub async fn apply_artifact(")
+        .expect("apply seam")..];
+    let apply_gate = apply
+        .find("room_edit_decision(local_room_role(acting), RoomEditKind::DurableContent)")
+        .expect("apply gate");
+    let executor = apply.find(".apply_patch(").expect("apply port call");
+    assert!(apply_gate < executor, "apply gate precedes its port");
+    assert_eq!(bridge.matches(".record_verdict(").count(), 1);
+    assert_eq!(bridge.matches(".apply_patch(").count(), 1);
     assert!(
         !bridge.contains("append_room") && !bridge.contains("RoomJournal>"),
         "the bridge must not hold a raw journal writer — the port is the only write path"
@@ -1618,10 +1707,9 @@ fn every_durable_write_in_the_artifact_bridge_routes_through_the_room_edit_gate(
             "the room-content seam must not reach `{forbidden}`"
         );
     }
-    // ⛔ No apply path in this cut (ruling A1).
     assert!(
-        !bridge.contains("review_and_apply") && !bridge.contains(".apply("),
-        "the verdict verb records a review; the apply front door is 18-3a-d"
+        !bridge.contains("review_and_apply"),
+        "the operator front door must not revive the dead review-and-apply wrapper"
     );
 
     // 🔴 Durable-first, bus-second — proven STRUCTURALLY (Rule 4), because the
@@ -1709,9 +1797,6 @@ fn the_artifact_panel_makes_no_integrity_or_apply_claim_it_cannot_back() {
         "authentic journal",
         "authenticated record",
         "is authentic",
-        "applied to the workspace",
-        "working tree",
-        "patch applied",
         "is live",
     ] {
         assert!(
@@ -1730,9 +1815,8 @@ fn the_artifact_panel_makes_no_integrity_or_apply_claim_it_cannot_back() {
         "the footer must state what the journal does NOT prove: {painted}"
     );
 
-    // The drill-down owes ruling P1's exact wording so the terse suffix cannot
-    // over-claim on screen.
-    use rustain::adapters::tui::handlers::artifact_command::{NO_APPLY_PATH_NOTE, render_show};
+    // The drill-down must name eligibility without claiming success.
+    use rustain::adapters::tui::handlers::artifact_command::{disposition_sentence, render_show};
     let room = OrchestrationRoom::project_for_host(
         OrchestrationRoomId::parse("room-test").expect("room id"),
         vec![RoomEvent::ArtifactCreated {
@@ -1747,17 +1831,19 @@ fn the_artifact_panel_makes_no_integrity_or_apply_claim_it_cannot_back() {
         &MergeBackPolicy::default(),
         Ok(b""),
     );
-    assert_eq!(
-        NO_APPLY_PATH_NOTE,
-        "eligible to apply — no operator apply path yet (`18-3a-d`)"
-    );
-    assert!(rendered.contains(NO_APPLY_PATH_NOTE), "{rendered}");
+    let expected_decision = disposition_sentence(PatchDisposition::Applies);
+    let decision = rendered
+        .lines()
+        .find_map(|line| line.strip_prefix("  decision  "))
+        .expect("drill-down decision");
+    assert_eq!(decision, expected_decision, "{rendered}");
+    assert!(rendered.contains("apply: never attempted"), "{rendered}");
 }
 
-/// **AC6 negative-scope ratchet.** This story writes no file outside
-/// `.rustain/`, mints no apply path, and mints no assignment vocabulary.
+/// **AC6 scope ratchet.** This cut adds the confirmed apply front door but
+/// still mints no assignment vocabulary.
 #[test]
-fn this_cut_ships_no_apply_path_and_no_assignment_vocabulary() {
+fn this_cut_ships_the_apply_path_and_no_assignment_vocabulary() {
     for relative in [
         "src/infrastructure/runtime/artifact_bridge.rs",
         "src/adapters/tui/handlers/artifact_command.rs",
@@ -1766,10 +1852,11 @@ fn this_cut_ships_no_apply_path_and_no_assignment_vocabulary() {
     ] {
         let body = std::fs::read_to_string(format!("{}/{relative}", env!("CARGO_MANIFEST_DIR")))
             .unwrap_or_else(|error| panic!("read {relative}: {error}"));
-        assert!(
-            !body.contains("PatchApplied"),
-            "{relative}: the durable applied-state event belongs to DF-17-3b-1 → 18-3a-d"
-        );
+        if relative.ends_with("artifact_bridge.rs") {
+            assert!(body.contains("ArtifactCommandArgs::Apply"), "{relative}");
+            assert!(body.contains("pub async fn apply_artifact("), "{relative}");
+            assert_eq!(body.matches(".apply_patch(").count(), 1, "{relative}");
+        }
         assert!(
             !body.contains("TicketAddressee::Node"),
             "{relative}: DF-18-3a-b-ASSIGN-MINT ships the assign verb, not this cut"
@@ -1825,6 +1912,7 @@ fn this_cut_ships_no_apply_path_and_no_assignment_vocabulary() {
 fn artifact_app_state(
     workspace: &std::path::Path,
     recorder: Option<std::sync::Arc<dyn rustain::domain::ports::PatchReviewRecorder>>,
+    executor: Option<std::sync::Arc<dyn rustain::domain::ports::PatchApplyExecutor>>,
 ) -> rustain::infrastructure::runtime::app_state::AppState {
     use std::sync::Arc;
 
@@ -1921,6 +2009,7 @@ fn artifact_app_state(
         ),
     ));
     app_state.patch_review = recorder;
+    app_state.patch_apply = executor;
     app_state
 }
 

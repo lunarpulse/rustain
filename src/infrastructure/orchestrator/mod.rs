@@ -2291,6 +2291,7 @@ impl WaveCtx {
                                                 OwnershipKind::Owned,
                                                 mode,
                                                 &ctx.merge_back_policy,
+                                                None,
                                             )
                                             .await
                                         {
@@ -3559,6 +3560,7 @@ mod tests {
                 crate::domain::models::OwnershipKind::Owned,
                 crate::domain::models::PermissionMode::Yolo,
                 &crate::domain::services::patch_review::MergeBackPolicy::default(),
+                None,
             )
             .await
         });
@@ -3569,6 +3571,7 @@ mod tests {
                 crate::domain::models::OwnershipKind::Owned,
                 crate::domain::models::PermissionMode::Yolo,
                 &crate::domain::services::patch_review::MergeBackPolicy::default(),
+                None,
             )
             .await
         });

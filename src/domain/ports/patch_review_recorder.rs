@@ -21,8 +21,8 @@
 //!
 //! ⛔ **This port does not apply anything.** Recording a verdict is an
 //! append to the room journal and nothing else; no `git apply`, no
-//! working-tree mutation. The operator-triggered apply front door is
-//! `18-3a-d` (`DF-18-3a-c-APPLY-FRONT-DOOR`).
+//! working-tree mutation. 18.3a-e delivered the operator front door through
+//! the separate `PatchApplyExecutor` port.
 
 use async_trait::async_trait;
 

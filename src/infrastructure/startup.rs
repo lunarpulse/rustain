@@ -1673,6 +1673,7 @@ pub async fn run() -> Result<()> {
     // the concrete `PatchMergeBack`.
     let mut patch_review_recorder: Option<Arc<dyn crate::domain::ports::PatchReviewRecorder>> =
         None;
+    let mut patch_apply_executor: Option<Arc<dyn crate::domain::ports::PatchApplyExecutor>> = None;
     // Story 10.2 — wire subagent provider into CompositeToolsetAdapter
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
@@ -2097,6 +2098,8 @@ pub async fn run() -> Result<()> {
                     event_bus.clone(),
                     Arc::new(crate::adapters::merge_back::GitPatchApplier),
                 ));
+            patch_apply_executor = Some(patch_merge_back.clone()
+                as std::sync::Arc<dyn crate::domain::ports::PatchApplyExecutor>);
             // Story 17.3c (D1): preserve the pre-isolation direct-write
             // contract — user-originated fanout edits auto-apply through the
             // journal-authoritative gate; self-originated stay review-gated.
@@ -2282,6 +2285,7 @@ pub async fn run() -> Result<()> {
     // so the surface and the apply path can never be reading two different
     // stores or describing two different policies.
     app_state.patch_review = patch_review_recorder;
+    app_state.patch_apply = patch_apply_executor;
 
     // 5d. Use the same storage adapter constructed above for session management.
     // Both tools and the event loop share one FileSystemStorage instance pointing

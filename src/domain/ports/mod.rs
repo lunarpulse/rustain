@@ -43,6 +43,8 @@ mod node_orchestrator;
 #[allow(unused_imports)]
 mod patch_applier;
 #[allow(unused_imports)]
+mod patch_apply_executor;
+#[allow(unused_imports)]
 mod patch_review_recorder;
 #[allow(unused_imports)]
 mod peer_interaction_recorder;
@@ -123,6 +125,7 @@ pub use ledger_journal_sink::{LedgerJournalError, LedgerJournalSink};
 pub use memory::MemoryPort;
 pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
 pub use patch_applier::{PatchApplier, PatchApplyError};
+pub use patch_apply_executor::{PatchApplyExecutor, PatchApplyPortError};
 pub use patch_review_recorder::{PatchReviewError, PatchReviewRecorder};
 pub use peer_interaction_recorder::{
     PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder,

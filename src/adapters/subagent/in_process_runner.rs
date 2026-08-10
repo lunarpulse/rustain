@@ -4969,6 +4969,7 @@ mod tests {
                 &crate::domain::services::patch_review::MergeBackPolicy {
                     auto_approve_user_originated: true,
                 },
+                None,
             )
             .await;
         assert!(matches!(
@@ -5193,6 +5194,7 @@ mod tests {
                 &crate::domain::services::patch_review::MergeBackPolicy {
                     auto_approve_user_originated: true,
                 },
+                None,
             )
             .await;
         assert!(
@@ -7062,6 +7064,7 @@ mod tests {
                 crate::domain::models::OwnershipKind::Owned,
                 crate::domain::models::PermissionMode::Yolo,
                 &policy,
+                None,
             )
             .await
             .expect("same policy auto-applies real user-originated patch");
@@ -7071,6 +7074,7 @@ mod tests {
                 crate::domain::models::OwnershipKind::Owned,
                 crate::domain::models::PermissionMode::Yolo,
                 &policy,
+                None,
             )
             .await;
         assert!(matches!(
@@ -7812,6 +7816,7 @@ mod tests {
                 RoomEvent::PatchApplyStarted {
                     artifact,
                     workspace_revision,
+                    ..
                 } => {
                     lines.push(format!(
                         "journal PatchApplyStarted artifact={artifact:?} workspace_revision={workspace_revision:?}"

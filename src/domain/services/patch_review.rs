@@ -17,6 +17,36 @@ pub struct MergeBackPolicy {
     pub auto_approve_user_originated: bool,
 }
 
+/// One ownership/disposition derivation shared by every operator patch surface.
+///
+/// `OwnershipKind::Owned` matches the production `/fanout` caller. Keeping the
+/// value beside the sole decision-core call prevents rows and write doors from
+/// computing independent answers before 18.4 introduces peer ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OperatorPatchDecision {
+    pub ownership: OwnershipKind,
+    pub disposition: PatchDisposition,
+}
+
+/// Resolve the apply decision and ownership governing one patch artifact.
+///
+/// Non-patch kinds get `None`: asking the merge-back gate about an
+/// `InputRequest` is a category error, not a refusal to display.
+#[must_use]
+pub fn operator_patch_decision(
+    artifact: &ArtifactRef,
+    permission_mode: PermissionMode,
+    policy: &MergeBackPolicy,
+) -> Option<OperatorPatchDecision> {
+    (artifact.kind == ArtifactKind::Patch).then(|| {
+        let ownership = OwnershipKind::Owned;
+        OperatorPatchDecision {
+            ownership,
+            disposition: patch_disposition(artifact, ownership, permission_mode, policy),
+        }
+    })
+}
+
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplyDecision {

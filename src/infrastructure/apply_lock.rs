@@ -35,10 +35,10 @@
 //! `PatchMergeBack.workspace` is stored verbatim — `startup.rs` never
 //! canonicalizes — so two processes can reach one repository under two
 //! spellings. Keying the lock on the path *you were handed* hands them two
-//! different locks and both applies proceed. [`workspace_hash`] is the tree's
-//! single `std::fs::canonicalize` caller and already keys the room id, so
-//! embedding it in the lock filename makes the canonical identity the thing
-//! being locked, exactly as `{room-id}.lock` already does for the journal.
+//! different locks and both applies proceed. [`workspace_hash`] is the shared
+//! canonicalization seam already used to key the room id, so embedding it in
+//! the lock filename makes the canonical identity the thing being locked,
+//! exactly as `{room-id}.lock` already does for the journal.
 //!
 //! [`workspace_hash`]: crate::infrastructure::paths::workspace_hash
 

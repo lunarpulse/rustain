@@ -168,6 +168,8 @@ pub enum ConfirmationType {
     SkillTrustInspect,
     /// Plan approval card (Story 6-0d AC4) — y/a/n/e for plan mode exit approval.
     PlanApproval,
+    /// Confirm `/artifact apply`: an irreversible workspace write.
+    ArtifactApply,
 }
 
 /// Overlay types for modal focus targets.

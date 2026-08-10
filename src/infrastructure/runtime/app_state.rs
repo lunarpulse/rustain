@@ -108,6 +108,9 @@ pub struct AppState {
     /// the shape, `transparency` and `room_roles` above use. `AppState::new`
     /// already takes 19 arguments and a 20th buys nothing.
     pub patch_review: Option<std::sync::Arc<dyn crate::domain::ports::PatchReviewRecorder>>,
+    /// Story 18.3a-e — confirmed operator apply seam. Bound once at the
+    /// composition root; no setter and no concrete merge-back dependency.
+    pub patch_apply: Option<std::sync::Arc<dyn crate::domain::ports::PatchApplyExecutor>>,
 }
 
 impl AppState {
@@ -166,6 +169,7 @@ impl AppState {
                 transparency: None,
                 room_roles: Arc::new(crate::adapters::policy::JournalRoomRoleProjection::inert()),
                 patch_review: None,
+                patch_apply: None,
             },
             domain_rx,
         )

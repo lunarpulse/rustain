@@ -176,7 +176,7 @@ impl CommandRegistry {
             },
             SlashCommandDef {
                 name: "artifact".to_string(),
-                description: "Inspect or review one durable artifact: /artifact show <id> | /artifact review <id> approve|request-changes|reject (records a verdict; applying arrives with 18-3a-d)"
+                description: "Inspect, review, or apply one durable patch: /artifact show <id> | /artifact review <id> approve|request-changes|reject | /artifact apply <id> (confirmed workspace write)"
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,

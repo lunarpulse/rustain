@@ -3,7 +3,7 @@
 //! `RoomEvent` is the canonical durable event. `OrchestrationRoom::project`
 //! performs no I/O and exposes no mutation surface to observers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -264,8 +264,8 @@ pub enum ApplyState {
     /// ⚠ **Cut 1 ships the latch and not the release**
     /// (`DF-18-3a-d-INDETERMINATE-CLEARING`). Nothing in this build can clear
     /// it, so the artifact is refused on every subsequent retry, permanently.
-    /// That is correct for a cut with no operator in it; the clearing verb is
-    /// `18-3a-e`'s. ⛔ "Make `Indeterminate` fail open" is forbidden as the
+    /// The operator-facing resolution verb belongs to `18-3a-f`. ⛔ "Make
+    /// `Indeterminate` fail open" is forbidden as the
     /// fix — it fails open on a workspace write whose outcome is unknown.
     Indeterminate,
     /// The apply completed and recorded its outcome.
@@ -540,13 +540,13 @@ pub enum RoomEvent {
     /// with no matching [`RoomEvent::PatchApplyResolved`] folds to
     /// [`ApplyState::Indeterminate`] — never to success.
     ///
-    /// ⛔ **No `applier` identity field in this cut.**
-    /// `PatchMergeBack::apply` is the sole `git apply` path and has exactly
-    /// one production caller, so the field would have exactly one possible
-    /// value. `18-3a-e` adds `#[serde(default)] applier: Option<AgentId>`
-    /// additively — the [`RoomEvent::TicketAssigned`] `to` pattern.
+    /// The operator is recorded when the confirmed front door invokes this
+    /// chokepoint. Policy-driven `/fanout` applies remain unattributed and omit
+    /// the field on the wire, preserving pre-18.3a-e journal compatibility.
     PatchApplyStarted {
         artifact: ArtifactId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        applier: Option<AgentId>,
         /// Best-effort preimage witness: the workspace revision observed just
         /// before the mutation, via `PatchApplier::revision`.
         ///
@@ -651,6 +651,10 @@ pub struct OrchestrationRoom {
     /// also lets the fold record an apply for an artifact this projection has
     /// never seen, instead of silently dropping it.
     apply_state: BTreeMap<ArtifactId, ApplyState>,
+    /// Patches captured before this journal's first apply record. The fold
+    /// consumes event order directly; no `JournalEntry::seq` enters this model.
+    predates_apply_records: BTreeSet<ArtifactId>,
+    seen_apply_record: bool,
     approvals: Vec<ApprovalView>,
     remote_rejections: Vec<RemoteRejectionView>,
 }
@@ -715,6 +719,11 @@ impl OrchestrationRoom {
     /// display surface.
     pub fn apply_state(&self) -> &BTreeMap<ArtifactId, ApplyState> {
         &self.apply_state
+    }
+
+    /// Artifacts whose capture precedes this journal's first apply record.
+    pub fn predates_apply_records(&self) -> &BTreeSet<ArtifactId> {
+        &self.predates_apply_records
     }
 
     pub fn approvals(&self) -> &[ApprovalView] {
@@ -792,6 +801,9 @@ impl OrchestrationRoom {
                 }
             }
             RoomEvent::PatchCaptured { artifact, producer } => {
+                if !self.seen_apply_record {
+                    self.predates_apply_records.insert(artifact.clone());
+                }
                 if let Some(view) = self.artifacts.get_mut(&artifact)
                     && view.producer == producer
                 {
@@ -823,6 +835,7 @@ impl OrchestrationRoom {
             // record for an unknown artifact is a genuine anomaly that must
             // stay visible rather than vanish.
             RoomEvent::PatchApplyStarted { artifact, .. } => {
+                self.seen_apply_record = true;
                 self.apply_state.insert(artifact, ApplyState::Indeterminate);
             }
             // Last write wins per artifact, exactly as `PatchReviewed` does.
@@ -832,6 +845,7 @@ impl OrchestrationRoom {
             // idempotency guard that hides a second record from the projection
             // while it sits in the log.
             RoomEvent::PatchApplyResolved { artifact, outcome } => {
+                self.seen_apply_record = true;
                 self.apply_state
                     .insert(artifact, ApplyState::Resolved(outcome));
             }

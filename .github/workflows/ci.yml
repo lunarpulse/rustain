@@ -72,6 +72,7 @@ jobs:
           cargo test --test conformance_18_3a_c_artifacts
           cargo test --test e2e_help_overlay
           cargo test --test conformance_18_3a_d_apply
+          cargo test --test conformance_18_3a_e_apply_surface -- --test-threads=1
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest
@@ -137,6 +138,7 @@ jobs:
             --test conformance_transparency \
             --test conformance_transparency_surfacing \
             --test conformance_18_3a_d_apply \
+            --test conformance_18_3a_e_apply_surface \
             --test conformance_cow_mergeback
 
       # The other half of the contract: the ungated guards assert that A2A is OFF by

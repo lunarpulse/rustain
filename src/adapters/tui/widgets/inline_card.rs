@@ -53,6 +53,11 @@ pub fn render_bottom_anchored_decision_card(
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Double)
         .border_style(Style::default().fg(accent));
-    let para = Paragraph::new(lines).block(block);
+    // When the card is taller than the pane, keep the TAIL — the warning and
+    // [y]/[n] actions an operator must see to answer an irreversible write
+    // safely. The lead lines scroll off rather than the decision prompt.
+    let visible = card_height.saturating_sub(2) as usize;
+    let scroll = lines.len().saturating_sub(visible) as u16;
+    let para = Paragraph::new(lines).block(block).scroll((scroll, 0));
     Widget::render(para, card_area, buf);
 }

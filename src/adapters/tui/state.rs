@@ -141,6 +141,17 @@ pub struct PendingForgetCard {
     pub focused_index: usize,
 }
 
+/// Confirmed workspace-write card for `/artifact apply <id>`.
+#[derive(Debug, Clone)]
+pub struct PendingApplyCard {
+    pub conversation_id: crate::domain::models::tab::ConversationId,
+    pub artifact: crate::domain::models::ArtifactRef,
+    pub files: Vec<String>,
+    pub workspace: std::path::PathBuf,
+    pub prior_focus: crate::domain::models::FocusState,
+    pub predates_apply_records: bool,
+}
+
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
 pub struct SkillTrustState {
     pub skill_name: String,
@@ -2553,6 +2564,8 @@ pub struct TuiState {
     pub pending_consolidation_card: Option<PendingConsolidationCard>,
     /// Story 11.4a: pending `/memory forget` confirm card awaiting user y/n.
     pub pending_forget_card: Option<PendingForgetCard>,
+    /// Story 18.3a-e: pending confirmed patch apply.
+    pub pending_apply_card: Option<PendingApplyCard>,
     /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
     /// when the event arrives while a stream is still active. Dispatched
     /// after the stream completes (TurnComplete handler).
@@ -2883,6 +2896,7 @@ impl TuiState {
             pending_delegation_card: None,
             pending_consolidation_card: None,
             pending_forget_card: None,
+            pending_apply_card: None,
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,

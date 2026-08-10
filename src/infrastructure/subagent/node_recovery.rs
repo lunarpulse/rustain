@@ -321,9 +321,9 @@ impl NodeRecovery {
                     parked_set.remove(&node);
                 }
                 JournalRecord::ParkClaimed { .. } | JournalRecord::ParkClaimReleased { .. } => {}
-                // Ledger conservation head is recovered separately by
-                // `AuthorityLedger::recover_from_journal` (17-2c D4); this fold
-                // rebuilds node/room state only.
+                // Ledger conservation heads are recovered separately by
+                // `AuthorityLedger::recover_conservation` (17-2c D4); this
+                // fold rebuilds node/room state only.
                 JournalRecord::LedgerConservation(_) => {}
                 // `load()` flattens atomic batches into individual records, so
                 // a `Batch` never reaches this fold; the arm is defensive.

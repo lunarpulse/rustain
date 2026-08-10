@@ -280,6 +280,7 @@ async fn every_apply_is_bracketed_by_a_durable_write_ahead_record() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect("the shipped policy applies a user-originated patch");
@@ -365,6 +366,7 @@ async fn a_workspace_without_git_history_still_applies_and_records_no_revision()
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect("a non-git workspace is a supported apply target");
@@ -415,6 +417,7 @@ async fn a_conflicting_apply_records_a_resolved_conflict_and_stays_retryable() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect_err("a non-applying patch is a conflict");
@@ -445,6 +448,7 @@ async fn a_conflicting_apply_records_a_resolved_conflict_and_stays_retryable() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect_err("still a conflict");
@@ -618,6 +622,7 @@ async fn a_crashed_apply_folds_to_indeterminate_and_refuses_the_next_attempt() {
                     OwnershipKind::Owned,
                     PermissionMode::Yolo,
                     &shipped_policy(),
+                    None,
                 )
                 .await
         })
@@ -667,6 +672,7 @@ async fn a_crashed_apply_folds_to_indeterminate_and_refuses_the_next_attempt() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect_err("an indeterminate artifact must be refused");
@@ -716,6 +722,7 @@ async fn a_never_attempted_artifact_still_applies_beside_a_wedged_one() {
                     OwnershipKind::Owned,
                     PermissionMode::Yolo,
                     &shipped_policy(),
+                    None,
                 )
                 .await
         })
@@ -731,6 +738,7 @@ async fn a_never_attempted_artifact_still_applies_beside_a_wedged_one() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect("a NeverAttempted artifact must still apply");
@@ -771,6 +779,7 @@ async fn an_unreadable_outcome_is_never_read_as_success_by_the_guard() {
         .journal
         .append_room(RoomEvent::PatchApplyStarted {
             artifact: artifact.id.clone(),
+            applier: None,
             workspace_revision: None,
         })
         .await
@@ -798,6 +807,7 @@ async fn an_unreadable_outcome_is_never_read_as_success_by_the_guard() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect_err("an unreadable outcome must fail closed");
@@ -835,10 +845,12 @@ async fn the_apply_lattice_preserves_the_outcome_and_replays_last_write_wins() {
     for event in [
         RoomEvent::PatchApplyStarted {
             artifact: indeterminate.clone(),
+            applier: None,
             workspace_revision: Some("cafebabe".to_owned()),
         },
         RoomEvent::PatchApplyStarted {
             artifact: conflicted.clone(),
+            applier: None,
             workspace_revision: None,
         },
         RoomEvent::PatchApplyResolved {
@@ -847,6 +859,7 @@ async fn the_apply_lattice_preserves_the_outcome_and_replays_last_write_wins() {
         },
         RoomEvent::PatchApplyStarted {
             artifact: repeated.clone(),
+            applier: None,
             workspace_revision: None,
         },
         RoomEvent::PatchApplyResolved {
@@ -855,6 +868,7 @@ async fn the_apply_lattice_preserves_the_outcome_and_replays_last_write_wins() {
         },
         RoomEvent::PatchApplyStarted {
             artifact: repeated.clone(),
+            applier: None,
             workspace_revision: None,
         },
         RoomEvent::PatchApplyResolved {
@@ -901,6 +915,7 @@ async fn an_apply_record_for_an_unknown_artifact_stays_visible() {
     journal
         .append_room(RoomEvent::PatchApplyStarted {
             artifact: orphan.clone(),
+            applier: None,
             workspace_revision: None,
         })
         .await
@@ -1002,6 +1017,7 @@ async fn a_second_service_over_one_workspace_is_refused_while_the_first_applies(
                     OwnershipKind::Owned,
                     PermissionMode::Yolo,
                     &shipped_policy(),
+                    None,
                 )
                 .await
         })
@@ -1016,6 +1032,7 @@ async fn a_second_service_over_one_workspace_is_refused_while_the_first_applies(
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect_err("the second holder of the workspace must be refused");
@@ -1066,6 +1083,7 @@ async fn two_spellings_of_one_workspace_contend_for_the_same_lock() {
                     OwnershipKind::Owned,
                     PermissionMode::Yolo,
                     &shipped_policy(),
+                    None,
                 )
                 .await
         })
@@ -1080,6 +1098,7 @@ async fn two_spellings_of_one_workspace_contend_for_the_same_lock() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect_err("a symlinked spelling addresses the same tree and must contend");
@@ -1159,6 +1178,7 @@ async fn one_apply_takes_the_workspace_lock_exactly_once() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &shipped_policy(),
+            None,
         )
         .await
         .expect("apply");
@@ -1246,37 +1266,47 @@ fn the_ci_a2a_lane_runs_this_target_with_instrumentation() {
     );
 }
 
-/// **AC4 — the negative ratchet that DEFINES this cut: zero operator surface.**
+/// **18.3a-e amendment:** the operator surface reaches the existing durable
+/// latch through one port and does not mint a second apply implementation.
 #[test]
-fn this_cut_ships_no_operator_apply_surface() {
-    for relative in [
-        "src/infrastructure/runtime/event_loop.rs",
-        "src/infrastructure/runtime/artifact_bridge.rs",
-        "src/adapters/tui/handlers/artifact_command.rs",
-        "src/adapters/tui/widgets/artifacts_panel.rs",
-        "src/adapters/a2a/projection.rs",
-        "src/adapters/palette_registry.rs",
-    ] {
-        let body = source(relative);
-        for forbidden in [
-            "PatchApplyStarted",
-            "PatchApplyResolved",
-            "ApplyOutcome",
-            "ApplyState",
-            "artifact apply",
-        ] {
-            assert!(
-                !body.contains(forbidden),
-                "{relative}: `{forbidden}` is 18-3a-e's, not this cut's"
-            );
-        }
-    }
+fn operator_surface_routes_to_the_existing_apply_latch() {
+    let bridge = source("src/infrastructure/runtime/artifact_bridge.rs");
+    let apply = &bridge[bridge
+        .find("pub async fn apply_artifact(")
+        .expect("apply seam")..];
+    let gate = apply
+        .find("room_edit_decision(local_room_role(acting), RoomEditKind::DurableContent)")
+        .expect("room edit gate");
+    let port = apply.find(".apply_patch(").expect("single apply port");
+    assert!(gate < port, "the gate precedes the workspace-write port");
+    assert_eq!(bridge.matches(".apply_patch(").count(), 1);
     assert!(
-        source("src/infrastructure/runtime/event_loop.rs")
-            .lines()
-            .count()
-            <= 11_321,
-        "this cut ships no surface, so the event_loop budget must not move"
+        !bridge.contains("RoomEvent::PatchApplyStarted"),
+        "the bridge delegates to the existing latch; it does not mint apply events"
+    );
+
+    let handler = source("src/adapters/tui/handlers/artifact_command.rs");
+    assert!(handler.contains("Some(\"apply\")"), "parser branch");
+    let loop_source = source("src/infrastructure/runtime/event_loop.rs");
+    for needle in [
+        "InputAction::ApplyCardAccept",
+        "InputAction::ApplyCardDecline",
+        "render_apply_card_lines",
+    ] {
+        assert!(loop_source.contains(needle), "{needle}");
+    }
+    assert!(loop_source.lines().count() <= 11_321);
+
+    let merge_back = source("src/infrastructure/orchestrator/merge_back.rs");
+    assert_eq!(
+        merge_back.matches("pub async fn apply(").count(),
+        1,
+        "no second merge-back latch"
+    );
+    let a2a = source("src/adapters/a2a/projection.rs");
+    assert!(
+        !a2a.contains("PatchApplyExecutor") && !a2a.contains("ArtifactCommandArgs::Apply"),
+        "18.4 peer projection remains deferred"
     );
 }
 

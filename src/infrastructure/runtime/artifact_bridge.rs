@@ -13,9 +13,9 @@
 //! is **durable-first, bus-second**: a journal failure returns `Err` and
 //! nothing reaches the bus.
 //!
-//! ⛔ **Nothing here applies a patch.** No `git apply`, no working-tree
-//! mutation, no file written outside `.rustain/`. Ruling A1: the verdict verb
-//! records a review; the apply front door is `18-3a-d`.
+//! `/artifact apply` is deliberately separate from the verdict port: after
+//! confirmation this bridge reaches one [`PatchApplyExecutor`] domain port.
+//! The bridge contains no direct `git apply` and mints no apply events.
 //!
 //! # Addressing goes through the projection
 //!
@@ -29,13 +29,15 @@
 use crate::adapters::tui::handlers::artifact_command::{
     self as handler, ArtifactCommandArgs, ResolveError,
 };
-use crate::adapters::tui::state::TuiState;
+use crate::adapters::tui::state::{PendingApplyCard, TuiState};
 use crate::domain::models::{
     AgentId, ArtifactRef, OrchestrationRoom, PermissionMode, ReviewVerdict, RoomEditDecision,
     RoomEditKind, RoomEvent,
 };
-use crate::domain::ports::{PatchReviewError, PatchReviewRecorder, RoomJournalReader};
-use crate::domain::services::patch_review::MergeBackPolicy;
+use crate::domain::ports::{
+    PatchApplyExecutor, PatchReviewError, PatchReviewRecorder, RoomJournalReader,
+};
+use crate::domain::services::patch_review::{MergeBackPolicy, PatchDisposition};
 use crate::domain::services::room_role::{local_room_role, room_edit_decision};
 use crate::infrastructure::runtime::app_state::AppState;
 
@@ -135,6 +137,13 @@ async fn dispatch(
             match show_artifact(app_state, &id, permission_mode).await {
                 Ok(message) => handler::show_artifact_message(state, message),
                 Err(message) => warn(state, conversation_id, app_state, message),
+            }
+        }
+        ArtifactCommandArgs::Apply { id } => {
+            if let Err(message) =
+                open_apply_card(app_state, state, conversation_id, &id, permission_mode).await
+            {
+                warn(state, conversation_id, app_state, message);
             }
         }
         ArtifactCommandArgs::Review { id, verdict } => {
@@ -361,6 +370,213 @@ async fn show_artifact(
         &policy,
         body.as_deref().map_err(String::clone),
     ))
+}
+
+async fn open_apply_card(
+    app_state: &AppState,
+    state: &mut TuiState,
+    conversation_id: &str,
+    typed: &str,
+    permission_mode: PermissionMode,
+) -> Result<(), String> {
+    if state.pending_apply_card.is_some() {
+        return Err("an artifact apply decision is already awaiting your answer".to_owned());
+    }
+    let room = load_room(app_state).await?;
+    let artifact = handler::resolve_artifact(&room, typed)
+        .map_err(|error| error.to_string())?
+        .clone();
+    let policy = effective_policy(app_state);
+    let decision = crate::domain::services::patch_review::operator_patch_decision(
+        &artifact,
+        permission_mode,
+        &policy,
+    )
+    .ok_or_else(|| "only patch artifacts can be applied".to_owned())?;
+    match decision.disposition {
+        PatchDisposition::Applies => {}
+        PatchDisposition::AutoApplies => {
+            return Err(auto_applies_refusal(&room, &artifact.id));
+        }
+        refused => return Err(handler::disposition_sentence(refused)),
+    }
+    if app_state.patch_apply.is_none() {
+        return Err(
+            "this session composed no merge-back service, so no patch can be applied".to_owned(),
+        );
+    }
+    let recorder = app_state
+        .patch_review
+        .as_ref()
+        .ok_or_else(|| NO_RECORDER.to_owned())?;
+    let body = recorder
+        .body(&artifact.id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let files = patch_files(&body);
+    let predates_apply_records = room.predates_apply_records().contains(&artifact.id);
+    let prior_focus = state.focus.clone();
+    state.pending_apply_card = Some(PendingApplyCard {
+        conversation_id: conversation_id.to_owned(),
+        artifact,
+        files,
+        workspace: app_state.compose_snapshot.workspace_path.clone(),
+        prior_focus,
+        predates_apply_records,
+    });
+    state.focus = crate::domain::models::FocusState::Overlay(
+        crate::domain::models::visual::OverlayType::Confirmation(
+            crate::domain::models::visual::ConfirmationType::ArtifactApply,
+        ),
+    );
+    state.needs_redraw = true;
+    Ok(())
+}
+
+fn patch_files(body: &[u8]) -> Vec<String> {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return vec!["paths unavailable".to_owned()];
+    };
+    let mut files = std::collections::BTreeSet::new();
+    for rest in text
+        .lines()
+        .filter_map(|line| line.strip_prefix("diff --git "))
+    {
+        for path in diff_header_paths(rest) {
+            files.insert(path);
+        }
+    }
+    if files.is_empty() {
+        files.insert("paths unavailable".to_owned());
+    }
+    files.into_iter().collect()
+}
+
+/// Source (`a/`) and destination (`b/`) paths from the text following
+/// `diff --git `. Both sides are returned so a rename lists the removed path
+/// alongside the added one. Git's C-style quoted header (`"a/…" "b/…"`, used
+/// when a path contains a space, tab, or other quoting byte) is decoded;
+/// unquoted headers split on ` b/`, which git never emits inside an unquoted
+/// path. The confirmation card names every file the write mutates.
+fn diff_header_paths(rest: &str) -> Vec<String> {
+    if rest.starts_with('"') {
+        let mut out = Vec::new();
+        let mut cursor = rest;
+        while let Some(open) = cursor.find('"') {
+            let after_open = &cursor[open + 1..];
+            let Some(close) = after_open.find('"') else { break };
+            let token = &after_open[..close];
+            if let Some(p) = token.strip_prefix("a/").or_else(|| token.strip_prefix("b/")) {
+                out.push(p.to_owned());
+            }
+            cursor = after_open[close + 1..].trim_start();
+        }
+        return out;
+    }
+    let Some((src, dst)) = rest.split_once(" b/") else {
+        return Vec::new();
+    };
+    let src = src.strip_prefix("a/").unwrap_or(src).trim_matches('"');
+    [src, dst.trim_matches('"')]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Honest refusal for an `AutoApplies` patch at the operator door. The patch is
+/// policy-auto-apply (not an operator-apply path), so the door always refuses —
+/// but the message must not claim a workspace write the durable record does not
+/// back. Only a recorded `Applied` outcome "already ran"; anything else is told
+/// honestly that the auto path has not recorded a completed apply.
+fn auto_applies_refusal(
+    room: &OrchestrationRoom,
+    artifact_id: &crate::domain::models::ArtifactId,
+) -> String {
+    use crate::domain::models::orchestration_room::{ApplyOutcome, ApplyState};
+    let already_applied = matches!(
+        room.apply_state().get(artifact_id),
+        Some(ApplyState::Resolved(ApplyOutcome::Applied))
+    );
+    if already_applied {
+        "this patch auto-applies under policy and already ran at fan-out completion".to_owned()
+    } else {
+        "this patch is set to auto-apply under policy; no completed apply is recorded yet"
+            .to_owned()
+    }
+}
+/// Execute a confirmed apply through the room-edit gate and one domain port.
+pub async fn apply_artifact(
+    room: &OrchestrationRoom,
+    executor: &dyn PatchApplyExecutor,
+    acting: &AgentId,
+    typed: &str,
+    permission_mode: PermissionMode,
+    policy: MergeBackPolicy,
+) -> Result<String, String> {
+    let artifact = handler::resolve_artifact(room, typed).map_err(|error| error.to_string())?;
+    let decision = crate::domain::services::patch_review::operator_patch_decision(
+        artifact,
+        permission_mode,
+        &policy,
+    )
+    .ok_or_else(|| "only patch artifacts can be applied".to_owned())?;
+    match decision.disposition {
+        PatchDisposition::Applies => {}
+        PatchDisposition::AutoApplies => {
+            return Err(auto_applies_refusal(room, &artifact.id));
+        }
+        refused => return Err(handler::disposition_sentence(refused)),
+    }
+    if room_edit_decision(local_room_role(acting), RoomEditKind::DurableContent)
+        != RoomEditDecision::Allow
+    {
+        return Err(format!(
+            "{} may not make durable room-content edits",
+            acting.as_str()
+        ));
+    }
+    let id = artifact.id.clone();
+    let result = executor
+        .apply_patch(
+            artifact.clone(),
+            decision.ownership,
+            permission_mode,
+            policy,
+            Some(acting.clone()),
+        )
+        .await;
+    Ok(handler::render_apply_result(&id, result))
+}
+
+/// Effect arm for an accepted card. The room is re-folded after the answer so
+/// addressing and the gate never rely on the preview snapshot.
+pub async fn apply_confirmed_card(
+    state: &mut TuiState,
+    app_state: &AppState,
+    card: PendingApplyCard,
+    permission_mode: PermissionMode,
+) {
+    let typed = card.artifact.id.as_str();
+    let result = match (load_room(app_state).await, app_state.patch_apply.as_ref()) {
+        (Ok(room), Some(executor)) => {
+            apply_artifact(
+                &room,
+                executor.as_ref(),
+                &acting_principal(),
+                typed,
+                permission_mode,
+                effective_policy(app_state),
+            )
+            .await
+        }
+        (Err(error), _) => Err(error),
+        (_, None) => Err("this session composed no merge-back service".to_owned()),
+    };
+    match result {
+        Ok(message) => handler::show_artifact_message(state, message),
+        Err(message) => warn(state, &card.conversation_id, app_state, message),
+    }
+    refresh_panel(app_state, state, permission_mode).await;
 }
 
 /// Record one operator verdict durably.

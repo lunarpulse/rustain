@@ -9,10 +9,10 @@
 //! `infrastructure::runtime::artifact_bridge`, which reaches it only through
 //! [`PatchReviewRecorder`].
 //!
-//! ⛔ **It records; it never applies.** `PatchMergeBack::apply` is deliberately
-//! not exposed here (ruling A1): the operator-triggered apply front door, the
-//! durable applied-state event (`DF-17-3b-1`, P1) and the cross-process apply
-//! lock (`DF-17-3b-2`) all belong to `18-3a-d`.
+//! ⛔ **It records; it never applies.** The durable apply latch and
+//! cross-process lock shipped in 18.3a-d; 18.3a-e exposes them through the
+//! separate `PatchApplyExecutor` port rather than widening this review-only
+//! adapter.
 
 use std::sync::Arc;
 

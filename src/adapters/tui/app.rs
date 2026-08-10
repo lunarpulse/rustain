@@ -119,6 +119,10 @@ pub enum InputAction {
     ForgetNavigateUp,
     /// Story 11.4a: `/memory forget` card — user pressed ↓/j (move focus down).
     ForgetNavigateDown,
+    /// Story 18.3a-e: confirm the pending patch apply.
+    ApplyCardAccept,
+    /// Story 18.3a-e: decline the pending patch apply.
+    ApplyCardDecline,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -763,6 +767,21 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'k' => return InputAction::ForgetNavigateUp,
             _ => return InputAction::Consumed,
         }
+    }
+
+    if state.pending_apply_card.is_some()
+        && state.focus
+            == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply))
+    {
+        return match crate::adapters::tui::widgets::apply_card::choice_for_key(c) {
+            Some(crate::adapters::tui::widgets::apply_card::ApplyCardChoice::Accept) => {
+                InputAction::ApplyCardAccept
+            }
+            Some(crate::adapters::tui::widgets::apply_card::ApplyCardChoice::Decline) => {
+                InputAction::ApplyCardDecline
+            }
+            None => InputAction::Consumed,
+        };
     }
 
     // Story 6.4: Plan deviation card key intercept (y/e/n)
@@ -2014,6 +2033,14 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             // Story 11.4a: Esc on forget card → cancel (purge nothing).
             if state.pending_forget_card.is_some() {
                 return InputAction::ForgetDeclineAll;
+            }
+            if state.pending_apply_card.is_some()
+                && state.focus
+                    == FocusState::Overlay(OverlayType::Confirmation(
+                        ConfirmationType::ArtifactApply,
+                    ))
+            {
+                return InputAction::ApplyCardDecline;
             }
             // Story 10.5: Esc on delegation card → cancel plan at this task
             if state.pending_delegation_card.is_some() {
@@ -5354,6 +5381,69 @@ mod tests {
         assert_eq!(
             handle_input(&mut state, &DomainInputEvent::KeyPress('e')),
             InputAction::ExportTransparency
+        );
+    }
+    #[test]
+    fn apply_card_keys_only_own_input_while_confirmation_focus_is_active() {
+        let make_card = || {
+            let hash =
+                crate::domain::models::ContentHash::parse_hex(&"e".repeat(64)).expect("hash");
+            crate::adapters::tui::state::PendingApplyCard {
+                conversation_id: "conversation".to_owned(),
+                artifact: crate::domain::models::EvidenceArtifact {
+                    id: crate::domain::models::ArtifactId::from(hash),
+                    kind: crate::domain::models::ArtifactKind::Patch,
+                    producer: crate::domain::models::AgentId::parse("spoke-1").expect("agent"),
+                    content_hash: hash,
+                    authority: crate::domain::models::CapabilityTokenId::default(),
+                    provenance: vec![crate::domain::models::ProvenanceTag::UserOriginated],
+                    depends_on: Vec::new(),
+                    review: Some(crate::domain::models::ReviewStatus::Pending),
+                    host: crate::domain::models::HostBinding::new("host-A", "workspace"),
+                },
+                files: vec!["src/lib.rs".to_owned()],
+                workspace: std::path::PathBuf::from("/workspace"),
+                prior_focus: FocusState::Input,
+                predates_apply_records: false,
+            }
+        };
+        let confirmation =
+            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply));
+        for (key, expected) in [
+            ('y', InputAction::ApplyCardAccept),
+            ('n', InputAction::ApplyCardDecline),
+            ('x', InputAction::Consumed),
+        ] {
+            let mut state = TuiState::new(80, 24);
+            state.pending_apply_card = Some(make_card());
+            state.focus = confirmation.clone();
+            assert_eq!(handle_char(&mut state, key), expected);
+        }
+
+        let mut input_owner = TuiState::new(80, 24);
+        input_owner.pending_apply_card = Some(make_card());
+        input_owner.focus = FocusState::Input;
+        let _ = handle_char(&mut input_owner, 'n');
+        assert_eq!(input_owner.input_buffer, "n");
+        assert!(input_owner.pending_apply_card.is_some());
+
+        let mut modal = TuiState::new(80, 24);
+        modal.pending_apply_card = Some(make_card());
+        modal.focus = confirmation;
+        assert_eq!(
+            handle_input(&mut modal, &DomainInputEvent::SpecialKey(DomainKey::Esc),),
+            InputAction::ApplyCardDecline
+        );
+
+        let mut input_with_card = TuiState::new(80, 24);
+        input_with_card.pending_apply_card = Some(make_card());
+        input_with_card.focus = FocusState::Input;
+        assert_ne!(
+            handle_input(
+                &mut input_with_card,
+                &DomainInputEvent::SpecialKey(DomainKey::Esc),
+            ),
+            InputAction::ApplyCardDecline
         );
     }
 }

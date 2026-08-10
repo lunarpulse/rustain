@@ -1739,6 +1739,16 @@ pub async fn run(
                                         let _ = app_state.event_bus.emit_domain(ev);
                                     }
                                 }
+                                InputAction::ApplyCardAccept => {
+                                    if let Some(card) = handlers::artifact_command::resolve_apply_card(&mut state, true) {
+                                        crate::infrastructure::runtime::artifact_bridge::apply_confirmed_card(&mut state, &app_state, card, security.current_mode()).await;
+                                    }
+                                    surface_deferred_modal(&mut state);
+                                }
+                                InputAction::ApplyCardDecline => {
+                                    let _ = handlers::artifact_command::resolve_apply_card(&mut state, false);
+                                    surface_deferred_modal(&mut state);
+                                }
                                 InputAction::DelegationCardCancel => {
                                     if let Some(ref pending) = state.pending_delegation_card {
                                         let conv_id = conversation.id.clone();
@@ -6245,7 +6255,7 @@ pub async fn run(
                                     tool_input: input_preview,
                                     risk,
                                 };
-                                if state.pending_plan_card.is_some() || state.pending_permission.is_some() {
+                                if state.pending_plan_card.is_some() || state.pending_permission.is_some() || state.pending_apply_card.is_some() {
                                     state.permission_queue.push(new_pending);
                                 } else {
                                     state.pending_permission = Some(new_pending);
@@ -6284,9 +6294,15 @@ pub async fn run(
                             summary,
                         };
                         state.pending_plan_approval = Some(pending);
-                        state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                            ConfirmationType::PlanApproval,
-                        ));
+                        // Defer focus if an apply-confirmation card owns it: the
+                        // apply card's intercepts require Confirmation(ArtifactApply)
+                        // focus and would strand if stolen. The plan card is surfaced
+                        // by `surface_deferred_modal` when the apply card resolves.
+                        if state.pending_apply_card.is_none() {
+                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                ConfirmationType::PlanApproval,
+                            ));
+                        }
                         state.needs_redraw = true;
                     }
                     AppEvent::PlanApprovalResolved { conversation_id: _conversation_id, outcome } => {
@@ -8936,6 +8952,22 @@ fn advance_permission_queue(state: &mut TuiState) {
     state.needs_redraw = true;
 }
 
+/// After a confirmation card resolves, hand focus to a modal that deferred to
+/// it — a permission queued while the card was open, or a plan approval that
+/// arrived mid-card — so it is not left pending and invisible. No-op otherwise.
+fn surface_deferred_modal(state: &mut TuiState) {
+    if state.pending_permission.is_none() && state.permission_queue.queue.front().is_some() {
+        advance_permission_queue(state);
+        return;
+    }
+    if state.pending_plan_approval.is_some()
+        && !matches!(state.focus, FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval)))
+    {
+        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval));
+        state.needs_redraw = true;
+    }
+}
+
 fn advance_skill_trust_queue(state: &mut TuiState) {
     if let Some(next) = state.skill_trust_queue.pop_front() {
         state.pending_skill_trust = Some(next);
@@ -9654,6 +9686,20 @@ fn render(
                     );
                     crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
                         frame.buffer_mut(), card_lines, theme.colors.accent, app_layout.chat_pane,
+                    );
+                }
+
+                if let Some(card) = &state.pending_apply_card {
+                    let card_lines = crate::adapters::tui::widgets::apply_card::render_apply_card_lines(
+                        card,
+                        theme,
+                        app_layout.chat_pane.width,
+                    );
+                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(
+                        frame.buffer_mut(),
+                        card_lines,
+                        theme.colors.accent,
+                        app_layout.chat_pane,
                     );
                 }
 

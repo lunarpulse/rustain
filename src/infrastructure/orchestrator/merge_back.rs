@@ -7,7 +7,10 @@ use crate::domain::models::{
     EvidenceArtifactDraft, HostBinding, OrchestrationRoom, OwnershipKind, PermissionMode,
     ProvenanceTag, ReviewStatus, ReviewVerdict, RoomEvent, UnifiedDiff,
 };
-use crate::domain::ports::{ArtifactError, ArtifactStore, PatchApplier, PatchApplyError};
+use crate::domain::ports::{
+    ArtifactError, ArtifactStore, PatchApplier, PatchApplyError, PatchApplyExecutor,
+    PatchApplyPortError,
+};
 use crate::domain::services::patch_review::{ApplyDecision, MergeBackPolicy, may_apply_patch};
 use crate::infrastructure::apply_lock::{ApplyLock, ApplyLockError};
 use crate::infrastructure::runtime::event_bus::EventBus;
@@ -169,6 +172,7 @@ impl PatchMergeBack {
         ownership: OwnershipKind,
         permission_mode: PermissionMode,
         policy: &MergeBackPolicy,
+        applier: Option<AgentId>,
     ) -> Result<(), MergeBackError> {
         let _guard = self.apply_guard.lock().await;
         let _workspace_lock = self.acquire_workspace_lock().await?;
@@ -218,6 +222,7 @@ impl PatchMergeBack {
         let workspace_revision = self.applier.revision(&self.workspace).await;
         self.persist(RoomEvent::PatchApplyStarted {
             artifact: stored.id.clone(),
+            applier,
             workspace_revision,
         })
         .await?;
@@ -227,20 +232,24 @@ impl PatchMergeBack {
             .await
             .map_err(map_apply_error);
         // Second leg of the bracket: the resolution is durable-best-effort.
-        // If this append fails AFTER `git apply` already returned, the error is
-        // propagated — the apply did not durably complete, so the `/fanout`
-        // caller is told it failed even though the working tree may carry the
-        // delta. The artifact then folds to `Indeterminate` and is refused on
-        // every later attempt (cut 1 ships the latch with no release). This is
-        // deliberate: swallowing the error and returning `result` would leave
-        // the room believing `Indeterminate` while the caller believes success
-        // — a silent inconsistency that is strictly worse than a reported
-        // failure. (`ADR-18-3a-d-01` Decision 1.)
-        self.persist(RoomEvent::PatchApplyResolved {
+        // If this append fails AFTER `git apply` already returned, the apply
+        // did not durably complete — the workspace may carry the delta while
+        // the artifact folds to `Indeterminate` and is refused on every later
+        // attempt (cut 1 ships the latch with no release). 18.3a-e surfaces
+        // this distinctly via `ApplyUnresolved` rather than a plain failure:
+        // swallowing the error and returning `result` would leave the room
+        // believing `Indeterminate` while the caller believes success — a
+        // silent inconsistency strictly worse than a reported failure.
+        // (ADR-18-3a-d-01 Decision 1; the operator-facing distinction is
+        // 18.3a-e's honesty refinement.)
+        let resolution = self.persist(RoomEvent::PatchApplyResolved {
             artifact: stored.id.clone(),
             outcome: apply_outcome(&result),
         })
-        .await?;
+        .await;
+        if let Err(resolution_err) = resolution {
+            return Err(MergeBackError::ApplyUnresolved(resolution_err.to_string()));
+        }
         result
     }
 
@@ -282,8 +291,9 @@ impl PatchMergeBack {
         permission_mode: PermissionMode,
         policy: &MergeBackPolicy,
     ) -> Result<(), MergeBackError> {
+        let applier = reviewer.clone();
         let reviewed = self.review(artifact, reviewer, verdict).await?;
-        self.apply(&reviewed, ownership, permission_mode, policy)
+        self.apply(&reviewed, ownership, permission_mode, policy, Some(applier))
             .await
     }
 
@@ -293,6 +303,30 @@ impl PatchMergeBack {
             .event_bus
             .emit_domain(AppEvent::DomainEvent(event.into()));
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl PatchApplyExecutor for PatchMergeBack {
+    async fn apply_patch(
+        &self,
+        artifact: ArtifactRef,
+        ownership: OwnershipKind,
+        permission_mode: PermissionMode,
+        policy: MergeBackPolicy,
+        applier: Option<AgentId>,
+    ) -> Result<(), PatchApplyPortError> {
+        self.apply(&artifact, ownership, permission_mode, &policy, applier)
+            .await
+            .map_err(|error| match error {
+                MergeBackError::WorkspaceBusy => PatchApplyPortError::WorkspaceBusy,
+                MergeBackError::ApplyIndeterminate => PatchApplyPortError::ApplyIndeterminate,
+                MergeBackError::ApplyUnresolved(message) => {
+                    PatchApplyPortError::ApplyUnresolved(message)
+                }
+                MergeBackError::Conflict(message) => PatchApplyPortError::Conflict(message),
+                other => PatchApplyPortError::Failed(other.to_string()),
+            })
     }
 }
 
@@ -348,9 +382,9 @@ fn authoritative_artifact(
 /// retry: `git apply` is atomic across hunks, so the working tree is in a
 /// state the next attempt can classify honestly on its own.
 ///
-/// ⚠ Cut 1 ships this latch with **no release**
-/// (`DF-18-3a-d-INDETERMINATE-CLEARING`); the operator resolution verb is
-/// `18-3a-e`'s. ⛔ "Make it fail open" is forbidden as the fix.
+/// ⚠ The latch still has **no release**
+/// (`DF-18-3a-d-INDETERMINATE-CLEARING`); the operator resolution verb belongs
+/// to `18-3a-f`. ⛔ "Make it fail open" is forbidden as the fix.
 fn apply_is_refused(state: ApplyState) -> bool {
     matches!(
         state,
@@ -419,6 +453,11 @@ pub enum MergeBackError {
          indeterminate and it will not be re-applied"
     )]
     ApplyIndeterminate,
+    #[error(
+        "git apply returned but the apply-outcome record could not be persisted; \
+         the workspace may carry the delta and the artifact is now indeterminate: {0}"
+    )]
+    ApplyUnresolved(String),
     #[error("another process is applying a patch to this workspace")]
     WorkspaceBusy,
     #[error("the workspace apply lock could not be taken: {0}")]

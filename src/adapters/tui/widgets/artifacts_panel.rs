@@ -30,8 +30,8 @@
 //!   hypothetical workspace write would sit in the same column as
 //!   `· auto-applies (policy)`, which describes a write that **already
 //!   happened**. Two tenses, one column, adjacent rows. An eligible patch reads
-//!   `· approved — no apply path yet`; `18-3a-d` restores the original wording
-//!   when it ships the front door.
+//!   `· applies`; the journaled outcome is rendered separately as
+//!   `· apply: <outcome>`.
 //! - **The `↓ N newer entries` head-poll chrome is absent.** It is fed by a
 //!   1 Hz tick `/room` has and this surface does not; copying the string
 //!   without the wiring ships an unreachable line
@@ -53,10 +53,12 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use crate::adapters::tui::state::{ArtifactsPanelState, ArtifactsZeroState};
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::{
-    ArtifactId, ArtifactKind, ArtifactRef, OrchestrationRoom, OwnershipKind, PermissionMode,
-    ReviewStatus, ReviewVerdict,
+    ApplyOutcome, ApplyState, ArtifactId, ArtifactKind, ArtifactRef, OrchestrationRoom,
+    PermissionMode, ReviewStatus, ReviewVerdict,
 };
-use crate::domain::services::patch_review::{MergeBackPolicy, PatchDisposition, patch_disposition};
+use crate::domain::services::patch_review::{
+    MergeBackPolicy, PatchDisposition, operator_patch_decision,
+};
 use crate::domain::services::transparency::{STRUCTURAL_REPLAY_CLAIM, format_unix_millis};
 
 use super::room_panel::UNKNOWN_RECORD_LABEL;
@@ -69,17 +71,6 @@ use super::sidebar::truncate_to_width;
 /// producing an identical diff do not collide — while `content_hash` stays
 /// body-only. No row, header or help string may call it the content hash.
 pub const ID_PREFIX_LEN: usize = 6;
-
-/// The ownership the disposition is resolved under.
-///
-/// `OwnershipKind::Owned` is not a guess: it is the **same** value the sole
-/// production apply caller passes (`orchestrator/mod.rs`, the `/fanout`
-/// merge-back arm). Resolving the surface under a different ownership than the
-/// apply path would reintroduce the two-derivations defect ruling A2 exists to
-/// prevent. A consequence worth stating: `PatchDisposition::RefusedPeerOwned`
-/// is therefore unreachable *through this front door*, and is proven by a
-/// direct-domain unit test instead.
-const ROW_OWNERSHIP: OwnershipKind = OwnershipKind::Owned;
 
 /// First [`ID_PREFIX_LEN`] characters of an artifact id.
 #[must_use]
@@ -141,13 +132,10 @@ pub fn review_state_label(review: Option<&ReviewStatus>) -> String {
 #[must_use]
 pub fn decision_suffix(disposition: PatchDisposition) -> Option<&'static str> {
     match disposition {
-        // ⚑ Ruling P1 — a deliberate, documented deviation from the UX table's
-        // `· applies`. `· auto-applies (policy)` below describes a `git apply`
-        // that ALREADY RAN; `· applies` would describe one nothing in this
-        // build can perform, because the sole production apply fires at
-        // fan-out completion and never re-runs. Same grammar, opposite reality,
-        // one column. `18-3a-d` restores `· applies` with the front door.
-        PatchDisposition::Applies => Some("approved — no apply path yet"),
+        // Eligible review decisions use the same verb as the confirmed front
+        // door. The outcome suffix below remains separate: `applies` is
+        // eligibility, `apply: applied` is the journaled result.
+        PatchDisposition::Applies => Some("applies"),
         PatchDisposition::AutoApplies => Some("auto-applies (policy)"),
         PatchDisposition::RefusedSelfReview => Some("refused: self-review"),
         PatchDisposition::RefusedPlanMode => Some("refused: plan mode"),
@@ -163,21 +151,6 @@ pub fn decision_suffix(disposition: PatchDisposition) -> Option<&'static str> {
         // future disposition cannot ship without a deliberate suffix decision
         // (AC4 keystone (b)).
     }
-}
-
-/// Resolve the apply decision that governs one artifact.
-///
-/// Non-patch kinds get `None`: their disposition is `RefusedNotAPatch`, which
-/// renders no suffix, and asking the merge-back gate about an `InputRequest` is
-/// a category error, not a refusal to display.
-#[must_use]
-pub fn row_disposition(
-    artifact: &ArtifactRef,
-    permission_mode: PermissionMode,
-    policy: &MergeBackPolicy,
-) -> Option<PatchDisposition> {
-    (artifact.kind == ArtifactKind::Patch)
-        .then(|| patch_disposition(artifact, ROW_OWNERSHIP, permission_mode, policy))
 }
 
 /// `▲ <word>` when this row needs the operator's attention, else empty.
@@ -225,6 +198,25 @@ pub fn ticket_state(room: &OrchestrationRoom, id: &ArtifactId) -> Option<String>
     None
 }
 
+pub fn apply_state_suffix(room: &OrchestrationRoom, artifact: &ArtifactId) -> String {
+    match room.apply_state().get(artifact).copied().unwrap_or_default() {
+        ApplyState::NeverAttempted if room.predates_apply_records().contains(artifact) => {
+            "apply: state unknown — this journal predates apply records; patch may already be in working tree"
+                .to_owned()
+        }
+        ApplyState::NeverAttempted => "apply: never attempted".to_owned(),
+        ApplyState::Indeterminate => {
+            "apply: indeterminate — no resolution verb exists yet (18-3a-f)".to_owned()
+        }
+        ApplyState::Resolved(ApplyOutcome::Applied) => "apply: applied".to_owned(),
+        ApplyState::Resolved(ApplyOutcome::Conflict) => "apply: conflict".to_owned(),
+        ApplyState::Resolved(ApplyOutcome::Failed) => "apply: failed".to_owned(),
+        ApplyState::Resolved(ApplyOutcome::Unknown) => {
+            "apply: unknown outcome (not success)".to_owned()
+        }
+    }
+}
+
 /// The composed pieces of one artifact row.
 ///
 /// 🔴 **One producer, two layouts.** Both [`artifact_row`] and
@@ -242,6 +234,7 @@ struct RowParts {
     producer: String,
     suffix: Option<&'static str>,
     hazard: &'static str,
+    apply_suffix: Option<String>,
 }
 
 fn row_parts(
@@ -250,7 +243,8 @@ fn row_parts(
     permission_mode: PermissionMode,
     policy: &MergeBackPolicy,
 ) -> RowParts {
-    let disposition = row_disposition(artifact, permission_mode, policy);
+    let disposition = operator_patch_decision(artifact, permission_mode, policy)
+        .map(|decision| decision.disposition);
     RowParts {
         kind: kind_label(artifact.kind),
         prefix: id_prefix(&artifact.id),
@@ -261,6 +255,8 @@ fn row_parts(
         },
         producer: artifact.producer.as_str().to_owned(),
         suffix: disposition.and_then(decision_suffix),
+        apply_suffix: (artifact.kind == ArtifactKind::Patch)
+            .then(|| apply_state_suffix(room, &artifact.id)),
         hazard: hazard(artifact, disposition),
     }
 }
@@ -285,6 +281,9 @@ pub fn artifact_row(
     );
     if let Some(suffix) = parts.suffix {
         row.push_str(&format!(" \u{b7} {suffix}"));
+    }
+    if let Some(apply_suffix) = &parts.apply_suffix {
+        row.push_str(&format!(" \u{b7} {apply_suffix}"));
     }
     if !parts.hazard.is_empty() {
         row.push_str(&format!("  {}", parts.hazard));
@@ -311,12 +310,16 @@ pub fn visible_artifact_row(
     let suffix_lost = parts
         .suffix
         .is_some_and(|suffix| !truncated.contains(suffix));
+    let apply_suffix_lost = parts
+        .apply_suffix
+        .as_ref()
+        .is_some_and(|suffix| !truncated.contains(suffix));
     // An `AwaitingReview` row carries NO suffix by design — its `▲ no
     // reviewer` hazard is the only signal, so a truncated hazard must trigger
     // the fallback too, or the canonical pending row loses its warning
     // precisely in the narrow layout this fallback exists to protect.
     let hazard_lost = !parts.hazard.is_empty() && !truncated.contains(parts.hazard);
-    if !suffix_lost && !hazard_lost {
+    if !suffix_lost && !apply_suffix_lost && !hazard_lost {
         return truncated;
     }
     // Safety-first fallback: reason and hazard before identifier.
@@ -326,6 +329,9 @@ pub fn visible_artifact_row(
     }
     if !parts.hazard.is_empty() {
         reordered.push_str(&format!(" {}", parts.hazard));
+    }
+    if let Some(apply_suffix) = &parts.apply_suffix {
+        reordered.push_str(&format!(" \u{b7} {apply_suffix}"));
     }
     reordered.push_str(&format!(" {}", parts.prefix));
     truncate_to_width(&reordered, width)
@@ -367,10 +373,10 @@ pub fn zero_state_lines(zero: ArtifactsZeroState) -> [&'static str; 2] {
     }
 }
 
-/// The footer's verb reminder. One spelling, and it names `18-3a-d` so the
-/// operator is not left guessing why an approved patch is still unapplied.
+/// The footer's verb reminder. The typed verbs are the affordance; the panel
+/// has no inert action labels.
 pub const VERB_HINT: &str = "/artifact show <id> · /artifact review <id> approve|request-changes|reject \
-     (records a verdict; applying arrives with 18-3a-d)";
+     · /artifact apply <id> (previews impact, then asks for confirmation)";
 
 /// Stated once, in the chrome, so an `InputRequest` row needs no affordance of
 /// its own to explain itself.
@@ -409,7 +415,7 @@ pub fn render(
         .borders(Borders::ALL)
         .border_style(border_style)
         .title_bottom(Span::styled(
-            " read-only replay · j/k move · Ctrl+X E close ",
+            " replay · j/k move · Ctrl+X E close ",
             Style::default().fg(theme.colors.fg_muted),
         ));
     let inner = block.inner(area);

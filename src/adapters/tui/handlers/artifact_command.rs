@@ -14,15 +14,16 @@
 
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::widgets::artifacts_panel::{
-    decision_suffix, id_prefix, kind_label, review_state_label, row_disposition,
+    apply_state_suffix, decision_suffix, id_prefix, kind_label, review_state_label,
 };
 use crate::domain::models::{
     ArtifactId, ArtifactKind, ArtifactRef, OrchestrationRoom, PermissionMode, ReviewVerdict,
 };
-use crate::domain::services::patch_review::MergeBackPolicy;
+use crate::domain::ports::PatchApplyPortError;
+use crate::domain::services::patch_review::{MergeBackPolicy, operator_patch_decision};
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/artifacts | /artifact show <id> | \
+pub const USAGE: &str = "/artifacts | /artifact show <id> | /artifact apply <id> | \
                          /artifact review <id> approve|request-changes|reject";
 
 /// Stable id for the in-chat `/artifact` result block. A drill-down is a
@@ -30,18 +31,14 @@ pub const USAGE: &str = "/artifacts | /artifact show <id> | \
 /// stacking another copy under the old one.
 pub const ARTIFACT_BLOCK_ID: &str = "artifact-view";
 
-/// The exact wording the drill-down owes an eligible-but-unappliable patch.
-///
-/// Pinned by a required-strings ratchet so ruling P1's `· approved — no apply
-/// path yet` suffix cannot quietly grow into an over-claim on screen.
-pub const NO_APPLY_PATH_NOTE: &str = "eligible to apply — no operator apply path yet (`18-3a-d`)";
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum ArtifactCommandArgs {
     /// Bare `/artifacts` — open the read-only list panel.
     List,
     /// `/artifact show <id>` — the drill-down.
     Show { id: String },
+    /// `/artifact apply <id>` — open the confirmed workspace-write front door.
+    Apply { id: String },
     /// `/artifact review <id> <verdict>` — the verdict verb.
     Review { id: String, verdict: ReviewVerdict },
 }
@@ -87,6 +84,15 @@ pub fn parse_artifact_command(
                 return Err(format!("/artifact show takes one id. {USAGE}"));
             }
             Ok(ArtifactCommandArgs::Show { id: id.to_owned() })
+        }
+        Some("apply") => {
+            let id = parts
+                .next()
+                .ok_or_else(|| format!("/artifact apply needs an artifact id. {USAGE}"))?;
+            if parts.next().is_some() {
+                return Err(format!("/artifact apply takes one id. {USAGE}"));
+            }
+            Ok(ArtifactCommandArgs::Apply { id: id.to_owned() })
         }
         Some("review") => {
             let id = parts
@@ -189,8 +195,8 @@ pub fn resolve_artifact<'room>(
 /// Render `/artifact show <id>` — the Drill-Down, not a new overlay.
 ///
 /// ⛔ **Bodies are shown by handle plus a bounded preview, never inlined
-/// wholesale.** ⛔ No wording here may claim the working tree changed: this cut
-/// records verdicts and applies nothing.
+/// wholesale.** Apply outcome wording comes only from the room projection; an
+/// approved review is eligibility, never evidence of a workspace write.
 #[must_use]
 pub fn render_show(
     artifact: &ArtifactRef,
@@ -229,7 +235,9 @@ pub fn render_show(
              arrives with the operator inbox.\n",
         );
     }
-    if let Some(disposition) = row_disposition(artifact, permission_mode, policy) {
+    if let Some(disposition) = operator_patch_decision(artifact, permission_mode, policy)
+        .map(|decision| decision.disposition)
+    {
         // A verdict this build cannot read folds as `Reviewed{Unknown}` and
         // lands fail-closed on `AwaitingReview` — but "no verdict has been
         // recorded" would contradict the state line above, which already
@@ -247,6 +255,10 @@ pub fn render_show(
             disposition_sentence(disposition)
         };
         out.push_str(&format!("  decision  {decision}\n"));
+        out.push_str(&format!(
+            "  apply     {}\n",
+            apply_state_suffix(room, &artifact.id)
+        ));
         // OPEN-DR-4 / `DF-18-3a-MERGEBACK-POLICY-VISIBILITY`: the effective
         // policy, sourced from the value the apply path uses.
         out.push_str(&format!(
@@ -279,9 +291,7 @@ pub fn disposition_sentence(
 ) -> String {
     use crate::domain::services::patch_review::PatchDisposition as D;
     match disposition {
-        // ⚑ Ruling P1's required wording, pinned by AC6's required-strings
-        // ratchet. It says eligible, never applied.
-        D::Applies => NO_APPLY_PATH_NOTE.to_owned(),
+        D::Applies => "eligible to apply after confirmation with `/artifact apply <id>`".to_owned(),
         D::AutoApplies => "auto-applies under the merge-back policy — a \
                            user-originated patch goes to `git apply` at fan-out \
                            completion without review; a failed apply leaves it \
@@ -296,8 +306,8 @@ pub fn disposition_sentence(
 
 /// One-line operator confirmation after a verdict is journaled.
 ///
-/// ⛔ **No wording may claim the working tree changed.** The verb records a
-/// review; the apply front door is `18-3a-d`.
+/// Approval changes eligibility only; applying remains a separate confirmed
+/// command.
 #[must_use]
 pub fn render_verdict_recorded(artifact: &ArtifactId, verdict: ReviewVerdict) -> String {
     let label = match verdict {
@@ -308,8 +318,7 @@ pub fn render_verdict_recorded(artifact: &ArtifactId, verdict: ReviewVerdict) ->
     };
     format!(
         "recorded {label} for {} in the room journal. \
-         Nothing was applied to the workspace — the operator apply path arrives \
-         with 18-3a-d.",
+         Nothing was applied yet — run `/artifact apply <id>` to preview and confirm the write.",
         id_prefix(artifact)
     )
 }
@@ -327,4 +336,48 @@ pub(crate) fn show_artifact_message(state: &mut TuiState, message: String) {
     );
     state.active_feedback_id = Some(ARTIFACT_BLOCK_ID.to_owned());
     state.needs_redraw = true;
+}
+
+/// Resolve the decision card and restore the focus that owned the command.
+///
+/// Decline consumes the card and returns `None`; accept returns the captured
+/// card for the event-loop effect arm.
+pub fn resolve_apply_card(
+    state: &mut TuiState,
+    accept: bool,
+) -> Option<crate::adapters::tui::state::PendingApplyCard> {
+    let card = state.pending_apply_card.take()?;
+    state.focus = card.prior_focus.clone();
+    state.needs_redraw = true;
+    accept.then_some(card)
+}
+
+#[must_use]
+pub fn render_apply_result(
+    artifact: &ArtifactId,
+    result: Result<(), PatchApplyPortError>,
+) -> String {
+    let prefix = id_prefix(artifact);
+    match result {
+        Ok(()) => format!("patch {prefix} applied to the workspace"),
+        Err(PatchApplyPortError::WorkspaceBusy) => {
+            format!("patch {prefix} was not applied: the workspace is busy")
+        }
+        Err(PatchApplyPortError::ApplyIndeterminate) => format!(
+            "patch {prefix} was not applied: its prior outcome is indeterminate; \
+             no resolution verb exists yet (18-3a-f)"
+        ),
+        Err(PatchApplyPortError::ApplyUnresolved(_)) => format!(
+            "patch {prefix} may have been applied, but its outcome could not be \
+             recorded — the workspace may have changed and the artifact is now \
+             indeterminate. Inspect the working tree; no resolution verb exists \
+             yet (18-3a-f)."
+        ),
+        Err(PatchApplyPortError::Conflict(message)) => {
+            format!("patch {prefix} conflicted and did not mutate the workspace: {message}")
+        }
+        Err(PatchApplyPortError::Failed(message)) => {
+            format!("patch {prefix} apply failed: {message}")
+        }
+    }
 }

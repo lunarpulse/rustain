@@ -293,7 +293,12 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "/artifact review <id> <verdict>",
-                    description: "Record approve|request-changes|reject; applying arrives with 18-3a-d",
+                    description: "Record approve|request-changes|reject; approval is not apply success",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/artifact apply <id>",
+                    description: "Preview impact, confirm, then apply an eligible patch",
                     available: true,
                 },
             ],
