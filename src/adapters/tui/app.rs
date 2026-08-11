@@ -769,7 +769,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         }
     }
 
-    if state.pending_apply_card.is_some()
+    if state.pending_artifact_card.is_some()
         && state.focus
             == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply))
     {
@@ -2034,7 +2034,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             if state.pending_forget_card.is_some() {
                 return InputAction::ForgetDeclineAll;
             }
-            if state.pending_apply_card.is_some()
+            if state.pending_artifact_card.is_some()
                 && state.focus
                     == FocusState::Overlay(OverlayType::Confirmation(
                         ConfirmationType::ArtifactApply,
@@ -5383,12 +5383,16 @@ mod tests {
             InputAction::ExportTransparency
         );
     }
+    /// ⚑ 18.3a-f: parameterised by mode. The whole point of the mode field is
+    /// that dispatch does **not** consult it — both card modes must produce the
+    /// same `InputAction`s from the same keys, or `choice_for_key`'s
+    /// single-sourcing is a lie.
     #[test]
     fn apply_card_keys_only_own_input_while_confirmation_focus_is_active() {
-        let make_card = || {
+        let make_card = |mode: crate::adapters::tui::state::ArtifactCardMode| {
             let hash =
                 crate::domain::models::ContentHash::parse_hex(&"e".repeat(64)).expect("hash");
-            crate::adapters::tui::state::PendingApplyCard {
+            crate::adapters::tui::state::PendingArtifactCard {
                 conversation_id: "conversation".to_owned(),
                 artifact: crate::domain::models::EvidenceArtifact {
                     id: crate::domain::models::ArtifactId::from(hash),
@@ -5405,45 +5409,55 @@ mod tests {
                 workspace: std::path::PathBuf::from("/workspace"),
                 prior_focus: FocusState::Input,
                 predates_apply_records: false,
+                mode,
             }
         };
         let confirmation =
             FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply));
-        for (key, expected) in [
-            ('y', InputAction::ApplyCardAccept),
-            ('n', InputAction::ApplyCardDecline),
-            ('x', InputAction::Consumed),
-        ] {
-            let mut state = TuiState::new(80, 24);
-            state.pending_apply_card = Some(make_card());
-            state.focus = confirmation.clone();
-            assert_eq!(handle_char(&mut state, key), expected);
-        }
-
-        let mut input_owner = TuiState::new(80, 24);
-        input_owner.pending_apply_card = Some(make_card());
-        input_owner.focus = FocusState::Input;
-        let _ = handle_char(&mut input_owner, 'n');
-        assert_eq!(input_owner.input_buffer, "n");
-        assert!(input_owner.pending_apply_card.is_some());
-
-        let mut modal = TuiState::new(80, 24);
-        modal.pending_apply_card = Some(make_card());
-        modal.focus = confirmation;
-        assert_eq!(
-            handle_input(&mut modal, &DomainInputEvent::SpecialKey(DomainKey::Esc),),
-            InputAction::ApplyCardDecline
-        );
-
-        let mut input_with_card = TuiState::new(80, 24);
-        input_with_card.pending_apply_card = Some(make_card());
-        input_with_card.focus = FocusState::Input;
-        assert_ne!(
-            handle_input(
-                &mut input_with_card,
-                &DomainInputEvent::SpecialKey(DomainKey::Esc),
+        for mode in [
+            crate::adapters::tui::state::ArtifactCardMode::Apply,
+            crate::adapters::tui::state::ArtifactCardMode::Resolve(
+                crate::domain::models::OperatorApplyFinding::Present,
             ),
-            InputAction::ApplyCardDecline
-        );
+        ] {
+            for (key, expected) in [
+                ('y', InputAction::ApplyCardAccept),
+                ('n', InputAction::ApplyCardDecline),
+                ('x', InputAction::Consumed),
+            ] {
+                let mut state = TuiState::new(80, 24);
+                state.pending_artifact_card = Some(make_card(mode));
+                state.focus = confirmation.clone();
+                assert_eq!(handle_char(&mut state, key), expected, "{mode:?}");
+            }
+
+            let mut input_owner = TuiState::new(80, 24);
+            input_owner.pending_artifact_card = Some(make_card(mode));
+            input_owner.focus = FocusState::Input;
+            let _ = handle_char(&mut input_owner, 'n');
+            assert_eq!(input_owner.input_buffer, "n", "{mode:?}");
+            assert!(input_owner.pending_artifact_card.is_some(), "{mode:?}");
+
+            let mut modal = TuiState::new(80, 24);
+            modal.pending_artifact_card = Some(make_card(mode));
+            modal.focus = confirmation.clone();
+            assert_eq!(
+                handle_input(&mut modal, &DomainInputEvent::SpecialKey(DomainKey::Esc),),
+                InputAction::ApplyCardDecline,
+                "{mode:?}"
+            );
+
+            let mut input_with_card = TuiState::new(80, 24);
+            input_with_card.pending_artifact_card = Some(make_card(mode));
+            input_with_card.focus = FocusState::Input;
+            assert_ne!(
+                handle_input(
+                    &mut input_with_card,
+                    &DomainInputEvent::SpecialKey(DomainKey::Esc),
+                ),
+                InputAction::ApplyCardDecline,
+                "{mode:?}"
+            );
+        }
     }
 }

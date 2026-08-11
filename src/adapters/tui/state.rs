@@ -141,15 +141,43 @@ pub struct PendingForgetCard {
     pub focused_index: usize,
 }
 
-/// Confirmed workspace-write card for `/artifact apply <id>`.
+/// What a [`PendingArtifactCard`] is asking the operator to confirm.
+///
+/// ⛔ **The mode parameterises CONTENT, never dispatch.** Both modes use the
+/// same two keys, the same `ConfirmationType`, the same card slot, the same
+/// render branch and the same `InputAction`s — that is what keeps the operator
+/// resolution verb out of `event_loop.rs`'s line budget entirely (Story
+/// 18.3a-f, ruling A7). `apply_card::bindings_for` carries a compile-time
+/// assertion that the key→choice mapping is identical across modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactCardMode {
+    /// `/artifact apply <id>` — a confirmed **workspace write**.
+    Apply,
+    /// `/artifact resolve <id> present|absent` — a confirmed durable record of
+    /// what the operator reports they saw. ⛔ Performs no workspace write, and
+    /// the card must say so before `y`.
+    Resolve(crate::domain::models::OperatorApplyFinding),
+}
+
+/// Confirmed decision card for `/artifact apply` and `/artifact resolve`.
+///
+/// ⚠ **The rename is deliberately partial** (Story 18.3a-f, ruling P3). The
+/// type and this field are mode-neutral because neither is pinned by any test
+/// and a rename moves no line count, so it is free. `InputAction::ApplyCardAccept`,
+/// `InputAction::ApplyCardDecline` and `render_apply_card_lines` keep their
+/// apply-flavoured names because `conformance_18_3a_d_apply.rs` pins all three
+/// by name inside `event_loop.rs` — and churning a pinned ratchet for cosmetics
+/// is how ratchets die by a thousand justifications. ⛔ Do not "fix" the
+/// asymmetry.
 #[derive(Debug, Clone)]
-pub struct PendingApplyCard {
+pub struct PendingArtifactCard {
     pub conversation_id: crate::domain::models::tab::ConversationId,
     pub artifact: crate::domain::models::ArtifactRef,
     pub files: Vec<String>,
     pub workspace: std::path::PathBuf,
     pub prior_focus: crate::domain::models::FocusState,
     pub predates_apply_records: bool,
+    pub mode: ArtifactCardMode,
 }
 
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
@@ -2564,8 +2592,11 @@ pub struct TuiState {
     pub pending_consolidation_card: Option<PendingConsolidationCard>,
     /// Story 11.4a: pending `/memory forget` confirm card awaiting user y/n.
     pub pending_forget_card: Option<PendingForgetCard>,
-    /// Story 18.3a-e: pending confirmed patch apply.
-    pub pending_apply_card: Option<PendingApplyCard>,
+    /// Story 18.3a-e / 18.3a-f: pending confirmed artifact decision — a patch
+    /// apply, or an operator's report about an indeterminate one. ⛔ One slot,
+    /// deliberately: a second card type would duplicate the render branch, both
+    /// focus-deferral guards and `surface_deferred_modal`.
+    pub pending_artifact_card: Option<PendingArtifactCard>,
     /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
     /// when the event arrives while a stream is still active. Dispatched
     /// after the stream completes (TurnComplete handler).
@@ -2896,7 +2927,7 @@ impl TuiState {
             pending_delegation_card: None,
             pending_consolidation_card: None,
             pending_forget_card: None,
-            pending_apply_card: None,
+            pending_artifact_card: None,
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,

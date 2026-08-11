@@ -265,14 +265,28 @@ fn the_production_bridge_has_one_apply_port_call_and_one_disposition_core() {
 
 fn pending_card(
     prior_focus: rustain::domain::models::FocusState,
-) -> rustain::adapters::tui::state::PendingApplyCard {
-    rustain::adapters::tui::state::PendingApplyCard {
+) -> rustain::adapters::tui::state::PendingArtifactCard {
+    card_in_mode(
+        prior_focus,
+        rustain::adapters::tui::state::ArtifactCardMode::Apply,
+    )
+}
+
+/// ⚠ 18.3a-f: the card became mode-discriminated. This file's assertions are
+/// the **apply** mode's; the resolve mode's live in
+/// `conformance_18_3a_f_resolution.rs`.
+fn card_in_mode(
+    prior_focus: rustain::domain::models::FocusState,
+    mode: rustain::adapters::tui::state::ArtifactCardMode,
+) -> rustain::adapters::tui::state::PendingArtifactCard {
+    rustain::adapters::tui::state::PendingArtifactCard {
         conversation_id: "conversation".to_owned(),
         artifact: artifact('e'),
         files: vec!["src/lib.rs".to_owned(), "tests/apply.rs".to_owned()],
         workspace: std::path::PathBuf::from("/workspace"),
         prior_focus,
         predates_apply_records: true,
+        mode,
     }
 }
 
@@ -284,10 +298,10 @@ fn decline_clears_the_card_and_restores_prior_focus_without_an_effect() {
 
     let prior = FocusState::Input;
     let mut state = rustain::adapters::tui::state::TuiState::new(80, 24);
-    state.pending_apply_card = Some(pending_card(prior.clone()));
+    state.pending_artifact_card = Some(pending_card(prior.clone()));
     state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply));
     assert!(resolve_apply_card(&mut state, false).is_none());
-    assert!(state.pending_apply_card.is_none());
+    assert!(state.pending_artifact_card.is_none());
     assert_eq!(state.focus, prior);
 }
 
@@ -323,13 +337,30 @@ fn the_painted_card_names_impact_wedge_risk_and_its_dispatch_keys() {
         "predates apply records",
         "may already be in the working tree",
         "indeterminate",
-        "18-3a-f",
+        // 🔴 18.3a-f INVERSION. This slot required the literal `"18-3a-f"`,
+        // because cut 2's card said *"No resolution verb exists yet
+        // (18-3a-f)."* The verb now exists, so the card must name IT — a
+        // deletion wearing a disguise is the failure mode here, so the
+        // replacement is a required string that still goes RED if the recovery
+        // line is dropped. Its positive control is
+        // `the_apply_card_still_names_the_recovery_verb_when_the_line_is_present`
+        // in `conformance_18_3a_f_resolution.rs`.
+        "/artifact resolve <id> present|absent",
         "[y] Apply",
         "[n] Cancel (Esc)",
     ] {
         assert!(rendered.contains(needle), "missing {needle:?}:\n{rendered}");
     }
-    for binding in apply_card::APPLY_CARD_BINDINGS {
+    // ⛔ The dead-end sentence must not survive alongside the verb that ends it.
+    assert!(
+        !rendered.contains("No resolution verb exists yet"),
+        "the release shipped; the card must not still claim otherwise:\n{rendered}"
+    );
+    // ⚠ 18.3a-f: iterate the mode's own table, not the const, so this stays
+    // valid by construction now that labels are mode-scoped (ruling A13). The
+    // apply card keeps `[y] Apply`; the resolve card must not have it, which
+    // `conformance_18_3a_f_resolution.rs` asserts from the other side.
+    for binding in apply_card::bindings_for(card.mode) {
         assert_eq!(
             apply_card::choice_for_key(binding.key),
             Some(binding.choice)
@@ -558,10 +589,9 @@ fn operator_result_vocabulary_distinguishes_busy_indeterminate_conflict_and_fail
     let id = ArtifactId::from(hash('d'));
     let cases = [
         (PatchApplyPortError::WorkspaceBusy, "workspace is busy"),
-        (
-            PatchApplyPortError::ApplyIndeterminate,
-            "no resolution verb exists yet (18-3a-f)",
-        ),
+        // 🔴 18.3a-f INVERSION. Was `"no resolution verb exists yet (18-3a-f)"`.
+        // The verb exists, so the sentence must route the operator to it.
+        (PatchApplyPortError::ApplyIndeterminate, "/artifact resolve"),
         (
             PatchApplyPortError::Conflict("does not apply".to_owned()),
             "conflicted and did not mutate",
@@ -583,6 +613,21 @@ fn operator_result_vocabulary_distinguishes_busy_indeterminate_conflict_and_fail
         render_apply_result(&id, Ok(())).contains("applied to the workspace"),
         "success is the only outcome that may claim the workspace changed"
     );
+    // ⛔ Neither dead-end sentence may survive the release that ends it.
+    for error in [
+        PatchApplyPortError::ApplyIndeterminate,
+        PatchApplyPortError::ApplyUnresolved("append failed".to_owned()),
+    ] {
+        let rendered = render_apply_result(&id, Err(error));
+        assert!(
+            !rendered.contains("no resolution verb exists yet"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("/artifact resolve"), "{rendered}");
+        // ⛔ And neither may claim the workspace changed — site 12 stays green
+        // and must: it is the assertion that catches ruling A14's mutant.
+        assert!(!rendered.contains("applied to the workspace"), "{rendered}");
+    }
 }
 
 #[cfg(unix)]
@@ -611,8 +656,8 @@ async fn a_new_file_patch_resurrects_on_reapply_and_records_honestly() {
     use rustain::adapters::artifact::FileSystemArtifactStore;
     use rustain::adapters::merge_back::GitPatchApplier;
     use rustain::domain::models::{
-        ApplyOutcome, ApplyState, CapabilityTokenId, HostBinding, OwnershipKind,
-        PermissionMode, ProvenanceTag, ProvisioningTier, UnifiedDiff,
+        ApplyOutcome, ApplyState, CapabilityTokenId, HostBinding, OwnershipKind, PermissionMode,
+        ProvenanceTag, ProvisioningTier, UnifiedDiff,
     };
     use rustain::domain::ports::{ArtifactStore, PatchApplier};
     use rustain::domain::services::patch_review::MergeBackPolicy;
@@ -655,7 +700,13 @@ async fn a_new_file_patch_resurrects_on_reapply_and_records_honestly() {
         .expect("capture");
 
     service
-        .apply(&artifact, OwnershipKind::Owned, PermissionMode::Yolo, &policy, None)
+        .apply(
+            &artifact,
+            OwnershipKind::Owned,
+            PermissionMode::Yolo,
+            &policy,
+            None,
+        )
         .await
         .expect("first apply creates the file");
     assert_eq!(
@@ -666,7 +717,13 @@ async fn a_new_file_patch_resurrects_on_reapply_and_records_honestly() {
     // The operator deletes the file by hand, then re-applies.
     std::fs::remove_file(root.join("rising.txt")).expect("operator deletes");
     service
-        .apply(&artifact, OwnershipKind::Owned, PermissionMode::Yolo, &policy, None)
+        .apply(
+            &artifact,
+            OwnershipKind::Owned,
+            PermissionMode::Yolo,
+            &policy,
+            None,
+        )
         .await
         .expect("re-apply resurrects the file (git apply exit=0 again)");
     assert_eq!(
@@ -675,7 +732,10 @@ async fn a_new_file_patch_resurrects_on_reapply_and_records_honestly() {
     );
 
     // Honest record: last-write-wins `Applied`, never `NeverAttempted`.
-    let room = journal.project_room("host-apply").await.expect("project room");
+    let room = journal
+        .project_room("host-apply")
+        .await
+        .expect("project room");
     assert_eq!(
         room.apply_state().get(&artifact.id).copied(),
         Some(ApplyState::Resolved(ApplyOutcome::Applied)),

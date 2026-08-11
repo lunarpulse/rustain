@@ -301,6 +301,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     description: "Preview impact, confirm, then apply an eligible patch",
                     available: true,
                 },
+                HelpBinding {
+                    key: "/artifact resolve <id> present|absent",
+                    description: "After an interrupted apply: record whether you found its changes in the tree",
+                    available: true,
+                },
             ],
         },
         HelpCategory {

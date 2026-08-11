@@ -238,6 +238,45 @@ pub enum ApplyOutcome {
     Unknown,
 }
 
+/// What an operator reported after inspecting the working tree themselves
+/// (Story 18.3a-f, FR160(d)).
+///
+/// ⛔ **A human's report, never a machine's observation.** Nothing in the
+/// product probes the tree to produce this value: AD-12 (*"Live state is never
+/// reconstructed from journal data"*, `ARCHITECTURE-SPINE.md:159`) and
+/// `ADR-18-3a-d-01` D2 both forbid the probe. It is a separate type from
+/// [`ApplyOutcome`] precisely so no consumer can render *"a human looked"* and
+/// *"`git apply` returned 0"* through one token.
+///
+/// ⚠ Carries the same trusted-filesystem assumption as every other journal
+/// record (`ADR-18-3a-d-01` D1) — it is not evidence, not authenticated and
+/// not tamper-evident (`DF-18-2-AUTHENTICATED-JOURNAL`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorApplyFinding {
+    /// The operator reports the patch's changes are in the working tree.
+    Present,
+    /// The operator reports they are not.
+    Absent,
+    /// A finding value written by a newer build.
+    ///
+    /// ⚑ **Mandatory, and not decoration** (`ADR-18-3a-d-01:91`). Without it a
+    /// finding string this build has never heard of fails the *whole journal
+    /// line*, and [`RoomEvent::Unrecognized`] cannot rescue it: the `event` tag
+    /// matched a known variant, so the failure is one level below that
+    /// fallback — and a mid-file parse failure takes the entire journal with
+    /// it.
+    ///
+    /// ⛔ **Never read as resolved.** `apply_is_refused` fails closed on it,
+    /// exactly as for [`ApplyOutcome::Unknown`], and the release verb
+    /// deliberately does not clear it: the confirmation card cannot name what
+    /// it would be asking the operator to supersede
+    /// (`DF-18-3a-f-UNREADABLE-VALUE-LATCH`).
+    #[serde(other)]
+    Unknown,
+}
+
 /// Journal-projected apply state of one patch artifact (Story 18.3a-d).
 ///
 /// The lattice **preserves** the outcome instead of collapsing it: cut 2
@@ -258,18 +297,29 @@ pub enum ApplyState {
     /// A [`RoomEvent::PatchApplyStarted`] with no matching
     /// [`RoomEvent::PatchApplyResolved`]: the process died inside the apply
     /// window, so the working tree may or may not carry the delta. The honest
-    /// answer is "unknown" — recovery is a projection, never a repair
-    /// (`ARCHITECTURE-SPINE.md` AD-12).
+    /// answer is "unknown" — the room projects what was recorded and never
+    /// repairs what was not (`ADR-18-3a-d-01:72`, applying AD-12's *"Live state
+    /// is never reconstructed from journal data"*, `ARCHITECTURE-SPINE.md:159`).
     ///
-    /// ⚠ **Cut 1 ships the latch and not the release**
-    /// (`DF-18-3a-d-INDETERMINATE-CLEARING`). Nothing in this build can clear
-    /// it, so the artifact is refused on every subsequent retry, permanently.
-    /// The operator-facing resolution verb belongs to `18-3a-f`. ⛔ "Make
-    /// `Indeterminate` fail open" is forbidden as the
-    /// fix — it fails open on a workspace write whose outcome is unknown.
+    /// ⚑ **Cut 1 shipped the latch; `18-3a-f` ships the release.** The operator
+    /// inspects the tree themselves and records what they found with
+    /// `/artifact resolve <id> present|absent`, which appends
+    /// [`RoomEvent::PatchApplyInspected`] and folds to
+    /// [`ApplyState::OperatorResolved`]
+    /// (`DF-18-3a-d-INDETERMINATE-CLEARING`, closed by `18-3a-f`). ⛔ "Make
+    /// `Indeterminate` fail open" remains forbidden as the fix — the release is
+    /// a **new durable fact**, never a weakened refusal.
     Indeterminate,
     /// The apply completed and recorded its outcome.
     Resolved(ApplyOutcome),
+    /// An operator inspected the working tree and reported what they found
+    /// (Story 18.3a-f).
+    ///
+    /// ⛔ Structurally distinct from [`ApplyState::Resolved`] at **every**
+    /// consumer, and that is the whole point: a human's report is not a
+    /// `git apply` return code, and no row, card or refusal may render the two
+    /// through one phrase.
+    OperatorResolved(OperatorApplyFinding),
 }
 
 #[non_exhaustive]
@@ -570,6 +620,36 @@ pub enum RoomEvent {
         artifact: ArtifactId,
         outcome: ApplyOutcome,
     },
+    /// An operator inspected the working tree and reported what they found
+    /// (Story 18.3a-f — FR160(d), NFR70(c)/(d)).
+    ///
+    /// ⛔ **This is NOT an observation the system made.** It records what a
+    /// human said, under the same trusted-filesystem assumption as every other
+    /// record in this journal (`ADR-18-3a-d-01` D1) — it is not an audit trail,
+    /// not evidence, not authenticated and not tamper-evident. ⚠ It is the
+    /// **fourth** member of the unsigned-trusted-on-replay class
+    /// (`DF-17-2d-AUTH-1`) and the sharpest: a forged line clears a safety
+    /// latch (`DF-18-2-AUTHENTICATED-JOURNAL`).
+    ///
+    /// Folding it moves the artifact from [`ApplyState::Indeterminate`] to
+    /// [`ApplyState::OperatorResolved`] — a **distinct** fact class, never a
+    /// second [`RoomEvent::PatchApplyResolved`]: `Resolved(outcome)` means the
+    /// journal records what `git apply` returned, and a human report is not
+    /// that. (Same ruling shape `DF-18-3a-d-APPLY-UNDO` already applies to
+    /// reverse-apply: *"a distinct fact, not a second resolution"*.)
+    ///
+    /// `inspector` is **attribution, never accountability**: `acting_principal`
+    /// returns [`AgentId::local_operator`] unconditionally, so the field has one
+    /// possible value in this build and two humans on one workstation are one
+    /// identity (`DF-18-3a-f-OPERATOR-SINGULARITY`, UX-DR-ROOM-04). It carries
+    /// ⛔ **no** `#[serde(default)]`: [`AgentId::default`] is
+    /// [`AgentId::new`] — a fresh random nanoid — so a defaulted attribution
+    /// field would fabricate an identity out of a truncated line.
+    PatchApplyInspected {
+        artifact: ArtifactId,
+        finding: OperatorApplyFinding,
+        inspector: AgentId,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -714,9 +794,15 @@ impl OrchestrationRoom {
     /// `copied().unwrap_or_default()` so the lattice stays total at the call
     /// site.
     ///
-    /// The production reader is `PatchMergeBack::apply`, which refuses
-    /// [`ApplyState::Indeterminate`]: this accessor is a guard input, not a
-    /// display surface.
+    /// 🔴 **Exactly three production consumers, and every one of them owes a
+    /// deliberate decision about every variant** (Story 18.3a-f, ruling A1):
+    /// `PatchMergeBack::apply_is_refused` (the guard — fails closed on both
+    /// unreadable shapes), `artifacts_panel::apply_state_suffix` (the row —
+    /// exhaustive, so the compiler forces a wording decision), and
+    /// `artifact_bridge::auto_applies_refusal` (the auto-apply door's honest
+    /// sentence). ⚠ It has been a **display** surface since cut 2, not only a
+    /// guard input; the pre-18.3a-e claim that it was "not a display surface"
+    /// was stale from the day the panel started reading it.
     pub fn apply_state(&self) -> &BTreeMap<ArtifactId, ApplyState> {
         &self.apply_state
     }
@@ -827,8 +913,8 @@ impl OrchestrationRoom {
                     view.review = Some(ReviewStatus::Reviewed { reviewer, verdict });
                 }
             }
-            // 🔴 Both apply arms fold **UNCONDITIONALLY**, into a map of their
-            // own. ⛔ Do not wrap them in `if let Some(view) =
+            // 🔴 All three apply arms fold **UNCONDITIONALLY**, into a map of
+            // their own. ⛔ Do not wrap them in `if let Some(view) =
             // self.artifacts.get_mut(&artifact)` the way the `PatchReviewed`
             // arm directly above does: that guard silently swallows an event
             // for an artifact this projection has not seen, and an apply
@@ -848,6 +934,31 @@ impl OrchestrationRoom {
                 self.seen_apply_record = true;
                 self.apply_state
                     .insert(artifact, ApplyState::Resolved(outcome));
+            }
+            // 🔴 The operator's report is a THIRD fact class, and it sets
+            // `seen_apply_record` for the same reason the two above do: the
+            // flag drives the capture-order stamp (`predates_apply_records`),
+            // and a resolution folding without it would stamp every patch
+            // captured afterwards as pre-record-era — a false *"this journal
+            // predates apply records"* warning on a brand-new patch.
+            //
+            // ⛔ No idempotency guard, for the reason stated on the arm above:
+            // a second report must move the projection, not sit invisible in
+            // the log. Last write wins, so the latest report governs — the same
+            // shape `ADR-18-3a-c-01` D6 blessed for re-review.
+            // ⚠ The structural ratchet
+            // (`the_apply_fold_arms_are_unnested_and_the_guard_precedes_the_mutation`)
+            // slices this arm from `            RoomEvent::…` to the first
+            // 12-space `}` on a line of its own, so rustfmt's wrapped
+            // destructure is fine — but a nested block closing at that
+            // indentation would truncate the slice and fail its positive
+            // control.
+            RoomEvent::PatchApplyInspected {
+                artifact, finding, ..
+            } => {
+                self.seen_apply_record = true;
+                self.apply_state
+                    .insert(artifact, ApplyState::OperatorResolved(finding));
             }
             RoomEvent::RemoteEnvelopeAccepted {
                 node, content_hash, ..

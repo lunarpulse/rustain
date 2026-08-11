@@ -111,6 +111,10 @@ pub struct AppState {
     /// Story 18.3a-e — confirmed operator apply seam. Bound once at the
     /// composition root; no setter and no concrete merge-back dependency.
     pub patch_apply: Option<std::sync::Arc<dyn crate::domain::ports::PatchApplyExecutor>>,
+    /// Story 18.3a-f — the operator's indeterminate-apply resolution seam. A
+    /// **sibling** of `patch_apply`, bound to the same service at the root;
+    /// ⛔ not a second mode of the apply port.
+    pub patch_resolve: Option<std::sync::Arc<dyn crate::domain::ports::PatchApplyResolver>>,
 }
 
 impl AppState {
@@ -170,6 +174,7 @@ impl AppState {
                 room_roles: Arc::new(crate::adapters::policy::JournalRoomRoleProjection::inert()),
                 patch_review: None,
                 patch_apply: None,
+                patch_resolve: None,
             },
             domain_rx,
         )

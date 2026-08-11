@@ -396,12 +396,30 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             None,
             "unrecognised record — written by a newer build".to_owned(),
         ),
-        // ⛔ `TicketAssigned` / `TicketResolved` fall through here **by
-        // decision, not by omission** (Story 18.3a-b). The transparency log is
-        // the peer-interaction surface; a ticket is a local agent→human fact,
-        // and 17.5b, 18.2 and 18.3a all left it out. Adding a
-        // `TransparencyKind` is a six-touch-point change and would move both
-        // hard-pinned `== 7` fixtures in `tests/conformance_transparency.rs`.
+        // ⛔ Every remaining variant returns `None` here **by decision, not by
+        // omission**: the transparency log is the peer-interaction surface, so
+        // every variant with no peer is a local fact that does not belong in it
+        // — node/wave/artifact/approval/patch lifecycle events, ticket events,
+        // and `PeerDraftResolved`. The two groups most likely to tempt a future
+        // author are called out below.
+        //
+        // `TicketAssigned` / `TicketResolved` (18.3a-b): a ticket is a local
+        // agent→human fact. 17.5b, 18.2 and 18.3a all left it out.
+        //
+        // `PatchApplyStarted` / `PatchApplyResolved` (18.3a-d) and
+        // `PatchApplyInspected` (18.3a-f): a workspace mutation and an
+        // operator's report about one are **local** facts too — no peer sends,
+        // receives or is named by them. ⚠ `PatchApplyInspected` is the one most
+        // likely to tempt a future author, because it carries an `inspector`
+        // and reads like an audit line. It is not: the field is **attribution,
+        // never accountability** (`DF-18-3a-f-OPERATOR-SINGULARITY`), the
+        // record is unsigned (`DF-18-2-AUTHENTICATED-JOURNAL`), and surfacing
+        // it in the transparency log would imply exactly the evidentiary weight
+        // `ADR-18-3a-d-01` D1 forbids claiming.
+        //
+        // The cost of changing any of this is the reason it is a decision: a
+        // new `TransparencyKind` is a six-touch-point change and would move
+        // both hard-pinned `== 7` fixtures in `tests/conformance_transparency.rs`.
         // Precedent for omission: `AutoResponseRetracted` above.
         _ => return None,
     };

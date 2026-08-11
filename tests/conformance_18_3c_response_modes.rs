@@ -8,6 +8,25 @@ fn source(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))
 }
 
+/// Serializes the two tests that read the **process-global** workspace-policy
+/// load counter against the ones that increment it.
+///
+/// 🔴 `workspace_policy_load_count()` is a process-wide static, and libtest runs
+/// every test in this binary concurrently on one process. Without this gate
+/// `ac6_delivery_decisions_never_reload_workspace_policy` reads the loads
+/// performed by `ac1_pinned_sender_mode_routes_through_bus_and_unpinned_fails_closed`
+/// and fails with `left: 2, right: 1` — measured red 3/3 in the default lane and
+/// 2/6 in the a2a lane at `02d6c46`. ⛔ Do not "fix" it by relaxing the
+/// assertion to `<= 2` or by deleting the reset: the exact-`1` count IS the
+/// ratchet (a delivery-time `load()` reads 2 as well), and a range would let
+/// the mutant it exists to catch pass. Serialize instead.
+fn policy_load_gate() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking test must not cascade into an unrelated poisoned-lock failure.
+    GATE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn write_policy(workspace: &std::path::Path, body: &str) {
     let dir = workspace.join(".rustain");
     std::fs::create_dir_all(&dir).expect("create policy directory");
@@ -208,8 +227,10 @@ async fn ac1_pinned_sender_mode_routes_through_bus_and_unpinned_fails_closed() {
     let peers = [trusted, untrusted];
 
     let wait_workspace = tempfile::tempdir().expect("wait workspace");
-    let (_, wait_policy) =
-        resolved_delivery_policy(wait_workspace.path(), "notify-and-wait", None, &peers);
+    let (_, wait_policy) = {
+        let _gate = policy_load_gate();
+        resolved_delivery_policy(wait_workspace.path(), "notify-and-wait", None, &peers)
+    };
     assert_eq!(
         drive_bus_consumer(std::sync::Arc::new(wait_policy), trusted_peer_id.clone(), 1).await,
         vec![ResponseRoute::Parked],
@@ -217,12 +238,15 @@ async fn ac1_pinned_sender_mode_routes_through_bus_and_unpinned_fails_closed() {
     );
 
     let auto_workspace = tempfile::tempdir().expect("auto workspace");
-    let (effective, auto_policy) = resolved_delivery_policy(
-        auto_workspace.path(),
-        "notify-and-auto",
-        Some("Pinned sender acknowledgement."),
-        &peers,
-    );
+    let (effective, auto_policy) = {
+        let _gate = policy_load_gate();
+        resolved_delivery_policy(
+            auto_workspace.path(),
+            "notify-and-auto",
+            Some("Pinned sender acknowledgement."),
+            &peers,
+        )
+    };
     assert_eq!(
         drive_bus_consumer(std::sync::Arc::new(auto_policy.clone()), trusted_peer_id, 1).await,
         vec![ResponseRoute::AutoDispatched(
@@ -429,32 +453,38 @@ async fn ac6_delivery_decisions_never_reload_workspace_policy() {
     let workspace = tempfile::tempdir().expect("workspace");
     let trusted = pinned_peer("trusted", [19; 32]);
     let trusted_peer_id = trusted.pinned_identity().expect("trusted pin");
-    rustain::adapters::policy::reset_workspace_policy_load_count();
-    let (_, policy) = resolved_delivery_policy(
-        workspace.path(),
-        "notify-and-auto",
-        Some("Zero-load acknowledgement."),
-        &[trusted],
-    );
-    assert_eq!(rustain::adapters::policy::workspace_policy_load_count(), 1);
+    // The whole reset→assert window is synchronous and holds the gate, so no
+    // concurrent test in this binary can add a load between them.
+    let policy = {
+        let _gate = policy_load_gate();
+        rustain::adapters::policy::reset_workspace_policy_load_count();
+        let (_, policy) = resolved_delivery_policy(
+            workspace.path(),
+            "notify-and-auto",
+            Some("Zero-load acknowledgement."),
+            &[trusted],
+        );
+        assert_eq!(rustain::adapters::policy::workspace_policy_load_count(), 1);
 
-    let header = MessageHeader {
-        sender: AgentId::parse("peer-agent").expect("sender"),
-        recipient: AgentId::parse("recipient").expect("recipient"),
-        correlation_id: CorrelationId::new("load-ratchet"),
-        kind: MessageKind::PeerMessage,
-        sequence: None,
-        verified_peer_id: Some(trusted_peer_id.clone()),
+        let header = MessageHeader {
+            sender: AgentId::parse("peer-agent").expect("sender"),
+            recipient: AgentId::parse("recipient").expect("recipient"),
+            correlation_id: CorrelationId::new("load-ratchet"),
+            kind: MessageKind::PeerMessage,
+            sequence: None,
+            verified_peer_id: Some(trusted_peer_id.clone()),
+        };
+        for _ in 0..32 {
+            let _ = policy.response_policy(&header);
+            let _ = policy.decide(&header, OwnershipKind::Peer);
+        }
+        assert_eq!(
+            rustain::adapters::policy::workspace_policy_load_count(),
+            1,
+            "delivery-time decisions must use the startup snapshot without calling load()"
+        );
+        policy
     };
-    for _ in 0..32 {
-        let _ = policy.response_policy(&header);
-        let _ = policy.decide(&header, OwnershipKind::Peer);
-    }
-    assert_eq!(
-        rustain::adapters::policy::workspace_policy_load_count(),
-        1,
-        "delivery-time decisions must use the startup snapshot without calling load()"
-    );
 
     let journal = NodeJournal::open_workspace(workspace.path())
         .await

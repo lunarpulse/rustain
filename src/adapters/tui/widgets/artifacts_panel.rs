@@ -53,8 +53,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use crate::adapters::tui::state::{ArtifactsPanelState, ArtifactsZeroState};
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::{
-    ApplyOutcome, ApplyState, ArtifactId, ArtifactKind, ArtifactRef, OrchestrationRoom,
-    PermissionMode, ReviewStatus, ReviewVerdict,
+    ApplyOutcome, ApplyState, ArtifactId, ArtifactKind, ArtifactRef, OperatorApplyFinding,
+    OrchestrationRoom, PermissionMode, ReviewStatus, ReviewVerdict,
 };
 use crate::domain::services::patch_review::{
     MergeBackPolicy, PatchDisposition, operator_patch_decision,
@@ -206,13 +206,34 @@ pub fn apply_state_suffix(room: &OrchestrationRoom, artifact: &ArtifactId) -> St
         }
         ApplyState::NeverAttempted => "apply: never attempted".to_owned(),
         ApplyState::Indeterminate => {
-            "apply: indeterminate — no resolution verb exists yet (18-3a-f)".to_owned()
+            "apply: indeterminate — inspect the tree, then /artifact resolve <id> present|absent"
+                .to_owned()
         }
         ApplyState::Resolved(ApplyOutcome::Applied) => "apply: applied".to_owned(),
         ApplyState::Resolved(ApplyOutcome::Conflict) => "apply: conflict".to_owned(),
         ApplyState::Resolved(ApplyOutcome::Failed) => "apply: failed".to_owned(),
         ApplyState::Resolved(ApplyOutcome::Unknown) => {
             "apply: unknown outcome (not success)".to_owned()
+        }
+        // 🔴 Ruling A8: `present`/`absent`, ⛔ never `applied`/`not-applied`.
+        // `ApplyOutcome::Applied` already means "`git apply` returned 0";
+        // reusing the word would weld two epistemic classes onto one token and
+        // both rows would read `apply: applied`.
+        //
+        // ⚠ Ruling P2: the `present` row reads as a COMPLETION, never an
+        // invitation. The gate permits a retry; the row must not advertise one.
+        // ⛔ No "retry", "ready to apply", "try again". ⛔ And no string here
+        // calls the release permanent, final or durable — compaction that drops
+        // the report while keeping its `PatchApplyStarted` silently re-wedges
+        // the artifact (`DF-18-2-JOURNAL-GROWTH`).
+        ApplyState::OperatorResolved(OperatorApplyFinding::Present) => {
+            "apply: resolved by operator — reported present".to_owned()
+        }
+        ApplyState::OperatorResolved(OperatorApplyFinding::Absent) => {
+            "apply: resolved by operator — reported absent".to_owned()
+        }
+        ApplyState::OperatorResolved(OperatorApplyFinding::Unknown) => {
+            "apply: resolved by operator — report unreadable (not resolved)".to_owned()
         }
     }
 }

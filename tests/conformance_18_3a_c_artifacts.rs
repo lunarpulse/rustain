@@ -1515,7 +1515,7 @@ async fn apply_command_previews_without_mutation_then_accept_runs_the_real_effec
     )
     .await;
 
-    let card = state.pending_apply_card.as_ref().expect("decision card");
+    let card = state.pending_artifact_card.as_ref().expect("decision card");
     assert!(
         card.files.iter().any(|path| path == "x"),
         "{:?}",

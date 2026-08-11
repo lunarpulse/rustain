@@ -29,13 +29,14 @@
 use crate::adapters::tui::handlers::artifact_command::{
     self as handler, ArtifactCommandArgs, ResolveError,
 };
-use crate::adapters::tui::state::{PendingApplyCard, TuiState};
+use crate::adapters::tui::state::{ArtifactCardMode, PendingArtifactCard, TuiState};
 use crate::domain::models::{
-    AgentId, ArtifactRef, OrchestrationRoom, PermissionMode, ReviewVerdict, RoomEditDecision,
-    RoomEditKind, RoomEvent,
+    AgentId, ArtifactRef, OperatorApplyFinding, OrchestrationRoom, PermissionMode, ReviewVerdict,
+    RoomEditDecision, RoomEditKind, RoomEvent,
 };
 use crate::domain::ports::{
-    PatchApplyExecutor, PatchReviewError, PatchReviewRecorder, RoomJournalReader,
+    PatchApplyExecutor, PatchApplyResolver, PatchReviewError, PatchReviewRecorder,
+    RoomJournalReader,
 };
 use crate::domain::services::patch_review::{MergeBackPolicy, PatchDisposition};
 use crate::domain::services::room_role::{local_room_role, room_edit_decision};
@@ -49,7 +50,8 @@ const NO_JOURNAL: &str =
 const NO_RECORDER: &str =
     "this session composed no merge-back service, so no verdict can be recorded";
 
-/// The principal acting on `/artifact review`.
+/// The principal acting on `/artifact review`, `/artifact apply` and
+/// `/artifact resolve`.
 ///
 /// 🔴 **This is a SEAM, not enforcement, and saying so is load bearing (ruling
 /// P2).** The function returns [`AgentId::local_operator`] unconditionally, so
@@ -66,6 +68,29 @@ const NO_RECORDER: &str =
 /// `tests/conformance_18_3a_c_artifacts.rs`, plus a domain unit test that
 /// drives the pure `room_edit_decision(Viewer, DurableContent)` case and is
 /// labelled as covering the **core**, not the production path.
+///
+/// ⚠ **It is a CONSTANT, and 18.3a-f made that constant load bearing.** Every
+/// operator-attributed durable record now flows from here — the write-ahead
+/// apply record's `applier` field (18.3a-e) and the operator inspection
+/// record's `inspector` field (18.3a-f) — so each has exactly one possible
+/// value, and two humans at one workstation are one identity in the journal.
+/// That is honest only while nothing words it otherwise: both fields are
+/// **attribution, never accountability** (UX-DR-ROOM-04).
+///
+/// ⚠ Those two records are named by *description* rather than by symbol on
+/// purpose. `conformance_18_3a_d_apply.rs` forbids the apply-event symbols
+/// anywhere in this file with a bare substring scan — the bridge must not mint
+/// apply events, and the ratchet does not distinguish prose from code. ⛔ Do
+/// not add an intra-doc link here to "fix" the readability; the ratchet is
+/// right and this comment is the cheaper side to bend.
+///
+/// The trigger is named rather than implied: **`DF-18-3a-f-OPERATOR-SINGULARITY`**
+/// fires when a second constructible operator identity exists (a login, a
+/// session-scoped principal, or a peer admitted as a room `Editor` in 18.4) —
+/// ⛔ not merely when someone wants better attribution. An unnamed trigger
+/// sitting in code on a load-bearing field is the `DF-18-3a-b-ASSIGN-MINT` /
+/// `DF-18-3a-ROLE-PROJECTION` failure verbatim. ⛔ Do not add a per-user field
+/// ahead of the principal.
 fn acting_principal() -> AgentId {
     AgentId::local_operator()
 }
@@ -162,6 +187,13 @@ async fn dispatch(
                     refresh_panel(app_state, state, permission_mode).await;
                 }
                 Err(message) => warn(state, conversation_id, app_state, message),
+            }
+        }
+        ArtifactCommandArgs::Resolve { id, finding } => {
+            if let Err(message) =
+                open_resolve_card(app_state, state, conversation_id, &id, finding).await
+            {
+                warn(state, conversation_id, app_state, message);
             }
         }
     }
@@ -379,7 +411,7 @@ async fn open_apply_card(
     typed: &str,
     permission_mode: PermissionMode,
 ) -> Result<(), String> {
-    if state.pending_apply_card.is_some() {
+    if state.pending_artifact_card.is_some() {
         return Err("an artifact apply decision is already awaiting your answer".to_owned());
     }
     let room = load_room(app_state).await?;
@@ -416,13 +448,79 @@ async fn open_apply_card(
     let files = patch_files(&body);
     let predates_apply_records = room.predates_apply_records().contains(&artifact.id);
     let prior_focus = state.focus.clone();
-    state.pending_apply_card = Some(PendingApplyCard {
+    state.pending_artifact_card = Some(PendingArtifactCard {
         conversation_id: conversation_id.to_owned(),
         artifact,
         files,
         workspace: app_state.compose_snapshot.workspace_path.clone(),
         prior_focus,
         predates_apply_records,
+        mode: ArtifactCardMode::Apply,
+    });
+    state.focus = crate::domain::models::FocusState::Overlay(
+        crate::domain::models::visual::OverlayType::Confirmation(
+            crate::domain::models::visual::ConfirmationType::ArtifactApply,
+        ),
+    );
+    state.needs_redraw = true;
+    Ok(())
+}
+
+/// Open the confirmation card for `/artifact resolve <id> present|absent`
+/// (Story 18.3a-f).
+///
+/// ⛔ **No disposition pre-gate here, and that is deliberate.** The apply door
+/// refuses anything that is not `PatchDisposition::Applies`, because it is
+/// about to write. This verb writes nothing to the workspace, and a wedged
+/// artifact is *precisely* one whose review disposition no longer matters — the
+/// operator is reporting on a mutation that may already have happened. The one
+/// gate that governs it is the wedged-only check, and it lives behind the port,
+/// under both locks, re-read after they are held. Deciding it here as well
+/// would be a second derivation racing the authoritative one.
+async fn open_resolve_card(
+    app_state: &AppState,
+    state: &mut TuiState,
+    conversation_id: &str,
+    typed: &str,
+    finding: crate::domain::models::OperatorApplyFinding,
+) -> Result<(), String> {
+    if state.pending_artifact_card.is_some() {
+        return Err("an artifact decision is already awaiting your answer".to_owned());
+    }
+    let room = load_room(app_state).await?;
+    // Projection-authoritative addressing (`ADR-18-3a-c-01` D4): unknown,
+    // ambiguous-with-candidates and in-store-but-not-in-fold all refuse here,
+    // for free, rather than journaling a record that then vanishes.
+    let artifact = handler::resolve_artifact(&room, typed)
+        .map_err(|error| error.to_string())?
+        .clone();
+    if artifact.kind != crate::domain::models::ArtifactKind::Patch {
+        return Err("only patch artifacts have an apply state to resolve".to_owned());
+    }
+    if app_state.patch_resolve.is_none() {
+        return Err(
+            "this session composed no merge-back service, so no apply can be resolved".to_owned(),
+        );
+    }
+    let recorder = app_state
+        .patch_review
+        .as_ref()
+        .ok_or_else(|| NO_RECORDER.to_owned())?;
+    let body = recorder
+        .body(&artifact.id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let files = patch_files(&body);
+    let predates_apply_records = room.predates_apply_records().contains(&artifact.id);
+    let prior_focus = state.focus.clone();
+    state.pending_artifact_card = Some(PendingArtifactCard {
+        conversation_id: conversation_id.to_owned(),
+        artifact,
+        files,
+        workspace: app_state.compose_snapshot.workspace_path.clone(),
+        prior_focus,
+        predates_apply_records,
+        mode: ArtifactCardMode::Resolve(finding),
     });
     state.focus = crate::domain::models::FocusState::Overlay(
         crate::domain::models::visual::OverlayType::Confirmation(
@@ -464,9 +562,14 @@ fn diff_header_paths(rest: &str) -> Vec<String> {
         let mut cursor = rest;
         while let Some(open) = cursor.find('"') {
             let after_open = &cursor[open + 1..];
-            let Some(close) = after_open.find('"') else { break };
+            let Some(close) = after_open.find('"') else {
+                break;
+            };
             let token = &after_open[..close];
-            if let Some(p) = token.strip_prefix("a/").or_else(|| token.strip_prefix("b/")) {
+            if let Some(p) = token
+                .strip_prefix("a/")
+                .or_else(|| token.strip_prefix("b/"))
+            {
                 out.push(p.to_owned());
             }
             cursor = after_open[close + 1..].trim_start();
@@ -488,22 +591,40 @@ fn diff_header_paths(rest: &str) -> Vec<String> {
 /// but the message must not claim a workspace write the durable record does not
 /// back. Only a recorded `Applied` outcome "already ran"; anything else is told
 /// honestly that the auto path has not recorded a completed apply.
+///
+/// 🔴 **Deliberate per variant, not a silent default** (Story 18.3a-f, ruling
+/// A1). This was a `matches!` equality against `Resolved(Applied)`, which meant
+/// a new [`ApplyState`] variant read silently as *"not applied"* — the compiler
+/// said nothing. An operator-reported `Present` is neither *"already ran"* (no
+/// machine outcome is on record) nor plain *"nothing recorded"* (a human
+/// inspected the tree and said the delta is there), so it gets its own
+/// sentence. The trailing `_ =>` deliberately groups the remaining
+/// no-completed-apply states (`NeverAttempted`, `Indeterminate`, the
+/// non-`Applied` outcomes, and absent/unreadable operator reports) under one
+/// honest message; ⛔ do not fold `Present` back into it. A future variant that
+/// needs its own wording gets an explicit arm here — that is the audit A1 asks
+/// for, not a compiler-enforced wildcard removal.
 fn auto_applies_refusal(
     room: &OrchestrationRoom,
     artifact_id: &crate::domain::models::ArtifactId,
 ) -> String {
-    use crate::domain::models::orchestration_room::{ApplyOutcome, ApplyState};
-    let already_applied = matches!(
-        room.apply_state().get(artifact_id),
-        Some(ApplyState::Resolved(ApplyOutcome::Applied))
-    );
-    if already_applied {
-        "this patch auto-applies under policy and already ran at fan-out completion".to_owned()
-    } else {
-        "this patch is set to auto-apply under policy; no completed apply is recorded yet"
-            .to_owned()
+    use crate::domain::models::orchestration_room::{
+        ApplyOutcome, ApplyState, OperatorApplyFinding,
+    };
+    match room.apply_state().get(artifact_id).copied() {
+        Some(ApplyState::Resolved(ApplyOutcome::Applied)) => {
+            "this patch auto-applies under policy and already ran at fan-out completion".to_owned()
+        }
+        Some(ApplyState::OperatorResolved(OperatorApplyFinding::Present)) => {
+            "this patch auto-applies under policy; no completed apply is recorded, but an \
+             operator reported its changes are already in the working tree"
+                .to_owned()
+        }
+        _ => "this patch is set to auto-apply under policy; no completed apply is recorded yet"
+            .to_owned(),
     }
 }
+
 /// Execute a confirmed apply through the room-edit gate and one domain port.
 pub async fn apply_artifact(
     room: &OrchestrationRoom,
@@ -548,16 +669,72 @@ pub async fn apply_artifact(
     Ok(handler::render_apply_result(&id, result))
 }
 
+/// Execute a confirmed operator report through the room-edit gate and the
+/// **sibling** resolution port (Story 18.3a-f).
+///
+/// ⛔ Reaches [`PatchApplyResolver`], never [`PatchApplyExecutor`]: this call
+/// performs no workspace write, and routing it through the apply port would
+/// make that untrue by construction. `pub` so a keystone can enter here — the
+/// nearest test-visible seam still ON the production path
+/// ([`resolve_confirmed_card`] is its only production caller), not a bypass
+/// beneath it. ⛔ The forbidden bypass is calling `PatchMergeBack` directly.
+pub async fn resolve_artifact_apply(
+    room: &OrchestrationRoom,
+    resolver: &dyn PatchApplyResolver,
+    acting: &AgentId,
+    typed: &str,
+    finding: OperatorApplyFinding,
+) -> Result<String, String> {
+    let artifact = handler::resolve_artifact(room, typed).map_err(|error| error.to_string())?;
+    // The same room-content seam every durable write in this module passes
+    // through. A constant function in this build (see `acting_principal`); the
+    // structural routing ratchet, not a behavioural test, is its evidence.
+    if room_edit_decision(local_room_role(acting), RoomEditKind::DurableContent)
+        != RoomEditDecision::Allow
+    {
+        return Err(format!(
+            "{} may not make durable room-content edits",
+            acting.as_str()
+        ));
+    }
+    let id = artifact.id.clone();
+    let result = resolver
+        .record_operator_inspection(artifact.clone(), finding, acting.clone())
+        .await;
+    Ok(handler::render_resolve_result(&id, finding, result))
+}
+
 /// Effect arm for an accepted card. The room is re-folded after the answer so
 /// addressing and the gate never rely on the preview snapshot.
+///
+/// ⚑ **One effect arm, two modes** (ruling A7). The event loop calls this and
+/// nothing else; the mode branch lives here, in a file with no size ratchet,
+/// rather than as a second `InputAction` and a second render branch in
+/// `event_loop.rs`.
 pub async fn apply_confirmed_card(
     state: &mut TuiState,
     app_state: &AppState,
-    card: PendingApplyCard,
+    card: PendingArtifactCard,
     permission_mode: PermissionMode,
 ) {
+    let result = match card.mode {
+        ArtifactCardMode::Apply => confirmed_apply(app_state, &card, permission_mode).await,
+        ArtifactCardMode::Resolve(finding) => confirmed_resolve(app_state, &card, finding).await,
+    };
+    match result {
+        Ok(message) => handler::show_artifact_message(state, message),
+        Err(message) => warn(state, &card.conversation_id, app_state, message),
+    }
+    refresh_panel(app_state, state, permission_mode).await;
+}
+
+async fn confirmed_apply(
+    app_state: &AppState,
+    card: &PendingArtifactCard,
+    permission_mode: PermissionMode,
+) -> Result<String, String> {
     let typed = card.artifact.id.as_str();
-    let result = match (load_room(app_state).await, app_state.patch_apply.as_ref()) {
+    match (load_room(app_state).await, app_state.patch_apply.as_ref()) {
         (Ok(room), Some(executor)) => {
             apply_artifact(
                 &room,
@@ -571,12 +748,30 @@ pub async fn apply_confirmed_card(
         }
         (Err(error), _) => Err(error),
         (_, None) => Err("this session composed no merge-back service".to_owned()),
-    };
-    match result {
-        Ok(message) => handler::show_artifact_message(state, message),
-        Err(message) => warn(state, &card.conversation_id, app_state, message),
     }
-    refresh_panel(app_state, state, permission_mode).await;
+}
+
+/// The production caller of [`PatchApplyResolver`] (Rule 1).
+async fn confirmed_resolve(
+    app_state: &AppState,
+    card: &PendingArtifactCard,
+    finding: OperatorApplyFinding,
+) -> Result<String, String> {
+    let typed = card.artifact.id.as_str();
+    match (load_room(app_state).await, app_state.patch_resolve.as_ref()) {
+        (Ok(room), Some(resolver)) => {
+            resolve_artifact_apply(
+                &room,
+                resolver.as_ref(),
+                &acting_principal(),
+                typed,
+                finding,
+            )
+            .await
+        }
+        (Err(error), _) => Err(error),
+        (_, None) => Err("this session composed no merge-back service".to_owned()),
+    }
 }
 
 /// Record one operator verdict durably.

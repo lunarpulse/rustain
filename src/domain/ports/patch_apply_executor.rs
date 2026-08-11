@@ -15,10 +15,16 @@ use crate::domain::services::patch_review::MergeBackPolicy;
 pub enum PatchApplyPortError {
     #[error("another process is applying a patch to this workspace")]
     WorkspaceBusy,
-    #[error("a prior apply has no recorded outcome; resolution is unavailable until 18-3a-f")]
+    #[error(
+        "a prior apply has no recorded outcome; inspect the working tree and record what you \
+         found with `/artifact resolve <id> present|absent`"
+    )]
     ApplyIndeterminate,
-    #[error("the apply mutated the workspace but its outcome could not be recorded; \
-             it is now indeterminate (no resolution verb exists yet, 18-3a-f): {0}")]
+    #[error(
+        "the apply mutated the workspace but its outcome could not be recorded; it is now \
+         indeterminate — inspect the working tree and record what you found with \
+         `/artifact resolve <id> present|absent`: {0}"
+    )]
     ApplyUnresolved(String),
     #[error("git apply rejected the patch without mutating the workspace: {0}")]
     Conflict(String),

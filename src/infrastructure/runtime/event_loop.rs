@@ -6255,7 +6255,7 @@ pub async fn run(
                                     tool_input: input_preview,
                                     risk,
                                 };
-                                if state.pending_plan_card.is_some() || state.pending_permission.is_some() || state.pending_apply_card.is_some() {
+                                if state.pending_plan_card.is_some() || state.pending_permission.is_some() || state.pending_artifact_card.is_some() {
                                     state.permission_queue.push(new_pending);
                                 } else {
                                     state.pending_permission = Some(new_pending);
@@ -6298,7 +6298,7 @@ pub async fn run(
                         // apply card's intercepts require Confirmation(ArtifactApply)
                         // focus and would strand if stolen. The plan card is surfaced
                         // by `surface_deferred_modal` when the apply card resolves.
-                        if state.pending_apply_card.is_none() {
+                        if state.pending_artifact_card.is_none() {
                             state.focus = FocusState::Overlay(OverlayType::Confirmation(
                                 ConfirmationType::PlanApproval,
                             ));
@@ -8961,9 +8961,13 @@ fn surface_deferred_modal(state: &mut TuiState) {
         return;
     }
     if state.pending_plan_approval.is_some()
-        && !matches!(state.focus, FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval)))
+        && !matches!(
+            state.focus,
+            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval))
+        )
     {
-        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval));
+        state.focus =
+            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval));
         state.needs_redraw = true;
     }
 }
@@ -9689,7 +9693,7 @@ fn render(
                     );
                 }
 
-                if let Some(card) = &state.pending_apply_card {
+                if let Some(card) = &state.pending_artifact_card {
                     let card_lines = crate::adapters::tui::widgets::apply_card::render_apply_card_lines(
                         card,
                         theme,

@@ -17,14 +17,20 @@ use crate::adapters::tui::widgets::artifacts_panel::{
     apply_state_suffix, decision_suffix, id_prefix, kind_label, review_state_label,
 };
 use crate::domain::models::{
-    ArtifactId, ArtifactKind, ArtifactRef, OrchestrationRoom, PermissionMode, ReviewVerdict,
+    ArtifactId, ArtifactKind, ArtifactRef, OperatorApplyFinding, OrchestrationRoom, PermissionMode,
+    ReviewVerdict,
 };
-use crate::domain::ports::PatchApplyPortError;
+use crate::domain::ports::{PatchApplyPortError, PatchResolvePortError};
 use crate::domain::services::patch_review::{MergeBackPolicy, operator_patch_decision};
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
+///
+/// ⛔ An advertised verb the operator cannot discover is the 18.3c defect
+/// class: this string, `command_registry.rs`'s palette entry and
+/// `help_data.rs`'s binding all move together.
 pub const USAGE: &str = "/artifacts | /artifact show <id> | /artifact apply <id> | \
-                         /artifact review <id> approve|request-changes|reject";
+                         /artifact review <id> approve|request-changes|reject | \
+                         /artifact resolve <id> present|absent";
 
 /// Stable id for the in-chat `/artifact` result block. A drill-down is a
 /// **view**, not an event stream: re-running it replaces the block rather than
@@ -41,6 +47,16 @@ pub enum ArtifactCommandArgs {
     Apply { id: String },
     /// `/artifact review <id> <verdict>` — the verdict verb.
     Review { id: String, verdict: ReviewVerdict },
+    /// `/artifact resolve <id> present|absent` — the operator's report about an
+    /// indeterminate apply (Story 18.3a-f).
+    ///
+    /// ⛔ The finding travels in the COMMAND, never as a card key: the card
+    /// stays a two-key `y`/`n` confirmation of an already-stated finding, which
+    /// is what keeps every event-loop-resident piece untouched (ruling A7).
+    Resolve {
+        id: String,
+        finding: OperatorApplyFinding,
+    },
 }
 
 /// Parse an operator-typed verdict.
@@ -55,6 +71,26 @@ pub fn parse_verdict(value: &str) -> Option<ReviewVerdict> {
         "approve" | "approved" => Some(ReviewVerdict::Approved),
         "request-changes" | "changes-requested" => Some(ReviewVerdict::ChangesRequested),
         "reject" | "rejected" => Some(ReviewVerdict::Rejected),
+        _ => None,
+    }
+}
+
+/// Parse an operator-typed apply finding (Story 18.3a-f).
+///
+/// ⛔ **`present`/`absent`, never `applied`/`not-applied`** (ruling A8).
+/// `ApplyOutcome::Applied` already means *"`git apply` returned 0"*; reusing
+/// the word would weld two epistemic classes onto one token and both rows would
+/// read `apply: applied`.
+///
+/// ⛔ `unknown` is deliberately **unparseable**: it is what a value written by a
+/// newer build degrades to, not something an operator can assert. Typing it
+/// falls through to the `USAGE` refusal, the same way an unrecognised verdict
+/// does.
+#[must_use]
+pub fn parse_finding(value: &str) -> Option<OperatorApplyFinding> {
+    match value {
+        "present" => Some(OperatorApplyFinding::Present),
+        "absent" => Some(OperatorApplyFinding::Absent),
         _ => None,
     }
 }
@@ -111,6 +147,27 @@ pub fn parse_artifact_command(
             Ok(ArtifactCommandArgs::Review {
                 id: id.to_owned(),
                 verdict,
+            })
+        }
+        // Mirrors the `review` arm exactly, down to the three refusal
+        // sentences: missing id, missing finding, too many args.
+        Some("resolve") => {
+            let id = parts
+                .next()
+                .ok_or_else(|| format!("/artifact resolve needs an artifact id. {USAGE}"))?;
+            let finding = parts
+                .next()
+                .ok_or_else(|| format!("/artifact resolve needs a finding. {USAGE}"))?;
+            if parts.next().is_some() {
+                return Err(format!(
+                    "/artifact resolve takes one id and one finding. {USAGE}"
+                ));
+            }
+            let finding = parse_finding(finding)
+                .ok_or_else(|| format!("unknown finding `{finding}`. {USAGE}"))?;
+            Ok(ArtifactCommandArgs::Resolve {
+                id: id.to_owned(),
+                finding,
             })
         }
         Some(other) => Err(format!("unknown /artifact subcommand `{other}`. {USAGE}")),
@@ -345,8 +402,8 @@ pub(crate) fn show_artifact_message(state: &mut TuiState, message: String) {
 pub fn resolve_apply_card(
     state: &mut TuiState,
     accept: bool,
-) -> Option<crate::adapters::tui::state::PendingApplyCard> {
-    let card = state.pending_apply_card.take()?;
+) -> Option<crate::adapters::tui::state::PendingArtifactCard> {
+    let card = state.pending_artifact_card.take()?;
     state.focus = card.prior_focus.clone();
     state.needs_redraw = true;
     accept.then_some(card)
@@ -364,14 +421,17 @@ pub fn render_apply_result(
             format!("patch {prefix} was not applied: the workspace is busy")
         }
         Err(PatchApplyPortError::ApplyIndeterminate) => format!(
-            "patch {prefix} was not applied: its prior outcome is indeterminate; \
-             no resolution verb exists yet (18-3a-f)"
+            "patch {prefix} was not applied: its prior outcome is indeterminate. \
+             Inspect the working tree, then run `/artifact resolve {prefix} present|absent`."
         ),
+        // ⚠ "may have been applied" is pinned by
+        // `conformance_18_3a_e_apply_surface.rs` — the honest half of this
+        // sentence. ⛔ Keep it; only the dead-end clause moves.
         Err(PatchApplyPortError::ApplyUnresolved(_)) => format!(
             "patch {prefix} may have been applied, but its outcome could not be \
              recorded — the workspace may have changed and the artifact is now \
-             indeterminate. Inspect the working tree; no resolution verb exists \
-             yet (18-3a-f)."
+             indeterminate. Inspect the working tree, then run \
+             `/artifact resolve {prefix} present|absent`."
         ),
         Err(PatchApplyPortError::Conflict(message)) => {
             format!("patch {prefix} conflicted and did not mutate the workspace: {message}")
@@ -379,5 +439,66 @@ pub fn render_apply_result(
         Err(PatchApplyPortError::Failed(message)) => {
             format!("patch {prefix} apply failed: {message}")
         }
+    }
+}
+
+/// Operator sentence for one resolution attempt (Story 18.3a-f, ruling A14).
+///
+/// ⛔ **A separate renderer, never [`render_apply_result`].** That one's success
+/// arm is *"patch … applied to the workspace"*, pinned by
+/// `conformance_18_3a_e_apply_surface.rs` with the message *"success is the only
+/// outcome that may claim the workspace changed"*. This verb performs **no**
+/// workspace write, so routing it through that renderer would make the product
+/// claim a write it did not perform — on the one verb that never writes. It
+/// also takes a different error set.
+///
+/// ⚠ The `WorkspaceBusy` *sentence* is reused as copy; the renderer is not.
+#[must_use]
+pub fn render_resolve_result(
+    artifact: &ArtifactId,
+    finding: OperatorApplyFinding,
+    result: Result<(), PatchResolvePortError>,
+) -> String {
+    let prefix = id_prefix(artifact);
+    match result {
+        // ⛔ No string here calls the record permanent, final or durable
+        // (ruling P6): compaction that drops this report while keeping its
+        // `PatchApplyStarted` silently re-wedges the artifact.
+        Ok(()) => format!(
+            "patch {prefix}: recorded your report that its changes {} in the working tree. \
+             The workspace was not written to and was not inspected.",
+            finding_clause(finding)
+        ),
+        Err(PatchResolvePortError::WorkspaceBusy) => {
+            format!("patch {prefix} was not resolved: the workspace is busy")
+        }
+        Err(PatchResolvePortError::NotWedged(state)) => format!(
+            "patch {prefix} was not resolved: it is not awaiting an operator report \
+             (recorded apply state: {state})"
+        ),
+        Err(PatchResolvePortError::UnreadableFinding) => format!(
+            "patch {prefix} was not resolved: an operator report must be \
+             'present' or 'absent' — 'unknown' cannot be filed"
+        ),
+        Err(PatchResolvePortError::RecordFailed(message)) => {
+            format!("patch {prefix}: your report could not be recorded: {message}")
+        }
+    }
+}
+
+/// The operator's own words, echoed back before and after confirmation.
+///
+/// ⛔ Never `applied`/`not applied` (ruling A8) — those describe what
+/// `git apply` returned, and this describes what a human saw.
+#[must_use]
+pub fn finding_clause(finding: OperatorApplyFinding) -> &'static str {
+    match finding {
+        OperatorApplyFinding::Present => "ARE",
+        OperatorApplyFinding::Absent => "are NOT",
+        // Unreachable from the parser (`parse_finding` refuses it) and refused
+        // by the verb (`record_inspection` rejects an `Unknown` finding), but
+        // the lattice can still hold one written by a newer build, so it gets an
+        // honest phrase rather than a panic.
+        _ => "could not be read from this build's report vocabulary as being",
     }
 }

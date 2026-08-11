@@ -7827,6 +7827,20 @@ mod tests {
                         "journal PatchApplyResolved artifact={artifact:?} outcome={outcome:?}"
                     ));
                 }
+                // 18.3a-f: same reason as the two arms above. No golden in this
+                // file records an operator inspection, so no pinned transcript
+                // moves — but `RoomEvent`'s in-crate matches are exhaustive and
+                // this one must name the variant to compile.
+                RoomEvent::PatchApplyInspected {
+                    artifact,
+                    finding,
+                    inspector,
+                } => {
+                    let i = it.sym(inspector.as_str());
+                    lines.push(format!(
+                        "journal PatchApplyInspected artifact={artifact:?} finding={finding:?} inspector={i}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

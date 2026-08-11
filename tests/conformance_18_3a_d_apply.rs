@@ -514,8 +514,14 @@ fn the_bracketed_region_reaches_the_bus_only_through_the_durable_persist_shell()
         );
     }
     // Positive control: `persist` is what `apply` uses, and it is durable-first.
+    //
+    // ⚠ 18.3a-f: counted as `.persist(`, not `self.persist(`. rustfmt breaks a
+    // long receiver onto its own line (`let resolution = self\n.persist(…)`),
+    // so the old needle silently read 1 — meaning `cargo fmt --check` green and
+    // this ratchet green were mutually exclusive at `02d6c46`, and cut 2 shipped
+    // with fmt red. ⛔ Do not restore the receiver-coupled needle.
     assert_eq!(
-        body.matches("self.persist(").count(),
+        body.matches(".persist(").count(),
         2,
         "the bracket is exactly two durable appends"
     );
@@ -938,15 +944,24 @@ async fn an_apply_record_for_an_unknown_artifact_stays_visible() {
 #[test]
 fn the_apply_fold_arms_are_unnested_and_the_guard_precedes_the_mutation() {
     let room = source("src/domain/models/orchestration_room.rs");
+    // ⚠ 18.3a-f: this list is HARDCODED — a new apply fold arm ships unpoliced
+    // unless it is added here. The `rfind` below needs exactly 12 spaces of
+    // indentation before `RoomEvent::`.
     for variant in [
         "RoomEvent::PatchApplyStarted",
         "RoomEvent::PatchApplyResolved",
+        "RoomEvent::PatchApplyInspected",
     ] {
         let arm_start = room
             .rfind(&format!("            {variant} {{"))
             .unwrap_or_else(|| panic!("positive control: the {variant} fold arm exists"));
         let arm = &room[arm_start..];
-        let arm = &arm[..arm.find("\n            }").expect("the arm closes")];
+        // ⚠ 18.3a-f: bound at the first 12-space `}` that is ALONE on its line.
+        // A three-field destructure makes rustfmt wrap the pattern, whose
+        // closer is `            } => {` — the old `"\n            }"` needle
+        // matched that and truncated the slice before the arm body, failing the
+        // positive control below on a perfectly correct arm.
+        let arm = &arm[..arm.find("\n            }\n").expect("the arm closes")];
         assert!(
             !arm.contains("artifacts.get_mut"),
             "{variant} must fold unconditionally into its own map"
