@@ -520,7 +520,7 @@ async fn acp_session_new_preserves_forwarded_env_literally_without_expansion() {
 /// (≤5s, 50ms step) tolerating the detached `start_mcp_connections` connect —
 /// never a wall-clock assertion.
 #[tokio::test(flavor = "current_thread")]
-#[cfg(feature = "mcp")]
+#[cfg(feature = "test-fake-mcp")]
 async fn build_acp_core_composite_branch_makes_forwarded_mcp_tool_callable() {
     use std::collections::BTreeMap;
 
@@ -619,7 +619,7 @@ async fn build_acp_core_composite_branch_makes_forwarded_mcp_tool_callable() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[cfg(all(feature = "mcp", target_os = "linux"))]
+#[cfg(all(feature = "test-fake-mcp", target_os = "linux"))]
 async fn close_session_reaps_real_forwarded_mcp_child() {
     use rustain::adapters::acp::run::{
         deterministic_acp_id_source, serve_acp_with_acp_core_factory_and_node_tree,

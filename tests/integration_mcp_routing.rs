@@ -16,9 +16,9 @@
 //!   * R12 — Workspace-access check is NOT invoked for MCP tools at runtime
 //!   * R13 — Cancellation mid-execution lands the FSM in Cancelled with no orphan
 //!
-//! All tests require the `mcp` feature flag (the only feature where MCP code paths exist).
+//! All tests require the `test-fake-mcp` feature because they exercise a real stdio child.
 
-#![cfg(feature = "mcp")]
+#![cfg(feature = "test-fake-mcp")]
 mod common;
 
 use std::collections::BTreeMap;

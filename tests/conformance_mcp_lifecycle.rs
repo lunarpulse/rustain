@@ -10,10 +10,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use rustain::adapters::mcp::client::McpClientAdapter;
+#[cfg(feature = "test-fake-mcp")]
 use rustain::adapters::mcp::lifecycle::shutdown_all_clients;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{McpConnectionState, McpServerSource, McpServerSpec, McpTransport};
 
+#[cfg(feature = "test-fake-mcp")]
 fn fake_spec(id: &str, env: BTreeMap<String, String>) -> McpServerSpec {
     let command = common::fake_mcp_binary();
     McpServerSpec {
@@ -28,6 +30,7 @@ fn fake_spec(id: &str, env: BTreeMap<String, String>) -> McpServerSpec {
     }
 }
 
+#[cfg(feature = "test-fake-mcp")]
 fn fake_spec_with_drop(id: &str, drop_ms: u64) -> McpServerSpec {
     let mut env = BTreeMap::new();
     env.insert("FAKE_MCP_DROP_AFTER_MS".into(), drop_ms.to_string());
@@ -41,8 +44,16 @@ fn fake_spec_with_drop(id: &str, drop_ms: u64) -> McpServerSpec {
 async fn test_reconnect_exponential_backoff_capped_at_5() {
     use rustain::adapters::mcp::reconnect::spawn_reconnect_task;
 
-    let mut spec = fake_spec("reconnect-test", BTreeMap::new());
-    spec.command = Some("/nonexistent-binary-that-does-not-exist".into());
+    let spec = McpServerSpec {
+        id: "reconnect-test".to_string(),
+        transport: McpTransport::Stdio,
+        command: Some("/nonexistent-binary-that-does-not-exist".into()),
+        args: vec![],
+        env: BTreeMap::new(),
+        url: None,
+        persistent: false,
+        source: McpServerSource::Workspace,
+    };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let client = Arc::new(McpClientAdapter::new(spec, Some(tx)));
@@ -89,6 +100,7 @@ async fn test_reconnect_exponential_backoff_capped_at_5() {
 }
 
 /// AC-6: After shutdown, no child processes should remain.
+#[cfg(feature = "test-fake-mcp")]
 #[tokio::test]
 async fn test_no_zombie_processes_after_shutdown() {
     let mut clients: Vec<Arc<McpClientAdapter>> = Vec::new();
@@ -97,7 +109,10 @@ async fn test_no_zombie_processes_after_shutdown() {
         let spec = fake_spec(&format!("zombie-test-{i}"), BTreeMap::new());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
         let client = Arc::new(McpClientAdapter::new(spec, Some(tx)));
-        let _ = client.connect().await;
+        client
+            .connect()
+            .await
+            .expect("fake-mcp-server must connect");
         clients.push(client);
     }
 
@@ -113,15 +128,17 @@ async fn test_no_zombie_processes_after_shutdown() {
         );
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    #[cfg(target_os = "linux")]
+    {
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
-    for client in &clients {
-        let output = std::process::Command::new("pgrep")
-            .args(["-f", &format!("fake-mcp-server.*{}", client.server_id())])
-            .output();
-        if let Ok(out) = output {
+        for client in &clients {
+            let output = std::process::Command::new("pgrep")
+                .args(["-f", &format!("fake-mcp-server.*{}", client.server_id())])
+                .output()
+                .expect("pgrep must inspect fake-mcp-server processes");
             assert!(
-                out.stdout.is_empty(),
+                output.stdout.is_empty(),
                 "zombie process found for server {}",
                 client.server_id()
             );

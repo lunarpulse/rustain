@@ -11,6 +11,7 @@
 //! Requires `--features test-fake-mcp` (the fake bin is gated on it; the
 //! missing-binary panic says so).
 
+#![cfg(feature = "test-fake-mcp")]
 mod common;
 
 use std::collections::BTreeMap;
