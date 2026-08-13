@@ -7393,10 +7393,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn owned_abandonment_self_destruct_is_journaled_cancelled() {
-        tokio::time::pause();
-        let (runner, _registry, _event_rx, tmp) = make_hanging_runner_observable().await;
+        let (runner, registry, _event_rx, tmp) = make_hanging_runner_observable().await;
         let spec = AgentLaunchSpec {
             prompt: "wait for owner disconnect".into(),
             effective_model: "test-model".into(),
@@ -7418,51 +7417,61 @@ mod tests {
             .await
             .expect("launch owned child");
         let agent_id = handle.agent_id.clone();
-        let mut saw_running = false;
-        for _ in 0..64 {
-            tokio::task::yield_now().await;
-            while let Ok(status) = handle.status_rx.try_recv() {
-                saw_running |= status == NodeState::Running;
-            }
-            if saw_running {
-                break;
-            }
-        }
-        assert!(saw_running, "positive control: child entered Running");
+        let running =
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle.status_rx.recv())
+                .await
+                .expect("timed out waiting for child to enter Running")
+                .expect("status channel closed before child entered Running");
+        assert_eq!(
+            running,
+            NodeState::Running,
+            "positive control: child entered Running"
+        );
+
+        // Clone the registry watch before abandonment. Its terminal publication
+        // follows the journal append, making Cancelled the durability barrier.
+        let mut registry_status = registry
+            .status_rx(&agent_id)
+            .await
+            .expect("owned child must have a registry status watch before abandonment");
         drop(handle.parent_disconnect);
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
-        let mut terminal = None;
-        let mut observed = Vec::new();
-        for _ in 0..64 {
-            tokio::time::advance(std::time::Duration::from_millis(100)).await;
-            for _ in 0..32 {
-                tokio::task::yield_now().await;
-            }
-            while let Ok(status) = handle.status_rx.try_recv() {
-                observed.push(status);
-                if status.is_terminal() {
-                    terminal = Some(status);
+
+        let mut waiting_count = 0;
+        let raw_terminal = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match handle.status_rx.recv().await {
+                    Some(NodeState::Waiting) => waiting_count += 1,
+                    Some(NodeState::Cancelled) => break NodeState::Cancelled,
+                    Some(status) => {
+                        panic!("unexpected raw status after owner disconnect: {status:?}")
+                    }
+                    None => panic!("status channel closed before abandonment reached Cancelled"),
                 }
             }
-            if terminal.is_some() {
-                break;
-            }
-        }
+        })
+        .await
+        .expect("timed out waiting for abandonment to reach Cancelled");
         assert_eq!(
-            terminal,
-            Some(NodeState::Cancelled),
-            "Owned disconnect exhausts retries then self-destructs; observed={observed:?}"
-        );
-        assert_eq!(
-            observed
-                .iter()
-                .filter(|state| **state == NodeState::Waiting)
-                .count(),
-            3,
+            waiting_count, 3,
             "exactly three deterministic retries precede self-destruct"
         );
+        assert_eq!(
+            raw_terminal,
+            NodeState::Cancelled,
+            "raw lifecycle must end in Cancelled after abandonment retries"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while *registry_status.borrow_and_update() != NodeState::Cancelled {
+                registry_status
+                    .changed()
+                    .await
+                    .expect("registry status watch closed before durable Cancelled publication");
+            }
+        })
+        .await
+        .expect("timed out waiting for durable Cancelled publication");
+
         let journal = NodeJournal::open_workspace(tmp.path())
             .await
             .expect("reopen journal");
