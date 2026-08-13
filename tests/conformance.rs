@@ -54,6 +54,8 @@ fn test_domain_no_forbidden_crate_imports() {
         "arc_swap",
         "a2a",
         "serde_jcs",
+        "iroh",
+        "noq",
     ];
     let allowed_tokio = ["tokio_util::sync::CancellationToken", "tokio::sync"];
     let domain_dir = Path::new("src/domain");

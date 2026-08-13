@@ -624,6 +624,13 @@ impl AttachServer {
         *self.peer_delivery.write().await = Some(handler);
     }
 
+    /// Clone the configured peer front door for sibling network listeners.
+    pub async fn verified_peer_handler(
+        &self,
+    ) -> Option<Arc<crate::adapters::rap::VerifiedPeerFrameHandler>> {
+        self.peer_delivery.read().await.clone()
+    }
+
     /// Current count of connected channels for honest `status` reporting (AC4).
     pub fn channel_count(&self) -> usize {
         // best-effort, non-blocking read

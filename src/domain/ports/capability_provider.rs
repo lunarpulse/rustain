@@ -230,6 +230,52 @@ mod a2a_conformance {
         );
     }
 
+    /// Story 18.4, AC6 — a p2p integration target not named by the dedicated
+    /// feature lane is a false green. Keep this sibling guard separate from the
+    /// A2A guard above: each guard owns exactly one CI lane.
+    #[test]
+    fn every_p2p_integration_test_is_wired_into_the_ci_p2p_lane() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut targets = Vec::new();
+        for entry in std::fs::read_dir(root.join("tests"))
+            .expect("tests/ must be readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "rs")
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                && stem.contains("p2p")
+            {
+                targets.push(stem.to_owned());
+            }
+        }
+        targets.sort();
+        assert!(
+            !targets.is_empty(),
+            "expected p2p integration tests under tests/"
+        );
+
+        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+            .expect(".github/workflows/ci.yml must be readable");
+        let lane: String = ci
+            .lines()
+            .skip_while(|line| *line != "  p2p:")
+            .skip(1)
+            .take_while(|line| {
+                line.is_empty() || !line.starts_with("  ") || line.starts_with("    ")
+            })
+            .collect();
+        assert!(!lane.is_empty(), "dedicated p2p CI job");
+        let missing: Vec<&String> = targets
+            .iter()
+            .filter(|stem| !lane.contains(&format!("--test {stem}")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "p2p integration tests exist that the CI `p2p` lane never runs: {missing:?}"
+        );
+    }
+
     /// Story 18.1b, R1 — the async-lock ratchet was never executed by CI.
     ///
     /// `MAX_KNOWN_STD_SYNC_LOCKS` lives in `tests/conformance.rs`, and until this

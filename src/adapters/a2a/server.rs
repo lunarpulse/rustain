@@ -1443,7 +1443,7 @@ async fn run_inner(
     ready: &mut Option<oneshot::Sender<Result<(), String>>>,
 ) -> anyhow::Result<()> {
     let server_config = super::config::parse_workspace_a2a_server_config(
-        &workspace.join(".rustain").join("a2a.json"),
+        &crate::infrastructure::paths::workspace_a2a_config_path(&workspace),
     )?;
     let policy = server_config
         .as_ref()

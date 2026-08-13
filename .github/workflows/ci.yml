@@ -51,6 +51,10 @@ jobs:
         continue-on-error: true
         run: cargo clippy --all-targets --features a2a -- -D warnings
 
+      - name: Clippy (advisory — p2p)
+        continue-on-error: true
+        run: cargo clippy --all-targets --features p2p -- -D warnings
+
       - name: Format
         run: cargo fmt --check
 
@@ -155,6 +159,35 @@ jobs:
             --test conformance_a2a_architecture \
             --test conformance_transparency \
             --test conformance_transparency_surfacing
+
+  p2p:
+    name: P2P Feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Run only bans: aggregate `cargo deny check` is intentionally excluded because this
+      # repository has no `[licenses]` allowlist and its baseline `lru 0.16.3` advisory makes
+      # that broader check red for reasons outside this story.
+      - name: Dependency bans (p2p)
+        run: |
+          cargo install --locked cargo-deny
+          cargo deny check bans
+
+      # The default Check job never enables this non-default transport feature.
+      # Targets are explicit; the default-lane sibling guard
+      # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` prevents a
+      # newly added tests/*p2p*.rs target from becoming a false green.
+      - name: Test with p2p feature (lib + every P2P integration target)
+        run: |
+          cargo test --lib --features p2p
+          cargo test --features p2p \
+            --test conformance_p2p_architecture \
+            --test conformance_p2p_dial_verdict \
+            --test conformance_p2p_ingress \
+            --test conformance_p2p_transport
 
   mcp:
     name: MCP Feature

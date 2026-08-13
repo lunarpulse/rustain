@@ -20,11 +20,11 @@ fn ac4_self_seal_type_wall() {
 /// does not derive `Deserialize`" invariant previously had NO executable guard
 /// anywhere in the suite (`ac4_domain_ownership_kind_is_not_deserializable` in
 /// `conformance_multi_agent_security.rs` was vacuous — `let _ = OwnershipKind::Owned;`).
-/// This compile_fail proves it for real: re-adding `#[derive(Deserialize)]` to
-/// `OwnershipKind` makes `domain_kind_not_deserializable.rs` start compiling,
-/// flipping this test RED.
+/// This compile-pass negative assertion has one applicable impl today. Re-adding
+/// `Deserialize` makes its marker ambiguous and flips this test RED without a
+/// feature-dependent rustc diagnostic snapshot.
 #[test]
 fn ac4_domain_kind_not_deserializable_type_wall() {
     let t = trybuild::TestCases::new();
-    t.compile_fail("tests/trybuild/ownership/domain_kind_not_deserializable.rs");
+    t.pass("tests/trybuild/ownership/domain_kind_not_deserializable.rs");
 }

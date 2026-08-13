@@ -113,6 +113,9 @@ gray_matter = "0.2"
 url = "2"
 zeroize = { version = "1", features = ["alloc"] }
 ed25519-dalek = { version = "=2.2.0", features = ["pkcs8", "rand_core"] }
+# Story 18.4 — replaceable cross-host transport adapter. Exact pin: iroh's
+# public vocabulary and MSRV can move within a minor release.
+iroh = { version = "=1.0.3", optional = true }
 # Portable OS CSPRNG for identity key generation (Story 17.1a: replaces the
 # Unix-only `/dev/urandom` read). Pinned to 0.6.4 — the exact version already
 # resolved transitively via ed25519-dalek's `rand_core` feature — so this only
@@ -236,6 +239,9 @@ a2a = [
     "dep:rustls-pemfile",
     "dep:subtle",
 ]
+# Story 18.4 — cross-host peer transport. Kept independent from the A2A HTTP
+# surface and out of default; domain types compile without the adapter.
+p2p = ["dep:iroh"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]

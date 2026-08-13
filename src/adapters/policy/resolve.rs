@@ -120,7 +120,7 @@ mod tests {
 
     fn resolve(dir: &Path) -> Result<(EffectivePolicy, PolicyExplanation), PolicyConfigError> {
         let peers = crate::adapters::a2a::config::parse_workspace_a2a_config(
-            &dir.join(".rustain").join("a2a.json"),
+            &crate::infrastructure::paths::workspace_a2a_config_path(dir),
         )
         .unwrap_or_default();
         resolve_workspace_policy(dir, &peers, &super::super::EmptyConsentProjection)

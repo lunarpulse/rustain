@@ -50,6 +50,16 @@ pub fn workspace_dir() -> Result<PathBuf> {
     std::env::current_dir().context("Could not determine current working directory")
 }
 
+/// Path to the workspace A2A-over-HTTP peer configuration.
+pub fn workspace_a2a_config_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("a2a.json")
+}
+
+/// Path to the independent workspace QUIC peer transport configuration.
+pub fn workspace_p2p_config_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("p2p.json")
+}
+
 /// Resolve the `{workspace}/.claude/sessions/` directory for session persistence.
 pub fn sessions_dir(workspace: &std::path::Path) -> PathBuf {
     workspace.join(".claude").join("sessions")

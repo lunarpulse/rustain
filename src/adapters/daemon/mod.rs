@@ -73,6 +73,7 @@ pub async fn run_daemon(
     // sharing its `NodeTree`, `DaemonCore` and event bus. There is no second
     // core.
     serve_a2a: Option<String>,
+    p2p_listen: bool,
 ) -> Result<()> {
     #[cfg(unix)]
     {
@@ -86,6 +87,7 @@ pub async fn run_daemon(
                         selection,
                         a2a_peers,
                         serve_a2a,
+                        p2p_listen,
                     )
                     .await
                 } else {
@@ -100,6 +102,7 @@ pub async fn run_daemon(
                     selection,
                     a2a_peers,
                     serve_a2a,
+                    p2p_listen,
                 )
                 .await
             }
@@ -131,6 +134,7 @@ pub async fn run_daemon(
             memory_adapter,
             selection,
             serve_a2a,
+            p2p_listen,
         );
         windows_not_supported()
     }
@@ -279,6 +283,7 @@ async fn run_daemon_foreground(
     selection: crate::domain::models::profile::ProfileSelection,
     a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
     serve_a2a: Option<String>,
+    p2p_listen: bool,
 ) -> Result<()> {
     config.daemon.validate().map_err(|e| anyhow::anyhow!(e))?;
 
@@ -311,7 +316,7 @@ async fn run_daemon_foreground(
     // malformed optional-listener config must not be fatal to daemon startup
     // (previously it could only break the feature-gated A2A listener itself).
     match crate::adapters::a2a::config::parse_workspace_a2a_server_config(
-        &workspace.join(".rustain").join("a2a.json"),
+        &crate::infrastructure::paths::workspace_a2a_config_path(&workspace),
     ) {
         Ok(config) => {
             let admission = config.map_or_else(Default::default, |server| server.admission);
@@ -602,6 +607,15 @@ async fn run_daemon_foreground(
     )
     .await?;
 
+    let p2p_shutdown = tokio_util::sync::CancellationToken::new();
+    let p2p_task = spawn_p2p_listener(
+        p2p_listen,
+        &workspace,
+        server.clone(),
+        p2p_shutdown.child_token(),
+    )
+    .await?;
+
     let rt = DaemonRuntime {
         config: config.clone(),
         memory: core.memory.clone(),
@@ -656,13 +670,23 @@ async fn run_daemon_foreground(
 
     let result = lifecycle::run_lifecycle(rt).await;
 
+    // Signal every listener FIRST, then await them. Cancelling in the same pass
+    // that awaits lets an earlier listener's five-second grace run while a later
+    // one is still admitting remote frames into a daemon whose lifecycle has
+    // already stopped.
     urgency_shutdown.cancel();
+    a2a_shutdown.cancel();
+    p2p_shutdown.cancel();
+
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), urgency_task).await;
 
-    a2a_shutdown.cancel();
     if let Some(task) = a2a_task {
         // Bounded: a listener that will not stop must not hold the daemon's exit
         // hostage — the process is going away regardless.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+    }
+
+    if let Some(task) = p2p_task {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
     }
 
@@ -799,6 +823,278 @@ async fn spawn_a2a_listener(
                 Err(error)
             }
         }
+    }
+}
+
+/// Compose the config-gated QUIC listener beside the daemon's existing peer
+/// front door. The disabled path allocates nothing and binds no endpoint.
+#[cfg(unix)]
+async fn spawn_p2p_listener(
+    enabled: bool,
+    workspace: &std::path::Path,
+    server: std::sync::Arc<crate::adapters::daemon::server::AttachServer>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    if !enabled {
+        let _ = (workspace, server, shutdown);
+        return Ok(None);
+    }
+    #[cfg(not(feature = "p2p"))]
+    {
+        let _ = (workspace, server, shutdown);
+        anyhow::bail!(
+            ".rustain/p2p.json enables the listener but this build has the `p2p` feature disabled"
+        );
+    }
+    #[cfg(feature = "p2p")]
+    {
+        let handler = server
+            .verified_peer_handler()
+            .await
+            .context("peer delivery front door is not configured")?;
+        let signer =
+            crate::adapters::rap::IdentityKeyStore::new(crate::infrastructure::paths::data_dir()?)
+                .load_or_generate()
+                .context("loading the local peer identity key")?;
+        let listener = compose_p2p_listener(
+            workspace,
+            handler,
+            signer.transport_secret_key_bytes(),
+            shutdown,
+        )
+        .await?;
+        tracing::info!(
+            address = listener.address,
+            "P2P listener ready; directly-addressable peers only; relay disabled"
+        );
+        Ok(Some(listener.task))
+    }
+}
+
+/// A bound listener and the address an operator can hand to a peer.
+#[cfg(all(unix, feature = "p2p"))]
+struct P2pListener {
+    address: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Everything the listener is, minus the two lookups that reach outside this
+/// process (the front door on `AttachServer` and the on-disk identity key).
+///
+/// Split out so the composition itself — bind, allowlist health, ingress, and
+/// shutdown — is reachable by a test that delivers a real frame through it,
+/// instead of being asserted about by reading this file's source.
+#[cfg(all(unix, feature = "p2p"))]
+async fn compose_p2p_listener(
+    workspace: &std::path::Path,
+    handler: std::sync::Arc<crate::adapters::rap::VerifiedPeerFrameHandler>,
+    transport_secret_key: [u8; 32],
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<P2pListener> {
+    use crate::domain::ports::PeerTransport;
+
+    let transport = std::sync::Arc::new(
+        crate::adapters::iroh::IrohPeerTransport::bind(
+            transport_secret_key,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .context("binding the P2P listener")?,
+    );
+    let address = String::from_utf8(transport.local_address()?.as_bytes().to_vec())
+        .context("rendering the P2P listener address")?;
+
+    // An entry with no pinned key can never match a presented endpoint, so it
+    // silently admits nobody. The refusal path names the peer that knocked, not
+    // this hole, so the operator hears about it here instead.
+    if let crate::domain::models::P2pConfigState::Present(peers) =
+        crate::adapters::p2p_config::load_workspace_p2p_config(
+            &crate::infrastructure::paths::workspace_p2p_config_path(workspace),
+        )
+    {
+        let unpinned: Vec<&str> = peers
+            .iter()
+            .filter(|peer| peer.pinned_key.is_none())
+            .map(|peer| peer.id.as_str())
+            .collect();
+        if !unpinned.is_empty() {
+            tracing::warn!(
+                entries = ?unpinned,
+                "P2P allowlist entries have no pinned key and can admit no peer"
+            );
+        }
+    }
+
+    let ingress = std::sync::Arc::new(crate::adapters::iroh::IrohPeerIngress::new(
+        transport.clone(),
+        handler,
+        workspace.to_path_buf(),
+    )?);
+    let task = tokio::spawn(async move {
+        if let Err(error) = ingress.run(shutdown).await {
+            tracing::error!(error = %error, "P2P listener stopped");
+        }
+        if let Err(error) = transport.shutdown().await {
+            tracing::error!(error = %error, "P2P listener shutdown failed");
+        }
+    });
+    Ok(P2pListener { address, task })
+}
+
+/// Story 18.4 AC2 — the config-gated listener is composed here, so the proof
+/// that it works has to run here too. Everything below the front-door lookup is
+/// exercised: bind, allowlist, shared verification, front-door delivery and
+/// cancellation.
+#[cfg(all(test, unix, feature = "p2p"))]
+mod p2p_listener_composition_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use async_trait::async_trait;
+    use base64::Engine as _;
+    use tokio::sync::mpsc;
+
+    use crate::adapters::iroh::{IrohPeerTransport, derive_peer_endpoint_identity};
+    use crate::adapters::rap::{
+        AgentSigner, VerifiedPeerConsent, VerifiedPeerConsumer, VerifiedPeerFrameHandler,
+    };
+    use crate::domain::models::{AgentId, AgentMessage, CorrelationId, MessageKind, PeerId};
+    use crate::domain::ports::{
+        AgentMessageBus, PeerDeliveryRecord, PeerInteractionRecorder, PeerTransport,
+        RelationshipDeliveryPolicy,
+    };
+    use crate::infrastructure::subagent::{LocalMessageBus, NodeTree};
+
+    struct ForwardingConsumer(mpsc::UnboundedSender<String>);
+
+    #[async_trait]
+    impl VerifiedPeerConsumer for ForwardingConsumer {
+        async fn consent(
+            &self,
+            _recipient: &AgentId,
+            _content: &AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<VerifiedPeerConsent, String> {
+            Ok(VerifiedPeerConsent::Accept)
+        }
+
+        async fn ingest(
+            &self,
+            _recipient: &AgentId,
+            content: AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<(), String> {
+            let _ = self.0.send(content.content);
+            Ok(())
+        }
+    }
+
+    struct AcceptingRecorder;
+
+    #[async_trait]
+    impl PeerInteractionRecorder for AcceptingRecorder {
+        async fn record_peer_delivery(&self, _record: PeerDeliveryRecord) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn composed_listener_delivers_an_allowlisted_frame_and_stops_on_cancel() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let server_key = ed25519_dalek::SigningKey::from_bytes(&[41; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+
+        let pinned = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(client_key.verifying_key().to_bytes());
+        let config_dir = workspace.path().join(".rustain");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::write(
+            config_dir.join("p2p.json"),
+            format!(
+                r#"{{"listen":true,"agents":{{"client":{{"pinnedKey":{{"alg":"EdDSA","x":"{pinned}"}}}}}}}}"#
+            ),
+        )
+        .expect("write allowlist");
+
+        let (ingested_tx, mut ingested_rx) = mpsc::unbounded_channel();
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let node_tree = NodeTree::new();
+        let bus = Arc::new(LocalMessageBus::new(
+            node_tree.clone(),
+            Arc::new(RelationshipDeliveryPolicy),
+        )) as Arc<dyn AgentMessageBus>;
+        let handler = Arc::new(VerifiedPeerFrameHandler::new(
+            node_tree,
+            Arc::new(ArcSwap::from_pointee(bus)),
+            domain_tx,
+            Arc::new(ForwardingConsumer(ingested_tx)),
+            Arc::new(AcceptingRecorder),
+        ));
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let listener = super::compose_p2p_listener(
+            workspace.path(),
+            handler,
+            server_key.to_bytes(),
+            shutdown.child_token(),
+        )
+        .await
+        .expect("compose the production listener");
+
+        let server_identity = derive_peer_endpoint_identity(&server_key.verifying_key().to_bytes())
+            .expect("server identity");
+        let client = IrohPeerTransport::bind(
+            client_key.to_bytes(),
+            HashMap::from([(
+                server_identity.peer_id.clone(),
+                crate::domain::ports::PeerAddress::from_bytes(listener.address.into_bytes())
+                    .expect("listener address"),
+            )]),
+        )
+        .await
+        .expect("bind client");
+
+        let signer = AgentSigner::from_signing_key(client_key);
+        let sender = AgentId::from_peer_path(&format!(
+            "{}/peer-transport",
+            signer.identity().peer_id.as_str()
+        ))
+        .expect("peer-rooted sender");
+        let not_after =
+            crate::domain::clock::Clock::wall_now_ms(&crate::domain::clock::SystemClock::default())
+                + 60_000;
+        let envelope = signer
+            .sign(
+                sender,
+                AgentId::parse("local-recipient").expect("recipient"),
+                CorrelationId::new("composition-1"),
+                MessageKind::PeerMessage,
+                1,
+                not_after,
+                "composition-nonce".to_owned(),
+                Vec::new(),
+                serde_json::json!("through the composed listener"),
+            )
+            .expect("sign envelope");
+        client
+            .send_to(&server_identity.peer_id, envelope)
+            .await
+            .expect("send to the composed listener");
+
+        let delivered =
+            tokio::time::timeout(std::time::Duration::from_secs(10), ingested_rx.recv())
+                .await
+                .expect("the composed listener must deliver within the test budget")
+                .expect("ingest channel stays open");
+        assert_eq!(delivered, "through the composed listener");
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), listener.task)
+            .await
+            .expect("cancellation stops the composed listener")
+            .expect("listener task does not panic");
+        client.shutdown().await.expect("shutdown client");
     }
 }
 

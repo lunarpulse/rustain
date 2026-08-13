@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::events::AppEvent;
@@ -29,12 +29,29 @@ use crate::infrastructure::subagent::{AgentHandle, MailboxBudget, NodeTree};
 
 pub const MAX_PEER_MESSAGE_BYTES: usize = 64 * 1024;
 const PEER_INGEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Late settlement fan-out depth. One slot per frame that can be in flight
+/// across every peer context; a subscriber that falls this far behind has
+/// stopped caring about the reservation it parked.
+const SETTLEMENT_CAPACITY: usize = 256;
 
 /// Recipient consent decision, separate from operational consumer failures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerifiedPeerConsent {
     Accept,
     Decline,
+}
+
+/// Terminal outcome of one peer frame, published after the ingest worker
+/// settles it.
+///
+/// A caller whose own wait timed out no longer holds the acknowledgement
+/// receiver, but the worker still reaches exactly one terminal result. Cross-host
+/// transports subscribe to this so a replay reservation parked on an uncertain
+/// wait is resolved by what actually happened rather than by a guess.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameSettlement {
+    pub correlation_id: String,
+    pub accepted: bool,
 }
 
 /// Application-side consumer reached only after cryptographic verification and
@@ -83,6 +100,7 @@ pub struct VerifiedPeerFrameHandler {
     verified_senders: Arc<Mutex<HashMap<AgentId, PeerId>>>,
     pending_ingest: Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), PeerDeliveryError>>>>>,
     recorder: Arc<dyn PeerInteractionRecorder>,
+    settlements: broadcast::Sender<FrameSettlement>,
 }
 
 impl VerifiedPeerFrameHandler {
@@ -102,7 +120,14 @@ impl VerifiedPeerFrameHandler {
             materialized: Arc::new(Mutex::new(HashSet::new())),
             verified_senders: Arc::new(Mutex::new(HashMap::new())),
             pending_ingest: Arc::new(Mutex::new(HashMap::new())),
+            settlements: broadcast::Sender::new(SETTLEMENT_CAPACITY),
         }
+    }
+
+    /// Observe terminal frame outcomes, including those that settle after the
+    /// caller's own wait has already timed out.
+    pub fn subscribe_settlements(&self) -> broadcast::Receiver<FrameSettlement> {
+        self.settlements.subscribe()
     }
 
     pub async fn handle_verified_peer_frame(
@@ -134,6 +159,12 @@ impl VerifiedPeerFrameHandler {
             .await
         {
             self.pending_ingest.lock().await.remove(&correlation);
+            // The bus never accepted the frame, so no worker will settle it.
+            // Publish the refusal here or a parked reservation waits forever.
+            let _ = self.settlements.send(FrameSettlement {
+                correlation_id: correlation,
+                accepted: false,
+            });
             return Err(PeerDeliveryError::Delivery(error.to_string()));
         }
 
@@ -204,6 +235,7 @@ impl VerifiedPeerFrameHandler {
         let verified_senders = self.verified_senders.clone();
         let pending_ingest = self.pending_ingest.clone();
         let materialized_set = self.materialized.clone();
+        let settlements = self.settlements.clone();
         tokio::spawn(async move {
             loop {
                 let op = tokio::select! {
@@ -306,10 +338,13 @@ impl VerifiedPeerFrameHandler {
                                 crate::domain::models::RefuseReason::Policy,
                             );
                             if domain_tx.send(receipt).is_err() {
-                                if let Some(ack) = pending_ingest.lock().await.remove(&correlation)
-                                {
-                                    let _ = ack.send(Err(PeerDeliveryError::EventChannelClosed));
-                                }
+                                settle(
+                                    &pending_ingest,
+                                    &settlements,
+                                    correlation,
+                                    Err(PeerDeliveryError::EventChannelClosed),
+                                )
+                                .await;
                                 continue;
                             }
                         } else if result.is_ok() {
@@ -323,16 +358,17 @@ impl VerifiedPeerFrameHandler {
                                 },
                             ));
                             if domain_tx.send(receipt).is_err() {
-                                if let Some(ack) = pending_ingest.lock().await.remove(&correlation)
-                                {
-                                    let _ = ack.send(Err(PeerDeliveryError::EventChannelClosed));
-                                }
+                                settle(
+                                    &pending_ingest,
+                                    &settlements,
+                                    correlation,
+                                    Err(PeerDeliveryError::EventChannelClosed),
+                                )
+                                .await;
                                 continue;
                             }
                         }
-                        if let Some(ack) = pending_ingest.lock().await.remove(&correlation) {
-                            let _ = ack.send(result);
-                        }
+                        settle(&pending_ingest, &settlements, correlation, result).await;
                     }
                     _ => {}
                 }
@@ -342,9 +378,13 @@ impl VerifiedPeerFrameHandler {
                 if let crate::domain::models::Op::Deliver(delivery) = op {
                     mailbox_budget.release();
                     let correlation = delivery.envelope.header.correlation_id.0.clone();
-                    if let Some(ack) = pending_ingest.lock().await.remove(&correlation) {
-                        let _ = ack.send(Err(PeerDeliveryError::ContextClosed));
-                    }
+                    settle(
+                        &pending_ingest,
+                        &settlements,
+                        correlation,
+                        Err(PeerDeliveryError::ContextClosed),
+                    )
+                    .await;
                 }
             }
             materialized_set.lock().await.remove(&recipient);
@@ -358,6 +398,29 @@ impl VerifiedPeerFrameHandler {
             self.node_tree.clear_taint(&recipient).await;
         }
     }
+}
+
+/// Resolve one correlation exactly once: answer the caller if it is still
+/// waiting, and publish the outcome for a caller whose wait already expired.
+///
+/// The oneshot alone is not enough. A transport that timed out has dropped its
+/// receiver but may still be holding replay state for this frame, and a dropped
+/// `send` tells it nothing. Every terminal path routes through here so that
+/// "the worker settled" is observable even when nobody is left on the oneshot.
+async fn settle(
+    pending_ingest: &Mutex<HashMap<String, oneshot::Sender<Result<(), PeerDeliveryError>>>>,
+    settlements: &broadcast::Sender<FrameSettlement>,
+    correlation: String,
+    result: Result<(), PeerDeliveryError>,
+) {
+    let accepted = result.is_ok();
+    if let Some(ack) = pending_ingest.lock().await.remove(&correlation) {
+        let _ = ack.send(result);
+    }
+    let _ = settlements.send(FrameSettlement {
+        correlation_id: correlation,
+        accepted,
+    });
 }
 
 pub fn translate_verified_peer_envelope(

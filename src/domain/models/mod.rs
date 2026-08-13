@@ -45,6 +45,7 @@ pub mod node_state;
 mod notice;
 pub mod orchestration;
 pub mod orchestration_room;
+pub mod p2p_peer_spec;
 pub mod palette;
 pub mod peer_identity;
 mod permission;
@@ -189,8 +190,9 @@ pub use orchestration_room::{
     RoomEvent, RoomIdError, TicketResolution, WaveId, WaveOutcome, WaveView,
 };
 #[allow(unused_imports)]
-pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
+pub use p2p_peer_spec::{P2pConfigState, P2pPeerSpec};
 #[allow(unused_imports)]
+pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 pub use peer_identity::{Ed25519Sig, PeerId, PeerIdentity, PeerIdentityError};
 #[allow(unused_imports)]
 pub use permission::{

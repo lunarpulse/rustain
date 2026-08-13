@@ -72,6 +72,23 @@ fn ensure_a2a_feature_enabled(
     }
 }
 
+fn ensure_p2p_feature_enabled(listen_requested: bool) -> Result<()> {
+    #[cfg(feature = "p2p")]
+    {
+        let _ = listen_requested;
+        Ok(())
+    }
+    #[cfg(not(feature = "p2p"))]
+    {
+        if listen_requested {
+            anyhow::bail!(
+                ".rustain/p2p.json enables the listener, but this build has the `p2p` feature disabled"
+            )
+        }
+        Ok(())
+    }
+}
+
 /// Decision-Core (Story 18.0 pattern): effect-free, value-returning.
 ///
 /// Command intercepts run in source order, so a combination that both branches
@@ -922,6 +939,26 @@ pub async fn run() -> Result<()> {
         use crate::domain::models::profile::PortDimension;
         let workspace = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
+        let starts_listener = matches!(&action, DaemonAction::Start { .. } | DaemonAction::Run);
+        let p2p_listen = if starts_listener {
+            let p2p_config_path = paths::workspace_p2p_config_path(&workspace);
+            let p2p_listen = crate::adapters::p2p_config::p2p_listener_requested(&p2p_config_path)
+                .map_err(anyhow::Error::msg)?;
+            if p2p_listen {
+                if let crate::domain::models::P2pConfigState::Malformed { reason } =
+                    crate::adapters::p2p_config::load_workspace_p2p_config(&p2p_config_path)
+                {
+                    anyhow::bail!(
+                        "P2P listener configuration in {} is malformed: {reason}",
+                        p2p_config_path.display()
+                    );
+                }
+            }
+            p2p_listen
+        } else {
+            false
+        };
+        ensure_p2p_feature_enabled(p2p_listen)?;
         let resolved_profile = profile_resolver_arc.resolve_active();
         let resolved_selection = resolved_profile.as_ref().map(|profile| &profile.selection);
         let memory_adapter = resolved_selection
@@ -945,6 +982,7 @@ pub async fn run() -> Result<()> {
             selection,
             a2a_peers,
             cli.serve_a2a.clone(),
+            p2p_listen,
         )
         .await
         .map_err(|e| {

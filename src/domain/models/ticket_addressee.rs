@@ -23,8 +23,8 @@
 //! is the only representable case, which is the strongest available discharge
 //! of FR152's prohibition.
 //!
-//! ⛔ **`NodeId` never enters** (NFR74): iroh's `NodeId` is a reachability
-//! address, not an identity. This type keys on `AgentId` only.
+//! ⛔ **The transport endpoint identifier never enters** (NFR74): it is
+//! reachability data, not an identity. This type keys on `AgentId` only.
 
 use crate::domain::models::AgentId;
 use serde::{Deserialize, Serialize};

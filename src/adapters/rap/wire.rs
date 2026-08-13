@@ -45,6 +45,12 @@ impl AgentSigner {
         &self.identity
     }
 
+    /// Export the existing instance key to the in-crate QUIC adapter so both
+    /// transport and RAP identity derive from one Ed25519 public key.
+    pub(crate) fn transport_secret_key_bytes(&self) -> [u8; 32] {
+        self.key.to_bytes()
+    }
+
     /// Sign arbitrary domain-separated bytes for protocols that reuse the
     /// instance identity without reusing RAP envelope framing.
     pub(crate) fn sign_detached(&self, message: &[u8]) -> Ed25519Sig {

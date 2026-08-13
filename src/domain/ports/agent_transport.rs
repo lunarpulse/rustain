@@ -17,6 +17,9 @@ pub enum AgentTransportError {
 ///
 /// `announce`/`discover`/`stream` remain Epic 17.4/Epic 18 work. Story 17.1a
 /// only needs a shared signed-envelope boundary that later transports can reuse.
+///
+/// `RapTransport` is this port's broadcast adapter. `PeerTransport` is the
+/// sibling cross-host port with remote addressing and connection lifecycle.
 #[async_trait]
 pub trait AgentTransport: Send + Sync {
     async fn send(&self, envelope: AgentEnvelope<Value>) -> Result<(), AgentTransportError>;

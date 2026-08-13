@@ -55,6 +55,15 @@ impl PinnedKey {
             .map_err(|source| A2aPeerSpecError::InvalidPinnedKey { source })?;
         Ok(Self::new(alg, x, kid))
     }
+
+    /// Derive the canonical peer identity from this validated Ed25519 pin.
+    ///
+    /// Both A2A and transport-specific peer specs delegate here so the tree has
+    /// one key-format decoder and one identity derivation.
+    pub fn peer_id(&self) -> Result<PeerId, A2aPeerSpecError> {
+        PeerId::from_jwk_ed25519_x(&self.x)
+            .map_err(|source| A2aPeerSpecError::InvalidPinnedKey { source })
+    }
 }
 
 /// Provenance of an A2A peer specification.
@@ -115,7 +124,7 @@ impl A2aPeerSpec {
     /// `<peer_id_hex>/agent` depending on the route, so its first segment is a
     /// namespace tag on two of the three production paths.
     pub fn pinned_identity(&self) -> Option<PeerId> {
-        PeerId::from_jwk_ed25519_x(&self.pinned_key.as_ref()?.x).ok()
+        self.pinned_key.as_ref()?.peer_id().ok()
     }
 
     /// A pseudonym derived from the alias, for a peer with no usable pin.

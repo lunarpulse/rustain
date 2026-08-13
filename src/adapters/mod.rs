@@ -19,6 +19,8 @@ pub mod daily_log_memory;
 pub mod file_scanner;
 pub mod filesystem;
 pub mod importers;
+#[cfg(feature = "p2p")]
+pub mod iroh;
 pub mod isolation;
 pub mod ledger;
 pub mod long_term_memory;
@@ -28,6 +30,7 @@ pub mod model_catalog_cache;
 #[cfg(feature = "models-dev")]
 pub mod models_dev;
 pub mod noop;
+pub mod p2p_config;
 pub mod palette_registry;
 pub mod persona_adapter;
 pub mod policy;

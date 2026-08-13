@@ -51,6 +51,8 @@ mod patch_review_recorder;
 #[allow(unused_imports)]
 mod peer_interaction_recorder;
 #[allow(unused_imports)]
+mod peer_transport;
+#[allow(unused_imports)]
 mod persona;
 #[allow(unused_imports)]
 mod profile_resolver;
@@ -133,6 +135,7 @@ pub use patch_review_recorder::{PatchReviewError, PatchReviewRecorder};
 pub use peer_interaction_recorder::{
     PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder,
 };
+pub use peer_transport::{InboundFrame, PeerAddress, PeerTransport, PeerTransportError};
 pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};
