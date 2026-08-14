@@ -535,6 +535,19 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // Story 18.4b (AC2/AC3/AC5/AC6) — the `rustain peer` verbs. Intercepted
+    // here, BEFORE provider construction, for the same reason `team log` is:
+    // reading and writing a local transport allowlist is offline-safe and
+    // non-billable. All logic lives in `peer_bridge`, so this stays a dispatch.
+    if let Some(Command::Peer { action }) = &cli.command {
+        return crate::infrastructure::runtime::peer_bridge::run_cli(action)
+            .await
+            .map_err(|e| {
+                eprintln!("rustain: peer command failed: {e}");
+                SubcommandExit(SubcommandExit::GENERIC).into()
+            });
+    }
+
     // Story 18.2 (AC6) — `rustain team log`. Intercepted here, BEFORE provider
     // construction: reading the transparency log is offline-safe, read-only
     // and non-billable, exactly like `session list`.

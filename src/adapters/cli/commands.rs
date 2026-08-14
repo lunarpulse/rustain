@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::adapters::cli::peer::PeerAction;
 use crate::adapters::cli::session::SessionAction;
 use crate::adapters::cli::team::TeamAction;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -230,6 +231,18 @@ pub enum Command {
     Team {
         #[command(subcommand)]
         action: TeamAction,
+    },
+    /// Control which peers may reach this host over the QUIC transport
+    /// (Story 18.4b, FR157 / FR158).
+    ///
+    /// `peer invite` mints a ticket, `peer add` imports one after a fingerprint
+    /// confirm, `peer list` and `peer show` read the roster, and `peer revoke`
+    /// removes an entry. All five read and write only `.rustain/p2p.json` —
+    /// never the independent `.rustain/a2a.json` HTTP allowlist. Offline-safe
+    /// and non-billable; `peer add` additionally needs an interactive terminal.
+    Peer {
+        #[command(subcommand)]
+        action: PeerAction,
     },
 }
 

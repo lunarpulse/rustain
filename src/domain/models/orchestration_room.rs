@@ -322,6 +322,34 @@ pub enum ApplyState {
     OperatorResolved(OperatorApplyFinding),
 }
 
+/// The three transport-admission facts [`RoomEvent::PeerAdmissionRecorded`]
+/// carries (Story 18.4b, AC6).
+///
+/// ⛔ Not a tier, a plan, an edition or a posture: this is *what the operator
+/// did to one alias in `.rustain/p2p.json`*, and nothing about how strictly
+/// admission is enforced. No tier mechanism exists in this tree (ruling A1).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerAdmissionOutcome {
+    /// `peer add` confirmed a fingerprint and pinned the offered key.
+    Pinned,
+    /// `peer revoke` removed the entry. The observable consequence is that the
+    /// peer's next frame is refused without a restart — ⛔ not a teardown.
+    Revoked,
+    /// `peer add` refused a key-mismatch import. The prior pin stands and
+    /// nothing was written.
+    ImportRefused,
+    /// A missing outcome or a value written by a newer build.
+    ///
+    /// `RoomEvent::Unrecognized` cannot catch a failure below a known event
+    /// tag. Defaulting to `Pinned` would fabricate a successful operator act;
+    /// this compatibility sentinel renders explicitly unknown instead.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
@@ -535,22 +563,30 @@ pub enum RoomEvent {
     /// (Story 18.3a, AC4). Produced by `/room role grant <alias-or-peer-id>
     /// <role>` acting on an entry that already exists in `a2a.json`.
     ///
-    /// # Three revocations, three meanings — never merge them
+    /// # Four withdrawals, four meanings — never merge them
     ///
-    /// The room journal carries three distinct withdrawal facts and a fold
+    /// The room journal carries four distinct withdrawal facts and a fold
     /// that cannot tell them apart is a fold that lies to `/team log`:
     ///
     /// 1. [`RoomEvent::ConsentRevoked`] (Story 18.3d, `/team untrust`) —
     ///    *one sender's standing A2A consent* is withdrawn, so the next
     ///    inbound message re-prompts. An application-level operator act about
     ///    delivery, not about the room.
-    /// 2. [`RoomEvent::RoomRoleRevoked`] (this story, `/room role revoke`) —
+    /// 2. [`RoomEvent::RoomRoleRevoked`] (Story 18.3a, `/room role revoke`) —
     ///    a peer's **room role** is withdrawn: they may no longer make room
     ///    edits. Says nothing about delivery or transport.
-    /// 3. FR158 trust-set revocation (Stories 18.4/18.4a, `peer revoke --now`)
-    ///    — the peer leaves the *allowlist*, so envelope verification rejects
-    ///    its next frame, valid signature notwithstanding. **18.4 authors its
-    ///    own variant for that**; it is not a second producer of this one.
+    /// 3. FR158 trust-set revocation (Story 18.4b, `peer revoke`) — the peer
+    ///    leaves the *transport allowlist*, so the next inbound frame on an
+    ///    already-open connection is refused, valid signature notwithstanding.
+    ///    **Story 18.4b authored [`RoomEvent::PeerAdmissionRecorded`] for
+    ///    that**, carrying [`PeerAdmissionOutcome::Revoked`]; it is not a
+    ///    second producer of this one. ⚠ The sentence this block carried
+    ///    before 2026-08-14 — *"18.4 authors its own variant for that"* — was
+    ///    false at HEAD: cut 1 of 18.4 shipped the substrate and authored no
+    ///    variant.
+    /// 4. ⛔ Not a withdrawal at all, listed because it is the one most easily
+    ///    mistaken for one: `peer revoke` does **not** rekey, tear down a
+    ///    session, or recall delivered bytes.
     ///
     /// ⛔ No rekey consequence. Nothing here implies cryptographic exclusion,
     /// key rotation, or that already-delivered bytes are recalled
@@ -649,6 +685,51 @@ pub enum RoomEvent {
         artifact: ArtifactId,
         finding: OperatorApplyFinding,
         inspector: AgentId,
+    },
+    /// A durable transport-admission fact (Story 18.4b, AC4/AC6 / FR157,
+    /// FR158). ⛔ **One** variant, three outcomes — see [`PeerAdmissionOutcome`].
+    ///
+    /// Produced by `peer add` ([`PeerAdmissionOutcome::Pinned`] and
+    /// [`PeerAdmissionOutcome::ImportRefused`]) and by `peer revoke`
+    /// ([`PeerAdmissionOutcome::Revoked`]). ⛔ Never by an inbound frame: the
+    /// allowlist verdict already runs per frame and refuses a rotated key as an
+    /// unlisted stranger, so the frame path cannot tell a rotation from a
+    /// stranger and no record here claims it can (ruling A2).
+    ///
+    /// # Why one variant and not three
+    ///
+    /// A new `RoomEvent` variant is a durable, forward-only commitment and a
+    /// transparency touch-point cost. These three facts share a subject (one
+    /// alias's standing in `.rustain/p2p.json`), a producer family (the `peer`
+    /// verbs) and a projection, so they are one variant carrying an outcome —
+    /// paying that cost once.
+    ///
+    /// # What it is not
+    ///
+    /// A journaled fact, never an enforcement claim. `Revoked` records that the
+    /// operator removed an entry; the *observable* consequence is that the
+    /// peer's next frame is refused without a restart. ⛔ It does not mean a
+    /// connection closed, a session ended, a key rotated, or that anything
+    /// already delivered was recalled (`DF-18-CRYPTO-CLUSTER`).
+    ///
+    /// ⛔ It carries **no** transport address or endpoint identity of any kind
+    /// (NFR74). That prohibition is pinned by
+    /// `conformance_p2p_transport.rs::nfr74_transport_types_never_become_room_authority_or_provenance`,
+    /// which scans this entire file for those type names — so they may not
+    /// appear even in a comment here, which is why none are named.
+    PeerAdmissionRecorded {
+        /// The operator's `.rustain/p2p.json` map key. The only stable
+        /// identifier a peer has that is not its key material, and therefore
+        /// the only thing a key change is detectable against (ruling A2).
+        #[serde(default)]
+        alias: String,
+        /// The identity derived from the pinned key, when there was one.
+        /// `None` for an entry that carried no pin: a record never manufactures
+        /// an identity.
+        #[serde(default)]
+        peer: Option<PeerId>,
+        #[serde(default)]
+        outcome: PeerAdmissionOutcome,
     },
     /// An `event` tag this build does not recognise.
     ///
@@ -1032,7 +1113,14 @@ impl OrchestrationRoom {
             | RoomEvent::ConsentGranted { .. }
             | RoomEvent::ConsentRevoked { .. }
             | RoomEvent::RoomRoleGranted { .. }
-            | RoomEvent::RoomRoleRevoked { .. } => {}
+            | RoomEvent::RoomRoleRevoked { .. }
+            // Transport admission is a fact about `.rustain/p2p.json`, not
+            // about a room node: no node, wave, artifact or approval exists for
+            // it to attach to, and the roster read model is the config file
+            // itself. It renders through the transparency projection
+            // (`TransparencyKind::TransportAdmission`), so this is absence of a
+            // fold target rather than a silent loss.
+            | RoomEvent::PeerAdmissionRecorded { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

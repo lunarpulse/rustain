@@ -43,7 +43,8 @@
 use std::path::PathBuf;
 
 use crate::domain::models::{
-    Direction, JournalEntry, JournalRecord, RejectReason, RoomEvent, node_journal,
+    Direction, JournalEntry, JournalRecord, PeerAdmissionOutcome, RejectReason, RoomEvent,
+    node_journal,
 };
 
 /// Longest disclosable free-text field rendered by any transparency surface.
@@ -102,8 +103,20 @@ pub enum TransparencyKind {
     RoomRoleGranted,
     /// Operator withdrew a peer's room role. Distinct from
     /// [`Self::ConsentRevoked`] (standing delivery consent) and from FR158's
-    /// trust-set revocation, which is Story 18.4's own variant.
+    /// trust-set revocation, which is [`Self::TransportAdmission`] carrying
+    /// `PeerAdmissionOutcome::Revoked` (Story 18.4b). ⚠ Before 2026-08-14 this
+    /// doc said that revocation was "Story 18.4's own variant"; cut 1 of 18.4
+    /// shipped the transport substrate and authored no variant, so the sentence
+    /// was false at HEAD until 18.4b authored one.
     RoomRoleRevoked,
+    /// Operator changed one alias's standing in the **transport** allowlist
+    /// `.rustain/p2p.json` — pinned, revoked, or an import refused
+    /// (Story 18.4b, AC6).
+    ///
+    /// ⛔ Distinct from every consent and role kind above: this governs *who
+    /// may reach this host at all*, not whether a message is delivered and not
+    /// what a peer may edit. A journaled fact, never an enforcement claim.
+    TransportAdmission,
     /// Interaction became visible in the audit spine before interruption routing.
     InteractionSurfaced,
     /// A batch of prior digest-tier interactions was shown to the operator.
@@ -127,6 +140,9 @@ impl TransparencyKind {
             Self::ConsentRevoked => "−",
             Self::RoomRoleGranted => "⊕",
             Self::RoomRoleRevoked => "⊖",
+            // ⊙ is unused by every other kind and by the ownership glyph set
+            // (`orchestration_glyph.rs`), which this story does not touch.
+            Self::TransportAdmission => "⊙",
             Self::InteractionSurfaced => "!",
             Self::DigestFlushed => "≋",
             _ => "·",
@@ -145,6 +161,7 @@ impl TransparencyKind {
             Self::ConsentRevoked => "consent-revoked",
             Self::RoomRoleGranted => "room-role-granted",
             Self::RoomRoleRevoked => "room-role-revoked",
+            Self::TransportAdmission => "transport-admission",
             Self::InteractionSurfaced => "surfaced",
             Self::DigestFlushed => "digest-flushed",
             _ => "unknown",
@@ -386,6 +403,33 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             None,
             "operator revoked room role".to_owned(),
         ),
+        // Story 18.4b, AC6 — the variant DOES render, decided rather than
+        // defaulted. The three withdrawal facts above are operator acts about
+        // one named peer, and this is the fourth; leaving it out would have made
+        // `/team log` silent about the only one of the four that governs
+        // reachability, and `peer list` no longer showing an alias is not a
+        // record of when or why it stopped. The six touch points are paid:
+        // variant, glyph, wire label, this arm, the filter parse arm, and the
+        // fixtures in `tests/conformance_transparency.rs`.
+        //
+        // Journaled fact, never an enforcement claim: the summary says what the
+        // operator did, never that a connection closed or a key rotated.
+        RoomEvent::PeerAdmissionRecorded {
+            alias,
+            peer,
+            outcome,
+            ..
+        } => (
+            TransparencyKind::TransportAdmission,
+            Direction::Unknown,
+            peer.as_ref()
+                .map(|peer| peer.as_str().to_owned())
+                // ⛔ Not "unknown-peer": an entry with no pinned key admits
+                // nobody, which is a known state rather than a missing one.
+                .unwrap_or_else(|| "—".to_owned()),
+            None,
+            transport_admission_summary(alias, *outcome),
+        ),
         // Retractions mutate the prior projected row in `fold_transparency`;
         // they never create a second visible row.
         RoomEvent::AutoResponseRetracted { .. } => return None,
@@ -436,6 +480,34 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         summary: sanitize_disclosable(&summary, MAX_SUMMARY_BYTES),
         provenance,
     })
+}
+
+/// Copy for a transport-admission row.
+///
+/// States what the operator did and, for a revocation, the one true observable.
+/// ⛔ Never that a connection closed, a session ended, a key rotated, or that
+/// anything already delivered was recalled.
+fn transport_admission_summary(alias: &str, outcome: PeerAdmissionOutcome) -> String {
+    let alias = if alias.trim().is_empty() {
+        "—"
+    } else {
+        alias
+    };
+    match outcome {
+        PeerAdmissionOutcome::Pinned => {
+            format!("operator pinned transport admission for '{alias}'")
+        }
+        PeerAdmissionOutcome::Revoked => format!(
+            "operator revoked transport admission for '{alias}'; the next frame is refused; \
+             open connections stay open and already-delivered bytes stay delivered"
+        ),
+        PeerAdmissionOutcome::ImportRefused => {
+            format!("operator import refused for '{alias}'; the pinned key stands")
+        }
+        PeerAdmissionOutcome::Unknown => {
+            format!("transport admission outcome for '{alias}' is unknown; no admission claim")
+        }
+    }
 }
 
 /// Fold an ordered journal into the transparency rows every surface renders.
@@ -543,12 +615,13 @@ impl TransparencyFilter {
                         "disclosed" => TransparencyKind::Disclosed,
                         "room-role-granted" => TransparencyKind::RoomRoleGranted,
                         "room-role-revoked" => TransparencyKind::RoomRoleRevoked,
+                        "transport-admission" => TransparencyKind::TransportAdmission,
                         "unknown" => TransparencyKind::Unknown,
                         _ => {
                             return Err(format!(
                                 "unknown kind `{value}` — valid: accepted, refused, \
                                  awaiting-approval, status-query, disclosed, room-role-granted, \
-                                 room-role-revoked, unknown"
+                                 room-role-revoked, transport-admission, unknown"
                             ));
                         }
                     }));

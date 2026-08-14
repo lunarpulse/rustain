@@ -170,6 +170,11 @@ pub enum ConfirmationType {
     PlanApproval,
     /// Confirm `/artifact apply`: an irreversible workspace write.
     ArtifactApply,
+    /// Confirm `/peer add`: pin a key into the transport allowlist
+    /// (Story 18.4b, AC3). ⛔ Deliberately NOT `ArtifactApply` and ⛔ not routed
+    /// through the apply card's key table, which is consulted mode-blind and
+    /// would hand this surface an unpainted `y` that rebinds a pin.
+    PeerAdd,
 }
 
 /// Overlay types for modal focus targets.

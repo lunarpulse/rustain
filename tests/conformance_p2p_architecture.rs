@@ -229,30 +229,31 @@ fn p2p_ci_lane_names_the_current_targets() {
     assert!(lane.contains("--test conformance_p2p_architecture"));
 }
 
-#[test]
-fn p2p_has_no_event_loop_palette_or_slash_command_surface() {
-    for (relative, positive_control) in [
-        (
-            "src/infrastructure/runtime/event_loop.rs",
-            "CommandRegistry",
-        ),
-        ("src/adapters/command_registry.rs", "CommandRegistry"),
-        ("src/adapters/palette_registry.rs", "PaletteRegistry"),
-    ] {
-        let contents = source(relative);
-        assert!(
-            contents.contains(positive_control),
-            "positive control: failed to read the expected surface in {relative}"
-        );
-        let lowered = contents.to_ascii_lowercase();
-        for forbidden in ["p2p", "peer transport", "peer listener"] {
-            assert!(
-                !lowered.contains(forbidden),
-                "{relative} exposes the peer listener through a forbidden UI surface: {forbidden}"
-            );
-        }
-    }
-}
+// ── RETIRED 2026-08-14 by Story 18.4b ───────────────────────────────────────
+//
+// `p2p_has_no_event_loop_palette_or_slash_command_surface` asserted that
+// `event_loop.rs`, `command_registry.rs` and `palette_registry.rs` contained
+// none of `p2p` / `peer transport` / `peer listener`.
+//
+// It was a **scope fence for cut 1, not a bug**: Story 18.4 shipped the
+// transport substrate with zero operator surface on purpose, and this assertion
+// held that line. Story 18.4b's whole deliverable is that surface — the `/peer`
+// slash command, its palette entry and its event-loop dispatch arm — so the
+// assertion goes red by construction the moment the story lands. It is retired
+// here explicitly, by name, in the same commit that adds the surface, rather
+// than quietly weakened or deleted without a record.
+//
+// ⛔ It is NOT replaced by a laxer version. What the fence protected is now
+// covered by narrower, still-live assertions:
+//
+// * the surface stays out of `event_loop.rs` — the exact line pin in
+//   `conformance_18_3a_f_resolution.rs::the_resolve_verb_costs_the_event_loop_nothing`
+//   keeps the loop's growth to the dispatch arm plus the two resolution arms;
+// * the operator copy stays honest — `conformance_p2p_ingress.rs`'s wording
+//   ceiling, whose `owned_modules` Story 18.4b extended to every module it
+//   added;
+// * the transport types stay out of the domain's authority and provenance
+//   models — `conformance_p2p_transport.rs::nfr74_…`.
 
 #[test]
 fn deferred_work_records_every_story_18_4_disposition() {

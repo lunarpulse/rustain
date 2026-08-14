@@ -123,6 +123,14 @@ pub enum InputAction {
     ApplyCardAccept,
     /// Story 18.3a-e: decline the pending patch apply.
     ApplyCardDecline,
+    /// Story 18.4b (AC3): confirm the pending `/peer add` and pin the key.
+    ///
+    /// ⛔ Deliberately separate from [`Self::ApplyCardAccept`]: sharing the apply
+    /// card's mode-blind key table would give a card that paints no `y` an
+    /// unpainted `y` that rebinds a pin.
+    PeerAddConfirm,
+    /// Story 18.4b (AC3): cancel the pending `/peer add`. Writes nothing.
+    PeerAddDecline,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -781,6 +789,23 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 InputAction::ApplyCardDecline
             }
             None => InputAction::Consumed,
+        };
+    }
+
+    // Story 18.4b (AC3): `/peer add` confirm key intercept.
+    //
+    // ⛔ Its own two-key match, NOT `apply_card::choice_for_key`: that function
+    // is single-sourced from `APPLY_CARD_BINDINGS` and called mode-blind, so
+    // routing a pin through it hands every future card an unpainted `y` that
+    // rebinds a key. Anything other than the two painted keys is consumed, so a
+    // stray keystroke never resolves the gate either way.
+    if state.pending_peer_add.is_some()
+        && state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd))
+    {
+        return match c {
+            'y' => InputAction::PeerAddConfirm,
+            'n' => InputAction::PeerAddDecline,
+            _ => InputAction::Consumed,
         };
     }
 
@@ -2042,6 +2067,14 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             {
                 return InputAction::ApplyCardDecline;
             }
+            // Story 18.4b (AC3): Esc on the `/peer add` confirm → cancel. Nothing
+            // is written, and the card paints `[n] Cancel (Esc)` to say so.
+            if state.pending_peer_add.is_some()
+                && state.focus
+                    == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd))
+            {
+                return InputAction::PeerAddDecline;
+            }
             // Story 10.5: Esc on delegation card → cancel plan at this task
             if state.pending_delegation_card.is_some() {
                 return InputAction::DelegationCardCancel;
@@ -2776,6 +2809,18 @@ fn submit_message(state: &mut TuiState) -> InputAction {
             // `/artifacts` keeps working, which reads as "the verdict verb is
             // broken" rather than "the verdict verb was never routed".
             if cmd_name == "artifacts" || cmd_name == "artifact" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
+            // /peer: the transport admission verbs (Story 18.4b). Same reason as
+            // `artifacts` above — WITHOUT this entry `/peer` falls through to
+            // SubmitWithContext, resolves no command file, and silently never
+            // runs, which is the 14.3c failure `/fanout` shipped with. A
+            // handler-only test stays green while the command is dead, so the
+            // integration keystone enters through `submit_message_for_test`.
+            if cmd_name == "peer" {
                 return InputAction::ExecuteCommand {
                     name: cmd_name,
                     args,

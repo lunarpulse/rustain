@@ -48,6 +48,7 @@ pub mod orchestration_room;
 pub mod p2p_peer_spec;
 pub mod palette;
 pub mod peer_identity;
+pub mod peer_ticket;
 mod permission;
 pub mod plan;
 pub mod pricing;
@@ -186,14 +187,20 @@ pub use orchestration::{
 #[allow(unused_imports)]
 pub use orchestration_room::{
     ApplyOutcome, ApplyState, ApprovalView, Direction, HostBinding, NodeView, OperatorApplyFinding,
-    OrchestrationRoom, OrchestrationRoomId, RejectReason, RemoteRejectionView, ReviewVerdict,
-    RoomEvent, RoomIdError, TicketResolution, WaveId, WaveOutcome, WaveView,
+    OrchestrationRoom, OrchestrationRoomId, PeerAdmissionOutcome, RejectReason,
+    RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution, WaveId,
+    WaveOutcome, WaveView,
 };
 #[allow(unused_imports)]
 pub use p2p_peer_spec::{P2pConfigState, P2pPeerSpec};
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 pub use peer_identity::{Ed25519Sig, PeerId, PeerIdentity, PeerIdentityError};
+#[allow(unused_imports)]
+pub use peer_ticket::{
+    PEER_FINGERPRINT_COLUMNS, PEER_ID_MULTIHASH_PREFIX, PEER_TICKET_PREFIX, PeerTicket,
+    PeerTicketError, peer_fingerprint, short_fingerprint,
+};
 #[allow(unused_imports)]
 pub use permission::{
     FileContextProvenance, FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome,

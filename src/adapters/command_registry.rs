@@ -167,6 +167,17 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            // Story 18.4b. The description names EVERY sub-verb: that is a
+            // tested convention (`conformance_18_3a_room.rs` asserts the /room
+            // entry's description names each of its own), because the palette
+            // description is the only place an operator discovers them.
+            SlashCommandDef {
+                name: "peer".to_string(),
+                description: "Who may reach this host over QUIC, from .rustain/p2p.json: /peer | /peer list [--json] | /peer show <alias> | /peer invite [--ttl=<dur>] [--name=<name>] | /peer add <alias> <ticket> | /peer revoke <alias-or-peer-id>"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
             SlashCommandDef {
                 name: "artifacts".to_string(),
                 description: "Durable artifact list with depends-on lineage (read-only replay, also Ctrl+X, E): /artifacts"

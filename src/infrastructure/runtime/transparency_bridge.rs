@@ -303,12 +303,18 @@ pub(crate) fn fanout_command(
 /// 18.2 had already overrun. The pure `handlers::team_command` still returns
 /// its events, so the behavioural tests are unaffected.
 /// Exact first-contact card copy shared by daemon state and TUI rendering.
+///
+/// The rotated-key clause interpolates
+/// [`crate::domain::services::peer_admission::ROTATED_KEY_DOCTRINE`] (Story
+/// 18.4b): AC4's key-mismatch alarm states the same doctrine, and two literals
+/// are two doctrines waiting to diverge. The rendered string is unchanged.
 pub(crate) fn consent_card_text(sender: &crate::domain::models::PeerId) -> String {
+    let doctrine = crate::domain::services::peer_admission::ROTATED_KEY_DOCTRINE;
     format!(
         "Consent required — {sender}\n\
          No standing consent is recorded for this sender.\n\
          [y] Allow once  [a] Always allow  [n] Decline\n\
-         [a] trusts the key this sender presents, not the person; a rotated key is a new peer.\n\
+         [a] trusts the key this sender presents, not the person; {doctrine}.\n\
          Awaiting your decision.\n\
          Logged immediately for safety; interruption timing follows your policy."
     )

@@ -7850,6 +7850,20 @@ mod tests {
                         "journal PatchApplyInspected artifact={artifact:?} finding={finding:?} inspector={i}"
                     ));
                 }
+                // 18.4b: same reason as the arms above. No golden in this file
+                // records a transport-admission act — a fan-out trace has no
+                // `peer` verb in it — but `RoomEvent`'s in-crate matches are
+                // exhaustive and this one must name the variant to compile.
+                RoomEvent::PeerAdmissionRecorded {
+                    alias,
+                    peer,
+                    outcome,
+                } => {
+                    let p = peer.as_ref().map(|peer| it.sym(peer.as_str()));
+                    lines.push(format!(
+                        "journal PeerAdmissionRecorded alias={alias:?} peer={p:?} outcome={outcome:?}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

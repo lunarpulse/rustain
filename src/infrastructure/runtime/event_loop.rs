@@ -1749,6 +1749,10 @@ pub async fn run(
                                     let _ = handlers::artifact_command::resolve_apply_card(&mut state, false);
                                     surface_deferred_modal(&mut state);
                                 }
+                                InputAction::PeerAddConfirm | InputAction::PeerAddDecline => {
+                                    let confirmed = matches!(action, InputAction::PeerAddConfirm);
+                                    crate::infrastructure::runtime::peer_bridge::resolve_peer_add(&mut state, confirmed, &app_state).await;
+                                }
                                 InputAction::DelegationCardCancel => {
                                     if let Some(ref pending) = state.pending_delegation_card {
                                         let conv_id = conversation.id.clone();
@@ -2325,6 +2329,8 @@ pub async fn run(
                                         crate::infrastructure::runtime::artifact_bridge::artifacts_command(&mut state, &conversation.id, cmd_arg, &app_state, security.current_mode()).await;
                                     } else if cmd_name == "artifact" {
                                         crate::infrastructure::runtime::artifact_bridge::artifact_command(&mut state, &conversation.id, cmd_arg, &app_state, security.current_mode()).await;
+                                    } else if cmd_name == "peer" {
+                                        crate::infrastructure::runtime::peer_bridge::peer_command(&mut state, &conversation.id, cmd_arg, &app_state).await;
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
                                         match cmd_arg.map(str::trim).filter(|s: &&str| !s.is_empty()) {
@@ -9704,6 +9710,15 @@ fn render(
                         card_lines,
                         theme.colors.accent,
                         app_layout.chat_pane,
+                    );
+                }
+
+                if let Some(pending) = &state.pending_peer_add {
+                    let card_lines = crate::adapters::tui::widgets::peer_add_prompt::render_peer_add_lines(
+                        pending, theme, app_layout.chat_pane.width,
+                    );
+                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
+                        frame.buffer_mut(), card_lines, theme.colors.decision_border, app_layout.chat_pane,
                     );
                 }
 

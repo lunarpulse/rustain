@@ -1967,11 +1967,26 @@ fn the_resolve_verb_costs_the_event_loop_nothing() {
         lines <= 11_321,
         "event_loop.rs has {lines} lines — put logic in artifact_bridge.rs, do not bump the cap"
     );
+    // ⚑ RE-BASED 2026-08-14 by Story 18.4b, from 11_285. That story's whole
+    // deliverable is a new operator surface, so unlike 18.3a-f it cannot cost
+    // the loop zero; it is amended here rather than paralleled by a second pin.
+    // Its budget is accounted for exactly:
+    //
+    //   +2  the `/peer` dispatch arm, before the adapter-override catch-all
+    //   +4  the PeerAddConfirm | PeerAddDecline resolution arm
+    //   +9  the pending-peer-add render branch
+    //   ---
+    //   +15 → 11_300
+    //
+    // Everything else lives in `peer_bridge.rs`, `cli/peer/*` and
+    // `handlers/peer_command.rs`.
     assert_eq!(
-        lines, 11_285,
-        "18.3a-f budgeted ZERO added lines (ruling A7). Growth here is a design \
+        lines, 11_300,
+        "18.3a-f budgeted ZERO added lines (ruling A7) and 18.4b re-based this to \
+         11_300 for exactly 15 accounted lines. Growth beyond that is a design \
          failure, not a budget question: reuse the card slot, the ConfirmationType, \
-         the InputActions, the render branch and the single effect call."
+         the InputActions, the render branch and the single effect call, and put \
+         verb logic in a bridge."
     );
 
     // ⛔ No second card slot, ConfirmationType, InputAction or render branch.

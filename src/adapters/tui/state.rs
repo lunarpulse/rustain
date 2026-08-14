@@ -180,6 +180,35 @@ pub struct PendingArtifactCard {
     pub mode: ArtifactCardMode,
 }
 
+/// A `/peer add` awaiting the operator's confirm (Story 18.4b, AC3).
+///
+/// # Why this is its own slot and not the apply card's
+///
+/// The apply card's key table is single-sourced and consulted **mode-blind**
+/// (`apply_card::choice_for_key` always reads `APPLY_CARD_BINDINGS`), so
+/// borrowing it would give any peer surface an unpainted `y` that resolves. For
+/// a pin that is a single-keystroke rebind, which is precisely what the
+/// key-mismatch alarm exists to forbid — so this prompt has its own slot, its
+/// own [`crate::domain::models::visual::ConfirmationType::PeerAdd`] focus, and
+/// its own two input actions. ⛔ Nothing here routes through `choice_for_key`.
+///
+/// The alarm itself has **no** slot at all: it is a never-truncated
+/// `FeedbackLevel::Error` block and binds no key.
+#[derive(Debug, Clone)]
+pub struct PendingPeerAdd {
+    pub conversation_id: String,
+    /// The alias the operator typed. ⛔ Never a name the ticket suggested.
+    pub alias: String,
+    pub ticket: crate::domain::models::PeerTicket,
+    /// Derived once, through the one identity derivation, before the card is
+    /// shown — so the fingerprint on screen is the one that gets pinned.
+    pub peer_id: crate::domain::models::PeerId,
+    /// The rendered card body, built by the shared copy module so the CLI and
+    /// TUI confirms cannot diverge.
+    pub card: String,
+    pub prior_focus: crate::domain::models::FocusState,
+}
+
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
 pub struct SkillTrustState {
     pub skill_name: String,
@@ -2597,6 +2626,10 @@ pub struct TuiState {
     /// deliberately: a second card type would duplicate the render branch, both
     /// focus-deferral guards and `surface_deferred_modal`.
     pub pending_artifact_card: Option<PendingArtifactCard>,
+    /// Story 18.4b (AC3): a `/peer add` awaiting the operator's confirm. Its own
+    /// slot on purpose — see [`PendingPeerAdd`] for why the apply card's
+    /// mode-blind key table must not be borrowed for a pin.
+    pub pending_peer_add: Option<PendingPeerAdd>,
     /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
     /// when the event arrives while a stream is still active. Dispatched
     /// after the stream completes (TurnComplete handler).
@@ -2928,6 +2961,7 @@ impl TuiState {
             pending_consolidation_card: None,
             pending_forget_card: None,
             pending_artifact_card: None,
+            pending_peer_add: None,
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,

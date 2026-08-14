@@ -112,8 +112,10 @@ fn test_e2e_help_overlay_shows_categories() {
     // from 65→85 in Story 4-4 (SEARCH & BOOKMARKS category: 11 new bindings),
     // from 85→110 for S16.6 (VIM FOLD & MOTION: 11 bindings) + PERMISSIONS (6 bindings),
     // from 110→116 in Story 18.3a (`/room` viewer + 3 role sub-verbs + Ctrl+X, R),
-    // and from 116→121 in Story 18.3a-c (`/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E).
-    let mut h = TestHarness::with_size(100, 121);
+    // from 116→121 in Story 18.3a-c (`/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E),
+    // and from 121→126 in Story 18.4b (5 `/peer` sub-verbs; ⛔ no chord — this
+    // story mints none, so only the COMMANDS category grew).
+    let mut h = TestHarness::with_size(100, 126);
 
     h.press_key(DomainKey::Esc);
     h.type_char('?');
@@ -238,8 +240,9 @@ fn test_e2e_help_overlay_shows_tmux_warning() {
     // Use larger terminal to fit tmux warning without scrolling.
     // Height bumped 60→85 (S4.4), 85→100 (S6.0d), 100→120 (S16.8 SCROLL & MOUSE category),
     // 120→126 (Story 18.3a: `/room` viewer + 3 role sub-verbs + Ctrl+X, R),
-    // 126→131 (Story 18.3a-c: `/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E).
-    let mut h = TestHarness::with_size(100, 131);
+    // 126→131 (Story 18.3a-c: `/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E),
+    // 131→136 (Story 18.4b: 5 `/peer` sub-verbs, COMMANDS category only).
+    let mut h = TestHarness::with_size(100, 136);
     h.press_key(DomainKey::Esc);
     h.type_char('?');
 

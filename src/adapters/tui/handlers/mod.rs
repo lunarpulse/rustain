@@ -37,6 +37,7 @@ pub mod forget_command;
 pub mod mcp_catalog;
 pub mod model_switch;
 pub mod notice;
+pub mod peer_command;
 pub mod profile_switch;
 pub mod render_error;
 pub mod room_command;

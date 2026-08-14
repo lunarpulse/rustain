@@ -33,6 +33,7 @@ pub mod exceptional_spawn_gate;
 pub mod feedback_block;
 pub mod help_overlay;
 pub mod input_box;
+pub mod peer_add_prompt;
 pub mod permission_prompt;
 pub mod plan_approval;
 pub mod plan_card;

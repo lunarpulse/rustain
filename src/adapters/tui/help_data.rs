@@ -306,6 +306,33 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     description: "After an interrupted apply: record whether you found its changes in the tree",
                     available: true,
                 },
+                // Story 18.4b. ONE section: the COMMANDS category. ⛔ No CHORDS
+                // entry — this story mints no chord.
+                HelpBinding {
+                    key: "/peer list",
+                    description: "Which peers may reach this host (configuration, not connection status)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/peer show <alias>",
+                    description: "Print one peer's pinned key and id in full, for comparing",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/peer invite",
+                    description: "Mint an expiring ticket for one person; grants reach, not authority",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/peer add <alias> <ticket>",
+                    description: "Import a ticket: confirm the fingerprint, then pin it. No bypass",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/peer revoke <peer>",
+                    description: "Remove a peer; their next frame is refused, without restart",
+                    available: true,
+                },
             ],
         },
         HelpCategory {

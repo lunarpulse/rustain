@@ -743,6 +743,12 @@ async fn one_peers_frames_stay_in_arrival_order() {
 
 #[test]
 fn every_p2p_operator_string_stays_within_the_wording_ceiling() {
+    // ⚠ Before Story 18.4b this array was a fixed seven paths containing no TUI,
+    // CLI or widget module — so the ban below was **vacuous for every operator
+    // string the admission surface renders**, which is an inert seam pretending
+    // to be a constraint. 18.4b extends it to every module it adds, in the same
+    // commit as the copy. ⛔ A new module that renders operator copy on this path
+    // and is not listed here is not covered by anything.
     let owned_modules = [
         "src/domain/ports/peer_transport.rs",
         "src/domain/models/peer_identity.rs",
@@ -751,6 +757,19 @@ fn every_p2p_operator_string_stays_within_the_wording_ceiling() {
         "src/adapters/p2p_config.rs",
         "src/adapters/iroh/mod.rs",
         "src/adapters/iroh/ingress.rs",
+        // Story 18.4b — the admission surface.
+        "src/domain/models/peer_ticket.rs",
+        "src/domain/services/peer_admission.rs",
+        "src/adapters/cli/peer/mod.rs",
+        "src/adapters/cli/peer/rows.rs",
+        "src/adapters/cli/peer/invite.rs",
+        "src/adapters/cli/peer/add.rs",
+        "src/adapters/cli/peer/list.rs",
+        "src/adapters/cli/peer/show.rs",
+        "src/adapters/cli/peer/revoke.rs",
+        "src/adapters/tui/handlers/peer_command.rs",
+        "src/adapters/tui/widgets/peer_add_prompt.rs",
+        "src/infrastructure/runtime/peer_bridge.rs",
     ];
     let mut strings = Vec::new();
     for relative in owned_modules {
