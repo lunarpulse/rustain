@@ -206,6 +206,17 @@ pub struct PendingPeerAdd {
     /// The rendered card body, built by the shared copy module so the CLI and
     /// TUI confirms cannot diverge.
     pub card: String,
+    /// The ticket's claimed reach, **already filtered** (Story 18.4d, D15).
+    ///
+    /// Filtered before the card is raised, so the operator is shown addresses
+    /// this host would actually dial and a hostile bundle never reaches a
+    /// keypress. `None` is the honest empty case.
+    pub reach: Option<crate::domain::ports::PeerAddress>,
+    /// `true` when this card is a reach-only refresh of an already-pinned key.
+    ///
+    /// The resolution path then writes **only** the address: no pin, no
+    /// admission record, and no first-contact trust decision is re-run.
+    pub reach_refresh: bool,
     pub prior_focus: crate::domain::models::FocusState,
 }
 

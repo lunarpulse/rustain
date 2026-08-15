@@ -85,6 +85,10 @@ jobs:
           # filters `tests/` by `stem.contains("p2p")` and would otherwise
           # demand a `--features p2p` lane this target does not need.
           cargo test --test conformance_18_4b_peer_surface
+          # Story 18.4d. Same reasoning as the line above: a default-feature
+          # target whose stem omits `p2p`, so it belongs to this job's explicit
+          # enumeration rather than the `--features p2p` lane.
+          cargo test --test conformance_18_4d_reach_and_ping
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest
@@ -194,7 +198,8 @@ jobs:
             --test conformance_p2p_dial_verdict \
             --test conformance_p2p_ingress \
             --test conformance_p2p_transport \
-            --test conformance_p2p_peer_admission
+            --test conformance_p2p_peer_admission \
+            --test conformance_p2p_reach
 
   mcp:
     name: MCP Feature

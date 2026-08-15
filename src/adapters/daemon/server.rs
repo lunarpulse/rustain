@@ -5292,6 +5292,13 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+
+        async fn record_transport_refusal(
+            &self,
+            _record: crate::domain::ports::TransportRefusalRecord,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     /// Stand up an `AttachServer` on a temp socket. `clock = None` uses the

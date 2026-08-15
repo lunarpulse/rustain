@@ -14,11 +14,12 @@ use rustain::adapters::rap::{
     AgentSigner, VerifiedPeerConsent, VerifiedPeerConsumer, VerifiedPeerFrameHandler, entry_hash,
 };
 use rustain::domain::models::{
-    AgentEnvelope, AgentId, AgentMessage, CorrelationId, Ed25519Sig, MessageKind, PeerId,
+    AgentEnvelope, AgentId, AgentMessage, CorrelationId, Ed25519Sig, FrameOutcome, FrameRefusal,
+    MessageKind, PeerId,
 };
 use rustain::domain::ports::{
     AgentMessageBus, PeerDeliveryRecord, PeerInteractionRecorder, PeerTransport,
-    PeerTransportError, RelationshipDeliveryPolicy,
+    PeerTransportError, RelationshipDeliveryPolicy, TransportRefusalRecord,
 };
 use rustain::infrastructure::paths::workspace_p2p_config_path;
 use rustain::infrastructure::subagent::{LocalMessageBus, NodeTree};
@@ -292,12 +293,20 @@ impl VerifiedPeerConsumer for RecordingConsumer {
 }
 
 #[derive(Default)]
-struct RecordingRecorder(Mutex<Vec<PeerDeliveryRecord>>);
+struct RecordingRecorder {
+    deliveries: Mutex<Vec<PeerDeliveryRecord>>,
+    refusals: Mutex<Vec<TransportRefusalRecord>>,
+}
 
 #[async_trait]
 impl PeerInteractionRecorder for RecordingRecorder {
     async fn record_peer_delivery(&self, record: PeerDeliveryRecord) -> Result<(), String> {
-        self.0.lock().await.push(record);
+        self.deliveries.lock().await.push(record);
+        Ok(())
+    }
+
+    async fn record_transport_refusal(&self, record: TransportRefusalRecord) -> Result<(), String> {
+        self.refusals.lock().await.push(record);
         Ok(())
     }
 }
@@ -382,11 +391,20 @@ async fn two_endpoint_keystone_verifies_before_reaching_the_front_door() {
     let signer = AgentSigner::from_signing_key(signing_key(23));
     let first = signed_envelope(&signer, 1, Vec::new(), "corr-1", "accepted");
 
-    client
-        .send_to(&server_id, first.clone())
-        .await
-        .expect("send valid frame");
-    assert_eq!(ingress.accept_next().await.expect("accept frame"), 1);
+    // ⚠ The send now waits for the receiver's verdict, so the two halves must run
+    // concurrently. Sending first and accepting afterwards would sit on the
+    // verdict timeout — and that shape is what made the old fire-and-forget
+    // `send_to` unable to tell an operator anything.
+    let (sent, accepted) = tokio::join!(
+        client.send_to(&server_id, first.clone()),
+        ingress.accept_next()
+    );
+    assert_eq!(accepted.expect("accept frame"), 1);
+    assert_eq!(
+        sent.expect("send valid frame").outcome,
+        FrameOutcome::Accepted,
+        "the sender must learn the acceptance, not infer it from a successful write"
+    );
     assert_eq!(consumer.bodies.lock().await.as_slice(), &["accepted"]);
 
     let mut tampered = signed_envelope(
@@ -399,16 +417,19 @@ async fn two_endpoint_keystone_verifies_before_reaching_the_front_door() {
     let mut signature = tampered.signature.as_bytes().to_vec();
     signature[0] ^= 0x01;
     tampered.signature = Ed25519Sig(signature);
-    client
-        .send_to(&server_id, tampered)
-        .await
-        .expect("transport carries untrusted frame");
+    let (sent, accepted) =
+        tokio::join!(client.send_to(&server_id, tampered), ingress.accept_next());
     assert!(matches!(
-        ingress.accept_next().await,
+        accepted,
         Err(PeerIngressError::Transport(
             PeerTransportError::SignatureInvalid(_)
         ))
     ));
+    assert_eq!(
+        sent.expect("transport carries untrusted frame").outcome,
+        FrameOutcome::Refused(FrameRefusal::SignatureInvalid),
+        "the sender is told the class, never a claim that the frame landed"
+    );
     assert_eq!(consumer.bodies.lock().await.as_slice(), &["accepted"]);
 
     client.shutdown().await.expect("shutdown client");
@@ -424,19 +445,23 @@ async fn replay_position_commits_only_after_downstream_acceptance() {
     let signer = AgentSigner::from_signing_key(signing_key(23));
     let envelope = signed_envelope(&signer, 1, Vec::new(), "retryable", "retry me");
 
-    client
-        .send_to(&server_id, envelope.clone())
-        .await
-        .expect("send first attempt");
-    assert!(matches!(
-        ingress.accept_next().await,
-        Err(PeerIngressError::Delivery(_))
-    ));
-    client
-        .send_to(&server_id, envelope)
-        .await
-        .expect("retry same frame");
-    assert_eq!(ingress.accept_next().await.expect("retry accepted"), 1);
+    let (sent, accepted) = tokio::join!(
+        client.send_to(&server_id, envelope.clone()),
+        ingress.accept_next()
+    );
+    assert!(matches!(accepted, Err(PeerIngressError::Delivery(_))));
+    assert_eq!(
+        sent.expect("send first attempt").outcome,
+        FrameOutcome::Refused(FrameRefusal::Unavailable),
+        "a downstream failure is a refusal the sender is told about, not silence"
+    );
+    let (sent, accepted) =
+        tokio::join!(client.send_to(&server_id, envelope), ingress.accept_next());
+    assert_eq!(accepted.expect("retry accepted"), 1);
+    assert_eq!(
+        sent.expect("retry same frame").outcome,
+        FrameOutcome::Accepted
+    );
     assert_eq!(consumer.bodies.lock().await.as_slice(), &["retry me"]);
 
     client.shutdown().await.expect("shutdown client");
@@ -450,14 +475,15 @@ async fn allowlist_removal_refuses_the_next_frame_on_the_same_open_connection() 
         endpoint_fixture(tmp.path()).await;
     let signer = AgentSigner::from_signing_key(signing_key(23));
     let first = signed_envelope(&signer, 1, Vec::new(), "before-removal", "before");
-    client
-        .send_to(&server_id, first.clone())
-        .await
-        .expect("send before removal");
-    ingress
-        .accept_next()
-        .await
-        .expect("accepted before removal");
+    let (sent, accepted) = tokio::join!(
+        client.send_to(&server_id, first.clone()),
+        ingress.accept_next()
+    );
+    accepted.expect("accepted before removal");
+    assert_eq!(
+        sent.expect("send before removal").outcome,
+        FrameOutcome::Accepted
+    );
     assert_eq!(client.active_connection_count().await, 1);
 
     write_allowlist(tmp.path(), None);
@@ -468,25 +494,33 @@ async fn allowlist_removal_refuses_the_next_frame_on_the_same_open_connection() 
         "after-removal",
         "after",
     );
-    client
-        .send_to(&server_id, second.clone())
-        .await
-        .expect("same connection remains writable");
+    let (sent, accepted) = tokio::join!(
+        client.send_to(&server_id, second.clone()),
+        ingress.accept_next()
+    );
     assert!(matches!(
-        ingress.accept_next().await,
+        accepted,
         Err(PeerIngressError::Transport(
             PeerTransportError::AllowlistEmpty
         ))
     ));
+    // AC5/AC6 — the revocation is observable **from the sender's chair**, on a
+    // connection that never closed. That is the property the two-host capture
+    // records, and before this story it was invisible to the sender.
+    assert_eq!(
+        sent.expect("same connection remains writable").outcome,
+        FrameOutcome::Refused(FrameRefusal::NotAdmitted)
+    );
     assert_eq!(consumer.bodies.lock().await.as_slice(), &["before"]);
     assert_eq!(client.active_connection_count().await, 1);
 
     write_allowlist(tmp.path(), Some(23));
-    client
-        .send_to(&server_id, second)
-        .await
-        .expect("retry after re-allow");
-    assert_eq!(ingress.accept_next().await.expect("re-allowed"), 2);
+    let (sent, accepted) = tokio::join!(client.send_to(&server_id, second), ingress.accept_next());
+    assert_eq!(accepted.expect("re-allowed"), 2);
+    assert_eq!(
+        sent.expect("retry after re-allow").outcome,
+        FrameOutcome::Accepted
+    );
     assert_eq!(
         consumer.bodies.lock().await.as_slice(),
         &["before", "after"]
@@ -566,6 +600,10 @@ fn inbound(
     rustain::domain::ports::InboundFrame {
         envelope,
         peer_id: peer_id.clone(),
+        // A hermetic frame carries no answer channel. That is not a bypass: the
+        // sender then reports an unknown outcome, which is exactly what a real
+        // sender does when no verdict comes back.
+        responder: None,
     }
 }
 
@@ -770,6 +808,13 @@ fn every_p2p_operator_string_stays_within_the_wording_ceiling() {
         "src/adapters/tui/handlers/peer_command.rs",
         "src/adapters/tui/widgets/peer_add_prompt.rs",
         "src/infrastructure/runtime/peer_bridge.rs",
+        // Story 18.4d — reach, the acknowledged frame, and the ping surface.
+        "src/domain/models/peer_frame.rs",
+        "src/domain/models/peer_reach.rs",
+        "src/domain/services/peer_reach_filter.rs",
+        "src/domain/services/refusal_quota.rs",
+        "src/adapters/p2p_reach.rs",
+        "src/adapters/cli/peer/ping.rs",
     ];
     let mut strings = Vec::new();
     for relative in owned_modules {

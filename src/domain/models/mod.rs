@@ -47,7 +47,9 @@ pub mod orchestration;
 pub mod orchestration_room;
 pub mod p2p_peer_spec;
 pub mod palette;
+pub mod peer_frame;
 pub mod peer_identity;
+pub mod peer_reach;
 pub mod peer_ticket;
 mod permission;
 pub mod plan;
@@ -187,15 +189,22 @@ pub use orchestration::{
 #[allow(unused_imports)]
 pub use orchestration_room::{
     ApplyOutcome, ApplyState, ApprovalView, Direction, HostBinding, NodeView, OperatorApplyFinding,
-    OrchestrationRoom, OrchestrationRoomId, PeerAdmissionOutcome, RejectReason,
-    RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution, WaveId,
-    WaveOutcome, WaveView,
+    OrchestrationRoom, OrchestrationRoomId, PeerAdmissionOutcome, PeerFrameAttemptOutcome,
+    RejectReason, RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution,
+    WaveId, WaveOutcome, WaveView,
 };
 #[allow(unused_imports)]
 pub use p2p_peer_spec::{P2pConfigState, P2pPeerSpec};
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
+#[allow(unused_imports)]
+pub use peer_frame::{
+    FEED_ENTRY_HASH_BYTES, FeedPosition, FrameOutcome, FrameRefusal, FrameVerdict,
+    MAX_GUIDED_SEQUENCE_JUMP,
+};
 pub use peer_identity::{Ed25519Sig, PeerId, PeerIdentity, PeerIdentityError};
+#[allow(unused_imports)]
+pub use peer_reach::{PEER_REACH_SCHEMA_VERSION, PeerReach, PeerReachState, PeerReachStore};
 #[allow(unused_imports)]
 pub use peer_ticket::{
     PEER_FINGERPRINT_COLUMNS, PEER_ID_MULTIHASH_PREFIX, PEER_TICKET_PREFIX, PeerTicket,

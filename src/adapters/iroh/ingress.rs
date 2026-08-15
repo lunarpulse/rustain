@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -13,9 +14,13 @@ use crate::adapters::rap::{
     FrameSettlement, PeerDeliveryError, ReplayReservation, ReplayWindow, VerifiedPeerFrameHandler,
     VerifyError, verify_envelope_reserved,
 };
-use crate::domain::models::PeerId;
-use crate::domain::ports::{InboundFrame, PeerTransport, PeerTransportError};
+use crate::domain::models::{CorrelationId, FeedPosition, FrameRefusal, FrameVerdict, PeerId};
+use crate::domain::ports::{
+    FrameResponder, InboundFrame, PeerInteractionRecorder, PeerTransport, PeerTransportError,
+    TransportRefusalRecord,
+};
 use crate::domain::services::peer_dial::{PeerDialRefusal, PeerDialVerdict};
+use crate::domain::services::refusal_quota::{RefusalJournalQuota, RefusalRecordVerdict};
 
 /// Frames one peer may have waiting behind its own in-flight frame. Deeper only
 /// buys latency for a peer whose next frame the replay window would refuse
@@ -26,6 +31,12 @@ const PEER_QUEUE_DEPTH: usize = 8;
 /// (that is the point of the per-peer split), but an unadmitted peer must not be
 /// able to mint workers without bound either.
 const MAX_PEER_WORKERS: usize = 64;
+
+/// How often the suppressed-refusal counter is summarized to the log.
+///
+/// ⛔ The summary is logged, never journaled: a durable record of suppressed
+/// volume is exactly the unbounded durable write the quota exists to prevent.
+const REFUSAL_SUMMARY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Owns the accepted-frame receiver and admits each frame through the shared
 /// RAP verifier and verified-peer delivery front door.
@@ -39,6 +50,12 @@ pub struct IrohPeerIngress {
     inbound: Mutex<mpsc::Receiver<InboundFrame>>,
     handler: Arc<VerifiedPeerFrameHandler>,
     replay: Arc<Mutex<ReplayWindow>>,
+    /// Where an allowlist refusal is journaled. The same sink the delivery front
+    /// door uses, taken from the handler rather than injected a second time: two
+    /// recorders is one the composition root can forget to wire.
+    recorder: Arc<dyn PeerInteractionRecorder>,
+    /// The bound on those durable rows (D16).
+    quota: Arc<Mutex<RefusalJournalQuota>>,
     workspace: PathBuf,
     now: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -93,11 +110,19 @@ impl IrohPeerIngress {
     ) -> Self {
         Self {
             inbound: Mutex::new(inbound),
+            recorder: handler.recorder(),
             handler,
             replay: Arc::new(Mutex::new(ReplayWindow::default())),
+            quota: Arc::new(Mutex::new(RefusalJournalQuota::new())),
             workspace,
             now: Arc::new(now),
         }
+    }
+
+    /// Refusals counted in memory instead of journaled, for the bound's own
+    /// ratchet. ⛔ Not an operator surface: no shipped copy reports this.
+    pub async fn suppressed_refusals(&self) -> u64 {
+        self.quota.lock().await.suppressed()
     }
 
     /// Accept and process one frame, returning its committed feed sequence.
@@ -110,10 +135,18 @@ impl IrohPeerIngress {
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> Result<(), PeerIngressError> {
         let mut workers: HashMap<PeerId, mpsc::Sender<InboundFrame>> = HashMap::new();
         let mut tasks = JoinSet::new();
+        let mut summary = tokio::time::interval(REFUSAL_SUMMARY_INTERVAL);
+        summary.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick fires immediately and would summarize nothing.
+        summary.tick().await;
 
         loop {
             let frame = tokio::select! {
                 _ = shutdown.cancelled() => break,
+                _ = summary.tick() => {
+                    self.log_refusal_summary().await;
+                    continue;
+                }
                 frame = self.next_frame() => match frame {
                     Some(frame) => frame,
                     None => break,
@@ -150,14 +183,104 @@ impl IrohPeerIngress {
         // drain what it already accepted, rather than losing it mid-delivery.
         drop(workers);
         while tasks.join_next().await.is_some() {}
+        self.log_refusal_summary().await;
         Ok(())
+    }
+
+    /// Report suppressed refusal volume to the log. ⛔ Never to the journal.
+    async fn log_refusal_summary(&self) {
+        if let Some(summary) = self.quota.lock().await.take_summary() {
+            tracing::info!(
+                suppressed = summary.suppressed,
+                forgotten_sources = summary.forgotten_sources,
+                tracked_sources = summary.tracked_sources,
+                "peer refusals were rate-bounded; the suppressed repeats are counted here only"
+            );
+        }
     }
 
     async fn next_frame(&self) -> Option<InboundFrame> {
         self.inbound.lock().await.recv().await
     }
 
-    async fn process_frame(&self, frame: InboundFrame) -> Result<u64, PeerIngressError> {
+    /// Admit one frame, answer its sender, and record the refusal this layer owns.
+    ///
+    /// Ordering is the contract, in this order and no other:
+    ///
+    /// 1. decide,
+    /// 2. append the receiver's own durable row for an admission refusal,
+    /// 3. **then** answer the sender.
+    ///
+    /// The sender's row and this one are independent records of one event, which
+    /// is exactly what a two-host capture cross-checks — so the durable side must
+    /// not depend on the remote hearing about it.
+    async fn process_frame(&self, mut frame: InboundFrame) -> Result<u64, PeerIngressError> {
+        let responder = frame.responder.take();
+        let peer_id = frame.peer_id.clone();
+        let correlation = frame.envelope.header.correlation_id.clone();
+        let outcome = self.admit_frame(frame).await;
+
+        if let Err(error) = &outcome {
+            if let Some(detail) = admission_refusal_detail(error) {
+                self.journal_refusal(&peer_id, detail, &correlation).await;
+            }
+        }
+        if let Some(responder) = responder {
+            responder.answer(self.verdict_for(&peer_id, &outcome).await);
+        }
+        outcome
+    }
+
+    /// The verdict this receiver hands back for one outcome.
+    async fn verdict_for(
+        &self,
+        peer: &PeerId,
+        outcome: &Result<u64, PeerIngressError>,
+    ) -> FrameVerdict {
+        let Err(error) = outcome else {
+            return FrameVerdict::accepted();
+        };
+        let refusal = refusal_class(error);
+        let verdict = FrameVerdict::refused(refusal);
+        if refusal == FrameRefusal::FeedPositionMismatch {
+            // The whole point of the acknowledged frame: tell the sender the
+            // position this window will accept, so it never has to remember one.
+            let expected = self.replay.lock().await.expected_position(peer);
+            verdict.with_expected(expected)
+        } else {
+            verdict
+        }
+    }
+
+    /// Append the durable refusal row, within the quota.
+    async fn journal_refusal(&self, peer: &PeerId, detail: String, correlation: &CorrelationId) {
+        let admitted = {
+            let mut quota = self.quota.lock().await;
+            quota.admit(peer, (self.now)())
+        };
+        if admitted != RefusalRecordVerdict::Journal {
+            return;
+        }
+        if let Err(error) = self
+            .recorder
+            .record_transport_refusal(TransportRefusalRecord {
+                peer: peer.clone(),
+                detail,
+                correlation_id: Some(correlation.clone()),
+            })
+            .await
+        {
+            // ⛔ Not fatal, and deliberately so: suppressing the refusal because
+            // it could not be journaled would turn a refusal into an admission.
+            tracing::error!(
+                %error,
+                peer = %peer,
+                "a peer admission refusal could not be journaled; the frame is still refused"
+            );
+        }
+    }
+
+    async fn admit_frame(&self, frame: InboundFrame) -> Result<u64, PeerIngressError> {
         // Re-read per frame so a removal takes effect on an already-open
         // connection (AC5). The read is blocking file I/O and must not run on
         // the async worker thread.
@@ -296,6 +419,61 @@ fn verification_error(error: VerifyError) -> PeerTransportError {
         VerifyError::Expired { .. } => PeerTransportError::FrameExpired(error.to_string()),
         other => PeerTransportError::SignatureInvalid(other.to_string()),
     }
+}
+
+/// The class this receiver names to the sender.
+///
+/// Classes, never prose: the sender renders its own sentence, so nothing this
+/// host writes here can end up quoted verbatim in a remote operator's terminal.
+fn refusal_class(error: &PeerIngressError) -> FrameRefusal {
+    match error {
+        PeerIngressError::Transport(error) => match error {
+            PeerTransportError::AllowlistAbsent
+            | PeerTransportError::AllowlistEmpty
+            | PeerTransportError::AllowlistMalformed(_)
+            | PeerTransportError::PeerUnpinned(_)
+            | PeerTransportError::PeerUnlisted(_) => FrameRefusal::NotAdmitted,
+            PeerTransportError::SignatureInvalid(_) => FrameRefusal::SignatureInvalid,
+            PeerTransportError::ReplayRejected(_) => FrameRefusal::FeedPositionMismatch,
+            PeerTransportError::FrameExpired(_) => FrameRefusal::Expired,
+            _ => FrameRefusal::Unavailable,
+        },
+        PeerIngressError::Delivery(error) => match error {
+            PeerDeliveryError::InvalidKind
+            | PeerDeliveryError::InvalidBody
+            | PeerDeliveryError::BodyTooLarge
+            | PeerDeliveryError::IdentifierTooLong
+            | PeerDeliveryError::DuplicateCorrelation(_) => FrameRefusal::Malformed,
+            PeerDeliveryError::PeerBindingMismatch => FrameRefusal::SignatureInvalid,
+            PeerDeliveryError::Declined => FrameRefusal::Declined,
+            _ => FrameRefusal::Unavailable,
+        },
+    }
+}
+
+/// The durable detail for a refusal **this layer owns**, or `None` when the
+/// refusal belongs to a layer that journals its own.
+///
+/// The delivery front door already journals acceptance and consent refusals, so
+/// only the transport-allowlist arm is missing — and it is the one `peer revoke`
+/// needs. ⛔ The detail never implies the envelope was signature-checked: at this
+/// point it was not. What is known is that QUIC bound the connection to the key
+/// the row names, and that is all the row says.
+fn admission_refusal_detail(error: &PeerIngressError) -> Option<String> {
+    let PeerIngressError::Transport(error) = error else {
+        return None;
+    };
+    let reason = match error {
+        PeerTransportError::AllowlistAbsent => "no peer allowlist on this host",
+        PeerTransportError::AllowlistEmpty => "the peer allowlist admits nobody",
+        PeerTransportError::AllowlistMalformed(_) => "the peer allowlist did not parse",
+        PeerTransportError::PeerUnpinned(_) => "the matching entry has no pinned key",
+        PeerTransportError::PeerUnlisted(_) => "this key is not in the peer allowlist",
+        _ => return None,
+    };
+    Some(format!(
+        "transport admission refused a frame from the connected key: {reason}"
+    ))
 }
 
 fn refusal_error(reason: PeerDialRefusal) -> PeerTransportError {

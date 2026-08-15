@@ -133,9 +133,11 @@ pub use patch_apply_executor::{PatchApplyExecutor, PatchApplyPortError};
 pub use patch_apply_resolver::{PatchApplyResolver, PatchResolvePortError};
 pub use patch_review_recorder::{PatchReviewError, PatchReviewRecorder};
 pub use peer_interaction_recorder::{
-    PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder,
+    PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder, TransportRefusalRecord,
 };
-pub use peer_transport::{InboundFrame, PeerAddress, PeerTransport, PeerTransportError};
+pub use peer_transport::{
+    FrameResponder, InboundFrame, PeerAddress, PeerTransport, PeerTransportError,
+};
 pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};

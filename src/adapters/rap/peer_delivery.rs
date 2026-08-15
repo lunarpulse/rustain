@@ -34,6 +34,15 @@ const PEER_INGEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// stopped caring about the reservation it parked.
 const SETTLEMENT_CAPACITY: usize = 256;
 
+/// Distinct sender names one admitted peer may bind (Story 18.4d, ruling P12).
+///
+/// The binding table is keyed by the **sender name**, and any
+/// `<peer_id>/<anything>` is a name the signing rule accepts — so an admitted
+/// peer could mint unbounded distinct senders and grow this map without bound.
+/// A real deployment uses a handful of agent paths per peer; thirty-two is
+/// generous for that and finite for the other case.
+const MAX_SENDERS_PER_PEER: usize = 32;
+
 /// Recipient consent decision, separate from operational consumer failures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerifiedPeerConsent {
@@ -97,7 +106,7 @@ pub struct VerifiedPeerFrameHandler {
     domain_tx: mpsc::UnboundedSender<AppEvent>,
     consumer: Arc<dyn VerifiedPeerConsumer>,
     materialized: Arc<Mutex<HashSet<AgentId>>>,
-    verified_senders: Arc<Mutex<HashMap<AgentId, PeerId>>>,
+    verified_senders: Arc<Mutex<VerifiedSenders>>,
     pending_ingest: Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), PeerDeliveryError>>>>>,
     recorder: Arc<dyn PeerInteractionRecorder>,
     settlements: broadcast::Sender<FrameSettlement>,
@@ -118,7 +127,7 @@ impl VerifiedPeerFrameHandler {
             consumer,
             recorder,
             materialized: Arc::new(Mutex::new(HashSet::new())),
-            verified_senders: Arc::new(Mutex::new(HashMap::new())),
+            verified_senders: Arc::new(Mutex::new(VerifiedSenders::default())),
             pending_ingest: Arc::new(Mutex::new(HashMap::new())),
             settlements: broadcast::Sender::new(SETTLEMENT_CAPACITY),
         }
@@ -128,6 +137,17 @@ impl VerifiedPeerFrameHandler {
     /// caller's own wait has already timed out.
     pub fn subscribe_settlements(&self) -> broadcast::Receiver<FrameSettlement> {
         self.settlements.subscribe()
+    }
+
+    /// The durable recorder this handler journals through.
+    ///
+    /// Exposed so the transport ingress records the refusals that happen
+    /// **before** this handler is ever reached through the same sink. ⛔ Not so a
+    /// caller can journal on its behalf: the delivery outcomes below stay this
+    /// type's own responsibility.
+    #[must_use]
+    pub fn recorder(&self) -> Arc<dyn PeerInteractionRecorder> {
+        Arc::clone(&self.recorder)
     }
 
     pub async fn handle_verified_peer_frame(
@@ -182,15 +202,7 @@ impl VerifiedPeerFrameHandler {
         sender: &AgentId,
         peer_id: &PeerId,
     ) -> Result<(), PeerDeliveryError> {
-        let mut senders = self.verified_senders.lock().await;
-        match senders.get(sender) {
-            Some(bound) if bound != peer_id => Err(PeerDeliveryError::PeerBindingMismatch),
-            Some(_) => Ok(()),
-            None => {
-                senders.insert(sender.clone(), peer_id.clone());
-                Ok(())
-            }
-        }
+        self.verified_senders.lock().await.bind(sender, peer_id)
     }
 
     async fn ensure_peer_context(&self, recipient: AgentId) -> Result<(), PeerDeliveryError> {
@@ -201,6 +213,14 @@ impl VerifiedPeerFrameHandler {
             }
             materialized.remove(&recipient);
         }
+        // A daemon restart restores this context's durable node with no worker
+        // behind it, and the in-memory set above starts empty — so without
+        // this, the first frame after a restart collides with the husk at
+        // registration below, for every admitted sender, forever. A live
+        // context is not in `awaiting_resume`, so this is a no-op for it.
+        self.node_tree
+            .retire_unresumed_peer_context(&recipient)
+            .await;
 
         let (command_tx, mut command_rx) = mpsc::channel(1);
         let (status_tx, _) = watch::channel(NodeState::Created);
@@ -258,7 +278,7 @@ impl VerifiedPeerFrameHandler {
                         let correlation = header.correlation_id.0.clone();
                         let body = delivery.envelope.body;
                         let content_bytes = body.content.len();
-                        let peer_id = verified_senders.lock().await.get(&header.sender).cloned();
+                        let peer_id = verified_senders.lock().await.peer_for(&header.sender);
 
                         // Dispatch owns the reservation from this point onward.
                         // Release before consent/journal/consumer awaits so one
@@ -400,6 +420,52 @@ impl VerifiedPeerFrameHandler {
     }
 }
 
+/// The permanent sender-name → peer binding, bounded per peer.
+///
+/// # Why the binding is permanent
+///
+/// Once a sender name has been seen from one peer, no other peer may ever claim
+/// it. That is what stops an admitted peer from impersonating another admitted
+/// peer's agent, and it is why the table never forgets an entry.
+///
+/// # Why it is bounded (Story 18.4d, ruling P12)
+///
+/// "Permanent" and "unbounded" together is a memory leak an admitted peer
+/// controls: the signing rule accepts any `<peer_id>/<anything>` as a sender, so
+/// one peer can mint distinct names forever. The per-peer count is therefore
+/// capped at [`MAX_SENDERS_PER_PEER`]. ⛔ The cap does **not** evict: evicting a
+/// binding is exactly the impersonation window the binding exists to close, so a
+/// peer past its cap is refused instead.
+#[derive(Default)]
+struct VerifiedSenders {
+    bound: HashMap<AgentId, PeerId>,
+    per_peer: HashMap<PeerId, usize>,
+}
+
+impl VerifiedSenders {
+    fn peer_for(&self, sender: &AgentId) -> Option<PeerId> {
+        self.bound.get(sender).cloned()
+    }
+
+    fn bind(&mut self, sender: &AgentId, peer_id: &PeerId) -> Result<(), PeerDeliveryError> {
+        match self.bound.get(sender) {
+            Some(bound) if bound != peer_id => Err(PeerDeliveryError::PeerBindingMismatch),
+            // The legitimate repeat: the same peer resending under a name it
+            // already owns costs nothing and consumes no new budget.
+            Some(_) => Ok(()),
+            None => {
+                let count = self.per_peer.entry(peer_id.clone()).or_insert(0);
+                if *count >= MAX_SENDERS_PER_PEER {
+                    return Err(PeerDeliveryError::SenderBudgetExhausted);
+                }
+                *count += 1;
+                self.bound.insert(sender.clone(), peer_id.clone());
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Resolve one correlation exactly once: answer the caller if it is still
 /// waiting, and publish the outcome for a caller whose wait already expired.
 ///
@@ -468,6 +534,8 @@ pub enum PeerDeliveryError {
     IdentifierTooLong,
     #[error("peer sender is already bound to a different verified PeerId")]
     PeerBindingMismatch,
+    #[error("this peer already holds the maximum of {MAX_SENDERS_PER_PEER} bound sender names")]
+    SenderBudgetExhausted,
     #[error("duplicate in-flight peer correlation id: {0}")]
     DuplicateCorrelation(String),
     #[error("verified peer sender was not bound")]
@@ -537,6 +605,13 @@ mod tests {
             self.0.lock().await.push(record);
             Ok(())
         }
+
+        async fn record_transport_refusal(
+            &self,
+            _record: crate::domain::ports::TransportRefusalRecord,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     fn peer() -> PeerIdentity {
@@ -589,6 +664,74 @@ mod tests {
             domain_rx,
             consumer,
         )
+    }
+
+    /// A daemon restart restores the recipient's durable node with no worker
+    /// behind it; the first frame after the restart must still land — the
+    /// husk is retired and the context rematerialized.
+    #[tokio::test]
+    async fn peer_context_is_rematerialized_after_a_daemon_restart() {
+        let (first_handler, node_tree, _domain_rx, _consumer) = handler();
+        let signed = envelope(MessageKind::PeerMessage, serde_json::json!("one"));
+        let peer_id = signed.signer.peer_id.clone();
+        first_handler
+            .handle_verified_peer_frame(signed, peer_id.clone())
+            .await
+            .unwrap();
+        let id = AgentId::from_validated("local-peer-session");
+        assert!(node_tree.delivery_target(&id).await.is_some());
+
+        // The restart: a fresh handler (empty in-memory set) over a tree
+        // whose recipient node was restored from its durable checkpoint —
+        // fabricated handle, awaiting a resume that never comes.
+        let (fresh_handler, fresh_tree, _domain_rx2, _consumer2) = handler();
+        fresh_tree
+            .restore_checkpoint(crate::domain::models::NodeCheckpoint {
+                id: id.clone(),
+                token: CapabilityTokenId::nil(),
+                parent: Some(AgentId::root()),
+                ownership: crate::domain::models::subagent_view::WireOwnershipKind::Peer,
+                state: NodeState::Cancelled,
+                origin: crate::domain::models::NodeOrigin::Remote,
+                foreground: false,
+                effective_model: String::new(),
+                tokens_in: 0,
+                tokens_out: 0,
+                turns: 0,
+                subagent_type: "remote-peer".to_owned(),
+                spawned_at: 0,
+                depth: 1,
+                tainted: false,
+                waiting_since: None,
+                wait_reason: None,
+            })
+            .await
+            .expect("the husk restores");
+
+        let mut next = envelope(MessageKind::PeerMessage, serde_json::json!("two"));
+        next.header.correlation_id = CorrelationId::new("corr-restart");
+        fresh_handler
+            .handle_verified_peer_frame(next, peer_id)
+            .await
+            .expect("the restored husk is retired and the context rematerialized");
+    }
+
+    /// The retirement must never touch a live context.
+    #[tokio::test]
+    async fn only_an_unresumed_remote_peer_husk_is_retired() {
+        let (handler, node_tree, _domain_rx, _consumer) = handler();
+        let signed = envelope(MessageKind::PeerMessage, serde_json::json!("one"));
+        let peer_id = signed.signer.peer_id.clone();
+        handler
+            .handle_verified_peer_frame(signed, peer_id)
+            .await
+            .unwrap();
+        let id = AgentId::from_validated("local-peer-session");
+        assert!(
+            !node_tree.retire_unresumed_peer_context(&id).await,
+            "a live context is not a husk"
+        );
+        assert!(node_tree.delivery_target(&id).await.is_some());
     }
 
     #[test]
@@ -747,6 +890,13 @@ mod tests {
         async fn record_peer_delivery(&self, _record: PeerDeliveryRecord) -> Result<(), String> {
             Err("injected journal failure".to_owned())
         }
+
+        async fn record_transport_refusal(
+            &self,
+            _record: crate::domain::ports::TransportRefusalRecord,
+        ) -> Result<(), String> {
+            Err("injected journal failure".to_owned())
+        }
     }
 
     struct BlockingFirstRecorder {
@@ -772,6 +922,13 @@ mod tests {
                 self.entered.notify_one();
                 self.release.notified().await;
             }
+            Ok(())
+        }
+
+        async fn record_transport_refusal(
+            &self,
+            _record: crate::domain::ports::TransportRefusalRecord,
+        ) -> Result<(), String> {
             Ok(())
         }
     }

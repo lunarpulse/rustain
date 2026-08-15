@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::domain::models::{AgentEnvelope, PeerId};
+use crate::domain::models::{AgentEnvelope, FrameVerdict, PeerId};
 
 /// Dialable transport coordinates encoded by an adapter.
 ///
@@ -32,10 +32,49 @@ impl PeerAddress {
 ///
 /// This frame is **unverified**. Callers must cryptographically verify the
 /// envelope and its [`PeerId`] binding before dispatching it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// ⚠ Not `Clone` and not comparable, on purpose: it now owns the one channel the
+/// sender is waiting on, and a frame that could be duplicated would let two
+/// answers race for one verdict.
+#[derive(Debug)]
 pub struct InboundFrame {
     pub envelope: AgentEnvelope<Value>,
     pub peer_id: PeerId,
+    /// Where this receiver answers the sender.
+    ///
+    /// `None` for a frame that arrived with no answer channel — a fire-and-forget
+    /// stream, or a hermetic fixture driving `process_frame` directly. A missing
+    /// responder is never an error: the sender then reports
+    /// [`crate::domain::models::FrameOutcome::Unanswered`], which is the honest
+    /// thing and ⛔ never acceptance.
+    pub responder: Option<FrameResponder>,
+}
+
+/// The receiver's one-shot answer channel for one frame.
+///
+/// The verdict travels back over the same authenticated connection, so it needs
+/// no signature of its own: `dial` already fails
+/// [`PeerTransportError::SignatureInvalid`] when the remote identity does not
+/// match the pinned key. This type exists so the *domain* can answer without
+/// holding a transport stream — the adapter owns the stream and the wire codec,
+/// and one codec is the whole point.
+#[derive(Debug)]
+pub struct FrameResponder(oneshot::Sender<FrameVerdict>);
+
+impl FrameResponder {
+    /// Create the responder and the receiver the transport adapter awaits.
+    #[must_use]
+    pub fn channel() -> (Self, oneshot::Receiver<FrameVerdict>) {
+        let (tx, rx) = oneshot::channel();
+        (Self(tx), rx)
+    }
+
+    /// Answer once. A dropped receiver is not an error: the sender may already
+    /// have stopped waiting, and the receiver's own durable row is the
+    /// independent record either way.
+    pub fn answer(self, verdict: FrameVerdict) {
+        let _ = self.0.send(verdict);
+    }
 }
 
 /// Typed peer-transport failures. Refusal causes stay distinct from signature
@@ -93,12 +132,25 @@ pub trait PeerTransport: Send + Sync {
     /// Establish or confirm a connection to an already-addressable peer.
     async fn dial(&self, peer: &PeerId) -> Result<(), PeerTransportError>;
 
-    /// Send one signed envelope to an addressed peer.
+    /// Send one signed envelope to an addressed peer and learn what became of it.
+    ///
+    /// ⚠ **Reshaped by Story 18.4d, not duplicated.** This used to return `()`
+    /// over a fire-and-forget stream, which made every honest caller say only
+    /// "written" — and, worse, left the sender unable to learn the feed position
+    /// the receiver expects, so a short-lived sender could never chain a second
+    /// frame. Adding an acknowledged twin beside the old method would have
+    /// shipped a method with no production caller; `send_to` had zero, so
+    /// reshaping it cost only the shipped fixtures. If a later story needs
+    /// fire-and-forget gossip, it adds one **with its own producer**.
+    ///
+    /// `Ok` means the frame was written and carries whatever answer came back —
+    /// including [`crate::domain::models::FrameOutcome::Unanswered`] when none
+    /// did. ⛔ A successful write is never acceptance.
     async fn send_to(
         &self,
         peer: &PeerId,
         envelope: AgentEnvelope<Value>,
-    ) -> Result<(), PeerTransportError>;
+    ) -> Result<FrameVerdict, PeerTransportError>;
 
     /// Transfer ownership of the accepted-frame receiver to the caller.
     fn inbound(&self) -> Result<mpsc::Receiver<InboundFrame>, PeerTransportError>;

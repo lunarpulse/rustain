@@ -15,6 +15,7 @@ use crate::domain::models::artifact::{
 };
 use crate::domain::models::invocation_fingerprint::InvocationFingerprint;
 use crate::domain::models::node_state::NodeState;
+use crate::domain::models::peer_frame::FrameRefusal;
 use crate::domain::models::peer_identity::PeerId;
 use crate::domain::models::room_role::RoomRole;
 use crate::domain::models::team_policy::{InteractionPolicySnapshot, NotificationUrgency};
@@ -350,6 +351,47 @@ pub enum PeerAdmissionOutcome {
     Unknown,
 }
 
+/// What became of one **outbound** peer frame (Story 18.4d, D10).
+///
+/// # Why this event exists at all
+///
+/// The shipped `PeerInteractionRecorder` takes a `PeerDeliveryRecord` whose
+/// outcome is `Accepted | Refused` and whose sink converts it *unconditionally*
+/// into an inbound record — so there was no way to journal a fact about a frame
+/// **this host sent**. Reusing the inbound shape would have recorded a send as a
+/// receipt.
+///
+/// # Why the outcome is a value and not a boolean
+///
+/// Four things can happen and only two of them are a decision by the peer. A
+/// boolean would have collapsed "the peer refused" into "we could not send" and
+/// both into "not accepted", which is precisely the false claim the transport's
+/// old fire-and-forget shape forced. ⛔ `Accepted` may be written **only** when a
+/// verdict was received and validated; a successful write alone is
+/// [`Self::OutcomeUnknown`].
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerFrameAttemptOutcome {
+    /// The peer answered that it took the frame.
+    Accepted,
+    /// The peer answered that it refused the frame. The class is in `refusal`.
+    Refused,
+    /// The frame never left: a dial, write or local journal failure.
+    SendFailed,
+    /// The frame was written and no readable answer came back. ⛔ Never rounded
+    /// up to `Accepted`.
+    OutcomeUnknown,
+    /// An outcome this build does not understand, or none was recorded.
+    ///
+    /// `RoomEvent::Unrecognized` catches an unknown `event` tag but nothing
+    /// below one, so this nested sentinel is what keeps a newer build's row
+    /// readable instead of failing the whole journal line.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
@@ -430,6 +472,27 @@ pub enum RoomEvent {
         /// `None` preserves replay of pre-18.2 journal entries.
         #[serde(default)]
         task: Option<String>,
+    },
+    /// One frame this host **sent** to a peer, and what the peer said about it
+    /// (Story 18.4d, D10; FR162's sender half).
+    ///
+    /// The receiver journals its own row independently, which is the point: two
+    /// records of one event, on two hosts, is what makes a federation claim
+    /// checkable rather than asserted.
+    ///
+    /// ⛔ Carries no address and no transport identifier (NFR74) — a `PeerId`,
+    /// the correlation, the byte count and the outcome, and nothing else.
+    PeerFrameAttempted {
+        peer: PeerId,
+        /// The frame's correlation id, so the two hosts' rows can be lined up.
+        correlation: String,
+        /// Encoded frame length. Volume, never content.
+        bytes: usize,
+        outcome: PeerFrameAttemptOutcome,
+        /// The class the peer named, present only for
+        /// [`PeerFrameAttemptOutcome::Refused`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refusal: Option<FrameRefusal>,
     },
     HostBoundUnavailable {
         node: AgentId,
@@ -1120,7 +1183,13 @@ impl OrchestrationRoom {
             // itself. It renders through the transparency projection
             // (`TransparencyKind::TransportAdmission`), so this is absence of a
             // fold target rather than a silent loss.
-            | RoomEvent::PeerAdmissionRecorded { .. } => {}
+            | RoomEvent::PeerAdmissionRecorded { .. }
+            // An outbound frame attempt is a fact about one peer and one
+            // correlation, not about a room node: this cut's `peer ping` sends
+            // from a CLI process that owns no node at all. It renders through
+            // the transparency projection, which is where a peer-interaction
+            // fact belongs.
+            | RoomEvent::PeerFrameAttempted { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

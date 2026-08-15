@@ -1371,6 +1371,34 @@ impl NodeTree {
         .await
     }
 
+    /// Retire a restored-but-never-resumed peer-dispatch context so the
+    /// peer-delivery front door can materialize a live one.
+    ///
+    /// A daemon restart restores every durable node — including a
+    /// `remote-peer` dispatch context — with a fabricated handle and an
+    /// `awaiting_resume` mark nothing ever clears, because nothing resumes a
+    /// peer context. Without this, the first frame after a restart collides
+    /// with the husk at registration — for every admitted sender, forever.
+    /// Only that exact shape is retired: `Peer`-owned, `remote-peer`-typed,
+    /// and still waiting on a resume that will never come. A live context, an
+    /// A2A peer node (`a2a-peer`), and every owned subagent are untouched.
+    ///
+    /// Returns whether a husk was retired.
+    pub async fn retire_unresumed_peer_context(&self, agent_id: &AgentId) -> bool {
+        {
+            let guard = self.inner.read().await;
+            let is_husk = guard.awaiting_resume.contains(agent_id)
+                && guard.nodes.get(agent_id).is_some_and(|node| {
+                    node.ownership == OwnershipKind::Peer && node.subagent_type == "remote-peer"
+                });
+            if !is_husk {
+                return false;
+            }
+        }
+        self.deregister(agent_id).await;
+        true
+    }
+
     /// Register a live ACP/editor attachment as a non-durable `Self` session root.
     ///
     /// This path is deliberately separate from [`Self::register`]: normal subagents

@@ -60,6 +60,17 @@ pub fn workspace_p2p_config_path(workspace: &std::path::Path) -> PathBuf {
     workspace.join(".rustain").join("p2p.json")
 }
 
+/// Path to the workspace peer **reach** store (Story 18.4d, D1).
+///
+/// A sibling of `p2p.json`, deliberately not a field inside it: that file's
+/// loader uses `deny_unknown_fields`, so a reachability key there could make the
+/// whole *admission* list `Malformed` on an older binary — and a malformed
+/// allowlist means this host admits no peer. Two files is the structural form of
+/// `reach ≠ trust`.
+pub fn workspace_p2p_reach_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("p2p-reach.json")
+}
+
 /// Resolve the `{workspace}/.claude/sessions/` directory for session persistence.
 pub fn sessions_dir(workspace: &std::path::Path) -> PathBuf {
     workspace.join(".claude").join("sessions")

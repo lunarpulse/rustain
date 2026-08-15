@@ -350,6 +350,30 @@ impl ReplayWindow {
         true
     }
 
+    /// The position this window would accept next from `peer_id`.
+    ///
+    /// Story 18.4d (D9). This is what the receiver **tells** a sender after a
+    /// feed-position refusal, and it is why a short-lived sender needs no durable
+    /// cursor: the authority for the position is the side that enforces it.
+    ///
+    /// A peer with no committed feed yields the optimistic start — sequence 1 and
+    /// an empty predecessor — which is exactly what `validate_candidate` demands
+    /// of a first frame, so the answer and the rule cannot drift.
+    ///
+    /// ⚠ A pending reservation is deliberately **not** reflected: the committed
+    /// position is the only one a retry may chain to, and reporting a position
+    /// that a rollback is about to undo would guide the sender into a fork.
+    #[must_use]
+    pub fn expected_position(&self, peer_id: &PeerId) -> crate::domain::models::FeedPosition {
+        match self.feeds.get(peer_id) {
+            Some(feed) => crate::domain::models::FeedPosition {
+                next_sequence: feed.highest.saturating_add(1),
+                prev_hash: feed.head.clone(),
+            },
+            None => crate::domain::models::FeedPosition::start(),
+        }
+    }
+
     fn accept(
         &mut self,
         peer_id: &PeerId,

@@ -7864,6 +7864,21 @@ mod tests {
                         "journal PeerAdmissionRecorded alias={alias:?} peer={p:?} outcome={outcome:?}"
                     ));
                 }
+                // 18.4d: same reason. A fan-out trace never sends a peer frame,
+                // but the in-crate match must name the variant to compile.
+                RoomEvent::PeerFrameAttempted {
+                    peer,
+                    correlation,
+                    bytes,
+                    outcome,
+                    refusal,
+                } => {
+                    let p = it.sym(peer.as_str());
+                    lines.push(format!(
+                        "journal PeerFrameAttempted peer={p} correlation={correlation:?} \
+                         bytes={bytes} outcome={outcome:?} refusal={refusal:?}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

@@ -595,13 +595,21 @@ fn the_invite_copy_states_reach_expiry_and_the_absence_of_an_address() {
     );
 
     // With addresses it says so, and still never calls the ticket a secret.
-    let reachable = PeerTicket::mint(
-        &signer(112),
-        vec![b"a".to_vec(), b"b".to_vec()],
-        NOW + HOUR,
-        None,
-    )
-    .expect("mint");
+    //
+    // ⚠ Fixture changed by Story 18.4d (D4): one `EndpointAddr` bundle carrying
+    // **two** transport addresses, not two opaque elements. The count is now the
+    // number of ways one endpoint can be reached, and a two-element ticket is a
+    // shape this host refuses at import — so the old fixture described a ticket
+    // that can no longer be imported. The assertion is unchanged.
+    let bundle = {
+        let key = signer(112).verifying_key().to_bytes();
+        let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!(
+            r#"{{"id":"{hex}","addrs":[{{"Ip":"203.0.113.4:4433"}},{{"Ip":"203.0.113.5:4433"}}]}}"#
+        )
+        .into_bytes()
+    };
+    let reachable = PeerTicket::mint(&signer(112), vec![bundle], NOW + HOUR, None).expect("mint");
     let mut out = Vec::new();
     render_invite(&reachable, Some((80, 24)), false, &mut out).expect("render");
     let text = String::from_utf8(out).expect("utf8");
@@ -1392,7 +1400,18 @@ fn the_slash_face_parses_every_sub_verb_the_cli_ships() {
         parse_peer_command(Some("add alice BLOB")).expect("add"),
         PeerCommandArgs::Add {
             alias: "alice".to_owned(),
-            ticket: "BLOB".to_owned()
+            ticket: "BLOB".to_owned(),
+            allow_local_addresses: false
+        }
+    );
+    // Story 18.4d (D15) — the local-address opt-in is a real, per-import flag,
+    // and it is off unless the operator asks for it.
+    assert_eq!(
+        parse_peer_command(Some("add alice BLOB --allow-local-addresses")).expect("add"),
+        PeerCommandArgs::Add {
+            alias: "alice".to_owned(),
+            ticket: "BLOB".to_owned(),
+            allow_local_addresses: true
         }
     );
     assert_eq!(

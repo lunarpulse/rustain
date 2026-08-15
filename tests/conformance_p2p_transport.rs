@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use rustain::adapters::iroh::{IrohPeerTransport, derive_peer_endpoint_identity};
 use rustain::adapters::rap::AgentSigner;
-use rustain::domain::models::{AgentEnvelope, AgentId, CorrelationId, MessageKind, PeerId};
+use rustain::domain::models::{
+    AgentEnvelope, AgentId, CorrelationId, FrameOutcome, FrameVerdict, MessageKind, PeerId,
+};
 use rustain::domain::ports::{PeerTransport, PeerTransportError};
 
 fn root() -> PathBuf {
@@ -87,14 +89,37 @@ async fn minimal_i_roh_adapter_round_trips_an_unverified_frame() {
         .await
         .expect("dial direct endpoint address");
     let envelope = signed_envelope(23);
-    client
+
+    // A frame is a request now, so the receiver has to answer or the sender waits
+    // out its verdict timeout. The answering half runs as its own task — which is
+    // what a real ingress is — and this is what proves the answer channel end to
+    // end rather than by inspection.
+    let receive = tokio::spawn(async move {
+        let mut frame = server_inbound.recv().await.expect("accepted frame");
+        let responder = frame
+            .responder
+            .take()
+            .expect("a frame on a real connection carries an answer channel");
+        responder.answer(FrameVerdict::accepted());
+        frame
+    });
+    let verdict = client
         .send_to(&server_identity.peer_id, envelope.clone())
         .await
         .expect("send signed envelope");
+    let frame = receive.await.expect("receiver task");
 
-    let frame = server_inbound.recv().await.expect("accepted frame");
     assert_eq!(frame.peer_id, client_identity.peer_id);
     assert_eq!(frame.envelope, envelope);
+    assert_eq!(
+        verdict.outcome,
+        FrameOutcome::Accepted,
+        "the sender must learn the outcome from the receiver, never infer it"
+    );
+    assert!(
+        verdict.expected.is_none(),
+        "an acceptance carries no feed-position correction"
+    );
 
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await.expect("shutdown server");

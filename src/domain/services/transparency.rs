@@ -43,8 +43,8 @@
 use std::path::PathBuf;
 
 use crate::domain::models::{
-    Direction, JournalEntry, JournalRecord, PeerAdmissionOutcome, RejectReason, RoomEvent,
-    node_journal,
+    Direction, FrameRefusal, JournalEntry, JournalRecord, PeerAdmissionOutcome,
+    PeerFrameAttemptOutcome, RejectReason, RoomEvent, node_journal,
 };
 
 /// Longest disclosable free-text field rendered by any transparency surface.
@@ -117,6 +117,19 @@ pub enum TransparencyKind {
     /// may reach this host at all*, not whether a message is delivered and not
     /// what a peer may edit. A journaled fact, never an enforcement claim.
     TransportAdmission,
+    /// This host **sent** a frame to a peer, and what the peer said about it
+    /// (Story 18.4d, AC5).
+    ///
+    /// ⛔ Distinct from [`Self::Accepted`] and [`Self::Rejected`], which record a
+    /// decision *this* host made about someone else's work. This one records a
+    /// decision the **remote** host made about ours, so collapsing it into those
+    /// two would put two different subjects under one glyph. It is also distinct
+    /// from [`Self::Disclosed`], which is result content handed back inside an
+    /// A2A task rather than an addressed frame.
+    ///
+    /// The six touch points are paid: variant, glyph, wire label, the fold arm,
+    /// the filter parse arm, and the fixtures.
+    PeerFrameAttempted,
     /// Interaction became visible in the audit spine before interruption routing.
     InteractionSurfaced,
     /// A batch of prior digest-tier interactions was shown to the operator.
@@ -143,6 +156,9 @@ impl TransparencyKind {
             // ⊙ is unused by every other kind and by the ownership glyph set
             // (`orchestration_glyph.rs`), which this story does not touch.
             Self::TransportAdmission => "⊙",
+            // ↗ is unused by every other kind: outbound, and about a decision
+            // made at the other end.
+            Self::PeerFrameAttempted => "↗",
             Self::InteractionSurfaced => "!",
             Self::DigestFlushed => "≋",
             _ => "·",
@@ -162,6 +178,7 @@ impl TransparencyKind {
             Self::RoomRoleGranted => "room-role-granted",
             Self::RoomRoleRevoked => "room-role-revoked",
             Self::TransportAdmission => "transport-admission",
+            Self::PeerFrameAttempted => "peer-frame",
             Self::InteractionSurfaced => "surfaced",
             Self::DigestFlushed => "digest-flushed",
             _ => "unknown",
@@ -430,6 +447,22 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             None,
             transport_admission_summary(alias, *outcome),
         ),
+        // Story 18.4d (AC5) — the sender's half of one frame. This is the only
+        // row in the log whose decision was made by the **other** host, which is
+        // exactly why gate 18 cross-checks it against the receiver's own row.
+        RoomEvent::PeerFrameAttempted {
+            peer,
+            correlation,
+            bytes,
+            outcome,
+            refusal,
+        } => (
+            TransparencyKind::PeerFrameAttempted,
+            Direction::Outbound,
+            peer.as_str().to_owned(),
+            Some(correlation.clone()),
+            peer_frame_summary(*outcome, *refusal, *bytes),
+        ),
         // Retractions mutate the prior projected row in `fold_transparency`;
         // they never create a second visible row.
         RoomEvent::AutoResponseRetracted { .. } => return None,
@@ -507,6 +540,55 @@ fn transport_admission_summary(alias: &str, outcome: PeerAdmissionOutcome) -> St
         PeerAdmissionOutcome::Unknown => {
             format!("transport admission outcome for '{alias}' is unknown; no admission claim")
         }
+    }
+}
+
+/// Copy for an outbound frame-attempt row.
+///
+/// ⛔ Says only what the verdict said. A written frame with no answer reports an
+/// unknown outcome; it is never rounded up, and the word *accepted* appears only
+/// when the peer actually said so.
+fn peer_frame_summary(
+    outcome: PeerFrameAttemptOutcome,
+    refusal: Option<FrameRefusal>,
+    bytes: usize,
+) -> String {
+    match outcome {
+        PeerFrameAttemptOutcome::Accepted => {
+            format!("peer accepted this host's frame ({bytes} bytes)")
+        }
+        PeerFrameAttemptOutcome::Refused => format!(
+            "peer refused this host's frame ({bytes} bytes): {}",
+            frame_refusal_label(refusal.unwrap_or_default())
+        ),
+        PeerFrameAttemptOutcome::SendFailed => {
+            format!("this host could not send a frame ({bytes} bytes); nothing reached the peer")
+        }
+        PeerFrameAttemptOutcome::OutcomeUnknown => format!(
+            "this host sent a frame ({bytes} bytes); the peer did not answer, so the outcome is \
+             unknown"
+        ),
+        PeerFrameAttemptOutcome::Unknown => {
+            format!("outbound frame outcome ({bytes} bytes) is unknown; no claim either way")
+        }
+    }
+}
+
+/// The wire-stable label for one refusal class.
+///
+/// One label table, shared by the journal row and the `peer ping` line, so the
+/// two faces of one verdict cannot drift.
+#[must_use]
+pub fn frame_refusal_label(refusal: FrameRefusal) -> &'static str {
+    match refusal {
+        FrameRefusal::NotAdmitted => "this host is not in the peer's allowlist",
+        FrameRefusal::SignatureInvalid => "the peer did not accept the frame's signature",
+        FrameRefusal::FeedPositionMismatch => "the frame's position in this host's feed",
+        FrameRefusal::Expired => "the frame's validity window had closed",
+        FrameRefusal::Malformed => "the peer could not read the frame",
+        FrameRefusal::Declined => "the recipient declined it",
+        FrameRefusal::Unavailable => "the peer could not take it",
+        _ => "a reason this build does not recognise",
     }
 }
 
@@ -616,12 +698,13 @@ impl TransparencyFilter {
                         "room-role-granted" => TransparencyKind::RoomRoleGranted,
                         "room-role-revoked" => TransparencyKind::RoomRoleRevoked,
                         "transport-admission" => TransparencyKind::TransportAdmission,
+                        "peer-frame" => TransparencyKind::PeerFrameAttempted,
                         "unknown" => TransparencyKind::Unknown,
                         _ => {
                             return Err(format!(
                                 "unknown kind `{value}` — valid: accepted, refused, \
                                  awaiting-approval, status-query, disclosed, room-role-granted, \
-                                 room-role-revoked, transport-admission, unknown"
+                                 room-role-revoked, transport-admission, peer-frame, unknown"
                             ));
                         }
                     }));

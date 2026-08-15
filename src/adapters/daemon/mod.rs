@@ -893,16 +893,40 @@ async fn compose_p2p_listener(
 ) -> Result<P2pListener> {
     use crate::domain::ports::PeerTransport;
 
+    // The dial map comes from the one builder (Story 18.4d, AC4), never from an
+    // inline map here. ⚠ **Populating it does not make the daemon dial.** This
+    // cut adds no daemon-initiated dial at all; the map is supplied so reach is
+    // in place for a future dialer and so the listener and `peer ping` share one
+    // source. The only exercised dialer is `peer ping`.
     let transport = std::sync::Arc::new(
         crate::adapters::iroh::IrohPeerTransport::bind(
             transport_secret_key,
-            std::collections::HashMap::new(),
+            crate::adapters::p2p_reach::peer_dial_map_from_workspace(workspace),
         )
         .await
         .context("binding the P2P listener")?,
     );
-    let address = String::from_utf8(transport.local_address()?.as_bytes().to_vec())
+    let local_address = transport.local_address()?;
+    let address = String::from_utf8(local_address.as_bytes().to_vec())
         .context("rendering the P2P listener address")?;
+
+    // AC1 — publish this host's own reach, **after** a successful bind and never
+    // before: a record written before the endpoint exists is a placeholder a
+    // ticket would then publish as fact. ⚠ The endpoint binds an ephemeral port,
+    // so this is rewritten every bind and a ticket minted during a previous run
+    // may name a port nobody is listening on. A reach write failure degrades —
+    // the listener still serves, and `peer invite` then emits its honest
+    // no-address copy — because reach is reachability, not admission.
+    if let Err(error) = crate::adapters::p2p_reach::publish_self_reach(
+        &crate::infrastructure::paths::workspace_p2p_reach_path(workspace),
+        &local_address,
+        chrono::Utc::now().timestamp(),
+    ) {
+        tracing::warn!(
+            %error,
+            "this host's reach could not be recorded; tickets will carry no network address"
+        );
+    }
 
     // An entry with no pinned key can never match a presented endpoint, so it
     // silently admits nobody. The refusal path names the peer that knocked, not
@@ -995,6 +1019,13 @@ mod p2p_listener_composition_tests {
     #[async_trait]
     impl PeerInteractionRecorder for AcceptingRecorder {
         async fn record_peer_delivery(&self, _record: PeerDeliveryRecord) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn record_transport_refusal(
+            &self,
+            _record: crate::domain::ports::TransportRefusalRecord,
+        ) -> Result<(), String> {
             Ok(())
         }
     }
@@ -1095,6 +1126,88 @@ mod p2p_listener_composition_tests {
             .expect("cancellation stops the composed listener")
             .expect("listener task does not panic");
         client.shutdown().await.expect("shutdown client");
+    }
+
+    /// Story 18.4d AC1 — the listener publishes this host's own reach **at
+    /// bind**, through the production composition path.
+    ///
+    /// Mutants: (a) skipping the write leaves the store absent, so a ticket
+    /// carries no address; (b) writing before `bind` succeeds would persist a
+    /// placeholder — asserted by requiring the recorded bundle to be one `bind`
+    /// accepts; (c) `listen: false` never reaches this path at all, which the
+    /// sibling test below holds.
+    #[tokio::test]
+    async fn the_composed_listener_publishes_its_own_reach_at_bind() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let server_key = ed25519_dalek::SigningKey::from_bytes(&[45; 32]);
+        let config_dir = workspace.path().join(".rustain");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::write(
+            config_dir.join("p2p.json"),
+            r#"{"listen":true,"agents":{}}"#,
+        )
+        .expect("write allowlist");
+
+        let reach_path = crate::infrastructure::paths::workspace_p2p_reach_path(workspace.path());
+        assert_eq!(
+            crate::adapters::p2p_reach::load_workspace_p2p_reach(&reach_path),
+            crate::domain::models::PeerReachState::Absent,
+            "positive control: nothing has published reach yet"
+        );
+
+        let (ingested_tx, _ingested_rx) = mpsc::unbounded_channel();
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let node_tree = NodeTree::new();
+        let bus = Arc::new(LocalMessageBus::new(
+            node_tree.clone(),
+            Arc::new(RelationshipDeliveryPolicy),
+        )) as Arc<dyn AgentMessageBus>;
+        let handler = Arc::new(VerifiedPeerFrameHandler::new(
+            node_tree,
+            Arc::new(ArcSwap::from_pointee(bus)),
+            domain_tx,
+            Arc::new(ForwardingConsumer(ingested_tx)),
+            Arc::new(AcceptingRecorder),
+        ));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let listener = super::compose_p2p_listener(
+            workspace.path(),
+            handler,
+            server_key.to_bytes(),
+            shutdown.child_token(),
+        )
+        .await
+        .expect("compose the production listener");
+
+        let state = crate::adapters::p2p_reach::load_workspace_p2p_reach(&reach_path);
+        let own = state
+            .own()
+            .expect("binding the listener must publish this host's reach");
+        assert!(own.captured_at > 0, "the record carries a capture stamp");
+        assert_eq!(
+            own.address.as_bytes(),
+            listener.address.as_bytes(),
+            "the published record must be the address the listener actually bound"
+        );
+        // Mutant (b): a placeholder written before bind would not be dialable.
+        // This proves the recorded bundle is consumable, not merely non-empty.
+        let identity = derive_peer_endpoint_identity(&server_key.verifying_key().to_bytes())
+            .expect("server identity");
+        IrohPeerTransport::bind(
+            ed25519_dalek::SigningKey::from_bytes(&[46; 32]).to_bytes(),
+            HashMap::from([(identity.peer_id, own.address.clone())]),
+        )
+        .await
+        .expect("the published reach must be an address `bind` accepts")
+        .shutdown()
+        .await
+        .expect("shutdown probe");
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), listener.task)
+            .await
+            .expect("cancellation stops the composed listener")
+            .expect("listener task does not panic");
     }
 }
 

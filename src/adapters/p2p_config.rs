@@ -246,14 +246,19 @@ impl AgentEntry {
 const DEFAULT_PIN_FIELD: &str = "pinnedKey";
 
 /// Cross-process guard for one complete read-modify-write transaction.
-struct P2pConfigWriteLock {
+///
+/// `pub(crate)` because Story 18.4d's sibling reach store needs exactly this
+/// transaction discipline. Reusing it is the point: a second hand-rolled
+/// `flock` + temp + rename would be a second chance to get one of the six steps
+/// wrong.
+pub(crate) struct P2pConfigWriteLock {
     file: Option<std::fs::File>,
     #[cfg(not(unix))]
     path: std::path::PathBuf,
 }
 
 impl P2pConfigWriteLock {
-    fn acquire(path: &Path) -> Result<Self, String> {
+    pub(crate) fn acquire(path: &Path) -> Result<Self, String> {
         let parent = path
             .parent()
             .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
@@ -471,7 +476,7 @@ fn rewrite_p2p_config(
     }
 
     let body = emit_p2p_config(&root_keys, &agents)?;
-    write_config_atomically(path, &body)
+    write_config_atomically(path, ".p2p-config-", &body)
 }
 
 /// Re-emit the document.
@@ -573,7 +578,10 @@ fn json_string(value: &str) -> String {
 /// Temp-then-rename with mode `0o600` before the rename, so the final file is
 /// never world-readable even momentarily (`auth_store` and `key_store`
 /// precedents). An interrupted write leaves the previous file intact.
-fn write_config_atomically(path: &Path, body: &str) -> Result<(), String> {
+///
+/// `prefix` names the temporary file so a directory listing during a write says
+/// which store is being replaced.
+pub(crate) fn write_config_atomically(path: &Path, prefix: &str, body: &str) -> Result<(), String> {
     use std::io::Write as _;
 
     let parent = path
@@ -583,7 +591,7 @@ fn write_config_atomically(path: &Path, body: &str) -> Result<(), String> {
         .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
 
     let mut builder = tempfile::Builder::new();
-    builder.prefix(".p2p-config-").suffix(".tmp").rand_bytes(16);
+    builder.prefix(prefix).suffix(".tmp").rand_bytes(16);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

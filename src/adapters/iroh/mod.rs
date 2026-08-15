@@ -9,17 +9,37 @@ use std::time::Duration;
 use ::iroh::endpoint::{Connection, presets};
 use ::iroh::{Endpoint, EndpointAddr, EndpointId};
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::models::{AgentEnvelope, PeerId};
-use crate::domain::ports::{InboundFrame, PeerAddress, PeerTransport, PeerTransportError};
+use crate::domain::models::{
+    AgentEnvelope, FeedPosition, FrameOutcome, FrameRefusal, FrameVerdict, PeerId,
+};
+use crate::domain::ports::{
+    FrameResponder, InboundFrame, PeerAddress, PeerTransport, PeerTransportError,
+};
 
 const PEER_ALPN: &[u8] = b"rustain/peer/1";
 const INBOUND_CAPACITY: usize = 128;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Longest verdict this transport will read or write.
+///
+/// A verdict is an outcome, a class and a feed position — a few hundred bytes at
+/// most. Bounding it is what stops a hostile receiver from answering a ping with
+/// a stream it never ends.
+const MAX_VERDICT_BYTES: usize = 4 * 1024;
+
+/// How long either side waits for a verdict before calling the outcome unknown.
+///
+/// ⚠ A silent receiver must not stall the sender indefinitely, and a slow local
+/// consumer must not hold a connection's stream queue forever.
+const VERDICT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Limits unadmitted connections so each may consume at most one frame buffer
 /// without allowing remote handshakes to grow tasks and heap without bound.
@@ -90,12 +110,31 @@ impl IrohPeerTransport {
     ) -> Result<Self, PeerTransportError> {
         let mut decoded = HashMap::with_capacity(peer_addresses.len());
         for (peer_id, address) in peer_addresses {
-            let endpoint_addr = decode_address(&address)?;
-            let derived = derive_peer_endpoint_identity(endpoint_addr.id.as_bytes())?;
-            if derived.peer_id != peer_id {
-                return Err(PeerTransportError::Address(format!(
-                    "endpoint identifier does not derive configured peer {peer_id}"
-                )));
+            // A stored entry this build cannot read — or one whose endpoint
+            // does not derive the pinned key — must not take the listener
+            // down: reach degrades ("dial nobody for that peer"), exactly as
+            // an absent or malformed reach store does. Only an operator edit
+            // or disk damage can produce this; every write path filters.
+            let endpoint_addr = match decode_address(&address) {
+                Ok(endpoint_addr) => endpoint_addr,
+                Err(error) => {
+                    tracing::warn!(%peer_id, %error, "ignoring an unreadable reach entry");
+                    continue;
+                }
+            };
+            match derive_peer_endpoint_identity(endpoint_addr.id.as_bytes()) {
+                Ok(derived) if derived.peer_id == peer_id => {}
+                Ok(_) => {
+                    tracing::warn!(
+                        %peer_id,
+                        "ignoring a reach entry whose endpoint derives a different peer"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%peer_id, %error, "ignoring an unreadable reach entry");
+                    continue;
+                }
             }
             decoded.insert(peer_id, endpoint_addr);
         }
@@ -223,7 +262,7 @@ impl PeerTransport for IrohPeerTransport {
         &self,
         peer: &PeerId,
         envelope: AgentEnvelope<Value>,
-    ) -> Result<(), PeerTransportError> {
+    ) -> Result<FrameVerdict, PeerTransportError> {
         let connection = self.connection(peer).await?;
         let bytes = serde_json::to_vec(&envelope)
             .map_err(|error| PeerTransportError::Send(error.to_string()))?;
@@ -232,18 +271,29 @@ impl PeerTransport for IrohPeerTransport {
                 "frame exceeds {MAX_FRAME_BYTES} bytes"
             )));
         }
-        let mut stream = connection
-            .open_uni()
+        // A frame is a request, so it travels on a bidirectional stream: the
+        // receiver answers on the same authenticated connection, which is what
+        // lets a short-lived sender learn the feed position it must chain to.
+        let (mut send, mut recv) = connection
+            .open_bi()
             .await
             .map_err(|error| PeerTransportError::Send(error.to_string()))?;
-        stream
-            .write_all(&bytes)
+        send.write_all(&bytes)
             .await
             .map_err(|error| PeerTransportError::Send(error.to_string()))?;
-        stream
-            .finish()
+        send.finish()
             .map_err(|error| PeerTransportError::Send(error.to_string()))?;
-        Ok(())
+
+        // ⛔ Past this point a failure is NOT a send failure and must never be
+        // reported as one: the frame is on the wire and the receiver may well
+        // have taken it. An unreadable answer is an unknown outcome, which is
+        // the only honest thing to say — and is never acceptance.
+        let reply =
+            tokio::time::timeout(VERDICT_TIMEOUT, recv.read_to_end(MAX_VERDICT_BYTES)).await;
+        Ok(match reply {
+            Ok(Ok(reply)) => decode_verdict(&reply).unwrap_or_else(FrameVerdict::unanswered),
+            Ok(Err(_)) | Err(_) => FrameVerdict::unanswered(),
+        })
     }
 
     fn inbound(&self) -> Result<mpsc::Receiver<InboundFrame>, PeerTransportError> {
@@ -269,6 +319,92 @@ impl PeerTransport for IrohPeerTransport {
 fn decode_address(address: &PeerAddress) -> Result<EndpointAddr, PeerTransportError> {
     serde_json::from_slice(address.as_bytes())
         .map_err(|error| PeerTransportError::Address(error.to_string()))
+}
+
+// ── The verdict wire codec ──────────────────────────────────────────────────
+//
+// One codec, in the one adapter that owns the stream. The domain's
+// [`FrameVerdict`] deliberately derives no `Serialize`: a domain-level derive
+// would quietly become a second wire contract that nothing keeps in step with
+// this one.
+//
+// Forward compatibility is explicit rather than accidental. The outcome tag and
+// the refusal class each carry their own `#[serde(other)]` fallback, and every
+// field is `default`, so a newer receiver's answer degrades to "refused, class
+// unknown" or "unknown outcome" instead of failing the decode and being reported
+// as *no answer at all*. ⛔ A decode failure must never round up to acceptance.
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireOutcome {
+    Accepted,
+    Refused,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct WireVerdict {
+    outcome: WireOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refusal: Option<FrameRefusal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_sequence: Option<u64>,
+    /// The expected predecessor hash, base64url. Absent and empty are the same
+    /// claim — "chain to nothing" — and both decode to an empty `prev_hash`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prev_hash: Option<String>,
+}
+
+fn encode_verdict(verdict: &FrameVerdict) -> Vec<u8> {
+    let (outcome, refusal) = match verdict.outcome {
+        FrameOutcome::Accepted => (WireOutcome::Accepted, None),
+        FrameOutcome::Refused(refusal) => (WireOutcome::Refused, Some(refusal)),
+        // ⛔ Never written: "no answer" is what an absent reply means, and
+        // answering with it would claim the receiver reached a decision it did
+        // not reach.
+        FrameOutcome::Unanswered => (WireOutcome::Unknown, None),
+    };
+    let wire = WireVerdict {
+        outcome,
+        refusal,
+        next_sequence: verdict.expected.as_ref().map(|at| at.next_sequence),
+        prev_hash: verdict
+            .expected
+            .as_ref()
+            .map(|at| URL_SAFE_NO_PAD.encode(&at.prev_hash)),
+    };
+    serde_json::to_vec(&wire).unwrap_or_default()
+}
+
+fn decode_verdict(bytes: &[u8]) -> Option<FrameVerdict> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let wire: WireVerdict = serde_json::from_slice(bytes).ok()?;
+    let outcome = match wire.outcome {
+        WireOutcome::Accepted => FrameOutcome::Accepted,
+        WireOutcome::Refused => {
+            FrameOutcome::Refused(wire.refusal.unwrap_or(FrameRefusal::Unclassified))
+        }
+        WireOutcome::Unknown => FrameOutcome::Unanswered,
+    };
+    // The position is shape-checked here, at the boundary, so no caller can
+    // reach the local signing path with a hostile sequence or a truncated hash.
+    let expected = wire.next_sequence.and_then(|next_sequence| {
+        let prev_hash = match wire.prev_hash.as_deref() {
+            Some(encoded) => URL_SAFE_NO_PAD.decode(encoded).ok()?,
+            None => Vec::new(),
+        };
+        let at = FeedPosition {
+            next_sequence,
+            prev_hash,
+        };
+        at.is_wellformed().then_some(at)
+    });
+    Some(FrameVerdict { outcome, expected })
 }
 
 async fn accept_frames(
@@ -309,12 +445,16 @@ async fn accept_frames(
                 return;
             };
 
+            // One stream at a time, and the verdict is written before the next
+            // stream is accepted. That is not a simplification: a sender chains
+            // frame N+1 to the position frame N's verdict names, so answering in
+            // order is what makes `--count` on one connection meaningful.
             loop {
-                let stream = tokio::select! {
+                let (mut send, mut recv) = tokio::select! {
                     _ = accept_cancel.cancelled() => return,
                     stream = tokio::time::timeout(
                         INBOUND_CONNECTION_IDLE_TIMEOUT,
-                        connection.accept_uni(),
+                        connection.accept_bi(),
                     ) => match stream {
                         Ok(Ok(stream)) => stream,
                         Ok(Err(_)) => return,
@@ -324,12 +464,11 @@ async fn accept_frames(
                         }
                     },
                 };
-                let mut stream = stream;
                 let bytes = tokio::select! {
                     _ = accept_cancel.cancelled() => return,
                     bytes = tokio::time::timeout(
                         INBOUND_CONNECTION_IDLE_TIMEOUT,
-                        stream.read_to_end(MAX_FRAME_BYTES),
+                        recv.read_to_end(MAX_FRAME_BYTES),
                     ) => match bytes {
                         Ok(Ok(bytes)) => bytes,
                         Ok(Err(_)) => {
@@ -346,17 +485,33 @@ async fn accept_frames(
                     connection.close(0u32.into(), b"invalid peer frame");
                     return;
                 };
+                let (responder, verdict) = FrameResponder::channel();
                 if tokio::select! {
                     _ = accept_cancel.cancelled() => return,
                     sent = inbound_tx.send(InboundFrame {
                         envelope,
                         peer_id: identity.peer_id.clone(),
+                        responder: Some(responder),
                     }) => sent,
                 }
                 .is_err()
                 {
                     return;
                 }
+                // A local consumer that never answers must not hold this
+                // connection open forever; the sender then reads an empty reply
+                // and reports an unknown outcome.
+                let answered = tokio::select! {
+                    _ = accept_cancel.cancelled() => return,
+                    answered = tokio::time::timeout(VERDICT_TIMEOUT, verdict) => match answered {
+                        Ok(Ok(verdict)) => Some(verdict),
+                        Ok(Err(_)) | Err(_) => None,
+                    },
+                };
+                if let Some(verdict) = answered {
+                    let _ = send.write_all(&encode_verdict(&verdict)).await;
+                }
+                let _ = send.finish();
             }
         });
     }

@@ -11,7 +11,8 @@
 use crate::adapters::tui::state::TuiState;
 
 const USAGE: &str = "/peer list [--json] | /peer show <alias> | /peer invite [--ttl=<dur>] \
-                     [--name=<name>] | /peer add <alias> <ticket> | /peer revoke <alias-or-peer-id>";
+                     [--name=<name>] | /peer add <alias> <ticket> [--allow-local-addresses] | \
+                     /peer revoke <alias-or-peer-id>";
 
 /// One parsed `/peer` sub-verb.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +31,11 @@ pub enum PeerCommandArgs {
     Add {
         alias: String,
         ticket: String,
+        /// Story 18.4d (D15). Opt in, **per import**, to a ticket whose claimed
+        /// address points into this machine or this local network — which two
+        /// hosts on one machine legitimately need. ⛔ Not a confirm bypass: the
+        /// fingerprint confirm still happens and still has no flag.
+        allow_local_addresses: bool,
     },
     Revoke {
         target: String,
@@ -98,7 +104,8 @@ pub fn parse_peer_command(cmd_arg: Option<&str>) -> Result<PeerCommandArgs, Stri
             let ticket = tokens
                 .next()
                 .ok_or_else(|| format!("Missing ticket. Use: {USAGE}"))?;
-            if let Some(extra) = tokens.next() {
+            let mut allow_local_addresses = false;
+            for extra in tokens {
                 // Naming the forbidden flags explicitly: an operator who tries
                 // one must be told it does not exist, not have it ignored.
                 if extra.starts_with("--yes") || extra.starts_with("--force") {
@@ -108,13 +115,19 @@ pub fn parse_peer_command(cmd_arg: Option<&str>) -> Result<PeerCommandArgs, Stri
                             .to_owned(),
                     );
                 }
+                if extra == "--allow-local-addresses" {
+                    allow_local_addresses = true;
+                    continue;
+                }
                 return Err(format!(
-                    "Expected exactly '<alias> <ticket>' after 'add'. Use: {USAGE}"
+                    "Expected '<alias> <ticket> [--allow-local-addresses]' after 'add'. Use: \
+                     {USAGE}"
                 ));
             }
             Ok(PeerCommandArgs::Add {
                 alias: alias.to_owned(),
                 ticket: ticket.to_owned(),
+                allow_local_addresses,
             })
         }
         "revoke" => {

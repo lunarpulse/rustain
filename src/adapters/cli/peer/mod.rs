@@ -31,6 +31,7 @@ use clap::Subcommand;
 pub mod add;
 pub mod invite;
 pub mod list;
+pub mod ping;
 pub mod revoke;
 pub mod rows;
 pub mod show;
@@ -71,6 +72,34 @@ pub enum PeerAction {
         alias: String,
         /// The ticket blob, as printed by `peer invite`.
         ticket: String,
+        /// Accept a claimed address that points into this machine or this local
+        /// network. Two hosts on one machine need it; a ticket from a stranger
+        /// naming your own loopback or metadata endpoint does not.
+        ///
+        /// ⛔ This is not a confirm bypass. The fingerprint confirm still
+        /// happens and there is still no flag that skips it.
+        #[arg(long)]
+        allow_local_addresses: bool,
+    },
+    /// Send one signed frame to a pinned peer and report what they said.
+    ///
+    /// The first verb that actually reaches another host. It resolves the alias
+    /// to its pinned key and its address on file, sends a frame, and prints the
+    /// answer the peer gave — or says the outcome is unknown when none came
+    /// back. It grants nothing and carries no authority.
+    Ping {
+        /// The alias to reach, as recorded by `peer add`.
+        alias: String,
+        /// How many frames to send on one connection. Defaults to 1.
+        ///
+        /// More than one exists so an operator can watch a revocation take
+        /// effect between frames on a connection that is already open.
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+        /// How long to wait between frames: `500ms`, `2s`, or a millisecond
+        /// count. Ignored when `--count` is 1.
+        #[arg(long)]
+        interval: Option<String>,
     },
     /// Show the transport roster from `.rustain/p2p.json`.
     ///

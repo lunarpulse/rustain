@@ -46,7 +46,7 @@ use crate::domain::events::{AppEvent, DomainEventPayload};
 use crate::domain::models::{AgentId, Direction, JournalRecord, PeerId, RejectReason, RoomEvent};
 use crate::domain::ports::{
     EventEmitter, PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder, RoomJournal,
-    RoomJournalError, RoomJournalReader,
+    RoomJournalError, RoomJournalReader, TransportRefusalRecord,
 };
 use crate::domain::services::transparency::{
     MAX_PEER_ID_BYTES, TRUNCATION_MARKER, sanitize_disclosable,
@@ -336,6 +336,31 @@ impl PeerInteractionRecorder for TransparencySink {
         self.record(outcome)
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// Story 18.4d (AC6). A transport-allowlist refusal is an inbound admission
+    /// refusal, so it lands on the shipped `RemoteEnvelopeRejected` /
+    /// `RejectReason::Policy` shape rather than minting a variant. ⛔ Not a new
+    /// `RejectReason`: that enum is internally tagged, so a new variant is a
+    /// durable-format break an older build cannot decode.
+    ///
+    /// The detail is host-authored, and it is sanitized anyway — "audited clean
+    /// once" is not an invariant.
+    async fn record_transport_refusal(&self, record: TransportRefusalRecord) -> Result<(), String> {
+        let TransportRefusalRecord {
+            peer,
+            detail,
+            correlation_id,
+        } = record;
+        self.record(InboundOutcome::Refused {
+            peer,
+            // ⛔ Not an empty string: a frame with no readable correlation has an
+            // unknown task, and an unknown fact renders as one.
+            task_id: correlation_id.map_or_else(|| "—".to_owned(), |id| id.0),
+            reason: detail,
+        })
+        .await
+        .map_err(|error| error.to_string())
     }
 }
 

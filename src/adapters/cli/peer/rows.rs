@@ -20,8 +20,9 @@
 
 use std::fmt::Write as _;
 
+use crate::adapters::cli::peer::ping::PingRefusal;
 use crate::domain::models::{
-    PeerAdmissionOutcome, PeerId, PeerTicket, PinnedKey, peer_fingerprint,
+    FrameOutcome, PeerAdmissionOutcome, PeerId, PeerTicket, PinnedKey, peer_fingerprint,
 };
 use crate::domain::services::peer_admission::{PeerRoster, PeerRosterRow, ROTATED_KEY_DOCTRINE};
 
@@ -149,6 +150,18 @@ pub fn roster_line(row: &PeerRosterRow, alias_width: usize) -> String {
 /// this the key I meant to pin?*, the same question the HTTP path already asks
 /// in `a2a/client.rs`. ⛔ Never raised by an inbound connection, so no second
 /// door appears beside the remote-peer approval front door.
+///
+/// # Why this card shows the addresses and every other surface shows a count
+///
+/// This is the **only human checkpoint** before this host dials what a stranger
+/// named, and "reachable at 1 direct address" cannot tell `203.0.113.7:4433`
+/// apart from `169.254.169.254:80`. So the card renders the addresses
+/// themselves; the roster, the logs and every non-consent surface stay
+/// count-only, and the blob itself stays hand-off-sensitive.
+///
+/// The addresses are **claimed** by the issuer. The ticket is self-signed, so the
+/// signature proves key possession and nothing about who owns those sockets — ⛔
+/// the card never says otherwise.
 #[must_use]
 pub fn confirm_card_text(alias: &str, ticket: &PeerTicket, peer_id: &PeerId) -> String {
     let alias = sanitize_for_terminal(alias);
@@ -159,6 +172,11 @@ pub fn confirm_card_text(alias: &str, ticket: &PeerTicket, peer_id: &PeerId) -> 
         "  fingerprint    {fingerprint}   ({FINGERPRINT_ENCODING})"
     );
     let _ = writeln!(out, "  reachable at   {}", reachable_clause(ticket));
+    for address in
+        crate::domain::services::peer_reach_filter::describe_ticket_reach(&ticket.addresses)
+    {
+        let _ = writeln!(out, "                 claimed: {address}");
+    }
     let _ = writeln!(out, "  ticket expires {}", expiry_label(ticket.not_after));
     if let Some(name) = ticket.suggested_name.as_deref() {
         let _ = writeln!(
@@ -284,13 +302,167 @@ pub fn show_text(alias: &str, pinned: Option<&PinnedKey>, peer_id: Option<&PeerI
 /// With no address configured it says exactly that, ⛔ never that the peer is
 /// unreachable: an empty address list is a missing configuration, not a network
 /// observation.
+///
+/// ⚠ **N counts transport addresses inside the bundle, not vector elements**
+/// (Story 18.4d, D4). One `EndpointAddr` is one endpoint that may be reachable
+/// several ways, and the operator is being told how many ways — so the shipped
+/// `ticket.addresses.len()` would have rendered "1 direct address" for a bundle
+/// holding three.
 #[must_use]
 pub fn reachable_clause(ticket: &PeerTicket) -> String {
-    match ticket.addresses.len() {
+    match crate::domain::services::peer_reach_filter::transport_address_count(&ticket.addresses) {
         0 => "no address is configured for this host".to_owned(),
         1 => "1 direct address".to_owned(),
         many => format!("{many} direct addresses"),
     }
+}
+
+// ── `peer ping` copy (Story 18.4d, AC5) ─────────────────────────────────────
+//
+// # The one rule these strings exist to enforce
+//
+// **accepted** and **refused** may be said ONLY when repeating a verdict this
+// host actually received and validated. A frame that was written and never
+// answered reports an unknown outcome. ⛔ Never *delivered*, never
+// *acknowledged*, never *verified*, never *secure*: the transport carried bytes
+// and a peer answered, and that is the whole of what is known.
+//
+// The refusal reason is rendered from the **class** the peer named, through the
+// shared label table — never from remote-authored prose, so no stranger's text
+// can reach an operator's terminal or slip past the wording ceiling.
+
+/// One frame, reporting exactly what the verdict said.
+#[must_use]
+pub fn ping_single_text(alias: &str, peer_id: &PeerId, outcome: FrameOutcome) -> String {
+    let alias = sanitize_for_terminal(alias);
+    let fp = peer_fingerprint(peer_id);
+    match outcome {
+        FrameOutcome::Accepted => format!("Sent 1 frame to {alias} ({fp}) — accepted."),
+        FrameOutcome::Refused(refusal) => format!(
+            "Sent 1 frame to {alias} ({fp}) — refused: {}.",
+            crate::domain::services::transparency::frame_refusal_label(refusal)
+        ),
+        FrameOutcome::Unanswered => format!(
+            "Sent 1 frame to {alias} ({fp}) — outcome unknown; the peer did not answer. Check \
+             the peer's transport-admission log."
+        ),
+    }
+}
+
+/// Every frame of a `--count` run was accepted, on one connection.
+#[must_use]
+pub fn ping_multi_text(alias: &str, peer_id: &PeerId, count: u32) -> String {
+    format!(
+        "Sent {count} frames to {} ({}) on one connection.",
+        sanitize_for_terminal(alias),
+        peer_fingerprint(peer_id)
+    )
+}
+
+/// The honesty clause for a run whose guided retry transmitted more envelopes
+/// than the frame count names. Empty when no retry happened, so the pinned
+/// copy above stays byte-identical in the common case.
+#[must_use]
+pub fn ping_retry_clause(frames: u32, transmitted: u32) -> String {
+    if transmitted <= frames {
+        return String::new();
+    }
+    format!(" {transmitted} envelopes were transmitted; the peer guided one position retry.")
+}
+
+/// A `--count` run that stopped. ⛔ It never implies the remaining frames were
+/// attempted: they were not.
+#[must_use]
+pub fn ping_partial_text(
+    alias: &str,
+    peer_id: &PeerId,
+    accepted: u32,
+    total: u32,
+    failed_frame: u32,
+    reason: &str,
+) -> String {
+    format!(
+        "Sent {accepted} of {total} frames to {} ({}); frame {failed_frame} failed: {reason}. \
+         Nothing further was attempted.",
+        sanitize_for_terminal(alias),
+        peer_fingerprint(peer_id)
+    )
+}
+
+/// Why nothing was sent.
+#[must_use]
+pub fn ping_refusal_text(alias: &str, refusal: &PingRefusal) -> String {
+    let alias = sanitize_for_terminal(alias);
+    match refusal {
+        PingRefusal::UnknownAlias => {
+            format!("Cannot ping {alias}: unknown alias. Nothing was sent.")
+        }
+        PingRefusal::Unpinned => format!(
+            "Cannot ping {alias}: no pinned key — this host has not admitted them. Nothing was \
+             sent."
+        ),
+        PingRefusal::NoReach => format!(
+            "Cannot ping {alias}: no network address on file — import a ticket that carries one. \
+             Nothing was sent."
+        ),
+        PingRefusal::DialFailed { reason } => format!(
+            "Cannot ping {alias}: dial failed ({}). Nothing was sent.",
+            sanitize_for_terminal(reason)
+        ),
+        PingRefusal::FeatureDisabled => format!(
+            "Cannot ping {alias}: this build was compiled without the peer transport. Nothing \
+             was sent."
+        ),
+        PingRefusal::LocalFault { reason } => format!(
+            "Cannot ping {alias}: this host could not prepare the frame ({}). Nothing was sent.",
+            sanitize_for_terminal(reason)
+        ),
+    }
+}
+
+/// The line printed after a reach-only refresh of an already-pinned peer.
+///
+/// ⛔ It does not claim a new pin: the key on file is unchanged, and saying
+/// otherwise would describe a trust decision the operator did not make.
+#[must_use]
+pub fn reach_refreshed_text(alias: &str, peer_id: &PeerId) -> String {
+    let alias = sanitize_for_terminal(alias);
+    format!(
+        "Updated the network address on file for {alias} ({}).\n\
+         The pinned key is unchanged and no new trust decision was recorded.\n\
+         `rustain peer ping {alias}` now dials the address this ticket carried.",
+        peer_fingerprint(peer_id)
+    )
+}
+
+/// The reach-refresh confirm card: same key, new address.
+///
+/// A separate card because it asks a different question. The `peer add` card asks
+/// *is this the key I meant to pin?*; this one asks *should this host dial these
+/// addresses instead?* — and the key is not up for decision, so the card says so.
+#[must_use]
+pub fn reach_refresh_card_text(alias: &str, ticket: &PeerTicket, peer_id: &PeerId) -> String {
+    let alias = sanitize_for_terminal(alias);
+    let mut out = format!("Update address — {alias}\n\n");
+    let _ = writeln!(
+        out,
+        "  fingerprint    {}   ({FINGERPRINT_ENCODING})",
+        peer_fingerprint(peer_id)
+    );
+    let _ = writeln!(out, "  already pinned yes — this key is unchanged");
+    let _ = writeln!(out, "  reachable at   {}", reachable_clause(ticket));
+    for address in
+        crate::domain::services::peer_reach_filter::describe_ticket_reach(&ticket.addresses)
+    {
+        let _ = writeln!(out, "                 claimed: {address}");
+    }
+    let _ = writeln!(out, "  ticket expires {}", expiry_label(ticket.not_after));
+    out.push_str(
+        "\nThis changes only where this host dials them. Their key stays pinned\n\
+         exactly as it is, and admission is unchanged.\n\n\
+         Awaiting your decision.  [y] Update the address  [n] Cancel (Esc)\n",
+    );
+    out
 }
 
 /// Human-readable expiry. Local time, matching `session list`'s format.

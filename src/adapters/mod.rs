@@ -31,6 +31,7 @@ pub mod model_catalog_cache;
 pub mod models_dev;
 pub mod noop;
 pub mod p2p_config;
+pub mod p2p_reach;
 pub mod palette_registry;
 pub mod persona_adapter;
 pub mod policy;
