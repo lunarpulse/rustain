@@ -116,6 +116,17 @@ ed25519-dalek = { version = "=2.2.0", features = ["pkcs8", "rand_core"] }
 # Story 18.4 — replaceable cross-host transport adapter. Exact pin: iroh's
 # public vocabulary and MSRV can move within a minor release.
 iroh = { version = "=1.0.3", optional = true }
+# Story 18.4c-b — the embedded relay SERVER behind `rustain relay serve`
+# (FR159). Exact pin, and it must move in LOCKSTEP with `iroh` above: the relay
+# server and the relay client have to link the same protocol version.
+# `default-features = false` drops the default `metrics`/`tls-ring` pair, but
+# `server` re-implies BOTH (`iroh-relay-1.0.3/Cargo.toml`: `server = ["metrics",
+# …, "tls-ring"]`) — which AC4 depends on, because `Counter::get()` returns a
+# hardcoded 0 with `iroh-metrics/metrics` off and the "ask the relay" leg would
+# go silently vacuous.
+iroh-relay = { version = "=1.0.3", optional = true, default-features = false, features = [
+    "server",
+] }
 # Story 18.4b (AC2) — QR encoding for `peer invite`. `default-features = false`
 # drops the `image`/`svg`/`pic` renderers, leaving a pure-Rust encoder with
 # ZERO transitive dependencies; this crate renders the module matrix itself
@@ -252,10 +263,28 @@ p2p = ["dep:iroh"]
 # Story 18.4c — the hermetic relay fixture, for `tests/conformance_p2p_relay.rs`
 # only. A SEPARATE key on purpose: `p2p` stays exactly `["dep:iroh"]`, which a
 # conformance test asserts by set equality, and `iroh/test-utils` transitively
-# pulls `iroh-relay/server` + `axum` — a server tree that must never reach the
-# shipped binary. Off by default; enabled for that one integration target via
-# `--features p2p-test-utils`, following the `test-instrumentation` precedent.
+# pulls `iroh-relay/server` + `axum`.
+#
+# ⚑ AMENDED 2026-08-17 by Story 18.4c-b (ruling A2). This comment used to end
+# *"— a server tree that must never reach the shipped binary"*. That sentence
+# was true of THIS key and is now false by scope change: `relay-server` below
+# ships the same server tree deliberately, because `relay serve` IS the
+# product's relay. The corrected statement is narrower and still load-bearing:
+# ⛔ the **test-utils** tree (`iroh/test-utils` + `axum`) must never reach the
+# shipped binary, and nothing here may widen `p2p`.
 p2p-test-utils = ["p2p", "iroh/test-utils"]
+# Story 18.4c-b — the embedded relay server for `rustain relay serve` (FR159).
+# A SEPARATE key, exactly like `p2p-test-utils` above: `p2p` stays exactly
+# `["dep:iroh"]` (asserted by set equality), and a NEW key is invisible to that
+# assertion. Off by default — the server tree is ~15 crates and NFR53 bounds a
+# feature at 5 MB.
+#
+# ⚠ FOUR dependencies, not one. `rustls`/`rustls-pemfile` are needed to NAME
+# `rustls::ServerConfig` for `CertConfig::Manual` and to parse the operator's
+# PEMs; both already exist as optional deps behind `a2a`, pinned to the versions
+# reqwest resolves so ONE rustls links. Reusing them widens no other feature
+# array.
+relay-server = ["dep:iroh-relay", "dep:rustls", "dep:rustls-pemfile"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]

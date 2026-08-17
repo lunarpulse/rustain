@@ -6281,6 +6281,7 @@ dependencies = [
  "hex",
  "insta",
  "iroh",
+ "iroh-relay",
  "landlock",
  "libc",
  "lru 0.16.3",

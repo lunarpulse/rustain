@@ -209,6 +209,16 @@ jobs:
           # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` sees it.
           cargo test --features p2p-test-utils \
             --test conformance_p2p_relay
+          # Story 18.4c-b — the relay SERVER target. Same reason as above, one
+          # feature further: it needs `relay-server` (the embedded iroh-relay
+          # server it spawns through rustain's own builder) AND `p2p-test-utils`
+          # (the client's `bind_without_direct_paths` + the self-signed-CA
+          # override, both of which are also `debug_assertions`-gated, so this
+          # command must stay a debug-profile run). Its stem contains `p2p`, so
+          # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` forces it
+          # to be named here.
+          cargo test --features p2p-test-utils,relay-server \
+            --test conformance_p2p_relay_server
 
   mcp:
     name: MCP Feature

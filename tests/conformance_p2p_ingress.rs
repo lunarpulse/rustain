@@ -823,6 +823,12 @@ fn every_p2p_operator_string_stays_within_the_wording_ceiling() {
         // Story 18.4c — the relay client.
         "src/domain/models/relay.rs",
         "src/adapters/relay_config.rs",
+        // Story 18.4c-b — the relay server surface. `cli/relay/serve.rs` holds
+        // EVERY string this cut renders, including its refusals, precisely so
+        // that one whole-file entry covers all of them.
+        "src/adapters/cli/relay/mod.rs",
+        "src/adapters/cli/relay/serve.rs",
+        "src/adapters/relay_server.rs",
     ];
     let mut strings = Vec::new();
     for relative in owned_modules {
@@ -843,6 +849,20 @@ fn every_p2p_operator_string_stays_within_the_wording_ceiling() {
     ] {
         strings.extend(rust_string_literals(function_source(&daemon, function)));
     }
+    // ⚑ Story 18.4c-b — why NEITHER hand-named list above grew.
+    //
+    // The hazard the two lists exist for is real and was checked: `startup.rs` is
+    // exactly where `Command::Relay` is intercepted, and a bail message written
+    // INLINE in that `if let` arm would be uncoverable — an arm is not a
+    // function, so `function_source` has no `fn <name>(` needle for it and
+    // panics rather than covering it.
+    //
+    // The resolution was to remove the hazard instead of chasing it: every relay
+    // string lives in `cli/relay/serve.rs`, which is scanned WHOLE-FILE above,
+    // and the dispatch arm carries no literal at all. `relay serve` composes
+    // nothing in `daemon/mod.rs`, so that list has nothing to gain either.
+    // `the_relay_dispatch_arm_carries_no_operator_copy` below is what holds that
+    // line — ⛔ without it, this paragraph would be a promise instead of a fact.
 
     let reach = "P2P listener ready; directly-addressable peers only; relay disabled";
     assert!(
@@ -895,4 +915,39 @@ fn every_p2p_operator_string_stays_within_the_wording_ceiling() {
             );
         }
     }
+}
+
+/// Story 18.4c-b — the structural ratchet that lets the ceiling above stay a
+/// whole-file scan (Rule 4).
+///
+/// `function_source` needs a literal `fn <name>(` needle and **panics** without
+/// one, so a string written inside `startup.rs`'s `if let Some(Command::Relay
+/// { .. })` arm can never be added to the hand-named list — it would be operator
+/// copy covered by nothing, in the one file where that has happened before.
+///
+/// ⚑ Rather than track a needle that cannot exist, the arm is held EMPTY of copy.
+/// The mutant is direct: write any string literal into that arm and this goes
+/// RED, which is the signal to move the string into `cli/relay/serve.rs` where
+/// the ceiling already reaches it.
+#[test]
+fn the_relay_dispatch_arm_carries_no_operator_copy() {
+    let startup = source("src/infrastructure/startup.rs");
+    let arm = startup
+        .split("if let Some(Command::Relay { action }) = &cli.command {")
+        .nth(1)
+        .expect("positive control: the relay dispatch arm must exist in startup.rs")
+        .split("\n    }")
+        .next()
+        .expect("positive control: the relay dispatch arm must close");
+
+    assert!(
+        arm.contains("relay::run_cli(action)"),
+        "positive control: the arm must actually be the dispatch, got {arm:?}"
+    );
+    let literals = rust_string_literals(arm);
+    assert!(
+        literals.is_empty(),
+        "the relay dispatch arm carries operator copy the wording ceiling cannot \
+         reach — move it into `cli/relay/serve.rs`: {literals:?}"
+    );
 }

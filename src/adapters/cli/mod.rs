@@ -10,6 +10,7 @@ pub mod init;
 pub mod migrate;
 pub mod peer;
 pub mod profile;
+pub mod relay;
 pub mod session;
 pub mod team;
 #[cfg(feature = "openai")]

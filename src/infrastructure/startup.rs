@@ -548,6 +548,22 @@ pub async fn run() -> Result<()> {
             });
     }
 
+    // Story 18.4c-b (AC2/AC3/AC5/AC6) — the `rustain relay serve` verb.
+    // Intercepted here, BEFORE provider construction, for the same reason the
+    // `peer` verbs are: running a relay is a network role, not a model call, and
+    // `--print-service-unit` is pure text.
+    //
+    // ⛔ This arm carries NO string literal, deliberately. An `if let` arm is not
+    // a function, so `function_source` has no `fn <name>(` needle for it and a
+    // message written here could not be added to the wording ceiling's
+    // hand-named list — it would be operator copy covered by nothing. Every
+    // relay string lives in `adapters::cli::relay::serve`, which the ceiling
+    // scans whole-file, and `the_relay_dispatch_arm_carries_no_operator_copy`
+    // holds this line.
+    if let Some(Command::Relay { action }) = &cli.command {
+        return crate::adapters::cli::relay::run_cli(action).await;
+    }
+
     // Story 18.2 (AC6) — `rustain team log`. Intercepted here, BEFORE provider
     // construction: reading the transparency log is offline-safe, read-only
     // and non-billable, exactly like `session list`.

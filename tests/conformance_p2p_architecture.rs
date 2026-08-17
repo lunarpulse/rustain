@@ -188,6 +188,53 @@ fn p2p_feature_is_isolated_and_pins_the_i_roh_stack() {
         Some(true)
     );
 
+    // Story 18.4c-b AC1 — the relay SERVER key. ⛔ Deliberately NOT part of the
+    // `p2p` set-equality assertion above: `relay-server` is a separate key, so
+    // `:180` stays byte-identical and this block is what covers the new one.
+    // Until this landed there was NO version-pin test for `iroh-relay` at all.
+    let relay_server: BTreeSet<_> = features["relay-server"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        relay_server,
+        BTreeSet::from(["dep:iroh-relay", "dep:rustls", "dep:rustls-pemfile"]),
+        "the relay server needs iroh-relay plus the rustls pair that names ServerConfig"
+    );
+    assert!(
+        !defaults.contains(&"relay-server"),
+        "relay-server must remain off by default: the server tree is ~15 crates"
+    );
+    assert_eq!(
+        manifest["dependencies"]["iroh-relay"]["version"].as_str(),
+        Some("=1.0.3"),
+        "iroh-relay must move in lockstep with iroh, or client and server link \
+         different relay protocol versions"
+    );
+    assert_eq!(
+        manifest["dependencies"]["iroh-relay"]["optional"].as_bool(),
+        Some(true),
+        "a non-optional iroh-relay links the whole server tree into every default build"
+    );
+    assert_eq!(
+        manifest["dependencies"]["iroh-relay"]["default-features"].as_bool(),
+        Some(false)
+    );
+    let relay_dep_features: BTreeSet<_> = manifest["dependencies"]["iroh-relay"]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        relay_dep_features,
+        BTreeSet::from(["server"]),
+        "`server` is the only feature wanted, and it re-implies `metrics`, which \
+         AC4's ask-the-relay leg needs to be non-vacuous"
+    );
+
     let a2a: BTreeSet<_> = features["a2a"]
         .as_array()
         .unwrap()

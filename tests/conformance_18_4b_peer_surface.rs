@@ -1637,6 +1637,13 @@ fn the_surface_names_no_tier() {
         "src/adapters/tui/handlers/peer_command.rs",
         "src/adapters/tui/widgets/peer_add_prompt.rs",
         "src/infrastructure/runtime/peer_bridge.rs",
+        // ⚑ Story 18.4c-b's own modules. Self-hosting a relay is the archetypal
+        // "enterprise feature", so this is exactly where the vocabulary tries to
+        // creep back in — and this array's comment above already records the same
+        // omission happening once at 18.4d.
+        "src/adapters/cli/relay/mod.rs",
+        "src/adapters/cli/relay/serve.rs",
+        "src/adapters/relay_server.rs",
     ] {
         let source = std::fs::read_to_string(relative).expect(relative);
         // Code only: a comment may explain WHY the shipped `TrustTier` spelling

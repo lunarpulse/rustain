@@ -192,53 +192,17 @@ async fn run_accept_pump(
 ///
 /// Blocking file I/O — call from `spawn_blocking` or from a non-async startup
 /// path, never from inside a request handler.
+///
+/// ⚑ **The loader itself moved 2026-08-17 (Story 18.4c-b, ruling A7b(2)).**
+/// `relay serve --cert/--key` needs the identical PEM→`ServerConfig` path, so
+/// the body was lifted to [`crate::adapters::pem_tls`] and this function
+/// delegates. ⛔ It was not duplicated: two loaders is two error vocabularies
+/// for one operator mistake, and the copy is the one that forgets the
+/// crypto-provider install. The signature, the messages and the `A2aError`
+/// mapping are unchanged, so every existing caller and assertion still holds.
 pub fn load_tls_material(cert_path: &Path, key_path: &Path) -> Result<A2aTlsMaterial, A2aError> {
-    let read = |path: &Path| -> Result<Vec<u8>, A2aError> {
-        std::fs::read(path)
-            .map_err(|error| A2aError::Config(format!("reading {}: {error}", path.display())))
-    };
-
-    let cert_pem = read(cert_path)?;
-    let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            A2aError::Config(format!(
-                "parsing certificate chain {}: {error}",
-                cert_path.display()
-            ))
-        })?;
-    if certs.is_empty() {
-        return Err(A2aError::Config(format!(
-            "certificate file {} contains no CERTIFICATE block",
-            cert_path.display()
-        )));
-    }
-
-    let key_pem = read(key_path)?;
-    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
-        .map_err(|error| {
-            A2aError::Config(format!(
-                "parsing private key {}: {error}",
-                key_path.display()
-            ))
-        })?
-        .ok_or_else(|| {
-            A2aError::Config(format!(
-                "private key file {} contains no PRIVATE KEY block",
-                key_path.display()
-            ))
-        })?;
-
-    // The process may host several rustls users (reqwest already links one), so
-    // installing the default provider is best-effort: an `Err` means somebody
-    // installed one first, which is fine — it is the same `ring` provider.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|error| A2aError::Config(format!("building rustls server config: {error}")))?;
-
+    let config = crate::adapters::pem_tls::load_server_tls_config(cert_path, key_path)
+        .map_err(|error| A2aError::Config(error.reason().to_owned()))?;
     Ok(A2aTlsMaterial {
         config: Arc::new(config),
     })

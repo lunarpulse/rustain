@@ -5,15 +5,25 @@
 //!
 //! The hermetic relay fixture is `iroh::test_utils::run_relay_server()`, which
 //! lives behind `iroh/test-utils` — and that feature transitively pulls
-//! `iroh-relay/server` plus `axum`, a **server tree that must never reach the
-//! shipped binary**. So it is a separate, non-default cargo key
-//! (`p2p-test-utils`), following the `test-instrumentation` precedent, and
-//! ⛔ **not** added to the `p2p` array: a conformance test asserts
-//! `p2p == {"dep:iroh"}` by set equality, so widening `p2p` goes red while a new
-//! key is invisible to it. The CI `p2p` lane runs this target under its own
-//! `cargo test --features p2p-test-utils` command, because dropping it into the
-//! `--features p2p` command would not fail an assertion — it would fail to
-//! **compile**.
+//! `iroh-relay/server` plus `axum`.
+//!
+//! ⚑ **AMENDED 2026-08-17 by Story 18.4c-b (ruling A2).** This paragraph used
+//! to call that *"a server tree that must never reach the shipped binary"*. The
+//! sentence was true of `p2p-test-utils` and became **false by scope change**
+//! the moment `relay-server` landed: `rustain relay serve` ships the
+//! `iroh-relay` server tree deliberately, off by default, because that server
+//! **is** the product's relay. The corrected, still-load-bearing statement:
+//! ⛔ the **test-utils** tree (`iroh/test-utils` + `axum`) must never reach the
+//! shipped binary — it exists only to fabricate a relay for tests, and
+//! `relay-server` gives production its own.
+//!
+//! So this stays a separate, non-default cargo key (`p2p-test-utils`), following
+//! the `test-instrumentation` precedent, and ⛔ **not** added to the `p2p` array:
+//! a conformance test asserts `p2p == {"dep:iroh"}` by set equality, so widening
+//! `p2p` goes red while a new key is invisible to it. The CI `p2p` lane runs
+//! this target under its own `cargo test --features p2p-test-utils` command,
+//! because dropping it into the `--features p2p` command would not fail an
+//! assertion — it would fail to **compile**.
 //!
 //! # The front door these keystones use, and the bypass they must not
 //!
@@ -1055,13 +1065,22 @@ fn ac3_the_listener_wires_the_watcher_and_never_awaits_online() {
     );
 }
 
-/// AC8 ratchet (Rule 4): every module that renders peer copy is inside the
-/// wording ceiling, **derived by directory walk**.
+/// AC8 ratchet (Rule 4): every module that renders peer or relay copy is inside
+/// the wording ceiling, **derived by directory walk**.
 ///
 /// ⚑ Derived, ⛔ not a hand-maintained second list — a hand-maintained list is
-/// exactly how `ping.rs` slipped out of `the_surface_names_no_tier` while
-/// looking covered. A module added to `src/adapters/cli/peer/` or a relay
-/// module added to `src/adapters/` now fails here on the commit that adds it.
+/// exactly how `ping.rs` slipped out of `the_surface_names_no_tier` while looking
+/// covered.
+///
+/// 🔴 **CORRECTED 2026-08-17 by Story 18.4c-b (ruling A11.2).** This comment used
+/// to claim *"a relay module added to `src/adapters/` now fails here on the
+/// commit that adds it."* **It did not.** The code walked only
+/// `src/adapters/cli/peer/` and then made two literal `expected.push(..)` calls,
+/// so a new `src/adapters/cli/relay/` directory — or a new
+/// `src/adapters/relay_server.rs` — was invisible to it. Leaving a comment that
+/// describes a mechanism the code lacks is what produced this class of defect, so
+/// BOTH were fixed: the walk now covers the relay CLI directory too, and the
+/// remaining literals are named as literals rather than as a walk.
 #[test]
 fn ac8_every_peer_copy_module_is_inside_the_wording_ceiling() {
     let ceiling = source("tests/conformance_p2p_ingress.rs");
@@ -1074,19 +1093,26 @@ fn ac8_every_peer_copy_module_is_inside_the_wording_ceiling() {
         .expect("end of array");
 
     let mut expected: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(root().join("src/adapters/cli/peer"))
-        .expect("the peer CLI directory")
-        .flatten()
-    {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "rs") {
-            let name = path.file_name().expect("file name").to_string_lossy();
-            expected.push(format!("src/adapters/cli/peer/{name}"));
+    // ⚑ WALKED: every module in either verb family's directory, so a new file
+    // there really does fail on the commit that adds it.
+    for family in ["src/adapters/cli/peer", "src/adapters/cli/relay"] {
+        for entry in std::fs::read_dir(root().join(family))
+            .unwrap_or_else(|error| panic!("the {family} directory: {error}"))
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let name = path.file_name().expect("file name").to_string_lossy();
+                expected.push(format!("{family}/{name}"));
+            }
         }
     }
-    // Every module Story 18.4c adds, wherever it sits.
+    // ⚠ NAMED, ⛔ not walked: these sit outside both directories, so they are
+    // literals and a reader must not mistake them for coverage of `src/adapters/`
+    // at large. Story 18.4c's two, then Story 18.4c-b's one.
     expected.push("src/domain/models/relay.rs".to_owned());
     expected.push("src/adapters/relay_config.rs".to_owned());
+    expected.push("src/adapters/relay_server.rs".to_owned());
     expected.sort();
 
     assert!(

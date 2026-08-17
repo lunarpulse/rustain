@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::adapters::cli::peer::PeerAction;
+use crate::adapters::cli::relay::RelayAction;
 use crate::adapters::cli::session::SessionAction;
 use crate::adapters::cli::team::TeamAction;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -243,6 +244,17 @@ pub enum Command {
     Peer {
         #[command(subcommand)]
         action: PeerAction,
+    },
+    /// Run the relay this host offers to its peers (Story 18.4c-b, FR159).
+    ///
+    /// `relay serve` binds the relay `rustain relay serve` names and prints the
+    /// URL peers add to their own `.rustain/relay.json`;
+    /// `relay serve --print-service-unit` renders a systemd unit for those same
+    /// flags and exits without binding anything. Needs a build with the
+    /// `relay-server` feature to serve; the unit renders in any build.
+    Relay {
+        #[command(subcommand)]
+        action: RelayAction,
     },
 }
 

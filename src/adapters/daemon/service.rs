@@ -53,34 +53,15 @@ impl ServiceParams {
     }
 }
 
-/// Single-pass `{placeholder}` substitution (Story 12-1d AC-12-1d-5). Scans `template`
-/// once left-to-right, replacing each `{key}` with its mapped value; an UNKNOWN
-/// `{...}` is emitted literally. Because the scan never re-examines emitted output, a
-/// substituted VALUE that itself contains `{env_block}`/`{user_directive}` (e.g. a
-/// workspace path or profile name with braces) is NOT re-expanded — this closes the
-/// sequential-`.replace()` template-injection defer from the 12.1b review.
-fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open..];
-        if let Some(close_rel) = after.find('}') {
-            let key = &after[1..close_rel];
-            match vars.iter().find(|(k, _)| *k == key) {
-                Some((_, v)) => out.push_str(v),
-                // Unknown placeholder: emit literally (keeps `{...}` that isn't ours).
-                None => out.push_str(&after[..=close_rel]),
-            }
-            rest = &after[close_rel + 1..];
-        } else {
-            out.push_str(after);
-            return out;
-        }
-    }
-    out.push_str(rest);
-    out
-}
+/// The single-pass substitution engine, ⚑ **lifted out of this module
+/// 2026-08-17 by Story 18.4c-b (AC5)**.
+///
+/// It lives in [`crate::adapters::template`] now, un-gated, because
+/// `relay serve --print-service-unit` renders a unit on every platform and this
+/// module is `#![cfg(unix)]`. ⛔ It was not copied: the single-pass property is
+/// load-bearing, and `render_template_does_not_re_expand_substituted_values`
+/// below still asserts it through this re-export.
+use crate::adapters::template::render_template;
 
 /// XML-escape text destined for a plist `<string>` element (Story 12-1d AC-12-1d-5):
 /// `&` first, then `<`/`>`. Closes the launchd XML-injection defer — a workspace /
