@@ -14,6 +14,7 @@ use crate::domain::services::peer_admission::{PeerRoster, configured_peer_by_ali
 pub fn render_peer_show(
     alias: &str,
     config: &crate::domain::models::P2pConfigState,
+    relay: &crate::domain::models::RelayConfigState,
     out: &mut impl Write,
 ) -> Result<()> {
     let peers = match config {
@@ -24,7 +25,7 @@ pub fn render_peer_show(
             write!(
                 out,
                 "{}",
-                crate::adapters::cli::peer::rows::render_roster(&peer_roster(other), None)
+                crate::adapters::cli::peer::rows::render_roster(&peer_roster(other), None, relay)
             )?;
             return Ok(());
         }
@@ -35,7 +36,7 @@ pub fn render_peer_show(
             write!(
                 out,
                 "{}",
-                show_text(&spec.id, spec.pinned_key.as_ref(), peer_id.as_ref())
+                show_text(&spec.id, spec.pinned_key.as_ref(), peer_id.as_ref(), relay)
             )?;
         }
         None => {

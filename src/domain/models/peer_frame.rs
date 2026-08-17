@@ -159,37 +159,104 @@ impl FrameOutcome {
     }
 }
 
-/// One receiver's answer to one frame.
+/// How one frame travelled, as **this host observed it** while carrying it
+/// (Story 18.4c, `UX-DR-PT-12`).
+///
+/// # Why three arms and ⛔ not two bools
+///
+/// iroh's `Path` answers `is_ip()` and `is_relay()`, and it has **no
+/// `is_custom()`** — a custom-transport path returns **false from both**. Code
+/// that assumes `!is_relay() ⇒ direct` therefore renders an unknown transport as
+/// a direct one. The unknown case is *neither true*, ⛔ not a missing variant,
+/// so it gets its own arm and a new upstream transport cannot silently read as
+/// direct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathObservation {
+    /// A direct IP path between the two endpoints.
+    Direct,
+    /// A relay carried it. `host` is the relay's canonical URL — the third
+    /// party that therefore observed this exchange (FR159-a, NFR73).
+    Relayed { host: String },
+    /// A transport this build does not name. ⛔ Never rendered as direct.
+    Other,
+}
+
+/// One receiver's answer to one frame, plus the path this host watched it take.
+///
+/// # ⛔ The dishonest state has no spelling
+///
+/// A path claim may be made **only where a received verdict exists**
+/// (`UX-DR-PT-08`, `UX-DR-PT-12`). That is not a rule anyone has to remember
+/// here: [`FrameVerdict::unanswered`] takes no path and there is no setter, so
+/// the mutant *"print a path on `Unanswered`"* **does not compile**.
+///
+/// The reason the rule exists was proven by execution: a receiver dropped its
+/// responder and shut down, the verdict came back `Unanswered`, the connection
+/// count fell to **0**, and `paths()` still reported `is_selected = true`
+/// because closing a path never clears `selected`. Reading the path *after* the
+/// verdict prints `Carried directly.` underneath *"the peer did not answer"*.
+///
+/// ⚠ ⛔ `outcome` is private with an accessor, exactly like [`Self::path`]:
+/// leaving it `pub` let any caller do `verdict.outcome = Unanswered` on an
+/// accepted verdict and keep the path — re-opening by mutation the exact
+/// path-under-`Unanswered` state [`Self::unanswered`] exists to make
+/// unconstructable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameVerdict {
-    pub outcome: FrameOutcome,
+    outcome: FrameOutcome,
     /// The position the receiver expects next, when it said one.
     pub expected: Option<FeedPosition>,
+    /// ⛔ Private, and it stays private: see the type's own doc.
+    path: Option<PathObservation>,
 }
 
 impl FrameVerdict {
+    /// The sender's record of an accepted frame: a verdict it received, and the
+    /// path it watched that frame take. ⚠ The path is **required**.
     #[must_use]
-    pub fn accepted() -> Self {
+    pub fn accepted(path: PathObservation) -> Self {
         Self {
             outcome: FrameOutcome::Accepted,
             expected: None,
+            path: Some(path),
         }
     }
 
+    /// The sender's record of a refused frame. ⚠ The path is **required**.
     #[must_use]
-    pub fn refused(refusal: FrameRefusal) -> Self {
+    pub fn refused(refusal: FrameRefusal, path: PathObservation) -> Self {
         Self {
             outcome: FrameOutcome::Refused(refusal),
             expected: None,
+            path: Some(path),
         }
     }
 
+    /// No readable answer came back.
+    ///
+    /// ⛔ Takes no path and **cannot be given one**. The frame is on the wire
+    /// and the outcome is unknown; anything this host would say about the path
+    /// is read from a snapshot the connection has already stopped maintaining.
     #[must_use]
     pub fn unanswered() -> Self {
         Self {
             outcome: FrameOutcome::Unanswered,
             expected: None,
+            path: None,
         }
+    }
+
+    /// What became of the frame, per the constructors that also carry (or
+    /// forbid) its path claim.
+    #[must_use]
+    pub fn outcome(&self) -> FrameOutcome {
+        self.outcome
+    }
+
+    /// The path this host observed, when it is entitled to claim one.
+    #[must_use]
+    pub fn path(&self) -> Option<&PathObservation> {
+        self.path.as_ref()
     }
 
     #[must_use]
@@ -206,6 +273,49 @@ impl FrameVerdict {
             return None;
         }
         current.accept_guidance(self.expected.as_ref()?)
+    }
+}
+
+/// The answer a **receiver** sends back — a domain type that **cannot carry a
+/// path**, because a receiver observes nothing about how the sender's bytes
+/// reached it, and this value is encoded onto the wire, where no path field
+/// exists (Story 18.4c review).
+///
+/// ⚑ This is deliberately **not** a `FrameVerdict`. When the reply was spelled
+/// `FrameVerdict::reply_accepted()`, any `PeerTransport` implementation could
+/// return that from `send_to` and silently drop the path claim the ping surface
+/// owes on every answered frame. A reply type with no path **cannot be
+/// mistaken for** a sender's verdict, because it is not one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameReply {
+    pub outcome: FrameOutcome,
+    /// The position this receiver expects next, when it has one to offer.
+    pub expected: Option<FeedPosition>,
+}
+
+impl FrameReply {
+    /// The receiver's answer to an accepted frame. ⛔ No path, by type.
+    #[must_use]
+    pub fn accepted() -> Self {
+        Self {
+            outcome: FrameOutcome::Accepted,
+            expected: None,
+        }
+    }
+
+    /// The receiver's refusal. ⛔ No path, by type.
+    #[must_use]
+    pub fn refused(refusal: FrameRefusal) -> Self {
+        Self {
+            outcome: FrameOutcome::Refused(refusal),
+            expected: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_expected(mut self, expected: FeedPosition) -> Self {
+        self.expected = Some(expected);
+        self
     }
 }
 
@@ -274,20 +384,63 @@ mod tests {
             prev_hash: vec![2u8; FEED_ENTRY_HASH_BYTES],
         };
         assert_eq!(
-            FrameVerdict::refused(FrameRefusal::FeedPositionMismatch)
+            FrameVerdict::refused(FrameRefusal::FeedPositionMismatch, PathObservation::Direct)
                 .with_expected(expected.clone())
                 .guided_retry(&current),
             Some(expected.clone())
         );
         // Mutant: retry on any refusal that happens to carry a position.
         assert!(
-            FrameVerdict::refused(FrameRefusal::NotAdmitted)
+            FrameVerdict::refused(FrameRefusal::NotAdmitted, PathObservation::Direct)
                 .with_expected(expected)
                 .guided_retry(&current)
                 .is_none()
         );
         // Mutant: infer a retry from an accepted verdict.
-        assert!(FrameVerdict::accepted().guided_retry(&current).is_none());
+        assert!(
+            FrameVerdict::accepted(PathObservation::Direct)
+                .guided_retry(&current)
+                .is_none()
+        );
+    }
+
+    /// Story 18.4c, AC5 — the path claim exists exactly where a received
+    /// verdict does.
+    ///
+    /// ⚑ Mutant (a) — *"print a path on `Unanswered`"* — is **structurally
+    /// impossible**: [`FrameVerdict::unanswered`] takes no argument, both
+    /// `path` and `outcome` are private with accessors and no setters, so the
+    /// mutant does not compile — not by constructor, and not by mutating an
+    /// accepted verdict's outcome either. What is asserted here is the half a
+    /// test *can* reach: the unanswered arm carries nothing, and both answered
+    /// arms carry what they observed.
+    ///
+    /// ⚑ And a receiver's answer is a [`FrameReply`] — a different type that
+    /// has no path to drop, so an adapter cannot hand one back from `send_to`
+    /// as though it were this host's own verdict.
+    #[test]
+    fn a_path_claim_exists_only_where_a_received_verdict_does() {
+        assert_eq!(FrameVerdict::unanswered().path(), None);
+        assert_eq!(FrameReply::accepted().outcome, FrameOutcome::Accepted);
+        assert_eq!(
+            FrameReply::refused(FrameRefusal::NotAdmitted).outcome,
+            FrameOutcome::Refused(FrameRefusal::NotAdmitted)
+        );
+
+        // Positive control: the mechanism can fire, on both answered arms.
+        assert_eq!(
+            FrameVerdict::accepted(PathObservation::Relayed {
+                host: "https://relay.example/".to_owned()
+            })
+            .path(),
+            Some(&PathObservation::Relayed {
+                host: "https://relay.example/".to_owned()
+            })
+        );
+        assert_eq!(
+            FrameVerdict::refused(FrameRefusal::Declined, PathObservation::Other).path(),
+            Some(&PathObservation::Other)
+        );
     }
 
     #[test]

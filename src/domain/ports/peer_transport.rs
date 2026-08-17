@@ -4,7 +4,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::domain::models::{AgentEnvelope, FrameVerdict, PeerId};
+use crate::domain::models::{AgentEnvelope, FrameReply, FrameVerdict, PeerId};
 
 /// Dialable transport coordinates encoded by an adapter.
 ///
@@ -59,12 +59,12 @@ pub struct InboundFrame {
 /// holding a transport stream — the adapter owns the stream and the wire codec,
 /// and one codec is the whole point.
 #[derive(Debug)]
-pub struct FrameResponder(oneshot::Sender<FrameVerdict>);
+pub struct FrameResponder(oneshot::Sender<FrameReply>);
 
 impl FrameResponder {
     /// Create the responder and the receiver the transport adapter awaits.
     #[must_use]
-    pub fn channel() -> (Self, oneshot::Receiver<FrameVerdict>) {
+    pub fn channel() -> (Self, oneshot::Receiver<FrameReply>) {
         let (tx, rx) = oneshot::channel();
         (Self(tx), rx)
     }
@@ -72,8 +72,13 @@ impl FrameResponder {
     /// Answer once. A dropped receiver is not an error: the sender may already
     /// have stopped waiting, and the receiver's own durable row is the
     /// independent record either way.
-    pub fn answer(self, verdict: FrameVerdict) {
-        let _ = self.0.send(verdict);
+    ///
+    /// ⚑ Takes a [`FrameReply`], ⛔ not a `FrameVerdict` (Story 18.4c review):
+    /// a receiver observes no path, and the reply type has none to drop — so
+    /// no adapter can hand a reply back from `send_to` as though it were this
+    /// host's own verdict.
+    pub fn answer(self, reply: FrameReply) {
+        let _ = self.0.send(reply);
     }
 }
 

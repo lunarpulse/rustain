@@ -14,7 +14,7 @@ use crate::adapters::rap::{
     FrameSettlement, PeerDeliveryError, ReplayReservation, ReplayWindow, VerifiedPeerFrameHandler,
     VerifyError, verify_envelope_reserved,
 };
-use crate::domain::models::{CorrelationId, FeedPosition, FrameRefusal, FrameVerdict, PeerId};
+use crate::domain::models::{CorrelationId, FeedPosition, FrameRefusal, FrameReply, PeerId};
 use crate::domain::ports::{
     FrameResponder, InboundFrame, PeerInteractionRecorder, PeerTransport, PeerTransportError,
     TransportRefusalRecord,
@@ -231,24 +231,29 @@ impl IrohPeerIngress {
         outcome
     }
 
-    /// The verdict this receiver hands back for one outcome.
+    /// The reply this receiver hands back for one outcome.
+    ///
+    /// ⛔ It is a `FrameReply` — a type with no path to carry: a receiver
+    /// observes nothing about how the sender's bytes reached it, and this value
+    /// is encoded onto the wire, where no path field exists. The path claim
+    /// belongs to the sender, minted beside the answer it received.
     async fn verdict_for(
         &self,
         peer: &PeerId,
         outcome: &Result<u64, PeerIngressError>,
-    ) -> FrameVerdict {
+    ) -> FrameReply {
         let Err(error) = outcome else {
-            return FrameVerdict::accepted();
+            return FrameReply::accepted();
         };
         let refusal = refusal_class(error);
-        let verdict = FrameVerdict::refused(refusal);
+        let reply = FrameReply::refused(refusal);
         if refusal == FrameRefusal::FeedPositionMismatch {
             // The whole point of the acknowledged frame: tell the sender the
             // position this window will accept, so it never has to remember one.
             let expected = self.replay.lock().await.expected_position(peer);
-            verdict.with_expected(expected)
+            reply.with_expected(expected)
         } else {
-            verdict
+            reply
         }
     }
 

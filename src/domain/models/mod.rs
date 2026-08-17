@@ -60,6 +60,7 @@ pub mod provider;
 pub mod provider_capabilities;
 pub mod redacted_url;
 pub mod redaction;
+pub mod relay;
 pub mod room_role;
 pub mod router;
 pub mod sandbox;
@@ -199,8 +200,8 @@ pub use p2p_peer_spec::{P2pConfigState, P2pPeerSpec};
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 #[allow(unused_imports)]
 pub use peer_frame::{
-    FEED_ENTRY_HASH_BYTES, FeedPosition, FrameOutcome, FrameRefusal, FrameVerdict,
-    MAX_GUIDED_SEQUENCE_JUMP,
+    FEED_ENTRY_HASH_BYTES, FeedPosition, FrameOutcome, FrameRefusal, FrameReply, FrameVerdict,
+    MAX_GUIDED_SEQUENCE_JUMP, PathObservation,
 };
 pub use peer_identity::{Ed25519Sig, PeerId, PeerIdentity, PeerIdentityError};
 #[allow(unused_imports)]
@@ -221,6 +222,8 @@ pub use plan::{
     PlanTaskStatus, TaskResult,
 };
 pub use redacted_url::RedactedUrl;
+#[allow(unused_imports)]
+pub use relay::{MAX_CONFIGURED_RELAYS, RelayConfigState, RelayMode, RelaySet};
 #[allow(unused_imports)]
 pub use room_role::{RoomEditDecision, RoomEditKind, RoomRole};
 pub use sandbox::SandboxPolicy;

@@ -14,7 +14,7 @@ use ed25519_dalek::SigningKey;
 
 use rustain::domain::models::{
     PEER_FINGERPRINT_COLUMNS, PEER_TICKET_PREFIX, PeerTicket, PeerTicketError, PinnedKey,
-    short_fingerprint,
+    RelayConfigState, short_fingerprint,
 };
 use rustain::domain::services::peer_admission::{
     PeerImportVerdict, PeerRevokeVerdict, PeerRoster, peer_import_verdict, peer_revoke_verdict,
@@ -23,6 +23,14 @@ use rustain::domain::services::peer_admission::{
 
 const NOW: i64 = 1_760_000_000;
 const HOUR: i64 = 3_600;
+
+/// The relay mode every 18.4b assertion in this file was written against, and
+/// the one an install with no `.rustain/relay.json` still composes (18.4c, A5).
+///
+/// ⚑ Naming it rather than defaulting it is the point: 18.4c made this copy
+/// **conditional**, and a blanket rewrite would have been invisible if these
+/// tests had quietly picked up whatever the new default was.
+const DISABLED_RELAY: RelayConfigState = RelayConfigState::Absent;
 
 fn signer(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
@@ -546,7 +554,7 @@ fn at_a_wide_terminal_the_blob_and_the_qr_both_render_from_one_payload() {
     );
 
     let mut out = Vec::new();
-    render_invite(&ticket, Some((200, 200)), true, &mut out).expect("render");
+    render_invite(&ticket, Some((200, 200)), true, &DISABLED_RELAY, &mut out).expect("render");
     let text = String::from_utf8(out).expect("utf8");
     assert!(
         text.contains(&blob),
@@ -577,7 +585,7 @@ fn the_invite_copy_states_reach_expiry_and_the_absence_of_an_address() {
 
     let ticket = PeerTicket::mint(&signer(111), Vec::new(), NOW + HOUR, None).expect("mint");
     let mut out = Vec::new();
-    render_invite(&ticket, Some((80, 24)), false, &mut out).expect("render");
+    render_invite(&ticket, Some((80, 24)), false, &DISABLED_RELAY, &mut out).expect("render");
     let text = String::from_utf8(out).expect("utf8");
     for needle in [
         "carries no network address",
@@ -611,7 +619,7 @@ fn the_invite_copy_states_reach_expiry_and_the_absence_of_an_address() {
     };
     let reachable = PeerTicket::mint(&signer(112), vec![bundle], NOW + HOUR, None).expect("mint");
     let mut out = Vec::new();
-    render_invite(&reachable, Some((80, 24)), false, &mut out).expect("render");
+    render_invite(&reachable, Some((80, 24)), false, &DISABLED_RELAY, &mut out).expect("render");
     let text = String::from_utf8(out).expect("utf8");
     assert!(text.contains("2 direct addresses"), "{text}");
 }
@@ -1068,16 +1076,18 @@ fn the_roster_renders_four_distinct_states_and_empty_is_not_an_error() {
     use rustain::adapters::cli::peer::rows::render_roster;
     use rustain::domain::models::P2pConfigState;
 
-    let absent = render_roster(&peer_roster(&P2P_ABSENT), Some(false));
+    let absent = render_roster(&peer_roster(&P2P_ABSENT), Some(false), &DISABLED_RELAY);
     let empty = render_roster(
         &peer_roster(&P2pConfigState::Present(Vec::new())),
         Some(false),
+        &DISABLED_RELAY,
     );
     let broken = render_roster(
         &peer_roster(&P2pConfigState::Malformed {
             reason: "invalid JSON".to_owned(),
         }),
         None,
+        &DISABLED_RELAY,
     );
     let populated = render_roster(
         &peer_roster(&P2pConfigState::Present(vec![
@@ -1085,6 +1095,7 @@ fn the_roster_renders_four_distinct_states_and_empty_is_not_an_error() {
             spec("carol", None),
         ])),
         Some(true),
+        &DISABLED_RELAY,
     );
 
     assert!(absent.contains("No peer allowlist. This host admits no peer."));
@@ -1143,6 +1154,7 @@ fn aliases_are_sanitized_on_the_read_path() {
             Some(pinned_key_of(&fresh_ticket(191))),
         )])),
         Some(false),
+        &DISABLED_RELAY,
     );
     assert!(
         !rendered.contains('\x1b'),
@@ -1165,7 +1177,7 @@ fn peer_show_prints_both_keys_whole() {
 
     let key = pinned_key_of(&fresh_ticket(201));
     let peer_id = key.peer_id().expect("peer id");
-    let text = show_text("alice", Some(&key), Some(&peer_id));
+    let text = show_text("alice", Some(&key), Some(&peer_id), &DISABLED_RELAY);
     assert!(
         text.contains(&key.x),
         "the pinned key must print whole: {text}"
@@ -1179,7 +1191,7 @@ fn peer_show_prints_both_keys_whole() {
         "{text}"
     );
     // An unpinned entry says it admits nobody rather than showing nothing.
-    let none = show_text("carol", None, None);
+    let none = show_text("carol", None, None, &DISABLED_RELAY);
     assert!(none.contains("admits nobody"), "{none}");
 }
 
@@ -1604,6 +1616,18 @@ fn the_surface_names_no_tier() {
         "src/domain/models/peer_ticket.rs",
         "src/domain/services/peer_admission.rs",
         "src/adapters/cli/peer/mod.rs",
+        // ⚑ Story 18.4c closes the hole this list opened: 18.4d added six
+        // modules that render operator copy and none of them was named here,
+        // so the scan looked complete and covered nothing they said.
+        "src/adapters/cli/peer/ping.rs",
+        "src/domain/models/peer_frame.rs",
+        "src/domain/models/peer_reach.rs",
+        "src/domain/services/peer_reach_filter.rs",
+        "src/domain/services/refusal_quota.rs",
+        "src/adapters/p2p_reach.rs",
+        // Story 18.4c's own modules.
+        "src/domain/models/relay.rs",
+        "src/adapters/relay_config.rs",
         "src/adapters/cli/peer/rows.rs",
         "src/adapters/cli/peer/invite.rs",
         "src/adapters/cli/peer/add.rs",

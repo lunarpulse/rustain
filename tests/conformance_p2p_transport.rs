@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use rustain::adapters::iroh::{IrohPeerTransport, derive_peer_endpoint_identity};
 use rustain::adapters::rap::AgentSigner;
 use rustain::domain::models::{
-    AgentEnvelope, AgentId, CorrelationId, FrameOutcome, FrameVerdict, MessageKind, PeerId,
+    AgentEnvelope, AgentId, CorrelationId, FrameOutcome, FrameReply, MessageKind, PeerId, RelayMode,
 };
 use rustain::domain::ports::{PeerTransport, PeerTransportError};
 
@@ -67,7 +67,7 @@ async fn minimal_i_roh_adapter_round_trips_an_unverified_frame() {
     let server_public = signing_key(17).verifying_key().to_bytes();
     let server_identity =
         derive_peer_endpoint_identity(&server_public).expect("server identity derives");
-    let server = IrohPeerTransport::bind(server_seed, HashMap::new())
+    let server = IrohPeerTransport::bind(server_seed, HashMap::new(), &RelayMode::Disabled)
         .await
         .expect("bind server");
     let server_address = server.local_address().expect("server address");
@@ -80,6 +80,7 @@ async fn minimal_i_roh_adapter_round_trips_an_unverified_frame() {
     let client = IrohPeerTransport::bind(
         client_seed,
         HashMap::from([(server_identity.peer_id.clone(), server_address)]),
+        &RelayMode::Disabled,
     )
     .await
     .expect("bind client");
@@ -100,7 +101,7 @@ async fn minimal_i_roh_adapter_round_trips_an_unverified_frame() {
             .responder
             .take()
             .expect("a frame on a real connection carries an answer channel");
-        responder.answer(FrameVerdict::accepted());
+        responder.answer(FrameReply::accepted());
         frame
     });
     let verdict = client
@@ -112,7 +113,7 @@ async fn minimal_i_roh_adapter_round_trips_an_unverified_frame() {
     assert_eq!(frame.peer_id, client_identity.peer_id);
     assert_eq!(frame.envelope, envelope);
     assert_eq!(
-        verdict.outcome,
+        verdict.outcome(),
         FrameOutcome::Accepted,
         "the sender must learn the outcome from the receiver, never infer it"
     );
@@ -131,7 +132,7 @@ async fn closed_cached_connection_is_evicted_before_redial() {
     let server_public = signing_key(31).verifying_key().to_bytes();
     let server_identity =
         derive_peer_endpoint_identity(&server_public).expect("server identity derives");
-    let server = IrohPeerTransport::bind(server_seed, HashMap::new())
+    let server = IrohPeerTransport::bind(server_seed, HashMap::new(), &RelayMode::Disabled)
         .await
         .expect("bind server");
     let server_address = server.local_address().expect("server address");
@@ -140,6 +141,7 @@ async fn closed_cached_connection_is_evicted_before_redial() {
     let client = IrohPeerTransport::bind(
         client_seed,
         HashMap::from([(server_identity.peer_id.clone(), server_address)]),
+        &RelayMode::Disabled,
     )
     .await
     .expect("bind client");
@@ -167,7 +169,7 @@ async fn shutdown_clears_active_connection_cache() {
     let server_public = signing_key(41).verifying_key().to_bytes();
     let server_identity =
         derive_peer_endpoint_identity(&server_public).expect("server identity derives");
-    let server = IrohPeerTransport::bind(server_seed, HashMap::new())
+    let server = IrohPeerTransport::bind(server_seed, HashMap::new(), &RelayMode::Disabled)
         .await
         .expect("bind server");
     let server_address = server.local_address().expect("server address");
@@ -175,6 +177,7 @@ async fn shutdown_clears_active_connection_cache() {
     let client = IrohPeerTransport::bind(
         signing_key(43).to_bytes(),
         HashMap::from([(server_identity.peer_id.clone(), server_address)]),
+        &RelayMode::Disabled,
     )
     .await
     .expect("bind client");

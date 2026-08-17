@@ -200,6 +200,15 @@ jobs:
             --test conformance_p2p_transport \
             --test conformance_p2p_peer_admission \
             --test conformance_p2p_reach
+          # Story 18.4c — the relay target needs the hermetic relay fixture,
+          # which lives behind `iroh/test-utils`. `--features p2p` is the whole
+          # feature list of the command above, so dropping this target into it
+          # would not fail an assertion: it would fail to COMPILE, and the lane
+          # would go red on a build error. It therefore runs under its own
+          # feature key, in this same job, where the default-lane wiring guard
+          # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` sees it.
+          cargo test --features p2p-test-utils \
+            --test conformance_p2p_relay
 
   mcp:
     name: MCP Feature

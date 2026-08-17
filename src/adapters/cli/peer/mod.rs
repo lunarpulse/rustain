@@ -22,9 +22,22 @@
 //!
 //! # ⛔ Not in this cut
 //!
-//! No tier, plan, edition or posture — no such mechanism exists in the tree. No
-//! connection-state indicator — this transport observes none. No relay of any
-//! kind. Nothing cryptographic beyond Ed25519 signature checking.
+//! No tier, plan, edition or posture — no such mechanism exists in the tree.
+//! Nothing cryptographic beyond Ed25519 signature checking.
+//!
+//! ⚠ **Two denials that stood here are false since Story 18.4c. They are
+//! amended in the commit that falsifies them, ⛔ not quietly deleted.**
+//!
+//! * *"No relay of any kind."* — the endpoint now composes one of three relay
+//!   modes (`disabled`, `default`, `configured`), and `disabled` is still what
+//!   an install with no `.rustain/relay.json` gets. What stays true is
+//!   narrower and worth saying: a relay a **peer** names is a claim, recorded
+//!   and rendered, and dialed only if the operator already configured it.
+//! * *"No connection-state indicator — this transport observes none."* — it
+//!   observes exactly one thing, exactly once: how a single frame travelled,
+//!   reported beside the verdict that frame received (`UX-DR-PT-12`). ⛔ Still
+//!   no standing connection state on the roster — `peer list` binds no
+//!   transport, so it has nothing to report and reports nothing.
 
 use clap::Subcommand;
 

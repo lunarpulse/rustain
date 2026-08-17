@@ -40,6 +40,7 @@ pub mod project_context_loader;
 pub mod project_scoped_memory;
 pub mod provider;
 pub mod rap;
+pub mod relay_config;
 pub mod sandbox;
 #[cfg(feature = "cron")]
 pub mod scheduler;

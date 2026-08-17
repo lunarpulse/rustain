@@ -249,6 +249,13 @@ a2a = [
 # Story 18.4 — cross-host peer transport. Kept independent from the A2A HTTP
 # surface and out of default; domain types compile without the adapter.
 p2p = ["dep:iroh"]
+# Story 18.4c — the hermetic relay fixture, for `tests/conformance_p2p_relay.rs`
+# only. A SEPARATE key on purpose: `p2p` stays exactly `["dep:iroh"]`, which a
+# conformance test asserts by set equality, and `iroh/test-utils` transitively
+# pulls `iroh-relay/server` + `axum` — a server tree that must never reach the
+# shipped binary. Off by default; enabled for that one integration target via
+# `--features p2p-test-utils`, following the `test-instrumentation` precedent.
+p2p-test-utils = ["p2p", "iroh/test-utils"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]

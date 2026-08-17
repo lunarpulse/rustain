@@ -32,7 +32,8 @@ use rustain::adapters::rap::{
 };
 use rustain::domain::models::{
     AgentEnvelope, AgentEnvelopeHeader, AgentId, AgentMessage, CorrelationId, Ed25519Sig,
-    JournalRecord, MessageKind, PeerFrameAttemptOutcome, PeerId, PeerIdentity, RoomEvent,
+    JournalRecord, MessageKind, PeerFrameAttemptOutcome, PeerId, PeerIdentity, RelayMode,
+    RoomEvent,
 };
 use rustain::domain::ports::{
     AgentMessageBus, PeerDeliveryRecord, PeerInteractionRecorder, PeerTransport,
@@ -134,9 +135,13 @@ async fn receiver(workspace: &Path, seed: u8, now_ms: i64) -> Receiver {
     let identity = derive_peer_endpoint_identity(&signing_key(seed).verifying_key().to_bytes())
         .expect("receiver identity");
     let transport = Arc::new(
-        IrohPeerTransport::bind(signing_key(seed).to_bytes(), HashMap::new())
-            .await
-            .expect("bind receiver"),
+        IrohPeerTransport::bind(
+            signing_key(seed).to_bytes(),
+            HashMap::new(),
+            &RelayMode::Disabled,
+        )
+        .await
+        .expect("bind receiver"),
     );
     let consumer = Arc::new(AcceptingConsumer::default());
     let recorder = Arc::new(CountingRecorder::default());
@@ -284,9 +289,13 @@ async fn the_invite_verb_publishes_the_reach_the_listener_recorded() {
     );
 
     // A real endpoint publishes a real record, exactly as the daemon does at bind.
-    let transport = IrohPeerTransport::bind(signing_key(99).to_bytes(), HashMap::new())
-        .await
-        .expect("bind");
+    let transport = IrohPeerTransport::bind(
+        signing_key(99).to_bytes(),
+        HashMap::new(),
+        &RelayMode::Disabled,
+    )
+    .await
+    .expect("bind");
     let address = transport.local_address().expect("address");
     rustain::adapters::p2p_reach::publish_self_reach(
         &workspace_p2p_reach_path(host.workspace.path()),
@@ -499,6 +508,7 @@ async fn a_refused_frame_is_journaled_once_and_reported_to_the_sender() {
     let client = IrohPeerTransport::bind(
         signing_key(93).to_bytes(),
         HashMap::from([(receiver.peer_id.clone(), address)]),
+        &RelayMode::Disabled,
     )
     .await
     .expect("bind client");
@@ -514,7 +524,7 @@ async fn a_refused_frame_is_journaled_once_and_reported_to_the_sender() {
         assert!(accepted.is_err(), "an unlisted peer must be refused");
         let verdict = sent.expect("the frame still travels");
         assert_eq!(
-            verdict.outcome,
+            verdict.outcome(),
             rustain::domain::models::FrameOutcome::Refused(
                 rustain::domain::models::FrameRefusal::NotAdmitted
             ),
@@ -599,9 +609,13 @@ fn signed(
 /// through it.
 #[tokio::test]
 async fn a_real_endpoint_address_decodes_through_the_import_filter() {
-    let transport = IrohPeerTransport::bind(signing_key(94).to_bytes(), HashMap::new())
-        .await
-        .expect("bind");
+    let transport = IrohPeerTransport::bind(
+        signing_key(94).to_bytes(),
+        HashMap::new(),
+        &RelayMode::Disabled,
+    )
+    .await
+    .expect("bind");
     let address = transport.local_address().expect("local address");
     let identity = derive_peer_endpoint_identity(&signing_key(94).verifying_key().to_bytes())
         .expect("identity");
@@ -621,6 +635,7 @@ async fn a_real_endpoint_address_decodes_through_the_import_filter() {
     IrohPeerTransport::bind(
         signing_key(95).to_bytes(),
         HashMap::from([(identity.peer_id.clone(), imported)]),
+        &RelayMode::Disabled,
     )
     .await
     .expect("the filtered address must still bind")

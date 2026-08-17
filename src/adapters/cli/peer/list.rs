@@ -10,7 +10,8 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::adapters::cli::peer::rows::{
-    PEER_LIST_SCHEMA_VERSION, render_roster, sanitize_for_terminal,
+    PEER_LIST_SCHEMA_VERSION, reach_statement, relay_disclosure, render_roster,
+    sanitize_for_terminal,
 };
 use crate::domain::services::peer_admission::PeerRoster;
 
@@ -27,7 +28,17 @@ struct PeerListJson<'a> {
     reason: Option<String>,
     peers: Vec<PeerRowJson>,
     /// The reach limit, stated wherever peer configuration is shown.
+    ///
+    /// ⚠ This is a **machine-readable schema value**, not copy: amending it is
+    /// a schema change, which is why it is one of an enumerable set of
+    /// sentences keyed by the composed relay mode rather than a free-form
+    /// string.
     reach: &'a str,
+    /// What a relay-composed host discloses (Story 18.4c, AC9). ⛔ Absent on a
+    /// `disabled` host: nothing third-party is carrying anything there, and an
+    /// empty disclosure would read as one that was suppressed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relay_disclosure: Option<&'a str>,
     /// ⛔ Present so a consumer cannot mistake this list for connection state.
     configuration_not_connection_status: bool,
 }
@@ -42,17 +53,17 @@ struct PeerRowJson {
 }
 
 const CONFIG_PATH: &str = ".rustain/p2p.json";
-const REACH: &str = "directly-addressable peers only; relay disabled";
 
 /// Render the roster, human or JSON.
 pub fn render_peer_list(
     roster: &PeerRoster,
     listen: Option<bool>,
+    relay: &crate::domain::models::RelayConfigState,
     json: bool,
     out: &mut impl Write,
 ) -> Result<()> {
     if !json {
-        write!(out, "{}", render_roster(roster, listen))?;
+        write!(out, "{}", render_roster(roster, listen, relay))?;
         return Ok(());
     }
     let (state, reason, peers) = match roster {
@@ -81,7 +92,8 @@ pub fn render_peer_list(
         state,
         reason,
         peers,
-        reach: REACH,
+        reach: reach_statement(relay),
+        relay_disclosure: relay_disclosure(relay),
         configuration_not_connection_status: true,
     };
     writeln!(out, "{}", serde_json::to_string_pretty(&payload)?)?;

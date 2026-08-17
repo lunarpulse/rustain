@@ -22,22 +22,128 @@ use std::fmt::Write as _;
 
 use crate::adapters::cli::peer::ping::PingRefusal;
 use crate::domain::models::{
-    FrameOutcome, PeerAdmissionOutcome, PeerId, PeerTicket, PinnedKey, peer_fingerprint,
+    FrameOutcome, PathObservation, PeerAdmissionOutcome, PeerId, PeerTicket, PinnedKey,
+    RelayConfigState, RelayMode, peer_fingerprint,
 };
 use crate::domain::services::peer_admission::{PeerRoster, PeerRosterRow, ROTATED_KEY_DOCTRINE};
 
 /// Schema version for `peer list --json`, following the `session list` idiom.
-pub const PEER_LIST_SCHEMA_VERSION: &str = "1.0";
+///
+/// ⚑ Bumped `1.0 → 1.1` by the 18.4c code review: the payload gained the
+/// conditional `relay_disclosure` field and the machine-readable `reach` value
+/// set expanded from one sentence to a mode-conditional set — additive changes,
+/// but changes to a schema value all the same, and `list.rs` itself documents
+/// amending `reach` as one.
+pub const PEER_LIST_SCHEMA_VERSION: &str = "1.1";
 
 /// What the operator is looking at, said once and reused.
 const CONFIG_LABEL: &str = ".rustain/p2p.json";
 
 /// The reach limit, matching the shipped listener line word for word
-/// (`UX-DR-PT-07`). ⛔ No connection-state indicator: `relayed` cannot occur
-/// under this cut's endpoint preset, `direct` is never observed because no path
-/// observation is performed, and an unreachable dial is an address-map miss
-/// rather than a network verdict.
-const REACH_LIMIT: &str = "Reach limit: directly-addressable peers only; relay disabled.";
+/// (`UX-DR-PT-07`), **conditional on the relay mode this host composed**.
+///
+/// ⚠ Conditional, ⛔ never blanket-rewritten. `disabled` stays the binary's
+/// default, so on an install with no `.rustain/relay.json` every one of these
+/// strings is still exactly the sentence that shipped — and the `disabled` arms
+/// below are written out in full rather than assembled, because the wording
+/// ceiling pins them as **string literals** and an assembled sentence is
+/// invisible to it.
+///
+/// ⛔ A connection-state indicator is still absent: `relayed` and `direct`
+/// describe one frame's observed path (`peer ping`, `UX-DR-PT-12`), never a
+/// standing property of a configured peer.
+#[must_use]
+pub fn reach_statement(relay: &RelayConfigState) -> &'static str {
+    if relay.degraded_reason().is_some() {
+        // ⛔ Distinguishable from a chosen `disabled`, or the operator degrades
+        // into a mode they cannot tell apart from the one they picked and never
+        // learns the file is broken.
+        return "directly-addressable peers only; relay disabled because .rustain/relay.json \
+                did not read";
+    }
+    match relay.mode() {
+        RelayMode::Disabled => "directly-addressable peers only; relay disabled",
+        RelayMode::N0Default => {
+            "directly-addressable peers, and peers reached through the relay \
+                                 n0 operates"
+        }
+        RelayMode::Configured { .. } => {
+            "directly-addressable peers, and peers reached through the relay this host configured"
+        }
+    }
+}
+
+/// The reach limit as it reads wherever peer configuration is shown.
+#[must_use]
+pub fn reach_limit(relay: &RelayConfigState) -> String {
+    match relay {
+        RelayConfigState::Absent | RelayConfigState::Present(RelayMode::Disabled) => {
+            "Reach limit: directly-addressable peers only; relay disabled.".to_owned()
+        }
+        _ => format!("Reach limit: {}.", reach_statement(relay)),
+    }
+}
+
+/// The line the daemon logs once the listener is up.
+#[must_use]
+pub fn listener_reach_line(relay: &RelayConfigState) -> String {
+    match relay {
+        RelayConfigState::Absent | RelayConfigState::Present(RelayMode::Disabled) => {
+            "P2P listener ready; directly-addressable peers only; relay disabled".to_owned()
+        }
+        _ => format!("P2P listener ready; {}", reach_statement(relay)),
+    }
+}
+
+/// What a relay-composed host owes its operator (Story 18.4c, AC9; NFR73,
+/// FR159-a).
+///
+/// # Why this is copy and not a comment
+///
+/// The journey this cut serves is the eight-laptop team, whose third inviolable
+/// rule is *"no asymmetric knowledge — if your agent shares information with
+/// another team member's agent, you know what was shared, with whom, and
+/// when."* That rule is written about teammates; a relay silently adds a third
+/// party that learns **who talks to whom**. This sentence is what keeps the
+/// rule true once that third party is carrying the traffic.
+///
+/// # What it may and may not say
+///
+/// It names what the relay **does** — carries packets, and therefore observes
+/// the social graph — and stops. ⛔ It never says the relay *cannot* read
+/// anything: this cut tests no confidentiality property and may claim none.
+/// ⛔ It never markets *private* or *anonymous*: a self-hosted relay moves the
+/// observer from the vendor to the operator, **not away**.
+///
+/// `None` on a `disabled` host, because nothing third-party is carrying
+/// anything there.
+///
+/// ⚑ The final sentence of both relay modes is the **drift notice** (Story
+/// 18.4c review, owner ruling): the daemon composes the mode once at startup,
+/// while these surfaces render the file as it reads *now* — so the copy says
+/// plainly when a change takes effect, rather than leaving the two to disagree
+/// silently. ⛔ The `disabled` arms carry no notice: they are byte-pinned to the
+/// shipped sentences (AC8), and under-claiming reach until a restart is the
+/// safe direction.
+#[must_use]
+pub fn relay_disclosure(relay: &RelayConfigState) -> Option<&'static str> {
+    match relay.mode() {
+        RelayMode::Disabled => None,
+        RelayMode::N0Default => Some(
+            "Relay: traffic to a relayed peer passes through a relay host operated by n0. That \
+             host sees which endpoints exchanged traffic, when, and how much. Running your own \
+             relay moves that observer to the operator instead of the vendor; it does not \
+             remove it. A change to .rustain/relay.json takes effect when the daemon restarts.",
+        ),
+        RelayMode::Configured { .. } => Some(
+            "Relay: traffic to a relayed peer passes through the relay host this host \
+             configured. That host sees which endpoints exchanged traffic, when, and how much — \
+             operator-observable rather than vendor-observable. It moves the observer; it does \
+             not remove it. A change to .rustain/relay.json takes effect when the daemon \
+             restarts.",
+        ),
+    }
+}
 
 /// How the fingerprint's encoding is named wherever one is shown.
 ///
@@ -76,7 +182,11 @@ pub fn short_peer_id(peer_id: Option<&PeerId>) -> String {
 /// an allowlist that is present and empty is a well-formed "admit nobody" and a
 /// deliberate posture.
 #[must_use]
-pub fn render_roster(roster: &PeerRoster, listen: Option<bool>) -> String {
+pub fn render_roster(
+    roster: &PeerRoster,
+    listen: Option<bool>,
+    relay: &RelayConfigState,
+) -> String {
     let listener = match listen {
         Some(true) => "    listener: on",
         Some(false) => "    listener: off",
@@ -116,8 +226,12 @@ pub fn render_roster(roster: &PeerRoster, listen: Option<bool>) -> String {
         }
     }
     out.push('\n');
-    out.push_str(REACH_LIMIT);
+    out.push_str(&reach_limit(relay));
     out.push('\n');
+    if let Some(disclosure) = relay_disclosure(relay) {
+        out.push_str(disclosure);
+        out.push('\n');
+    }
     out
 }
 
@@ -260,7 +374,12 @@ pub fn nothing_changed_text(what: &str, alias: &str) -> String {
 /// recognition aid and not a comparison aid, and AC4 tells the operator to come
 /// here to compare.
 #[must_use]
-pub fn show_text(alias: &str, pinned: Option<&PinnedKey>, peer_id: Option<&PeerId>) -> String {
+pub fn show_text(
+    alias: &str,
+    pinned: Option<&PinnedKey>,
+    peer_id: Option<&PeerId>,
+    relay: &RelayConfigState,
+) -> String {
     let alias = sanitize_for_terminal(alias);
     let mut out = format!("{alias} — {CONFIG_LABEL}\n\n");
     match (pinned, peer_id) {
@@ -292,12 +411,16 @@ pub fn show_text(alias: &str, pinned: Option<&PinnedKey>, peer_id: Option<&PeerI
         ),
     }
     out.push('\n');
-    out.push_str(REACH_LIMIT);
+    out.push_str(&reach_limit(relay));
     out.push('\n');
+    if let Some(disclosure) = relay_disclosure(relay) {
+        out.push_str(disclosure);
+        out.push('\n');
+    }
     out
 }
 
-/// The clause naming what a ticket says about reachability.
+/// The clause naming what a ticket says about reachability, **by kind**.
 ///
 /// With no address configured it says exactly that, ⛔ never that the peer is
 /// unreachable: an empty address list is a missing configuration, not a network
@@ -308,12 +431,36 @@ pub fn show_text(alias: &str, pinned: Option<&PinnedKey>, peer_id: Option<&PeerI
 /// several ways, and the operator is being told how many ways — so the shipped
 /// `ticket.addresses.len()` would have rendered "1 direct address" for a bundle
 /// holding three.
+///
+/// 🔴 **And the kinds are separated because they were not** (Story 18.4c, AC8).
+/// The count this reads used to fold `Relay` entries in with `Ip` ones, so the
+/// confirm card — *the one human checkpoint*, whose own doc says it exists
+/// because a count cannot tell `203.0.113.7:4433` from `169.254.169.254:80` —
+/// called a relay address **direct**. It was latent only while nothing minted
+/// relay tickets. This story mints them, which fires it.
 #[must_use]
 pub fn reachable_clause(ticket: &PeerTicket) -> String {
-    match crate::domain::services::peer_reach_filter::transport_address_count(&ticket.addresses) {
+    let counts =
+        crate::domain::services::peer_reach_filter::transport_address_kinds(&ticket.addresses);
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    for (count, one, many) in [
+        (counts.direct, "1 direct address", "direct addresses"),
+        (counts.relay, "1 relay address", "relay addresses"),
+        (
+            counts.unreadable,
+            "1 address this build could not read",
+            "addresses this build could not read",
+        ),
+    ] {
+        match count {
+            0 => {}
+            1 => parts.push(one.to_owned()),
+            many_count => parts.push(format!("{many_count} {many}")),
+        }
+    }
+    match parts.len() {
         0 => "no address is configured for this host".to_owned(),
-        1 => "1 direct address".to_owned(),
-        many => format!("{many} direct addresses"),
+        _ => parts.join(" and "),
     }
 }
 
@@ -357,6 +504,40 @@ pub fn ping_multi_text(alias: &str, peer_id: &PeerId, count: u32) -> String {
         sanitize_for_terminal(alias),
         peer_fingerprint(peer_id)
     )
+}
+
+/// How the frame that produced a verdict actually travelled (Story 18.4c, AC5;
+/// `UX-DR-PT-12`).
+///
+/// # A separate line, and that is a decision
+///
+/// ⛔ It is **not** appended inside [`ping_single_text`] or [`ping_multi_text`]:
+/// both are pinned byte-exact, and widening a pinned sentence to carry a new
+/// fact is how a pin stops meaning anything.
+///
+/// # It is only ever called where a claim is allowed
+///
+/// The caller reaches it through `FrameVerdict::path()`, which is `None` on
+/// every unanswered frame and cannot be made anything else — so the sentence
+/// *"Carried directly."* can never appear underneath *"the peer did not
+/// answer"*, which is the exact false claim `UX-DR-PT-12` exists to stop.
+///
+/// ⚑ One claim per verdict, ⛔ never one per run: iroh holepunches **after**
+/// connecting, so a `--count 3` run can genuinely migrate relay→direct
+/// mid-flight and three frames can honestly have three different answers.
+#[must_use]
+pub fn ping_path_text(path: &PathObservation) -> String {
+    match path {
+        PathObservation::Direct => "Carried directly between the two hosts.".to_owned(),
+        PathObservation::Relayed { host } => format!(
+            "Carried through the relay {host}, which therefore saw that these two endpoints \
+             exchanged traffic."
+        ),
+        // ⛔ Never rendered as direct. `Path` answers two bools with no
+        // `is_custom()` companion, so a transport this build does not know
+        // answers false to both — and "not a relay" is not "direct".
+        PathObservation::Other => "Carried over a transport this build does not name.".to_owned(),
+    }
 }
 
 /// The honesty clause for a run whose guided retry transmitted more envelopes
@@ -404,6 +585,14 @@ pub fn ping_refusal_text(alias: &str, refusal: &PingRefusal) -> String {
         PingRefusal::NoReach => format!(
             "Cannot ping {alias}: no network address on file — import a ticket that carries one. \
              Nothing was sent."
+        ),
+        // ⛔ A posture, ⛔ never a verdict about the peer: they named a relay,
+        // this host does not use it, and neither half of that says they did
+        // anything wrong. ⛔ And it never suggests --allow-local-addresses:
+        // that flag is about local sockets and covers no relay.
+        PingRefusal::RelayNotConfigured => format!(
+            "Cannot ping {alias}: this peer names a relay this host does not use, and this host \
+             dials only the relays it configured. Nothing was sent."
         ),
         PingRefusal::DialFailed { reason } => format!(
             "Cannot ping {alias}: dial failed ({}). Nothing was sent.",

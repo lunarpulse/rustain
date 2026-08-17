@@ -15,7 +15,7 @@ use rustain::adapters::rap::{
 };
 use rustain::domain::models::{
     AgentEnvelope, AgentId, AgentMessage, CorrelationId, Ed25519Sig, FrameOutcome, FrameRefusal,
-    MessageKind, PeerId,
+    MessageKind, PeerId, RelayMode,
 };
 use rustain::domain::ports::{
     AgentMessageBus, PeerDeliveryRecord, PeerInteractionRecorder, PeerTransport,
@@ -346,9 +346,13 @@ async fn endpoint_fixture(
 ) {
     write_allowlist(workspace, Some(23));
     let server = Arc::new(
-        IrohPeerTransport::bind(signing_key(17).to_bytes(), HashMap::new())
-            .await
-            .expect("bind server"),
+        IrohPeerTransport::bind(
+            signing_key(17).to_bytes(),
+            HashMap::new(),
+            &RelayMode::Disabled,
+        )
+        .await
+        .expect("bind server"),
     );
     let server_identity = rustain::adapters::iroh::derive_peer_endpoint_identity(
         &signing_key(17).verifying_key().to_bytes(),
@@ -361,6 +365,7 @@ async fn endpoint_fixture(
                 server_identity.peer_id.clone(),
                 server.local_address().expect("server address"),
             )]),
+            &RelayMode::Disabled,
         )
         .await
         .expect("bind client"),
@@ -401,7 +406,7 @@ async fn two_endpoint_keystone_verifies_before_reaching_the_front_door() {
     );
     assert_eq!(accepted.expect("accept frame"), 1);
     assert_eq!(
-        sent.expect("send valid frame").outcome,
+        sent.expect("send valid frame").outcome(),
         FrameOutcome::Accepted,
         "the sender must learn the acceptance, not infer it from a successful write"
     );
@@ -426,7 +431,7 @@ async fn two_endpoint_keystone_verifies_before_reaching_the_front_door() {
         ))
     ));
     assert_eq!(
-        sent.expect("transport carries untrusted frame").outcome,
+        sent.expect("transport carries untrusted frame").outcome(),
         FrameOutcome::Refused(FrameRefusal::SignatureInvalid),
         "the sender is told the class, never a claim that the frame landed"
     );
@@ -451,7 +456,7 @@ async fn replay_position_commits_only_after_downstream_acceptance() {
     );
     assert!(matches!(accepted, Err(PeerIngressError::Delivery(_))));
     assert_eq!(
-        sent.expect("send first attempt").outcome,
+        sent.expect("send first attempt").outcome(),
         FrameOutcome::Refused(FrameRefusal::Unavailable),
         "a downstream failure is a refusal the sender is told about, not silence"
     );
@@ -459,7 +464,7 @@ async fn replay_position_commits_only_after_downstream_acceptance() {
         tokio::join!(client.send_to(&server_id, envelope), ingress.accept_next());
     assert_eq!(accepted.expect("retry accepted"), 1);
     assert_eq!(
-        sent.expect("retry same frame").outcome,
+        sent.expect("retry same frame").outcome(),
         FrameOutcome::Accepted
     );
     assert_eq!(consumer.bodies.lock().await.as_slice(), &["retry me"]);
@@ -481,7 +486,7 @@ async fn allowlist_removal_refuses_the_next_frame_on_the_same_open_connection() 
     );
     accepted.expect("accepted before removal");
     assert_eq!(
-        sent.expect("send before removal").outcome,
+        sent.expect("send before removal").outcome(),
         FrameOutcome::Accepted
     );
     assert_eq!(client.active_connection_count().await, 1);
@@ -508,7 +513,7 @@ async fn allowlist_removal_refuses_the_next_frame_on_the_same_open_connection() 
     // connection that never closed. That is the property the two-host capture
     // records, and before this story it was invisible to the sender.
     assert_eq!(
-        sent.expect("same connection remains writable").outcome,
+        sent.expect("same connection remains writable").outcome(),
         FrameOutcome::Refused(FrameRefusal::NotAdmitted)
     );
     assert_eq!(consumer.bodies.lock().await.as_slice(), &["before"]);
@@ -518,7 +523,7 @@ async fn allowlist_removal_refuses_the_next_frame_on_the_same_open_connection() 
     let (sent, accepted) = tokio::join!(client.send_to(&server_id, second), ingress.accept_next());
     assert_eq!(accepted.expect("re-allowed"), 2);
     assert_eq!(
-        sent.expect("retry after re-allow").outcome,
+        sent.expect("retry after re-allow").outcome(),
         FrameOutcome::Accepted
     );
     assert_eq!(
@@ -815,6 +820,9 @@ fn every_p2p_operator_string_stays_within_the_wording_ceiling() {
         "src/domain/services/refusal_quota.rs",
         "src/adapters/p2p_reach.rs",
         "src/adapters/cli/peer/ping.rs",
+        // Story 18.4c — the relay client.
+        "src/domain/models/relay.rs",
+        "src/adapters/relay_config.rs",
     ];
     let mut strings = Vec::new();
     for relative in owned_modules {
@@ -865,6 +873,21 @@ fn every_p2p_operator_string_stays_within_the_wording_ceiling() {
             "zero-config",
             "any-nat",
             "relay-reachable",
+            // Story 18.4c, measured (ruling A10). `secure` and `enterprise`
+            // have zero shipped occurrences, so both are free to ban. `trusted`
+            // is zero **in the peer surface** and ~10 elsewhere, which is why
+            // this ban is scoped to `owned_modules` and ⛔ never repo-wide.
+            // `free` alone would break `command_registry.rs`'s "…to free
+            // context space", so the phrase is what is banned.
+            "secure",
+            "enterprise",
+            "trusted",
+            "free tier",
+            // ⛔ `posture` is deliberately ABSENT. It appears only in doc
+            // comments, and `rust_string_literals` strips comments — so adding
+            // it here would be an inert needle pretending to be a constraint,
+            // which is the exact defect this ceiling exists to close. The
+            // posture ban is enforced by review, and priced honestly.
         ] {
             assert!(
                 !lowered.contains(forbidden),

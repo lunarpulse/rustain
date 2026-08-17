@@ -71,6 +71,19 @@ pub fn workspace_p2p_reach_path(workspace: &std::path::Path) -> PathBuf {
     workspace.join(".rustain").join("p2p-reach.json")
 }
 
+/// Path to the workspace relay-mode configuration (Story 18.4c, FR159).
+///
+/// A **third** sibling, for the same structural reason the reach store is a
+/// second one: `p2p.json`'s root uses `deny_unknown_fields`, so a `relay` key
+/// added there would make an older binary read the whole *admission* list as
+/// `Malformed` — and a malformed allowlist means this host admits no peer. A
+/// reachability addition would therefore become a silent security-posture
+/// change on downgrade. Relay mode is reachability, so it lives beside the
+/// allowlist and never inside it.
+pub fn workspace_relay_config_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("relay.json")
+}
+
 /// Resolve the `{workspace}/.claude/sessions/` directory for session persistence.
 pub fn sessions_dir(workspace: &std::path::Path) -> PathBuf {
     workspace.join(".claude").join("sessions")

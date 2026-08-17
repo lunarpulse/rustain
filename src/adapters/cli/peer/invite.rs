@@ -18,7 +18,9 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 
-use crate::adapters::cli::peer::rows::{expiry_label, reachable_clause, sanitize_for_terminal};
+use crate::adapters::cli::peer::rows::{
+    expiry_label, reach_limit, reachable_clause, relay_disclosure, sanitize_for_terminal,
+};
 use crate::domain::models::{PeerTicket, peer_fingerprint};
 
 /// Default ticket lifetime when `--ttl` is not given.
@@ -117,6 +119,7 @@ pub fn render_invite(
     ticket: &PeerTicket,
     terminal: Option<(u16, u16)>,
     want_qr: bool,
+    relay: &crate::domain::models::RelayConfigState,
     out: &mut impl Write,
 ) -> Result<()> {
     let blob = ticket
@@ -168,10 +171,14 @@ pub fn render_invite(
             sanitize_for_terminal(name)
         )?;
     }
-    writeln!(
-        out,
-        "\nReach limit: directly-addressable peers only; relay disabled."
-    )?;
+    // ⚠ This used to duplicate the constant as a literal, which is a live
+    // drift hazard: two spellings of one sentence stay equal only until one is
+    // edited. It now reads the shared builder, so the mode this host composed
+    // reaches every surface at once.
+    writeln!(out, "\n{}", reach_limit(relay))?;
+    if let Some(disclosure) = relay_disclosure(relay) {
+        writeln!(out, "\n{disclosure}")?;
+    }
 
     match qr_for(&blob, terminal, want_qr) {
         QrOutcome::NotRequested => {}

@@ -22,8 +22,8 @@ use rustain::adapters::p2p_reach::{
 };
 use rustain::domain::models::{
     Direction, FrameOutcome, FrameRefusal, FrameVerdict, JournalEntry, JournalRecord,
-    PeerFrameAttemptOutcome, PeerId, PeerReachState, PeerTicket, PinnedKey, RejectReason,
-    RoomEvent, peer_fingerprint,
+    PathObservation, PeerFrameAttemptOutcome, PeerId, PeerReachState, PeerTicket, PinnedKey,
+    RejectReason, RelayConfigState, RelaySet, RoomEvent, peer_fingerprint,
 };
 use rustain::domain::ports::PeerAddress;
 use rustain::domain::services::peer_reach_filter::{
@@ -35,6 +35,10 @@ use rustain::infrastructure::paths::{workspace_p2p_config_path, workspace_p2p_re
 
 const NOW: i64 = 1_800_000_000;
 const HOUR: i64 = 3_600;
+
+/// The relay mode 18.4d's assertions were written against, and the one an
+/// install with no `.rustain/relay.json` still composes (18.4c, A5).
+const DISABLED_RELAY: RelayConfigState = RelayConfigState::Absent;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -146,7 +150,10 @@ fn ac4_ratchet_the_allowlist_loader_knows_nothing_about_reach() {
         .next()
         .expect("production half");
     assert!(
-        production.contains("peer_dial_map_from_workspace(workspace)"),
+        // ⚠ Story 18.4c extended the builder with the composed relay set (D13),
+        // so the call now carries a second argument. The rule this pins is
+        // unchanged: the daemon binds with **the builder's** output.
+        production.contains("peer_dial_map_from_workspace(workspace, &relay_set)"),
         "the daemon listener must bind with the builder's output"
     );
     assert!(
@@ -155,7 +162,7 @@ fn ac4_ratchet_the_allowlist_loader_knows_nothing_about_reach() {
     );
     let bridge = source("src/infrastructure/runtime/peer_bridge.rs");
     assert!(
-        bridge.contains("peer_dial_map_from_workspace(workspace)"),
+        bridge.contains("peer_dial_map_from_workspace(workspace, &relay_set)"),
         "`peer ping` must resolve reach through the same builder"
     );
 }
@@ -197,7 +204,7 @@ fn ac2_the_invite_copy_counts_inside_the_bundle() {
 
     let empty = PeerTicket::mint(&signer(2), Vec::new(), NOW + HOUR, None).expect("mint");
     let mut out = Vec::new();
-    render_invite(&empty, Some((80, 24)), false, &mut out).expect("render");
+    render_invite(&empty, Some((80, 24)), false, &DISABLED_RELAY, &mut out).expect("render");
     let text = String::from_utf8(out).expect("utf8");
     assert!(text.contains("carries no network address"));
     assert!(
@@ -219,7 +226,7 @@ fn ac2_the_invite_copy_counts_inside_the_bundle() {
     .expect("mint");
     assert_eq!(transport_address_count(&three.addresses), 3);
     let mut out = Vec::new();
-    render_invite(&three, Some((80, 24)), false, &mut out).expect("render");
+    render_invite(&three, Some((80, 24)), false, &DISABLED_RELAY, &mut out).expect("render");
     let text = String::from_utf8(out).expect("utf8");
     assert!(text.contains("3 direct addresses"), "{text}");
     assert!(
@@ -238,7 +245,7 @@ fn ac2_the_invite_copy_counts_inside_the_bundle() {
     )
     .expect("mint");
     let mut out = Vec::new();
-    render_invite(&one, Some((80, 24)), false, &mut out).expect("render");
+    render_invite(&one, Some((80, 24)), false, &DISABLED_RELAY, &mut out).expect("render");
     let text = String::from_utf8(out).expect("utf8");
     assert!(text.contains("1 direct address"), "{text}");
     assert!(
@@ -503,6 +510,15 @@ fn ac9_the_ping_copy_stays_inside_the_wording_ceiling() {
         rows::ping_partial_text("b", &peer(9), 0, 2, 1, "a reason"),
         rows::reach_refreshed_text("b", &peer(9)),
         rows::ping_retry_clause(1, 2),
+        // ⚑ Story 18.4c — a rendered string absent from this vec is covered by
+        // nothing: this scan reads runtime output, so a `format!`-assembled
+        // sentence is caught here even though the repo-wide literal ceiling
+        // would only ever see its fragments.
+        rows::ping_path_text(&PathObservation::Direct),
+        rows::ping_path_text(&PathObservation::Relayed {
+            host: "https://relay.example.com/".to_owned(),
+        }),
+        rows::ping_path_text(&PathObservation::Other),
     ];
     for refusal in [
         PingRefusal::UnknownAlias,
@@ -515,6 +531,7 @@ fn ac9_the_ping_copy_stays_inside_the_wording_ceiling() {
         PingRefusal::LocalFault {
             reason: "no key".to_owned(),
         },
+        PingRefusal::RelayNotConfigured,
     ] {
         rendered.push(rows::ping_refusal_text("b", &refusal));
     }
@@ -535,7 +552,10 @@ fn ac9_the_ping_copy_stays_inside_the_wording_ceiling() {
         ));
     }
     assert!(
-        rendered.len() >= 20,
+        // ⚑ Raised from 20 by Story 18.4c: three path sentences and one relay
+        // refusal joined the surface, and a count that did not move would have
+        // let a later deletion pass unnoticed.
+        rendered.len() >= 24,
         "positive control: the scan found suspiciously few ping strings"
     );
     for line in &rendered {
@@ -609,7 +629,8 @@ fn ac5_guided_retry_validates_the_position_and_happens_once() {
         prev_hash: vec![3u8; 32],
     };
     let verdict =
-        FrameVerdict::refused(FrameRefusal::FeedPositionMismatch).with_expected(sane.clone());
+        FrameVerdict::refused(FrameRefusal::FeedPositionMismatch, PathObservation::Direct)
+            .with_expected(sane.clone());
     assert_eq!(verdict.guided_retry(&start), Some(sane));
 
     // Mutant (g2): acting on a malformed position.
@@ -632,7 +653,7 @@ fn ac5_guided_retry_validates_the_position_and_happens_once() {
         },
     ] {
         assert!(
-            FrameVerdict::refused(FrameRefusal::FeedPositionMismatch)
+            FrameVerdict::refused(FrameRefusal::FeedPositionMismatch, PathObservation::Direct)
                 .with_expected(hostile.clone())
                 .guided_retry(&start)
                 .is_none(),
@@ -970,10 +991,14 @@ fn ac3_the_reach_refresh_changes_only_the_address() {
     )
     .expect("refresh");
 
-    let map = peer_dial_map_from_workspace(dir.path());
+    let map = peer_dial_map_from_workspace(dir.path(), &RelaySet::empty());
     assert_eq!(map.len(), 1);
     assert_eq!(
-        describe_ticket_reach(&[map[&id].as_bytes().to_vec()]),
+        describe_ticket_reach(&[map
+            .get(&id)
+            .expect("the alias is dialable")
+            .as_bytes()
+            .to_vec()]),
         ["ip 203.0.113.20:55001"]
     );
     assert_eq!(

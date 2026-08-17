@@ -45,6 +45,18 @@ use crate::domain::services::peer_reach_filter::{ReachRefusal, imported_reach};
 use crate::infrastructure::paths::{workspace_p2p_config_path, workspace_p2p_reach_path};
 use crate::infrastructure::runtime::app_state::AppState;
 
+/// The relay mode this workspace composed, as every peer surface must state it.
+///
+/// ⚑ One read, one value, handed to every renderer. Two reads could disagree if
+/// the file changed between them, and two surfaces contradicting each other
+/// about which relay this host uses is exactly the asymmetric knowledge the
+/// disclosure exists to prevent.
+fn relay_state(workspace: &std::path::Path) -> crate::domain::models::RelayConfigState {
+    crate::adapters::relay_config::load_workspace_relay_config(
+        &crate::infrastructure::paths::workspace_relay_config_path(workspace),
+    )
+}
+
 /// Run one `peer` verb from the CLI.
 ///
 /// Intercepted in `startup.rs` before provider construction: reading and writing
@@ -52,6 +64,10 @@ use crate::infrastructure::runtime::app_state::AppState;
 pub(crate) async fn run_cli(action: &PeerAction) -> anyhow::Result<()> {
     let workspace = crate::infrastructure::paths::workspace_dir()?;
     let config_path = workspace_p2p_config_path(&workspace);
+    // ⚑ Read once, per invocation, and handed to every renderer: the reach
+    // copy, the `--json` `reach` value and the relay disclosure must all
+    // describe the **same** composed mode, or one surface contradicts another.
+    let relay = relay_state(&workspace);
     let mut stdout = std::io::stdout();
     match action {
         PeerAction::Invite { ttl, qr, name } => {
@@ -60,7 +76,13 @@ pub(crate) async fn run_cli(action: &PeerAction) -> anyhow::Result<()> {
                 None => invite::DEFAULT_TTL_SECONDS,
             };
             let ticket = mint_local_ticket(&workspace, ttl_seconds, name.clone())?;
-            invite::render_invite(&ticket, crossterm::terminal::size().ok(), *qr, &mut stdout)
+            invite::render_invite(
+                &ticket,
+                crossterm::terminal::size().ok(),
+                *qr,
+                &relay,
+                &mut stdout,
+            )
         }
         PeerAction::Add {
             alias,
@@ -102,13 +124,14 @@ pub(crate) async fn run_cli(action: &PeerAction) -> anyhow::Result<()> {
             list::render_peer_list(
                 &peer_roster(&config),
                 list::listen_flag(&config_path),
+                &relay,
                 *json,
                 &mut stdout,
             )
         }
         PeerAction::Show { alias } => {
             let config = load_workspace_p2p_config(&config_path);
-            show::render_peer_show(alias, &config, &mut stdout)
+            show::render_peer_show(alias, &config, &relay, &mut stdout)
         }
         PeerAction::Revoke { target, now } => {
             if *now {
@@ -379,7 +402,7 @@ fn resolve_ping_target(
     workspace: &std::path::Path,
     config_path: &std::path::Path,
     alias: &str,
-) -> Result<(PeerId, PeerAddress), ping::PingRefusal> {
+) -> Result<(PeerId, PeerAddress, crate::domain::models::RelayMode), ping::PingRefusal> {
     let peers = match load_workspace_p2p_config(config_path) {
         P2pConfigState::Present(peers) => peers,
         P2pConfigState::Absent => return Err(ping::PingRefusal::UnknownAlias),
@@ -395,10 +418,25 @@ fn resolve_ping_target(
     // The one builder (AC4). ⛔ Never an inline map: the daemon listener and this
     // verb must read reach through the same symbol or they can disagree about who
     // is dialable.
-    let address = crate::adapters::p2p_reach::peer_dial_map_from_workspace(workspace)
-        .remove(&peer_id)
-        .ok_or(ping::PingRefusal::NoReach)?;
-    Ok((peer_id, address))
+    //
+    // ⚑ And it is filtered by the same relay set the client endpoint below is
+    // composed with (18.4c, D13) — ⛔ a `peer ping` that dialed what the daemon
+    // refuses would be the mode-honoured-in-one-bind defect wearing a verb.
+    let relay = crate::adapters::relay_config::load_workspace_relay_config(
+        &crate::infrastructure::paths::workspace_relay_config_path(workspace),
+    )
+    .mode();
+    let relay_set = crate::adapters::relay_config::relay_url_set(&relay);
+    let mut dial_map =
+        crate::adapters::p2p_reach::peer_dial_map_from_workspace(workspace, &relay_set);
+    let address = match dial_map.remove(&peer_id) {
+        Some(address) => address,
+        None if dial_map.excluded_by_relay_set(alias) => {
+            return Err(ping::PingRefusal::RelayNotConfigured);
+        }
+        None => return Err(ping::PingRefusal::NoReach),
+    };
+    Ok((peer_id, address, relay))
 }
 
 /// `peer ping` on the CLI: resolve, dial, send, report what the peer said.
@@ -410,7 +448,7 @@ async fn run_cli_ping(
     interval: std::time::Duration,
     out: &mut impl std::io::Write,
 ) -> anyhow::Result<()> {
-    let (peer_id, address) = match resolve_ping_target(workspace, config_path, alias) {
+    let (peer_id, address, relay) = match resolve_ping_target(workspace, config_path, alias) {
         Ok(target) => target,
         Err(refusal) => {
             writeln!(out, "{}", rows::ping_refusal_text(alias, &refusal))?;
@@ -419,7 +457,7 @@ async fn run_cli_ping(
     };
     #[cfg(not(feature = "p2p"))]
     {
-        let _ = (&peer_id, &address, count, interval, workspace);
+        let _ = (&peer_id, &address, &relay, count, interval, workspace);
         writeln!(
             out,
             "{}",
@@ -429,7 +467,10 @@ async fn run_cli_ping(
     }
     #[cfg(feature = "p2p")]
     {
-        send_ping_frames(workspace, alias, &peer_id, address, count, interval, out).await
+        send_ping_frames(
+            workspace, alias, &peer_id, address, &relay, count, interval, out,
+        )
+        .await
     }
 }
 
@@ -458,6 +499,7 @@ async fn send_ping_frames(
     alias: &str,
     peer_id: &PeerId,
     address: PeerAddress,
+    relay: &crate::domain::models::RelayMode,
     count: u32,
     interval: std::time::Duration,
     out: &mut impl std::io::Write,
@@ -495,9 +537,13 @@ async fn send_ping_frames(
     let recipient = AgentId::from_peer_path(&ping::ping_recipient_path(&local))
         .map_err(|error| anyhow::anyhow!("could not derive the ping recipient: {error}"))?;
 
+    // ⚑ The **same** relay mode the daemon listener composes. A mode honoured
+    // in one production bind and not the other is a host whose ping takes a
+    // path its own listener would refuse.
     let transport = match crate::adapters::iroh::IrohPeerTransport::bind(
         signer.transport_secret_key_bytes(),
         std::collections::HashMap::from([(peer_id.clone(), address)]),
+        relay,
     )
     .await
     {
@@ -555,6 +601,7 @@ async fn send_ping_frames(
     let mut accepted = 0u32;
     let mut transmitted = 0u32;
     let mut stop: Option<String> = None;
+    let mut observed_paths: Vec<crate::domain::models::PathObservation> = Vec::new();
 
     'frames: for frame_index in 1..=count {
         if frame_index > 1 && !interval.is_zero() {
@@ -594,13 +641,22 @@ async fn send_ping_frames(
             let result = transport.send_to(peer_id, envelope).await;
             transmitted += 1;
             let (outcome, refusal) = match &result {
-                Ok(verdict) => match verdict.outcome {
+                Ok(verdict) => match verdict.outcome() {
                     FrameOutcome::Accepted => (PeerFrameAttemptOutcome::Accepted, None),
                     FrameOutcome::Refused(class) => (PeerFrameAttemptOutcome::Refused, Some(class)),
                     FrameOutcome::Unanswered => (PeerFrameAttemptOutcome::OutcomeUnknown, None),
                 },
                 Err(_) => (PeerFrameAttemptOutcome::SendFailed, None),
             };
+            // ⚑ One claim per verdict, recorded as the verdict arrives (AC5).
+            // `path()` is `None` on every unanswered frame and cannot be made
+            // anything else, so nothing here can put a path sentence under
+            // *"the peer did not answer"*.
+            if let Ok(verdict) = &result
+                && let Some(path) = verdict.path()
+            {
+                observed_paths.push(path.clone());
+            }
             if let Err(error) =
                 journal_frame_attempt(workspace, peer_id, &correlation, bytes, outcome, refusal)
                     .await
@@ -610,7 +666,7 @@ async fn send_ping_frames(
             }
 
             match result {
-                Ok(verdict) if verdict.outcome.is_accepted() => {
+                Ok(verdict) if verdict.outcome().is_accepted() => {
                     accepted += 1;
                     position = FeedPosition::advanced(sequence, header_hash);
                     continue 'frames;
@@ -624,9 +680,9 @@ async fn send_ping_frames(
                         }
                     }
                     stop = Some(if count == 1 {
-                        rows::ping_single_text(alias, peer_id, verdict.outcome)
+                        rows::ping_single_text(alias, peer_id, verdict.outcome())
                     } else {
-                        let reason = match verdict.outcome {
+                        let reason = match verdict.outcome() {
                             FrameOutcome::Refused(class) => {
                                 crate::domain::services::transparency::frame_refusal_label(class)
                             }
@@ -669,28 +725,27 @@ async fn send_ping_frames(
 
     let _ = transport.shutdown().await;
     let retry_clause = rows::ping_retry_clause(count, transmitted);
-    match stop {
-        Some(line) => {
-            writeln!(out, "{line}{retry_clause}")?;
-            anyhow::bail!("peer ping did not complete every frame");
-        }
-        None if count == 1 => {
-            writeln!(
-                out,
-                "{}{retry_clause}",
-                rows::ping_single_text(alias, peer_id, FrameOutcome::Accepted)
-            )?;
-            Ok(())
-        }
-        None => {
-            writeln!(
-                out,
-                "{}{retry_clause}",
-                rows::ping_multi_text(alias, peer_id, count)
-            )?;
-            Ok(())
-        }
+    let (line, complete) = match stop {
+        Some(line) => (line, false),
+        None if count == 1 => (
+            rows::ping_single_text(alias, peer_id, FrameOutcome::Accepted),
+            true,
+        ),
+        None => (rows::ping_multi_text(alias, peer_id, count), true),
+    };
+    writeln!(out, "{line}{retry_clause}")?;
+    // ⚑ A separate line per verdict, ⛔ never folded into the pinned summary
+    // sentence above. `--count 3` yields three verdicts and therefore up to
+    // three claims: iroh holepunches **after** connecting, so one run can
+    // genuinely migrate relay→direct mid-flight and one claim would describe
+    // whichever side of that migration it happened to be asked on.
+    for path in &observed_paths {
+        writeln!(out, "{}", rows::ping_path_text(path))?;
     }
+    if !complete {
+        anyhow::bail!("peer ping did not complete every frame");
+    }
+    Ok(())
 }
 
 /// Append the outbound frame-attempt record (D10).
@@ -974,12 +1029,14 @@ pub(crate) async fn peer_command(
     };
     let workspace = app_state.compose_snapshot.workspace_path.clone();
     let config_path = workspace_p2p_config_path(&workspace);
+    let relay = relay_state(&workspace);
     match command {
         PeerCommandArgs::List { json } => {
             let mut buffer = Vec::new();
             let rendered = list::render_peer_list(
                 &peer_roster(&load_workspace_p2p_config(&config_path)),
                 list::listen_flag(&config_path),
+                &relay,
                 json,
                 &mut buffer,
             );
@@ -988,7 +1045,7 @@ pub(crate) async fn peer_command(
         PeerCommandArgs::Show { alias } => {
             let mut buffer = Vec::new();
             let config = load_workspace_p2p_config(&config_path);
-            let rendered = show::render_peer_show(&alias, &config, &mut buffer);
+            let rendered = show::render_peer_show(&alias, &config, &relay, &mut buffer);
             handler::show_peer_message(state, render_or_error(rendered, buffer));
         }
         PeerCommandArgs::Invite { ttl, name } => {
@@ -1004,7 +1061,7 @@ pub(crate) async fn peer_command(
                     // terminal-sized canvas and a partial code would not scan.
                     // `rustain peer invite --qr` is where a code can be measured
                     // against the real terminal.
-                    let rendered = invite::render_invite(&ticket, None, false, &mut buffer);
+                    let rendered = invite::render_invite(&ticket, None, false, &relay, &mut buffer);
                     handler::show_peer_message(state, render_or_error(rendered, buffer));
                 }
                 Err(error) => {

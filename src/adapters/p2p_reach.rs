@@ -26,7 +26,7 @@
 //! rename and parent-directory fsync, and the same in-lock re-read and typed
 //! schema validation before any mutation.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use base64::Engine as _;
@@ -38,8 +38,10 @@ use crate::adapters::p2p_config::{
 };
 use crate::domain::models::{
     P2pConfigState, PEER_REACH_SCHEMA_VERSION, PeerId, PeerReach, PeerReachState, PeerReachStore,
+    RelaySet,
 };
 use crate::domain::ports::PeerAddress;
+use crate::domain::services::peer_reach_filter::{DialableReach, dialable_reach};
 use crate::infrastructure::paths::{workspace_p2p_config_path, workspace_p2p_reach_path};
 
 /// Temporary-file prefix, so a directory listing during a write names the store.
@@ -195,6 +197,60 @@ pub fn publish_self_reach(
     })
 }
 
+/// Re-record this host's own address, **only when it actually changed**
+/// (Story 18.4c, AC3).
+///
+/// # Why the bind-time write is not enough
+///
+/// `Endpoint::addr()` reports what is known *now*, and a relay is established
+/// after the bind returns — so on a relay-enabled host the bind-time record is
+/// relay-less and `peer invite` would mint a ticket naming no relay. The
+/// endpoint's own address watcher is the alternative its documentation names;
+/// ⛔ `Endpoint::online()` is not, because with no relay configured it pends
+/// forever, which is exactly the `disabled` host.
+///
+/// # Why "only when it changed" is the whole design and not a nicety
+///
+/// A relay that flaps up/down/up fires the watcher on every WAN twitch. Without
+/// this bound the reach store — a **file** — is rewritten and fsynced each
+/// time, and a `peer invite` landing mid-flap mints a **freshly signed,
+/// unexpired** ticket naming a relay that is currently down. Story 18.4d ate
+/// the same bug in a different costume: *a stale self record can mint a
+/// freshly signed, unexpired ticket naming a dead port.*
+///
+/// The comparison happens **inside** the transaction, against what is on disk,
+/// so a concurrent writer cannot open a window between the check and the write.
+///
+/// # Errors
+///
+/// Returns the reason. Every error means nothing was written.
+///
+/// Returns `Ok(false)` when the stored address already matched — ⛔ that is a
+/// success, not a failure, and no bytes were touched.
+pub fn publish_self_reach_on_change(
+    path: &Path,
+    address: &PeerAddress,
+    captured_at: i64,
+) -> Result<bool, String> {
+    let mut wrote = false;
+    rewrite_reach(path, |store| {
+        if store
+            .own
+            .as_ref()
+            .is_some_and(|own| &own.address == address)
+        {
+            return Ok(false);
+        }
+        store.own = Some(PeerReach {
+            address: address.clone(),
+            captured_at,
+        });
+        wrote = true;
+        Ok(true)
+    })?;
+    Ok(wrote)
+}
+
 /// Record an imported peer's reach under `alias` (AC3).
 ///
 /// `expected` is the identity the operator confirmed. It is re-checked against
@@ -274,13 +330,62 @@ pub fn clear_peer_reach(reach_path: &Path, alias: &str) -> Result<(), String> {
     rewrite_reach(reach_path, |store| Ok(store.peers.remove(alias).is_some()))
 }
 
-/// **The** dial map builder (AC4).
+/// What the dial map builder produced.
+///
+/// It is more than a map because a miss has two very different meanings and the
+/// operator surface has to tell them apart: *nothing on file* and *this peer
+/// names a relay this host does not use* are different sentences.
+#[derive(Clone, Debug, Default)]
+pub struct PeerDialMap {
+    dialable: HashMap<PeerId, PeerAddress>,
+    relay_not_configured: BTreeSet<String>,
+}
+
+impl PeerDialMap {
+    /// The addresses the transport binds with.
+    #[must_use]
+    pub fn addresses(&self) -> HashMap<PeerId, PeerAddress> {
+        self.dialable.clone()
+    }
+
+    /// Take one peer's address out, as `peer ping` does.
+    pub fn remove(&mut self, peer: &PeerId) -> Option<PeerAddress> {
+        self.dialable.remove(peer)
+    }
+
+    /// The address recorded for one peer, if this host may dial them.
+    #[must_use]
+    pub fn get(&self, peer: &PeerId) -> Option<&PeerAddress> {
+        self.dialable.get(peer)
+    }
+
+    /// Whether this alias has reach on file whose every address was a relay
+    /// outside this host's configured set (D13).
+    #[must_use]
+    pub fn excluded_by_relay_set(&self, alias: &str) -> bool {
+        self.relay_not_configured.contains(alias)
+    }
+
+    /// How many peers this host can dial.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.dialable.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.dialable.is_empty()
+    }
+}
+
+/// **The** dial map builder (Story 18.4d AC4; extended by 18.4c AC4).
 ///
 /// One symbol maps persisted reach to the `HashMap<PeerId, PeerAddress>` the
 /// transport binds with, and both production consumers — the `peer ping` client
 /// bind and the daemon listener bind — call exactly this. ⛔ A second builder,
 /// or a map assembled inline at a call site, is the divergence this shape exists
-/// to prevent.
+/// to prevent, which is why the relay-set rule was **extended into** it rather
+/// than added beside it.
 ///
 /// # Honesty clause
 ///
@@ -297,24 +402,43 @@ pub fn clear_peer_reach(reach_path: &Path, alias: &str) -> Result<(), String> {
 /// map, and no stale reach record can outlive the trust decision that justified
 /// it. ⛔ It does not work the other way round: being in this map admits nobody,
 /// and admission is still re-read per frame.
+///
+/// # Why the relay set is consulted here (D13)
+///
+/// A relay URL inside a peer's ticket is a **claim**; `relays` is the
+/// **fact** — the set this host's endpoint was actually composed with. Applying
+/// it at the one place the dial map is built is what makes *"the relay hosts
+/// this process contacts are exactly the ones the operator configured"* an
+/// invariant rather than an assertion, and it is applied at **dial** rather
+/// than at import so an entry recorded before the mode changed cannot be dialed
+/// afterwards.
 #[must_use]
-pub fn peer_dial_map_from_workspace(workspace: &Path) -> HashMap<PeerId, PeerAddress> {
+pub fn peer_dial_map_from_workspace(workspace: &Path, relays: &RelaySet) -> PeerDialMap {
+    let mut map = PeerDialMap::default();
     let reach = load_workspace_p2p_reach(&workspace_p2p_reach_path(workspace));
     let Some(store) = reach.store() else {
-        return HashMap::new();
+        return map;
     };
     let P2pConfigState::Present(peers) =
         load_workspace_p2p_config(&workspace_p2p_config_path(workspace))
     else {
-        return HashMap::new();
+        return map;
     };
-    let mut map = HashMap::new();
     for peer in &peers {
         let Some(peer_id) = peer.pinned_identity() else {
             continue;
         };
-        if let Some(reach) = store.peer(&peer.id) {
-            map.insert(peer_id, reach.address.clone());
+        let Some(reach) = store.peer(&peer.id) else {
+            continue;
+        };
+        match dialable_reach(&reach.address, relays) {
+            DialableReach::Dialable(address) => {
+                map.dialable.insert(peer_id, address);
+            }
+            DialableReach::RelayNotConfigured => {
+                map.relay_not_configured.insert(peer.id.clone());
+            }
+            DialableReach::Nothing => {}
         }
     }
     map
@@ -348,7 +472,7 @@ mod tests {
             load_workspace_p2p_reach(&workspace_p2p_reach_path(dir.path())),
             PeerReachState::Absent
         );
-        assert!(peer_dial_map_from_workspace(dir.path()).is_empty());
+        assert!(peer_dial_map_from_workspace(dir.path(), &RelaySet::empty()).is_empty());
     }
 
     /// D2: a malformed reach store degrades, and the allowlist it sits beside is
@@ -366,7 +490,7 @@ mod tests {
             load_workspace_p2p_reach(&reach_path),
             PeerReachState::Malformed { .. }
         ));
-        assert!(peer_dial_map_from_workspace(dir.path()).is_empty());
+        assert!(peer_dial_map_from_workspace(dir.path(), &RelaySet::empty()).is_empty());
         assert_eq!(
             std::fs::read(&config_path).expect("read allowlist"),
             before,
@@ -497,13 +621,13 @@ mod tests {
         )
         .expect("record");
 
-        let map = peer_dial_map_from_workspace(dir.path());
+        let map = peer_dial_map_from_workspace(dir.path(), &RelaySet::empty());
         assert_eq!(map.len(), 1);
         assert_eq!(map.get(&expected), Some(&address("b-bundle")));
 
         remove_peer_from_workspace_config(&config_path, "b").expect("revoke");
         assert!(
-            peer_dial_map_from_workspace(dir.path()).is_empty(),
+            peer_dial_map_from_workspace(dir.path(), &RelaySet::empty()).is_empty(),
             "a revoked alias must not stay dialable through a stale reach record"
         );
     }

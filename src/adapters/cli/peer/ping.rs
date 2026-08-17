@@ -67,6 +67,12 @@ pub enum PingRefusal {
     Unpinned,
     /// Pinned, but no address on file — nothing to dial.
     NoReach,
+    /// Reach is on file, but every address it names is a relay this host does
+    /// not use (Story 18.4c, D13).
+    ///
+    /// ⛔ Not a verdict about the peer: an offered relay is a claim, this
+    /// host's configured set is the fact, and the two simply do not intersect.
+    RelayNotConfigured,
     /// The dial itself failed. ⚠ Distinct from `Unreachable`, which means the
     /// address book had no entry at all.
     DialFailed { reason: String },

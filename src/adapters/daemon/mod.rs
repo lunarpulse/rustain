@@ -865,16 +865,29 @@ async fn spawn_p2p_listener(
         .await?;
         tracing::info!(
             address = listener.address,
-            "P2P listener ready; directly-addressable peers only; relay disabled"
+            "{}",
+            crate::adapters::cli::peer::rows::listener_reach_line(&listener.relay)
         );
+        // AC9 — the disclosure is emitted where the operator reads the ready
+        // line too (Story 18.4c review): a host that composes a relay says a
+        // third party is carrying its traffic, and the startup log is a surface
+        // the completion record names. `None` on a `disabled` host.
+        if let Some(disclosure) =
+            crate::adapters::cli::peer::rows::relay_disclosure(&listener.relay)
+        {
+            tracing::info!("{disclosure}");
+        }
         Ok(Some(listener.task))
     }
 }
 
-/// A bound listener and the address an operator can hand to a peer.
+/// A bound listener, the address an operator can hand to a peer, and the relay
+/// mode it composed — which the ready line has to name, because a `disabled`
+/// host and a relay-composed host reach different sets of peers.
 #[cfg(all(unix, feature = "p2p"))]
 struct P2pListener {
     address: String,
+    relay: crate::domain::models::RelayConfigState,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -893,6 +906,30 @@ async fn compose_p2p_listener(
 ) -> Result<P2pListener> {
     use crate::domain::ports::PeerTransport;
 
+    // ⚑ The relay mode is read **before** the bind and reaches the composition
+    // itself, not a log line about it. Absent means `disabled`, which is
+    // byte-for-byte the endpoint every shipped build already composes; a
+    // malformed file degrades to `disabled` too, and says so distinguishably
+    // rather than taking the whole peer transport down over one corrupt byte.
+    let relay = crate::adapters::relay_config::load_workspace_relay_config(
+        &crate::infrastructure::paths::workspace_relay_config_path(workspace),
+    );
+    if let Some(reason) = relay.degraded_reason() {
+        // The row names the FILE and the REASON. Without it the operator
+        // degrades into a mode nobody can tell apart from the one they chose,
+        // and never learns their configuration is broken.
+        tracing::warn!(
+            file = %crate::infrastructure::paths::workspace_relay_config_path(workspace).display(),
+            %reason,
+            "the relay configuration did not read; this host composed no relay"
+        );
+    }
+    let relay_mode = relay.mode();
+    // The set of relay hosts this process may contact is exactly the set the
+    // endpoint was composed with (D13) — so the dial map is filtered by the
+    // same value the bind uses, never by a second reading of the file.
+    let relay_set = crate::adapters::relay_config::relay_url_set(&relay_mode);
+
     // The dial map comes from the one builder (Story 18.4d, AC4), never from an
     // inline map here. ⚠ **Populating it does not make the daemon dial.** This
     // cut adds no daemon-initiated dial at all; the map is supplied so reach is
@@ -901,7 +938,9 @@ async fn compose_p2p_listener(
     let transport = std::sync::Arc::new(
         crate::adapters::iroh::IrohPeerTransport::bind(
             transport_secret_key,
-            crate::adapters::p2p_reach::peer_dial_map_from_workspace(workspace),
+            crate::adapters::p2p_reach::peer_dial_map_from_workspace(workspace, &relay_set)
+                .addresses(),
+            &relay_mode,
         )
         .await
         .context("binding the P2P listener")?,
@@ -926,6 +965,41 @@ async fn compose_p2p_listener(
             %error,
             "this host's reach could not be recorded; tickets will carry no network address"
         );
+    }
+
+    // AC3 — and then keep it true. The bind-time record above is the honest
+    // fact at that instant, but a relay is established *after* the bind
+    // returns, so on a relay-composed host it names no relay and `peer invite`
+    // would mint a ticket that names none either. ⛔ The fix is not
+    // `Endpoint::online()`: with no relay configured that pends forever, which
+    // is exactly the `disabled` host. It is the endpoint's own address watcher,
+    // writing **only when the address actually changed** — a flapping relay
+    // must not fsync this file on every WAN twitch.
+    {
+        let watcher_transport = transport.clone();
+        let watcher_cancel = shutdown.clone();
+        let reach_path = crate::infrastructure::paths::workspace_p2p_reach_path(workspace);
+        tokio::spawn(async move {
+            watcher_transport
+                .republish_address_on_change(watcher_cancel, |address| {
+                    match crate::adapters::p2p_reach::publish_self_reach_on_change(
+                        &reach_path,
+                        &address,
+                        chrono::Utc::now().timestamp(),
+                    ) {
+                        Ok(true) => tracing::info!(
+                            "this host's own address changed; the reach record now matches it"
+                        ),
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "this host's changed reach could not be recorded; tickets keep the \
+                             address already on file"
+                        ),
+                    }
+                })
+                .await;
+        });
     }
 
     // An entry with no pinned key can never match a presented endpoint, so it
@@ -962,7 +1036,11 @@ async fn compose_p2p_listener(
             tracing::error!(error = %error, "P2P listener shutdown failed");
         }
     });
-    Ok(P2pListener { address, task })
+    Ok(P2pListener {
+        address,
+        relay,
+        task,
+    })
 }
 
 /// Story 18.4 AC2 — the config-gated listener is composed here, so the proof
@@ -1082,6 +1160,7 @@ mod p2p_listener_composition_tests {
                 crate::domain::ports::PeerAddress::from_bytes(listener.address.into_bytes())
                     .expect("listener address"),
             )]),
+            &crate::domain::models::RelayMode::Disabled,
         )
         .await
         .expect("bind client");
@@ -1196,6 +1275,7 @@ mod p2p_listener_composition_tests {
         IrohPeerTransport::bind(
             ed25519_dalek::SigningKey::from_bytes(&[46; 32]).to_bytes(),
             HashMap::from([(identity.peer_id, own.address.clone())]),
+            &crate::domain::models::RelayMode::Disabled,
         )
         .await
         .expect("the published reach must be an address `bind` accepts")

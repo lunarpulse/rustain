@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ::iroh::endpoint::{Connection, presets};
-use ::iroh::{Endpoint, EndpointAddr, EndpointId};
+use ::iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode as IrohRelayMode, TransportAddr};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -18,7 +18,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::{
-    AgentEnvelope, FeedPosition, FrameOutcome, FrameRefusal, FrameVerdict, PeerId,
+    AgentEnvelope, FeedPosition, FrameOutcome, FrameRefusal, FrameReply, FrameVerdict,
+    PathObservation, PeerId, RelayMode, RelaySet,
 };
 use crate::domain::ports::{
     FrameResponder, InboundFrame, PeerAddress, PeerTransport, PeerTransportError,
@@ -80,8 +81,28 @@ pub fn derive_peer_endpoint_identity(
 
 /// iroh 1.0 adapter for the cross-host [`PeerTransport`] port.
 ///
-/// The endpoint is built with [`presets::Minimal`]: no relay and no address
-/// lookup. This cut therefore reaches directly-addressable peers only.
+/// # The composition, and why it starts where it does
+///
+/// Every endpoint is built from [`presets::Minimal`], which sets **only** the
+/// rustls crypto provider — no relay and, decisively, **no address lookup**.
+/// The relay is then layered on with `.relay_mode(…)` according to the
+/// operator's [`RelayMode`]: `Disabled` adds nothing, `N0Default` adds the n0
+/// list, `Configured` adds exactly the relays they named.
+///
+/// ⛔ Never `presets::N0`, and ⛔ never `presets::N0DisableRelay`: the latter is
+/// `N0.apply(builder).relay_mode(Disabled)` — the **full** N0 preset, including
+/// all three n0 address-lookup services, with the relay switched off
+/// afterwards. Zero-phone-home has two halves, and starting from `Minimal` is
+/// what closes the second one for free. ⛔ Never call `.address_lookup(…)`
+/// either; that reopens it.
+///
+/// # What a relay observes (FR159-a)
+///
+/// A relay is a forward-only conduit for an end-to-end-encrypted session: it
+/// carries packets and therefore observes the **social graph** — which endpoint
+/// exchanged traffic with which, when, and how much. ⛔ No string in this tree
+/// may claim it *cannot* read anything: this cut tests no confidentiality
+/// property and may claim none.
 pub struct IrohPeerTransport {
     endpoint: Endpoint,
     peer_addresses: Arc<HashMap<PeerId, EndpointAddr>>,
@@ -103,10 +124,53 @@ impl std::fmt::Debug for IrohPeerTransport {
 
 impl IrohPeerTransport {
     /// Bind an endpoint whose transport key is the same Ed25519 key used for
-    /// signed peer envelopes.
+    /// signed peer envelopes, composing the operator's relay mode onto
+    /// [`presets::Minimal`].
+    ///
+    /// ⚠ `relay` reaches **both** production binds — the daemon listener and
+    /// the `peer ping` client. A mode honoured in one and not the other is a
+    /// host whose ping takes a path its own listener would not.
     pub async fn bind(
         secret_key_bytes: [u8; 32],
         peer_addresses: HashMap<PeerId, PeerAddress>,
+        relay: &RelayMode,
+    ) -> Result<Self, PeerTransportError> {
+        Self::compose(secret_key_bytes, peer_addresses, relay, true).await
+    }
+
+    /// Bind with the direct (IP) transport removed, so the only way out is the
+    /// relay the operator configured.
+    ///
+    /// ⚠ **Test builds only.** The gate is `p2p-test-utils` **and**
+    /// `debug_assertions`, so no binary a release profile could ship — not even
+    /// an `--all-features` one — has a path to this call (Story 18.4c review).
+    ///
+    /// It exists because *"with the direct path disabled (relay-only)"* is
+    /// NFR72(a)'s literal wording, and on a single host loopback hole-punching
+    /// otherwise wins inside the first round trip: measured, the same exchange
+    /// observed `Relayed` once and `Direct` once. Asserting a relayed path
+    /// without removing the direct transport would therefore be asserting a
+    /// **race**, which is exactly what a deterministic control has to replace.
+    ///
+    /// ⛔ It is not a second composition. It enters the same [`Self::compose`],
+    /// with the same preset and the same relay mode, and differs by one builder
+    /// call — so it cannot drift into a double more forgiving than production.
+    #[cfg(all(feature = "p2p-test-utils", debug_assertions))]
+    pub async fn bind_without_direct_paths(
+        secret_key_bytes: [u8; 32],
+        peer_addresses: HashMap<PeerId, PeerAddress>,
+        relay: &RelayMode,
+    ) -> Result<Self, PeerTransportError> {
+        Self::compose(secret_key_bytes, peer_addresses, relay, false).await
+    }
+
+    /// The one endpoint composition. `direct_paths` is `true` on every
+    /// production path; only the test-gated entry above passes `false`.
+    async fn compose(
+        secret_key_bytes: [u8; 32],
+        peer_addresses: HashMap<PeerId, PeerAddress>,
+        relay: &RelayMode,
+        direct_paths: bool,
     ) -> Result<Self, PeerTransportError> {
         let mut decoded = HashMap::with_capacity(peer_addresses.len());
         for (peer_id, address) in peer_addresses {
@@ -139,9 +203,36 @@ impl IrohPeerTransport {
             decoded.insert(peer_id, endpoint_addr);
         }
 
-        let endpoint = Endpoint::builder(presets::Minimal)
+        let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(::iroh::SecretKey::from_bytes(&secret_key_bytes))
-            .alpns(vec![PEER_ALPN.to_vec()])
+            .alpns(vec![PEER_ALPN.to_vec()]);
+        builder = match relay {
+            // The shipped composition, byte-identical: adding nothing is what
+            // `disabled` means, and it is what an install with no `relay.json`
+            // has always had.
+            RelayMode::Disabled => builder,
+            RelayMode::N0Default => builder.relay_mode(IrohRelayMode::Default),
+            RelayMode::Configured { urls } => {
+                let parsed = parse_relay_urls(urls)?;
+                builder.relay_mode(IrohRelayMode::custom(parsed))
+            }
+        };
+        if !direct_paths {
+            // ⚠ Reachable only from the test-gated entry: every production
+            // caller passes `true`. Removing the IP transport is what makes
+            // *"the direct path disabled"* a fact rather than a hope.
+            builder = builder.clear_ip_transports();
+        }
+        // ⚠ TEST BUILDS ONLY, and it is compiled out of every binary a profile
+        // could ever ship: the gate is `p2p-test-utils` **and**
+        // `debug_assertions`, so a `--all-features` release build does not
+        // carry it either — a non-default feature alone is a convention, and
+        // conventions drift (Story 18.4c review). The hermetic relay fixture
+        // serves a self-signed certificate, and without this the handshake
+        // fails in a way that reads exactly like a relay bug.
+        #[cfg(all(feature = "p2p-test-utils", debug_assertions))]
+        let builder = builder.ca_tls_config(::iroh::tls::CaTlsConfig::insecure_skip_verify());
+        let endpoint = builder
             .bind()
             .await
             .map_err(|error| PeerTransportError::Address(error.to_string()))?;
@@ -187,6 +278,167 @@ impl IrohPeerTransport {
         let mut connections = self.connections.write().await;
         connections.retain(|_, connection| connection.close_reason().is_none());
         connections.len()
+    }
+
+    /// Run `sink` whenever this endpoint has a **publishable** own address —
+    /// now, and each time it or its relay session changes (Story 18.4c, AC3).
+    ///
+    /// # Why a watcher and ⛔ never `Endpoint::online()`
+    ///
+    /// `Endpoint::addr()` returns whatever is known *now*, and its own doc
+    /// directs callers to await `online()` first — but `online()` **pends
+    /// forever when no relay is configured**, which is exactly the `disabled`
+    /// host. So the bind-time publish stays as it is (a relay-less record on a
+    /// relay-enabled host is the honest fact at that instant), and this loop
+    /// corrects it the moment a home relay is actually established.
+    ///
+    /// # The current value is emitted first (Story 18.4c review)
+    ///
+    /// ⚑ `updated()` completes only on a value **newer** than the watcher's
+    /// creation snapshot. A relay established between the bind-time publish and
+    /// this watcher's creation is therefore the *initial* value and would never
+    /// be reported — leaving the self reach record and every later ticket
+    /// relay-less until the next network change. Emitting the current value
+    /// first closes that window, and `publish_self_reach_on_change` already
+    /// suppresses the unchanged case.
+    ///
+    /// # An address naming a relay is published only once its session is up
+    ///
+    /// ⛔ iroh publishes a relay into the address the moment it is **selected**
+    /// — `RelayConnectionState::Connecting`, before the dial — and the address
+    /// watcher carries no state. Publishing that would advertise (and mint into
+    /// tickets) a relay this host has no session with (Story 18.4c review,
+    /// owner ruling). So a relay-bearing address is sunk only when
+    /// [`Endpoint::home_relay_status`] reports that relay `Connected`; a
+    /// relay-less address is always publishable.
+    ///
+    /// ⛔ No sleep, ⛔ no unbounded await, ⛔ no polling: it returns when the
+    /// token is cancelled or the endpoint's last clone is dropped.
+    pub async fn republish_address_on_change(
+        &self,
+        cancel: CancellationToken,
+        mut sink: impl FnMut(PeerAddress),
+    ) {
+        use ::iroh::Watcher as _;
+
+        let mut addresses = self.endpoint.watch_addr();
+        let mut relay_status = self.endpoint.home_relay_status();
+        let mut current = addresses.get();
+        loop {
+            let ready = relay_sessions_ready(&current, &relay_status.get());
+            if ready {
+                match serde_json::to_vec(&current) {
+                    Ok(bytes) => match PeerAddress::from_bytes(bytes) {
+                        Ok(address) => sink(address),
+                        Err(error) => {
+                            tracing::warn!(%error, "this host's changed address did not encode");
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(%error, "this host's changed address did not encode");
+                    }
+                }
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                updated = addresses.updated() => {
+                    let Ok(addr) = updated else {
+                        // The last `Endpoint` clone is gone; there is nothing
+                        // left to observe and nothing to report.
+                        return;
+                    };
+                    current = addr;
+                }
+                changed = relay_status.updated() => {
+                    // The address did not move; the relay's *session* did.
+                    // Re-evaluate readiness against the fresh status — this is
+                    // the arm that publishes a selected relay once it connects.
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The home relays this endpoint **holds sessions with**, as `(url,
+    /// connected)` (Story 18.4c, AC1's positive control).
+    ///
+    /// ⚠ Test builds only: the gate is `p2p-test-utils` **and**
+    /// `debug_assertions`, so no release profile can carry it. This is the
+    /// observation AC1 named — the *composed endpoint's* own report of which
+    /// relay it uses, ⛔ not a pre-composition domain value a mutant beside the
+    /// composition could satisfy.
+    #[cfg(all(feature = "p2p-test-utils", debug_assertions))]
+    #[must_use]
+    pub fn home_relay_sessions(&self) -> Vec<(String, bool)> {
+        use ::iroh::Watcher as _;
+
+        self.endpoint
+            .home_relay_status()
+            .get()
+            .into_iter()
+            .map(|status| (status.url().to_string(), status.is_connected()))
+            .collect()
+    }
+
+    /// Await the first home relay this endpoint **holds a session with**, and
+    /// return its URL (Story 18.4c, AC1's positive control).
+    ///
+    /// ⚠ Test builds only, same gate as [`Self::home_relay_sessions`]. Event-
+    /// driven ⛔ not polled: the current value is checked first (a relay
+    /// connected before this watcher existed must not be missed), then each
+    /// subsequent status change.
+    #[cfg(all(feature = "p2p-test-utils", debug_assertions))]
+    pub async fn await_connected_home_relay(&self) -> String {
+        use ::iroh::Watcher as _;
+
+        let mut watcher = self.endpoint.home_relay_status();
+        loop {
+            if let Some(status) = watcher.get().iter().find(|status| status.is_connected()) {
+                return status.url().to_string();
+            }
+            if watcher.updated().await.is_err() {
+                // The last `Endpoint` clone is gone; there is nothing to await.
+                return String::new();
+            }
+        }
+    }
+
+    /// The endpoint's net-report and portmap counters, as `(reports,
+    /// portmap_attempts)` (Story 18.4c, test gate 15).
+    ///
+    /// ⚠ Compiled **only** into the test build. `p2p-test-utils` is a
+    /// non-default cargo key, so the shipped binary gains no accessor and no
+    /// caller — an observability surface whose only caller is a test is the
+    /// mechanism-without-a-trigger class this epic keeps paying for, and
+    /// keeping it out of the release build is how this one avoids joining it.
+    ///
+    /// Under [`presets::Minimal`] both must stay at zero whatever the
+    /// destination, which is the one **host-blind-proof** leg of the
+    /// zero-phone-home claim: the counters name no host, so a claim about
+    /// *which* host was contacted cannot rest on them alone.
+    #[cfg(feature = "p2p-test-utils")]
+    #[must_use]
+    pub fn net_report_counters(&self) -> (u64, u64) {
+        let metrics = self.endpoint.metrics();
+        (
+            metrics.net_report.reports.get(),
+            metrics.net_report.portmap_attempts.get(),
+        )
+    }
+
+    /// Bytes this endpoint has sent to **a** relay — ⛔ not to a named one.
+    ///
+    /// Useful only as a positive control: paired with a structurally
+    /// single-entry relay map, "bytes to a relay" can mean bytes to just one
+    /// relay. ⚠ With `iroh-metrics/metrics` off this returns a hardcoded `0`
+    /// rather than failing to compile, which is exactly why the assertion that
+    /// uses it is a `> 0` control.
+    #[cfg(feature = "p2p-test-utils")]
+    #[must_use]
+    pub fn relay_bytes_sent(&self) -> u64 {
+        self.endpoint.metrics().socket.send_relay.get()
     }
 }
 
@@ -284,6 +536,20 @@ impl PeerTransport for IrohPeerTransport {
         send.finish()
             .map_err(|error| PeerTransportError::Send(error.to_string()))?;
 
+        // ⚑ The path is read HERE — immediately after the write, while it still
+        // describes the connection that carried **this frame's bytes** — and it
+        // is minted **with** the verdict rather than fetched by an accessor
+        // afterwards (Story 18.4c review). Reading it after the reply would
+        // misattribute: iroh holepunches *after* connecting, so the connection
+        // can migrate relay→direct while the answer is in flight, and the first
+        // frame — the one most likely still on the relay — would be reported
+        // under the path its answer arrived on. One read, at the moment the
+        // frame travelled: still no second read of a moving thing, and an
+        // unanswered frame still drops the path entirely (`unanswered()` takes
+        // none), so a receiver that drops its responder can never get
+        // `Carried directly.` printed beneath *"the peer did not answer"*.
+        let path = observe_path(&connection);
+
         // ⛔ Past this point a failure is NOT a send failure and must never be
         // reported as one: the frame is on the wire and the receiver may well
         // have taken it. An unreadable answer is an unknown outcome, which is
@@ -291,7 +557,9 @@ impl PeerTransport for IrohPeerTransport {
         let reply =
             tokio::time::timeout(VERDICT_TIMEOUT, recv.read_to_end(MAX_VERDICT_BYTES)).await;
         Ok(match reply {
-            Ok(Ok(reply)) => decode_verdict(&reply).unwrap_or_else(FrameVerdict::unanswered),
+            Ok(Ok(reply)) => decode_verdict(&reply, path).unwrap_or_else(FrameVerdict::unanswered),
+            // ⛔ No path here, and there is no way to attach one: `unanswered`
+            // takes none.
             Ok(Err(_)) | Err(_) => FrameVerdict::unanswered(),
         })
     }
@@ -319,6 +587,86 @@ impl PeerTransport for IrohPeerTransport {
 fn decode_address(address: &PeerAddress) -> Result<EndpointAddr, PeerTransportError> {
     serde_json::from_slice(address.as_bytes())
         .map_err(|error| PeerTransportError::Address(error.to_string()))
+}
+
+// ── The relay composition ───────────────────────────────────────────────────
+
+/// Parse the operator's canonical relay URLs into iroh's own type.
+///
+/// ⚠ Both sides of the membership rule go through the **same** WHATWG parser:
+/// `RelayUrl` is `Arc<url::Url>` whose `FromStr` delegates to `Url::from_str`,
+/// and the canonical text this receives came out of that same parser. So
+/// "configured" and "offered" are compared as one relation, not two.
+fn parse_relay_urls(urls: &[String]) -> Result<Vec<::iroh::RelayUrl>, PeerTransportError> {
+    urls.iter()
+        .map(|url| {
+            url.parse::<::iroh::RelayUrl>().map_err(|error| {
+                PeerTransportError::Address(format!("relay URL {url:?} did not parse: {error}"))
+            })
+        })
+        .collect()
+}
+
+/// The relay hosts the n0 default mode resolves to.
+///
+/// Resolved through iroh's own `RelayMode::relay_map()` rather than copied, so
+/// a list that moves upstream moves here too — the membership rule must be
+/// checked against the relays this endpoint would actually dial, ⛔ never
+/// against a snapshot that has drifted from them.
+#[must_use]
+pub fn n0_default_relay_set() -> RelaySet {
+    IrohRelayMode::Default
+        .relay_map()
+        .urls::<Vec<::iroh::RelayUrl>>()
+        .into_iter()
+        .map(|url| url.as_str().to_owned())
+        .collect()
+}
+
+/// Whether an address may be published as this host's reach: every relay it
+/// names must have a **connected session** (Story 18.4c review, owner ruling).
+///
+/// iroh publishes a relay into the endpoint address the moment the relay is
+/// *selected* — `RelayConnectionState::Connecting`, before the dial — and the
+/// address watcher carries no connection state. Sinking such an address would
+/// advertise (and mint into freshly signed tickets) a relay this host has no
+/// session with. A relay-less address names only direct sockets, which need no
+/// session to be a fact.
+fn relay_sessions_ready(address: &EndpointAddr, status: &[::iroh::endpoint::RelayStatus]) -> bool {
+    address.addrs.iter().all(|addr| match addr {
+        TransportAddr::Relay(url) => status
+            .iter()
+            .any(|status| status.url() == url && status.is_connected()),
+        // Direct sockets and any transport a newer iroh adds name no relay,
+        // so no session is required for them to be a publishable fact.
+        _ => true,
+    })
+}
+
+/// How the frame that just got an answer actually travelled.
+///
+/// ⚠ `for path in connection.paths()` does **not** compile — `IntoIterator` is
+/// implemented on `&PathList`, not `PathList` — so the snapshot is bound first.
+/// And the match is on `remote_addr()` rather than on `is_ip()`/`is_relay()`:
+/// those are two bools with no `is_custom()` companion, so a custom-transport
+/// path answers **false to both** and code that assumes `!is_relay() ⇒ direct`
+/// renders it as direct. Matching the address makes the unknown case its own
+/// arm — and hands over the relay host the disclosure has to name.
+fn observe_path(connection: &Connection) -> PathObservation {
+    let paths = connection.paths();
+    let Some(selected) = (&paths)
+        .into_iter()
+        .find(::iroh::endpoint::Path::is_selected)
+    else {
+        return PathObservation::Other;
+    };
+    match selected.remote_addr() {
+        TransportAddr::Ip(_) => PathObservation::Direct,
+        TransportAddr::Relay(url) => PathObservation::Relayed {
+            host: url.to_string(),
+        },
+        _ => PathObservation::Other,
+    }
 }
 
 // ── The verdict wire codec ──────────────────────────────────────────────────
@@ -358,8 +706,8 @@ struct WireVerdict {
     prev_hash: Option<String>,
 }
 
-fn encode_verdict(verdict: &FrameVerdict) -> Vec<u8> {
-    let (outcome, refusal) = match verdict.outcome {
+fn encode_verdict(reply: &FrameReply) -> Vec<u8> {
+    let (outcome, refusal) = match reply.outcome {
         FrameOutcome::Accepted => (WireOutcome::Accepted, None),
         FrameOutcome::Refused(refusal) => (WireOutcome::Refused, Some(refusal)),
         // ⛔ Never written: "no answer" is what an absent reply means, and
@@ -370,8 +718,8 @@ fn encode_verdict(verdict: &FrameVerdict) -> Vec<u8> {
     let wire = WireVerdict {
         outcome,
         refusal,
-        next_sequence: verdict.expected.as_ref().map(|at| at.next_sequence),
-        prev_hash: verdict
+        next_sequence: reply.expected.as_ref().map(|at| at.next_sequence),
+        prev_hash: reply
             .expected
             .as_ref()
             .map(|at| URL_SAFE_NO_PAD.encode(&at.prev_hash)),
@@ -379,18 +727,17 @@ fn encode_verdict(verdict: &FrameVerdict) -> Vec<u8> {
     serde_json::to_vec(&wire).unwrap_or_default()
 }
 
-fn decode_verdict(bytes: &[u8]) -> Option<FrameVerdict> {
+/// Decode one answer, and attach the path this host watched the frame take.
+///
+/// ⚑ `path` is consumed by the two answered arms and **dropped** on the unknown
+/// arm. There is no way to keep it there: [`FrameVerdict::unanswered`] takes no
+/// argument, which is why the mutant *"print a path on `Unanswered`"* is not a
+/// rule to remember but a line that does not compile.
+fn decode_verdict(bytes: &[u8], path: PathObservation) -> Option<FrameVerdict> {
     if bytes.is_empty() {
         return None;
     }
     let wire: WireVerdict = serde_json::from_slice(bytes).ok()?;
-    let outcome = match wire.outcome {
-        WireOutcome::Accepted => FrameOutcome::Accepted,
-        WireOutcome::Refused => {
-            FrameOutcome::Refused(wire.refusal.unwrap_or(FrameRefusal::Unclassified))
-        }
-        WireOutcome::Unknown => FrameOutcome::Unanswered,
-    };
     // The position is shape-checked here, at the boundary, so no caller can
     // reach the local signing path with a hostile sequence or a truncated hash.
     let expected = wire.next_sequence.and_then(|next_sequence| {
@@ -404,7 +751,17 @@ fn decode_verdict(bytes: &[u8]) -> Option<FrameVerdict> {
         };
         at.is_wellformed().then_some(at)
     });
-    Some(FrameVerdict { outcome, expected })
+    let verdict = match wire.outcome {
+        WireOutcome::Accepted => FrameVerdict::accepted(path),
+        WireOutcome::Refused => {
+            FrameVerdict::refused(wire.refusal.unwrap_or(FrameRefusal::Unclassified), path)
+        }
+        WireOutcome::Unknown => FrameVerdict::unanswered(),
+    };
+    Some(match expected {
+        Some(expected) => verdict.with_expected(expected),
+        None => verdict,
+    })
 }
 
 async fn accept_frames(
