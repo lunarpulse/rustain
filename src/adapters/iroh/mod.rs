@@ -564,6 +564,61 @@ impl PeerTransport for IrohPeerTransport {
         })
     }
 
+    /// Write one topic advertisement and return only the receiver's expected
+    /// feed position (Story 18.4a).
+    ///
+    /// # Why this overrides the default rather than inheriting it
+    ///
+    /// The port's default is `Err(Unsupported)` on purpose — a defaulted method
+    /// that silently succeeds is a mechanism whose absence is
+    /// indistinguishable from its presence. This is the one real transport, so
+    /// it is the one implementation that must opt in.
+    ///
+    /// # Why it reuses the same bidirectional stream
+    ///
+    /// The receiver chains **every** frame from one sender by `prev_hash`,
+    /// gossip included, so a sender that could not learn the position it must
+    /// chain to would fork the feed on the first restart of either side —
+    /// 18.4d's D9, exactly. The reply is read for that one fact and for nothing
+    /// else: ⛔ no outcome, no path, no acceptance is returned to the caller,
+    /// because an advertisement has none to give.
+    async fn gossip_topic(
+        &self,
+        peer: &PeerId,
+        envelope: AgentEnvelope<Value>,
+    ) -> Result<Option<crate::domain::models::FeedPosition>, PeerTransportError> {
+        let connection = self.connection(peer).await?;
+        let bytes = serde_json::to_vec(&envelope)
+            .map_err(|error| PeerTransportError::Send(error.to_string()))?;
+        if bytes.len() > MAX_FRAME_BYTES {
+            return Err(PeerTransportError::Send(format!(
+                "frame exceeds {MAX_FRAME_BYTES} bytes"
+            )));
+        }
+        let (mut send, mut recv) = connection
+            .open_bi()
+            .await
+            .map_err(|error| PeerTransportError::Send(error.to_string()))?;
+        send.write_all(&bytes)
+            .await
+            .map_err(|error| PeerTransportError::Send(error.to_string()))?;
+        send.finish()
+            .map_err(|error| PeerTransportError::Send(error.to_string()))?;
+
+        // ⛔ Past this point a failure is not a send failure: the frame is on
+        // the wire. An unreadable answer simply means no guidance was offered.
+        let reply =
+            tokio::time::timeout(VERDICT_TIMEOUT, recv.read_to_end(MAX_VERDICT_BYTES)).await;
+        Ok(match reply {
+            // ⛔ The path is discarded: a fire-and-forget advertisement makes
+            // no path claim, so the placeholder is the never-direct arm and
+            // nothing reads it.
+            Ok(Ok(reply)) => decode_verdict(&reply, PathObservation::Other)
+                .and_then(|verdict| verdict.expected.clone()),
+            Ok(Err(_)) | Err(_) => None,
+        })
+    }
+
     fn inbound(&self) -> Result<mpsc::Receiver<InboundFrame>, PeerTransportError> {
         self.inbound_rx
             .try_lock()

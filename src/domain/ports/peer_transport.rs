@@ -119,6 +119,17 @@ pub enum PeerTransportError {
     InboundUnavailable,
     #[error("peer transport shutdown failed: {0}")]
     Shutdown(String),
+    /// The implementation does not provide an optional capability.
+    ///
+    /// ⚑ Story 18.4a: the default [`PeerTransport::gossip_topic`] returns this
+    /// rather than `Ok(())`. A defaulted method that silently succeeds is a
+    /// mechanism whose absence is indistinguishable from its presence — the
+    /// false-green this port's own `send_to` doc warns about.
+    #[error("peer {peer_id} transport does not provide {capability}")]
+    Unsupported {
+        peer_id: String,
+        capability: &'static str,
+    },
     #[error("peer transport is closed")]
     Closed,
 }
@@ -156,6 +167,55 @@ pub trait PeerTransport: Send + Sync {
         peer: &PeerId,
         envelope: AgentEnvelope<Value>,
     ) -> Result<FrameVerdict, PeerTransportError>;
+
+    /// Gossip one signed topic frame to an addressed peer (Story 18.4a, FR150).
+    ///
+    /// ⚑ **The sibling [`Self::send_to`]'s doc authorized exactly this, with a
+    /// condition**: *"if a later story needs fire-and-forget gossip, it adds one
+    /// **with its own producer**."* Story 18.4a is that story;
+    /// `VerifiedPeerFrameHandler::regossip` and `rustain peer share` are the two
+    /// producers, and ⛔ this method must never ship without one.
+    ///
+    /// # Why it is not `send_to`
+    ///
+    /// `send_to` is *acknowledged*: every caller must handle a
+    /// [`FrameVerdict`], because a message that was refused is a fact an
+    /// operator has to be told. An advertisement is not a message that must
+    /// land — a peer that never hears it simply keeps the head it holds — so
+    /// this method exposes **no outcome at all**. ⛔ There is no spelling of
+    /// "the peer accepted this advertisement", which is what makes the honest
+    /// claim the only claim.
+    ///
+    /// # What `Ok` means, and the one thing it carries
+    ///
+    /// The frame was written. ⛔ Never acceptance, never delivery.
+    ///
+    /// `Ok(Some(position))` adds exactly one fact a stateless sender cannot
+    /// otherwise learn: the [`FeedPosition`] the receiver said it would accept
+    /// instead. That is 18.4d's D9 ruling applied here — *make the receiver tell
+    /// the sender its feed position and you no longer need to store one* — and
+    /// it is why no durable gossip cursor exists. `Ok(None)` means the receiver
+    /// volunteered nothing, which includes the ordinary case where it took the
+    /// frame. ⛔ A caller may use the position to re-sign **once**; a second
+    /// guided retry per destination lets a hostile receiver spin the sender.
+    ///
+    /// # Default
+    ///
+    /// Defaulted so no existing implementation breaks (the
+    /// additive-with-defaults discipline `ContextPort` documents). ⚠ The default
+    /// is a refusal, ⛔ not a silent success: an implementation that has not
+    /// opted in must not let a caller believe a head was advertised.
+    async fn gossip_topic(
+        &self,
+        peer: &PeerId,
+        envelope: AgentEnvelope<Value>,
+    ) -> Result<Option<crate::domain::models::FeedPosition>, PeerTransportError> {
+        let _ = envelope;
+        Err(PeerTransportError::Unsupported {
+            peer_id: peer.to_string(),
+            capability: "topic gossip",
+        })
+    }
 
     /// Transfer ownership of the accepted-frame receiver to the caller.
     fn inbound(&self) -> Result<mpsc::Receiver<InboundFrame>, PeerTransportError>;

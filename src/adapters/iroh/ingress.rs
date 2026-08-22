@@ -167,6 +167,24 @@ impl IrohPeerIngress {
                         );
                         continue;
                     }
+                    // ⚑ DF-18-4d-PREADMISSION-WORKER-SLOTS, closed here. A
+                    // worker used to be minted **before** `admit_frame` read the
+                    // allowlist, so sixty-four unadmitted stranger keys could
+                    // pin every slot and lock out every peer the operator
+                    // actually pinned — a denial of service that needs no
+                    // signature and no admission. The allowlist is consulted
+                    // before a slot is *created*, ⛔ never instead of the
+                    // per-frame check in `admit_frame`: that one stays, because
+                    // a revocation must take effect on an already-open
+                    // connection (AC5, 18.4b), and a slot that exists is not a
+                    // frame that was admitted.
+                    if !self.dialable(&frame.peer_id).await {
+                        tracing::warn!(
+                            peer = %frame.peer_id,
+                            "peer frame refused before a worker slot was created: not admitted"
+                        );
+                        continue;
+                    }
                     let (sender, receiver) = mpsc::channel(PEER_QUEUE_DEPTH);
                     tasks.spawn(peer_worker(Arc::clone(&self), receiver));
                     workers.insert(frame.peer_id.clone(), sender.clone());
@@ -197,6 +215,26 @@ impl IrohPeerIngress {
                 "peer refusals were rate-bounded; the suppressed repeats are counted here only"
             );
         }
+    }
+
+    /// Whether the operator's allowlist admits this identity **right now**.
+    ///
+    /// ⛔ Not a substitute for `admit_frame`'s own read: this one decides
+    /// whether a *slot* may be created, and the per-frame read decides whether
+    /// a *frame* is admitted. Collapsing the two would make a revocation take
+    /// effect only for peers that had no worker yet.
+    async fn dialable(&self, peer: &PeerId) -> bool {
+        let workspace = self.workspace.clone();
+        let presented = peer.clone();
+        // Blocking file I/O, off the async worker thread — the same discipline
+        // `admit_frame` uses for the same read.
+        matches!(
+            tokio::task::spawn_blocking(move || peer_dial_verdict_from_workspace(
+                &workspace, &presented
+            ))
+            .await,
+            Ok(PeerDialVerdict::Admit)
+        )
     }
 
     async fn next_frame(&self) -> Option<InboundFrame> {

@@ -26,7 +26,7 @@ line() { printf '{"schema_version":1,"seq":%s,"record":{"kind":"room","payload":
   line 6 "{\"event\":\"admission_deferred\",\"coordinator\":\"root\",\"spoke\":\"${PEER_A}\",\"gate\":\"a2a-inbound-approval:t-2\"}"
   line 7 "{\"event\":\"admission_deferred\",\"coordinator\":\"root\",\"spoke\":\"${PEER_B}\",\"gate\":\"a2a-status-query:t-9\"}"
   line 8 "{\"event\":\"admission_deferred\",\"coordinator\":\"root\",\"spoke\":\"spoke-3\",\"gate\":\"fork-join-rate\"}"
-  line 9 "{\"event\":\"peer_equivocated\",\"peer\":\"${PEER_B}\",\"topic\":\"t-topic\",\"heads\":[\"a\",\"b\"]}"
+  line 9 "{\"event\":\"room_unrecognised_marker\",\"peer\":\"${PEER_B}\",\"topic\":\"t-topic\",\"heads\":[\"a\",\"b\"]}"
   line 10 "{\"event\":\"node_state_changed\",\"node\":\"a2a-in/sub-a/t-1\",\"from\":\"running\",\"to\":\"completed\"}"
 } > "$OUT"
 

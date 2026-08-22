@@ -52,6 +52,7 @@ pub mod streaming_collect;
 pub mod summary_labeler;
 pub mod swap_tier;
 pub mod tool_scheduler;
+pub mod topic;
 pub use plan_runtime::{PlanRuntime, PlanRuntimeState, TaskTurnOutcome, format_task_prompt};
 pub mod turn_grouping;
 pub mod turn_queue;

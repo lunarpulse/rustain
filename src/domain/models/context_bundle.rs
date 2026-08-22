@@ -113,6 +113,16 @@ pub enum ContextSource {
     Recall(String),
     /// (Story 11.6) A cold-group gist → `[group: {N}]`.
     Group(u64),
+    /// (Story 18.4a, FR151) A signed handle a peer issued → `[peer: <peer-id>]`.
+    ///
+    /// ⛔ The label is **attribution, never truth** (COLLAB invariant 15): it
+    /// says *peer K asserted this*, and never that the assertion is correct,
+    /// verified or authenticated. Every entry carrying this source is tainted
+    /// by construction — see [`ContextBundle::has_peer_origin`].
+    ///
+    /// The identity is a [`crate::domain::models::PeerId`] and ⛔ never a
+    /// transport identifier (NFR74).
+    Peer(crate::domain::models::PeerId),
 }
 
 impl ContextSource {
@@ -125,6 +135,7 @@ impl ContextSource {
             ContextSource::Project(name) => format!("[project: {name}]"),
             ContextSource::Recall(provider) => format!("[recall: {provider}]"),
             ContextSource::Group(n) => format!("[group: {n}]"),
+            ContextSource::Peer(peer) => format!("[peer: {}]", peer.as_str()),
         }
     }
 
@@ -134,12 +145,22 @@ impl ContextSource {
     /// material that may also appear as a daily-log row of the same date and is
     /// NOT a duplicate (forward-compat note 2). So `Group`/`Recall`/`Project`
     /// each get their own class and never collide with memory rows.
+    ///
+    /// ⚑ **`Peer` gets its own class, and that is a SECURITY property, not
+    /// tidiness (Story 18.4a).** Dedup replaces the lower-precedence entry
+    /// *in place* (`memory_context.rs`), so a shared class would let a signed
+    /// peer assertion **evict the operator's own memory row**. A signature is
+    /// attribution, never truth (COLLAB invariant 15): a peer saying *"the event
+    /// bus is Kafka"* and local memory saying *"NATS"* must **both** survive
+    /// into the bundle, each attributed, for the model to weigh. ⛔ Never fold
+    /// `Peer` into class `0`.
     pub fn dedup_class(&self) -> u8 {
         match self {
             ContextSource::DailyLog(_) | ContextSource::MemoryMd => 0,
             ContextSource::Project(_) => 1,
             ContextSource::Recall(_) => 2,
             ContextSource::Group(_) => 3,
+            ContextSource::Peer(_) => 4,
         }
     }
 
@@ -148,8 +169,25 @@ impl ContextSource {
     /// cacheable system prompt — prefix-cache correctness, ADR-11-1), so a
     /// `Project` reference is carried in the bundle for `/context show` + dedup
     /// but is NEVER re-injected here.
+    ///
+    /// ⚠ This predicate is a **negation**, so a new variant becomes injectable
+    /// without the compiler asking. `Peer` being injectable is the behaviour
+    /// FR151 wants — peer context must reach the model — but it is *chosen*
+    /// here rather than inherited, and `peer_entries_are_injectable_by_decision`
+    /// pins the choice so the next variant does not inherit it silently.
     pub fn is_injectable(&self) -> bool {
         !matches!(self, ContextSource::Project(_))
+    }
+
+    /// Whether an entry from this source is peer-origin, and therefore tainted.
+    ///
+    /// ⚑ Derived from the variant, ⛔ never from a field on
+    /// [`ProvenancedEntry`]: that struct is not `#[non_exhaustive]`, so a new
+    /// field breaks every construction site in the crate for a bit that
+    /// `ContextSource::Peer(..)` already implies. 17.2a's landmine list says the
+    /// same of `ProvenanceTag` — reuse, do not redefine.
+    pub fn is_peer_origin(&self) -> bool {
+        matches!(self, ContextSource::Peer(_))
     }
 }
 
@@ -189,7 +227,15 @@ impl ProvenancedEntry {
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct AssembleDiagnostics {
-    /// Token cost per source, in injection order (drives the `/context show` card).
+    /// Token cost per source, in **first-injection order** (drives the
+    /// `/context show` card).
+    ///
+    /// ⚠ **The order is load-bearing since Story 18.4a.** `ContextBundle`
+    /// derives `PartialEq` over `diagnostics` as well as `entries`, and NFR71
+    /// asserts two bundles are byte-identical under permuted arrival — so a
+    /// producer that accumulates this through a `HashMap` makes that assertion
+    /// flake. Producers accumulate in encounter order; ⛔ never through a
+    /// randomly-seeded map.
     pub per_source_tokens: Vec<(ContextSource, usize)>,
     /// Total estimated injected token cost (sum of injectable entries).
     pub total_tokens: usize,
@@ -235,6 +281,24 @@ impl ContextBundle {
     /// Whether there are no entries at all.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Whether any entry in this bundle came from a peer (Story 18.4a, FR151).
+    ///
+    /// ⚑ This is the bridge the taint gate was missing. Before this story the
+    /// only escalation into `ProvenanceTag::SelfOriginated` mid-turn was a
+    /// completed tool call whose name began `"a2a__"`, so a locally-initiated
+    /// turn that assembled peer-sourced context dispatched destructive tools as
+    /// `UserOriginated` and the taint gate never fired. FR151's headline —
+    /// *"peer context is read, never a silent driver of a destructive action"* —
+    /// was false without this.
+    ///
+    /// ⛔ Derived from the entries, never from a peer-supplied assertion:
+    /// 17.1b's Vex rule (17.2a landmine #4) is that *"a peer must not assert
+    /// `tainted:false` to clear its own taint"*. There is no field a peer could
+    /// set; the bit is recomputed from `ContextSource` on every read.
+    pub fn has_peer_origin(&self) -> bool {
+        self.entries.iter().any(|e| e.source.is_peer_origin())
     }
 
     /// Materialise the injectable entries into a labelled `context_prefix` block:
@@ -294,6 +358,20 @@ mod tests {
             "[recall: honcho]"
         );
         assert_eq!(ContextSource::Group(7).attribution(), "[group: 7]");
+        let peer = crate::domain::models::PeerId::from_public_key(&[9u8; 32]).expect("valid key");
+        assert_eq!(
+            ContextSource::Peer(peer.clone()).attribution(),
+            format!("[peer: {}]", peer.as_str())
+        );
+        // ⚑ Deliberate, not inherited: `Peer` is injectable because FR151 wants
+        // peer context to reach the model — and `is_injectable` is a negation,
+        // so pin the choice or the next variant inherits it silently.
+        assert!(ContextSource::Peer(peer.clone()).is_injectable());
+        assert!(ContextSource::Peer(peer.clone()).is_peer_origin());
+        assert!(!ContextSource::MemoryMd.is_peer_origin());
+        // ⚑ The dedup class is a SECURITY property: a peer entry must never
+        // collide with (and so never evict) a local memory row.
+        assert_ne!(ContextSource::Peer(peer).dedup_class(), 0);
     }
 
     #[test]

@@ -220,9 +220,20 @@ impl MemoryContextAdapter {
         let mut total = 0usize;
         let mut truncated = false;
         let mut kept: Vec<ProvenancedEntry> = Vec::with_capacity(entries.len());
-        // Aggregate token counts per source (not per entry) for clean card display.
-        let mut per_source_map: std::collections::HashMap<ContextSource, usize> =
-            std::collections::HashMap::new();
+        // Aggregate token counts per source (not per entry) for clean card
+        // display.
+        //
+        // ⚑ **An encounter-ordered `Vec`, ⛔ never a `HashMap` (Story 18.4a).**
+        // This was a `std::collections::HashMap` collected with `.into_iter()`,
+        // whose iteration order is randomly seeded per process — so
+        // `AssembleDiagnostics.per_source_tokens` differed run to run, and
+        // because `ContextBundle` derives `PartialEq` over `diagnostics` as
+        // well as `entries`, NFR71's *"byte-identical under any permutation"*
+        // assertion would have flaked rather than failed honestly. Classified
+        // per Rule 3 as a **pre-existing defect** on the seam NFR71 makes
+        // load-bearing — not deferrable, fixed here. The source count is a
+        // handful, so the linear scan costs less than a hash.
+        let mut per_source: Vec<(ContextSource, usize)> = Vec::new();
 
         for e in entries.drain(..) {
             let cost = e.estimated_tokens();
@@ -235,12 +246,17 @@ impl MemoryContextAdapter {
                 }
                 total += cost;
             }
-            *per_source_map.entry(e.source.clone()).or_insert(0) += cost;
+            match per_source
+                .iter_mut()
+                .find(|(source, _)| *source == e.source)
+            {
+                Some((_, running)) => *running += cost,
+                None => per_source.push((e.source.clone(), cost)),
+            }
             kept.push(e);
         }
 
         *entries = kept;
-        let per_source: Vec<(ContextSource, usize)> = per_source_map.into_iter().collect();
         (truncated, per_source, total)
     }
 

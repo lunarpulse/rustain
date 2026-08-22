@@ -119,6 +119,23 @@ pub(crate) async fn run_cli(action: &PeerAction) -> anyhow::Result<()> {
             )
             .await
         }
+        PeerAction::Share {
+            alias,
+            artifact,
+            topic,
+            summary,
+        } => {
+            run_cli_share(
+                &workspace,
+                &config_path,
+                alias,
+                artifact,
+                topic,
+                summary.as_deref(),
+                &mut stdout,
+            )
+            .await
+        }
         PeerAction::List { json } => {
             let config = load_workspace_p2p_config(&config_path);
             list::render_peer_list(
@@ -398,7 +415,7 @@ async fn run_cli_reach_refresh(
 ///
 /// ⚠ Every refusal happens **here**, before anything is bound or dialed: an
 /// unknown or unpinned alias must never produce a socket.
-fn resolve_ping_target(
+pub(crate) fn resolve_ping_target(
     workspace: &std::path::Path,
     config_path: &std::path::Path,
     alias: &str,
@@ -472,6 +489,140 @@ async fn run_cli_ping(
         )
         .await
     }
+}
+
+/// `peer share` on the CLI: forward the operator's share act to the running
+/// daemon (Story 18.4a, FR150; code-review D3).
+///
+/// ⚑ **The daemon is the producer, not this process.** The daemon holds the
+/// one Topic store the context provider reads and the one bound transport the
+/// host identity listens on. A CLI-side endpoint would sign with the same
+/// identity key over a second connection — forking the receiver's feed against
+/// the daemon's — and its fresh store would be dropped at exit, so this host
+/// would never retain its own log (the pre-review shape, which also computed
+/// the advertised head over a fabricated header and false-fired
+/// `PeerEquivocated` on every receiver: P1/P2).
+///
+/// Every refusal still happens before anything is dialed: the daemon resolves
+/// the alias, the artifact and the listener before any peer socket exists.
+async fn run_cli_share(
+    workspace: &std::path::Path,
+    _config_path: &std::path::Path,
+    alias: &str,
+    artifact_id: &str,
+    topic: &str,
+    summary: Option<&str>,
+    out: &mut impl std::io::Write,
+) -> anyhow::Result<()> {
+    use crate::adapters::cli::peer::share::{
+        ShareRefusal, share_refusal_text, share_sent_text, validate_summary,
+    };
+    use crate::adapters::daemon::protocol::{
+        ClientFrame, ConnectionTier, DaemonFrame, PeerShareOutcome, answer_attach_challenge,
+        read_frame, write_frame,
+    };
+
+    let refuse = |out: &mut dyn std::io::Write, refusal: ShareRefusal| -> anyhow::Result<()> {
+        writeln!(out, "{}", share_refusal_text(alias, &refusal))?;
+        anyhow::bail!("peer share refused before anything was sent")
+    };
+
+    // The one client-side validation: the summary. Everything else resolves
+    // daemon-side, against the one p2p.json and the one room the daemon reads.
+    if let Some(text) = summary
+        && let Err(refusal) = validate_summary(text)
+    {
+        return refuse(out, refusal);
+    }
+
+    let socket = crate::infrastructure::paths::daemon_socket_path(workspace)?;
+    let stream = match tokio::net::UnixStream::connect(&socket).await {
+        Ok(stream) => stream,
+        Err(_) => return refuse(out, ShareRefusal::DaemonUnavailable),
+    };
+    let (mut reader, mut writer) = stream.into_split();
+    let signer =
+        crate::adapters::rap::IdentityKeyStore::new(crate::infrastructure::paths::data_dir()?)
+            .load_or_generate()
+            .map_err(|error| anyhow::anyhow!("this host's identity key did not load: {error}"))?;
+    answer_attach_challenge(
+        &mut reader,
+        &mut writer,
+        false,
+        ConnectionTier::TrustedLocal,
+        &signer,
+    )
+    .await?;
+    match read_frame::<_, DaemonFrame>(&mut reader).await? {
+        Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
+            if granted_mode != crate::adapters::daemon::protocol::AttachMode::ReadWrite {
+                return refuse(
+                    out,
+                    ShareRefusal::LocalFault {
+                        reason: "another client holds this daemon's writer slot".to_owned(),
+                    },
+                );
+            }
+        }
+        other => anyhow::bail!("the daemon did not accept the attach: {other:?}"),
+    }
+    write_frame(
+        &mut writer,
+        &ClientFrame::PeerShare {
+            alias: alias.to_owned(),
+            artifact: artifact_id.to_owned(),
+            topic: topic.to_owned(),
+            summary: summary.map(str::to_owned),
+        },
+    )
+    .await?;
+    // Event frames may stream while the share resolves; the answer is the
+    // first PeerShareResult (or a protocol Error).
+    loop {
+        match read_frame::<_, DaemonFrame>(&mut reader).await? {
+            Some(DaemonFrame::PeerShareResult { outcome }) => match outcome {
+                PeerShareOutcome::Advertised => {
+                    writeln!(out, "{}", share_sent_text(alias, topic, artifact_id))?;
+                    return Ok(());
+                }
+                PeerShareOutcome::Refused { reason } => {
+                    writeln!(out, "{reason}")?;
+                    anyhow::bail!("peer share refused before anything was sent");
+                }
+            },
+            Some(DaemonFrame::Event(_)) => continue,
+            Some(DaemonFrame::Error(error)) => {
+                return refuse(
+                    out,
+                    ShareRefusal::LocalFault {
+                        reason: error.to_string(),
+                    },
+                );
+            }
+            Some(other) => anyhow::bail!("unexpected daemon frame while sharing: {other:?}"),
+            None => anyhow::bail!("the daemon closed the connection mid-share"),
+        }
+    }
+}
+
+/// Look one artifact up in this workspace's room projection.
+pub(crate) async fn resolve_shared_artifact(
+    workspace: &std::path::Path,
+    artifact_id: &str,
+) -> anyhow::Result<Option<crate::domain::models::EvidenceArtifact>> {
+    let journal =
+        crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(workspace)
+            .await?;
+    // The **same** host-id derivation every other room read uses. ⛔ Not a
+    // second one: `project_for_host` derives host-bound availability from it,
+    // and two derivations would disagree about which artifacts live here.
+    let host_id = crate::infrastructure::subagent::current_host_id(workspace);
+    let room = journal.project_room(&host_id).await?;
+    Ok(room
+        .artifacts()
+        .iter()
+        .find(|(id, _)| id.as_str() == artifact_id)
+        .map(|(_, artifact)| artifact.clone()))
 }
 
 /// Send `count` signed frames to one peer on **one** connection.

@@ -1,6 +1,6 @@
 {
   "FIXTURE_room_journal_pre_18_2.jsonl": {
-    "sha256": "32d8f473cda2dfd5e2bc2485b10cc93318be88409b69547fd7ec4e3350a4f489",
+    "sha256": "df58cfe5549ad99e6bf2368002a3ea913a90203aacc27ff319907c1ad8050bd9",
     "provenance": {
       "shape_of": "rustain@6ca43eb .rustain/rooms/room-<hash>.jsonl",
       "authored": "2026-07-26",

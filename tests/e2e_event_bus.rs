@@ -142,6 +142,7 @@ fn test_app_state_honors_raw_capacity() {
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: std::sync::Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -223,6 +224,7 @@ fn test_app_state_session_cancel_is_root_token() {
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: std::sync::Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]

@@ -82,13 +82,18 @@ fn peer_envelope(
     prev_hash: Vec<u8>,
     body: Value,
 ) -> Box<AgentEnvelope<Value>> {
-    let sender = AgentId::from_peer_path(&format!("{}/agent", signer.identity().peer_id.as_str()))
-        .expect("peer-rooted sender");
+    let pid = signer.identity().peer_id.as_str();
+    let sender = AgentId::from_peer_path(&format!("{pid}/agent")).expect("peer-rooted sender");
+    // ⚑ Rooted at the sender's own namespace too — the recipient rule 18.4a
+    // enforces (`DF-18-4d-RECIPIENT-NAMESPACE`); a bare `daemon` recipient is
+    // refused now.
+    let recipient =
+        AgentId::from_peer_path(&format!("{pid}/daemon")).expect("peer-rooted recipient");
     Box::new(
         signer
             .sign(
                 sender,
-                AgentId::parse("daemon").expect("valid recipient"),
+                recipient,
                 CorrelationId::new("real-peer-corr"),
                 MessageKind::PeerMessage,
                 sequence,

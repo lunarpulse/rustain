@@ -611,16 +611,24 @@ impl AttachServer {
     pub async fn configure_peer_recorder(
         self: &Arc<Self>,
         recorder: Arc<dyn crate::domain::ports::PeerInteractionRecorder>,
+        topics: Arc<crate::adapters::rap::PeerTopicStore>,
     ) {
-        let handler = Arc::new(crate::adapters::rap::VerifiedPeerFrameHandler::new(
-            self.node_tree.clone(),
-            self.peer_bus.clone(),
-            self.domain_tx.clone(),
-            Arc::new(DaemonPeerConsumer {
-                server: Arc::downgrade(self),
-            }),
-            recorder,
-        ));
+        let handler = Arc::new(
+            crate::adapters::rap::VerifiedPeerFrameHandler::new(
+                self.node_tree.clone(),
+                self.peer_bus.clone(),
+                self.domain_tx.clone(),
+                Arc::new(DaemonPeerConsumer {
+                    server: Arc::downgrade(self),
+                }),
+                recorder,
+            )
+            // Story 18.4a — the **same** `Arc` the `"composite"` context adapter
+            // reads. ⛔ Constructing a second store here would give this host an
+            // agent that reads a different log than the one its transport
+            // writes, which is the failure this argument exists to prevent.
+            .with_topics(topics),
+        );
         *self.peer_delivery.write().await = Some(handler);
     }
 
@@ -1228,6 +1236,104 @@ impl AttachServer {
         Ok(())
     }
 
+    /// Execute one operator share act against the running daemon (Story 18.4a;
+    /// code-review D3 + D1).
+    ///
+    /// The daemon is the right home for this: it owns the one `PeerTopicStore`
+    /// the context provider reads and the one transport the host identity
+    /// listens on. Every refusal is produced before anything is dialed, in the
+    /// same order the CLI used to check — alias, artifact, summary, listener —
+    /// and each names what was **not** done.
+    async fn execute_peer_share(
+        &self,
+        alias: &str,
+        artifact_id: &str,
+        topic: &str,
+        summary: Option<String>,
+    ) -> super::protocol::PeerShareOutcome {
+        use crate::adapters::cli::peer::share::{
+            ShareRefusal, derived_summary, share_refusal_text, validate_summary,
+        };
+
+        let refuse = |refusal: ShareRefusal| super::protocol::PeerShareOutcome::Refused {
+            reason: share_refusal_text(alias, &refusal),
+        };
+
+        let workspace = self.core.workspace.clone();
+        let config_path = crate::infrastructure::paths::workspace_p2p_config_path(&workspace);
+        let (peer_id, _address, _relay) =
+            match crate::infrastructure::runtime::peer_bridge::resolve_ping_target(
+                &workspace,
+                &config_path,
+                alias,
+            ) {
+                Ok(target) => target,
+                Err(crate::adapters::cli::peer::ping::PingRefusal::UnknownAlias) => {
+                    return refuse(ShareRefusal::UnknownAlias);
+                }
+                Err(crate::adapters::cli::peer::ping::PingRefusal::Unpinned) => {
+                    return refuse(ShareRefusal::Unpinned);
+                }
+                Err(crate::adapters::cli::peer::ping::PingRefusal::NoReach) => {
+                    return refuse(ShareRefusal::NoReach);
+                }
+                Err(crate::adapters::cli::peer::ping::PingRefusal::RelayNotConfigured) => {
+                    return refuse(ShareRefusal::RelayNotConfigured);
+                }
+                Err(other) => {
+                    return refuse(ShareRefusal::LocalFault {
+                        reason: crate::adapters::cli::peer::rows::ping_refusal_text(alias, &other),
+                    });
+                }
+            };
+
+        let artifact = match crate::infrastructure::runtime::peer_bridge::resolve_shared_artifact(
+            &workspace,
+            artifact_id,
+        )
+        .await
+        {
+            Ok(Some(artifact)) => artifact,
+            Ok(None) => {
+                return refuse(ShareRefusal::UnknownArtifact {
+                    artifact: artifact_id.to_owned(),
+                });
+            }
+            Err(error) => {
+                return refuse(ShareRefusal::LocalFault {
+                    reason: format!("the room journal could not be read ({error})"),
+                });
+            }
+        };
+
+        let summary_text = summary.unwrap_or_else(|| derived_summary(&artifact));
+        let summary = match validate_summary(&summary_text) {
+            Ok(summary) => summary,
+            Err(refusal) => return refuse(refusal),
+        };
+
+        let handler = self.peer_delivery.read().await.clone();
+        let Some(handler) = handler else {
+            return refuse(ShareRefusal::LocalFault {
+                reason: "the peer delivery front door is not configured on this daemon".to_owned(),
+            });
+        };
+        match handler
+            .share_handle(
+                &peer_id,
+                &artifact,
+                &crate::domain::models::CorrelationId::new(topic),
+                summary,
+            )
+            .await
+        {
+            Ok(()) => super::protocol::PeerShareOutcome::Advertised,
+            Err(error) => super::protocol::PeerShareOutcome::Refused {
+                reason: format!("Nothing was shared with '{alias}': {error}"),
+            },
+        }
+    }
+
     async fn retract_auto_response(
         &self,
         message_id: &str,
@@ -1612,6 +1718,35 @@ impl AttachServer {
                     self.send_to(conn_id, DaemonFrame::Error(ProtocolError::Internal(error)))
                         .await;
                 }
+            }
+            ClientFrame::PeerShare {
+                alias,
+                artifact,
+                topic,
+                summary,
+            } => {
+                // Story 18.4a (code-review D3) — an operator act, so the same
+                // gates as every other mutating trusted-local frame.
+                if mode != AttachMode::ReadWrite {
+                    self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
+                        .await;
+                    return false;
+                }
+                if tier != ConnectionTier::TrustedLocal {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::PeerVerification(
+                            "topic share is same-host trusted-local only".to_owned(),
+                        )),
+                    )
+                    .await;
+                    return false;
+                }
+                let outcome = self
+                    .execute_peer_share(&alias, &artifact, &topic, summary)
+                    .await;
+                self.send_to(conn_id, DaemonFrame::PeerShareResult { outcome })
+                    .await;
             }
             ClientFrame::Attach { .. } => {
                 // Re-Attach mid-session is a protocol error.
@@ -2099,6 +2234,7 @@ impl AttachServer {
                 turn_origin,
                 CancellationToken::new(),
             )
+            .await
         };
 
         if let Err(e) = handle.await {
@@ -3801,6 +3937,10 @@ mod tests {
             tool_scheduler,
             persona: Arc::new(NoOpPersona),
             context_assembler: Arc::new(ArcSwap::from_pointee(None)),
+            context: Arc::new(ArcSwap::from_pointee(
+                Arc::new(crate::adapters::noop::NoOpContext)
+                    as Arc<dyn crate::domain::ports::ContextPort>,
+            )),
             storage: storage.clone(),
             fs_storage: Arc::new(FileSystemStorage::with_workspace_root(
                 crate::infrastructure::paths::sessions_dir(workspace),
@@ -3842,6 +3982,7 @@ mod tests {
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(mock_runtime(
                     provider.clone(),
@@ -3888,6 +4029,7 @@ mod tests {
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(mock_runtime(
                     provider.clone(),
@@ -5187,6 +5329,7 @@ mod tests {
             storage,
             Arc::new(NoOpSecurity),
             Arc::new(PromptPersona(prompt.to_owned())),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(mock_runtime(
                     provider.clone(),
@@ -5262,14 +5405,18 @@ mod tests {
         not_after: i64,
     ) -> Box<AgentEnvelope<serde_json::Value>> {
         use crate::domain::models::{AgentId, CorrelationId, MessageKind};
-        let sender =
-            AgentId::from_peer_path(&format!("{}/agent", signer.identity().peer_id.as_str()))
-                .expect("peer-rooted sender");
+        let pid = signer.identity().peer_id.as_str();
+        let sender = AgentId::from_peer_path(&format!("{pid}/agent")).expect("peer-rooted sender");
+        // ⚑ Rooted at the sender's own namespace too — the recipient rule
+        // `DF-18-4d-RECIPIENT-NAMESPACE` (closed by 18.4a) enforces. Pre-18.4a
+        // this fixture addressed a bare `daemon`, which is refused now.
+        let recipient =
+            AgentId::from_peer_path(&format!("{pid}/daemon")).expect("peer-rooted recipient");
         Box::new(
             signer
                 .sign(
                     sender,
-                    AgentId::parse("daemon").expect("valid recipient"),
+                    recipient,
                     CorrelationId::new("corr"),
                     MessageKind::PeerMessage,
                     sequence,
@@ -5326,7 +5473,10 @@ mod tests {
             None => AttachServer::new(core, conversation, bus.domain_tx.clone()),
         };
         server
-            .configure_peer_recorder(Arc::new(AcceptingPeerRecorder))
+            .configure_peer_recorder(
+                Arc::new(AcceptingPeerRecorder),
+                Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            )
             .await;
         let shutdown = CancellationToken::new();
         let srv = server.clone();
@@ -6331,6 +6481,57 @@ mod tests {
             });
         }
         (server, rx, conn_id)
+    }
+
+    /// Story 18.4a code-review D3: `peer share` is a daemon-owned
+    /// trusted-local mutation. The protocol frame must reach the daemon-side
+    /// resolver (not silently fall through), and an unknown alias is refused
+    /// before a peer transport could be used.
+    #[tokio::test]
+    async fn peer_share_frame_reaches_daemon_and_refuses_unknown_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, mut rx, conn_id) = setup_consolidation_test(tmp.path()).await;
+
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::PeerShare {
+                    alias: "missing".into(),
+                    artifact: "artifact-1".into(),
+                    topic: "architecture".into(),
+                    summary: None,
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                conn_id,
+            )
+            .await;
+        match rx.recv().await {
+            Some(DaemonFrame::PeerShareResult {
+                outcome: crate::adapters::daemon::protocol::PeerShareOutcome::Refused { reason },
+            }) => assert!(
+                reason.contains("No peer named 'missing'"),
+                "the daemon must resolve and refuse before any dial: {reason}"
+            ),
+            other => panic!("expected PeerShareResult::Refused, got {other:?}"),
+        }
+
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::PeerShare {
+                    alias: "missing".into(),
+                    artifact: "artifact-1".into(),
+                    topic: "architecture".into(),
+                    summary: None,
+                },
+                AttachMode::ReadOnly,
+                ConnectionTier::TrustedLocal,
+                conn_id,
+            )
+            .await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(DaemonFrame::Error(ProtocolError::ReadOnly))
+        ));
     }
 
     /// Wrap bare `MemoryFact`s into the wire `ProposedFact` shape (Story 12.2d Fork-C),

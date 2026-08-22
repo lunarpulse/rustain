@@ -404,6 +404,18 @@ impl LocalTurnDriver {
         // the session toggle is OFF (AC7).
         handlers::context_command::inject_assembled_context(state, context, &text, &mut messages)
             .await;
+        // Story 18.4a (FR151) — the taint bridge. The bundle the front door just
+        // cached is the only place that knows whether this turn is carrying a
+        // teammate's assertions, and `has_peer_origin` recomputes the bit from
+        // each entry's `ContextSource`. ⛔ Never read from a peer-supplied field:
+        // there is none, which is what makes 17.1b's Vex rule — *"a peer must
+        // not assert `tainted:false` to clear its own taint"* — structural here.
+        //
+        // ⚑ Gated on the injection toggle (code-review P7): the front door
+        // early-returns when injection is off WITHOUT clearing the cached
+        // bundle, so an unguarded read would keep every later turn tainted by
+        // a bundle that was never injected into it.
+        let context_tainted = context_taint_for_turn(state);
 
         let all_tool_defs = tools.available_tools();
         let persona_prompt = persona.system_prompt(workspace_path);
@@ -571,6 +583,7 @@ impl LocalTurnDriver {
             parent_trace,
             session_id,
             TurnOrigin::Interactive,
+            context_tainted,
         ));
         *active_turn = Some(handle);
 
@@ -601,10 +614,29 @@ pub(crate) fn tool_survives_allowlist(
     allowed.contains(name) || name == "activate_skill" || name == "task"
 }
 
+/// Whether the context actually injected into this turn carries peer-origin
+/// material. The toggle is part of the predicate: `inject_assembled_context`
+/// intentionally returns early while OFF and retains the prior bundle for
+/// `/context show`; that cache must not taint a turn it never entered
+/// (code-review P7).
+fn context_taint_for_turn(state: &TuiState) -> bool {
+    state.context_injection_on
+        && state
+            .last_context_bundle
+            .as_ref()
+            .is_some_and(crate::domain::models::ContextBundle::has_peer_origin)
+}
+
 #[cfg(test)]
 mod turn_driver_allowlist_tests {
-    use super::tool_survives_allowlist;
     use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use super::{context_taint_for_turn, tool_survives_allowlist};
+    use crate::adapters::tui::state::TuiState;
+    use crate::domain::models::{
+        ContextBundle, ContextSource, PeerId, ProvenancedEntry, Relevance, RetrievalMethod,
+    };
 
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -634,5 +666,35 @@ mod turn_driver_allowlist_tests {
     fn explicitly_allowed_tool_survives() {
         let allowed = set(&["Read", "Bash"]);
         assert!(tool_survives_allowlist("Bash", &allowed));
+    }
+
+    #[test]
+    fn context_toggle_off_ignores_a_stale_peer_bundle() {
+        // Code-review P7: `/context off` short-circuits assembly and leaves the
+        // prior cached bundle available for `/context show`; that old bundle
+        // must not prompt a destructive dispatch on the current, un-injected
+        // turn.
+        let peer = PeerId::from_public_key(&[7u8; 32]).expect("valid peer");
+        let bundle = ContextBundle {
+            entries: vec![ProvenancedEntry {
+                source: ContextSource::Peer(peer),
+                content: Arc::from("peer claim"),
+                timestamp: 0,
+                retrieval_method: RetrievalMethod::Structural,
+                relevance: Relevance::Unscored,
+            }],
+            diagnostics: Default::default(),
+        };
+        let mut state = TuiState::new(80, 24);
+        state.last_context_bundle = Some(bundle);
+        assert!(
+            context_taint_for_turn(&state),
+            "the injected peer bundle taints"
+        );
+        state.context_injection_on = false;
+        assert!(
+            !context_taint_for_turn(&state),
+            "the cached bundle is not the current turn's context while injection is off"
+        );
     }
 }

@@ -609,9 +609,19 @@ pub fn explain_effective_policy(
                 binding: SenderBinding::DeclaredPeerId,
             } => rows.push(PolicyRow {
                 key: format!("sender:{}", sender.alias),
+                // The binding is real, but only for a sender that PRESENTS this
+                // key. An inbound A2A HTTP submitter's identity is a digest of
+                // the credential it presented (`loopback`, `apikey:<…>`), never a
+                // pinned public key, so this override cannot match one — and the
+                // row used to reassure the operator that it did. Scoped, not
+                // blanket: a signed-envelope peer carrying this key does bind
+                // here (DF-18-4e-OVERRIDE-UNREACHABLE).
                 detail: format!(
-                    "per-sender override `{}` binds to declared pinned identity {} and is \
-                     rename-stable; {values}",
+                    "per-sender override `{}` binds to declared pinned identity {} for a sender \
+                     that presents that key in a signed envelope, and is rename-stable; it can \
+                     never match an inbound A2A HTTP submitter, whose identity is derived from \
+                     the credential presented rather than from a pinned key \
+                     (DF-18-4e-OVERRIDE-UNREACHABLE); {values}",
                     sender.alias,
                     short_id(peer_id)
                 ),
@@ -1187,6 +1197,83 @@ mod tests {
                 .any(|row| row.detail.contains("UNPINNED") && row.detail.contains("drive-by")),
             "an unpinned per-sender target must be reported: {:?}",
             explanation.rows
+        );
+    }
+
+    /// Story 18.4e AC7 — the explainer must not reassure an operator about a
+    /// binding that cannot fire on the path they are configuring.
+    ///
+    /// Front door: the row `explain_effective_policy` renders, reached through the
+    /// real `resolve_effective_policy`. ⛔ Not the enum variant — a
+    /// `matches!(SenderBinding::DeclaredPeerId, …)` assertion says nothing about
+    /// what the operator is told.
+    ///
+    /// Mutants this must turn RED:
+    /// (a) restore the old unqualified *"binds to declared pinned identity … and
+    ///     is rename-stable"* wording — the A2A clause and the DF id disappear;
+    /// (b) make the honesty clause **blanket** (the `is NOT applied` phrasing the
+    ///     genuinely-inapplicable arms use) — the signed-envelope clause
+    ///     disappears, and it would contradict the behaviour asserted below,
+    ///     because this override really does resolve for the identity it names.
+    ///
+    /// Positive control: the row still exists. Trading a misleading line for an
+    /// invisible one is not a fix.
+    #[test]
+    fn a_declared_pin_row_scopes_its_promise_to_the_path_that_can_honour_it() {
+        let key = [77u8; 32];
+        let pinned = PeerId::from_public_key(&key).unwrap();
+        let mut policy = IndividualPolicy::default();
+        policy.overrides.insert(
+            "marcus-arch".to_owned(),
+            SenderOverride {
+                peer_id: Some(pinned.as_str().to_owned()),
+                response_mode: Some(ResponseMode::NotifyAndAuto),
+                ..SenderOverride::default()
+            },
+        );
+        let effective = resolve_effective_policy(&policy, None, &[peer("marcus-arch", Some(key))]);
+
+        // Both halves of the new sentence are anchored in behaviour, not prose. A
+        // sender that presents this key in a signed envelope resolves to the
+        // pinned identity, so the override really does bind for it …
+        assert_eq!(
+            sender_policy_for(&effective, &pinned)
+                .and_then(|sender| sender.response_mode.as_ref())
+                .map(|resolved| resolved.value),
+            Some(ResponseMode::NotifyAndAuto),
+            "a declared pin must still bind for the identity it names"
+        );
+        // … while an inbound A2A HTTP submitter's identity is `sha256(<credential
+        // handle>)`, which no pinned public key can equal.
+        for handle in ["loopback", "apikey:some-presented-key"] {
+            assert_eq!(
+                sender_policy_for(&effective, &alias_pseudonym(handle)),
+                None,
+                "an A2A submitter identity must never resolve a pinned override"
+            );
+        }
+
+        let explanation = explain_effective_policy(&effective, &[]);
+        let row = explanation
+            .rows
+            .iter()
+            .find(|row| row.key == "sender:marcus-arch")
+            .expect("the override must still be explained, never silently dropped");
+        for expected in [
+            "in a signed envelope",
+            "never match an inbound A2A HTTP submitter",
+            "DF-18-4e-OVERRIDE-UNREACHABLE",
+        ] {
+            assert!(
+                row.detail.contains(expected),
+                "missing `{expected}`: {}",
+                row.detail
+            );
+        }
+        assert!(
+            !row.detail.contains("is NOT applied"),
+            "the honesty clause must be scoped to the A2A path, not a blanket refusal: {}",
+            row.detail
         );
     }
 

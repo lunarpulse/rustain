@@ -80,6 +80,14 @@ pub struct ComposeContext {
     /// `.await` points without blocking the runtime. Deadlock-free by lock
     /// ordering: writers never nest, and the swap holds only the write lock.
     pub memory_write_gate: Arc<tokio::sync::RwLock<()>>,
+    /// Story 18.4a — the replicated Topic log, shared by the transport that
+    /// fills it and the `"composite"` context adapter that reads it.
+    ///
+    /// ⛔ One `Arc`, threaded rather than constructed twice: two stores is a
+    /// host whose agent reads a different log than the one its transport
+    /// writes, and the profile-reload path re-composes the context port while
+    /// the transport keeps running.
+    pub peer_topic_store: Arc<crate::adapters::rap::PeerTopicStore>,
     #[cfg(feature = "meta-search")]
     pub search_config: crate::domain::models::SearchConfig,
     #[cfg(feature = "meta-search")]
@@ -149,6 +157,7 @@ impl AgentCore {
             channels: Self::wrap(channels),
             scheduler: Self::wrap(scheduler),
             context: Self::wrap(context),
+            peer_topic_store: Arc::clone(&ctx.peer_topic_store),
             agent_message_bus: AgentCore::wrap(Arc::new(
                 crate::infrastructure::agent_message_bus::LocalMessageBus::new(
                     Default::default(),
@@ -736,10 +745,41 @@ pub fn build_context(
         }
         // Explicit opt-out — the dormant no-op (no injection at all).
         "noop" => Ok(Arc::new(NoOpContext)),
+        // Story 18.4a (FR151) — local memory context **plus** peer-origin
+        // context, both behind the one `ContextPort` slot.
+        //
+        // ⚑ This arm is the load-bearing half of FR151, and it is a **core
+        // change**. Before it, `build_context` returned exactly one adapter, so
+        // selecting the peer provider would have *replaced* the operator's
+        // local memory context rather than adding to it — a feature that
+        // silently deletes another feature. ⛔ FR151's "zero core change" clause
+        // is false and is not repeated; what is true is that the change is
+        // small and precedented.
+        //
+        // The shape is copied from the toolset dimension's own `"composite"`
+        // arm above, including its recursive-inner-build: the inner adapter is
+        // produced by calling this factory again, so a `default` context built
+        // here and one built directly cannot drift.
+        "composite" => {
+            let local = build_context("default", config, ctx)?;
+            let peer = Arc::new(crate::adapters::peer_context::PeerContextProvider::new(
+                Arc::clone(&ctx.peer_topic_store),
+            ));
+            Ok(Arc::new(
+                crate::adapters::composite_context_adapter::CompositeContextAdapter::new(
+                    local, peer,
+                ),
+            ))
+        }
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Context,
             name: other.to_string(),
-            available: vec!["default".into(), "daily".into(), "noop".into()],
+            available: vec![
+                "default".into(),
+                "daily".into(),
+                "noop".into(),
+                "composite".into(),
+            ],
         }),
     }
 }
@@ -1129,6 +1169,7 @@ pub fn build_daemon_memory(
             Arc::new(NoOpMemory) as Arc<dyn MemoryPort>
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -1152,6 +1193,10 @@ pub(crate) fn daemon_compose_context(
     channel_turn_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::domain::models::ChannelTurnRequest>,
     >,
+    // Story 18.4a — threaded rather than constructed here. The daemon rebuilds
+    // this context on first activity, so a store minted inside would be a
+    // second log the transport never writes to.
+    peer_topic_store: Arc<crate::adapters::rap::PeerTopicStore>,
 ) -> ComposeContext {
     use crate::adapters::sandbox::NoOpSandbox;
     ComposeContext {
@@ -1181,6 +1226,7 @@ pub(crate) fn daemon_compose_context(
             Arc::new(NoOpMemory) as Arc<dyn MemoryPort>
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store,
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -1234,6 +1280,11 @@ pub fn build_daemon_core(
     };
     let persona_name = pick(PortDimension::Persona, "coding");
     let tools_name = pick(PortDimension::Tools, "builtin-only");
+    let (context_name, context_config) = profile_selection
+        .dimensions
+        .get(&PortDimension::Context)
+        .map(|adapter| (adapter.adapter.clone(), adapter._config.clone()))
+        .unwrap_or_else(|| ("default".to_owned(), None));
 
     // ── Eager parts (cheap, connection-free) ────────────────────────────────
     let memory = build_daemon_memory(workspace, memory_adapter)?;
@@ -1247,12 +1298,18 @@ pub fn build_daemon_core(
     // unreachable, not just administratively avoided.
     let security: Arc<dyn SecurityPort> =
         Arc::new(HeadlessSecurityAdapter::new(workspace.to_path_buf()));
+    // Story 18.4a — minted once, here, and shared by every later composition of
+    // this daemon's context as well as by the verified-peer delivery front door.
+    // ⛔ Not inside `daemon_compose_context`: that runs again on first activity,
+    // so a store built there would be a second log the transport never writes.
+    let peer_topic_store = Arc::new(crate::adapters::rap::PeerTopicStore::new());
     let eager_ctx = daemon_compose_context(
         workspace,
         storage.clone(),
         domain_tx.clone(),
         assembler_name.clone(),
         channel_turn_tx.clone(),
+        Arc::clone(&peer_topic_store),
     );
     let persona = build_persona(&persona_name, None, &eager_ctx)?;
 
@@ -1264,6 +1321,7 @@ pub fn build_daemon_core(
         let security = security.clone();
         let domain_tx = domain_tx.clone();
         let channel_turn_tx = channel_turn_tx.clone();
+        let factory_topic_store = Arc::clone(&peer_topic_store);
         #[cfg(feature = "mcp")]
         let task_node_tree = _node_tree;
         #[cfg(feature = "mcp")]
@@ -1276,6 +1334,7 @@ pub fn build_daemon_core(
                     domain_tx.clone(),
                     assembler_name.clone(),
                     channel_turn_tx.clone(),
+                    Arc::clone(&factory_topic_store),
                 );
                 // Live, connection-holding parts — first activity only.
                 let provider: Arc<dyn StreamingProvider> = {
@@ -1343,6 +1402,11 @@ pub fn build_daemon_core(
                     Vec::new()
                 };
                 let context_assembler = build_context_assembler(&ctx)?;
+                // Story 18.4a (code-review D2): the daemon's interactive
+                // attach-mode turn owns context injection, so compose the
+                // bundle-tier port from the same `ctx` whose topic store the
+                // verified-peer delivery handler fills.
+                let context = build_context(&context_name, context_config.as_ref(), &ctx)?;
                 // Deny-by-default approval (AC6): NoOp persistence so no stale
                 // "always-allow" rule can undermine the unattended deny policy.
                 let approval = crate::domain::services::approval_runtime::ApprovalRuntime::new(
@@ -1372,6 +1436,7 @@ pub fn build_daemon_core(
                     context_assembler: Arc::new(arc_swap::ArcSwap::from_pointee(Some(
                         context_assembler,
                     ))),
+                    context: Arc::new(arc_swap::ArcSwap::from_pointee(context)),
                     storage: storage.clone(),
                     fs_storage,
                     usage_ledger: Arc::new(crate::adapters::ledger::FileUsageLedger::new()),
@@ -1395,6 +1460,7 @@ pub fn build_daemon_core(
         storage,
         security,
         persona,
+        peer_topic_store,
         factory,
     ))
 }
@@ -1528,6 +1594,7 @@ pub fn build_cli_core(
         )
             as Arc<dyn MemoryPort>)),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -1634,6 +1701,7 @@ pub fn build_acp_core(
         )
             as Arc<dyn MemoryPort>)),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -1761,6 +1829,7 @@ mod tests {
             )
                 as Arc<dyn MemoryPort>)),
             memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+            peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             #[cfg(feature = "meta-search")]
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]

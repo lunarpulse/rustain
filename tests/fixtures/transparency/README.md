@@ -20,7 +20,18 @@ an assertion that cannot fail is one that quietly gets skipped:
    RED.
 
 2. **Unknown-variant rendering (AC5, UX-DR-ROOM-01).** Line 9 carries the event
-   tag `peer_equivocated`, which **this build has no arm for**. That is legal:
+   tag `room_unrecognised_marker`, which **this build has no arm for** — an
+   invented tag that names no planned feature, so no future build can ever
+   grow an arm for it and repeat the failure below. That is legal:
+   ⚑ Amended 2026-08-20 by Story 18.4a: this line carried `peer_equivocated`
+   from 18.2 until 18.4a **shipped that variant**, at which point the fixture's
+   unknown representative became a known arm and the AC5 assertion could no
+   longer fail. The representative moved, one line, byte-identical shape — the
+   `== 7` row counts and every other line are untouched. ⚑ Amended again the
+   same day on code review (D6): the first replacement tag named a real
+   deferred crypto-cluster event, which the story's scope fence forbids as a
+   *string* — and any real planned tag would someday become known and repeat
+   the failure, so the representative is now a tag that names nothing.
    `RoomEvent` is `#[non_exhaustive]`, internally tagged, and declares
    `#[serde(other)] Unrecognized`. You cannot assert "unknown variants render
    explicitly" against a variant that does not exist yet, so the fixture

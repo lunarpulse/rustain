@@ -1345,6 +1345,7 @@ fn resolve_app_state(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: std::sync::Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]

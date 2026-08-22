@@ -83,6 +83,9 @@ pub mod mcp;
 #[cfg(feature = "mcp")]
 pub mod composite_toolset_adapter;
 
+pub mod composite_context_adapter;
+pub mod peer_context;
+
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
 

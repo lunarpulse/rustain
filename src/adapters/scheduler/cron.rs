@@ -325,14 +325,16 @@ async fn run_job(task: CronJobTask) {
             return;
         }
     };
-    let handle = rt.drive_turn(
-        task.job.prompt.clone(),
-        ChannelKind::Cron,
-        &mut conversation,
-        &job_tx,
-        TurnOrigin::Cron,
-        child_cancel.clone(),
-    );
+    let handle = rt
+        .drive_turn(
+            task.job.prompt.clone(),
+            ChannelKind::Cron,
+            &mut conversation,
+            &job_tx,
+            TurnOrigin::Cron,
+            child_cancel.clone(),
+        )
+        .await;
     if let Err(e) = task.storage.save_conversation(&conversation).await {
         tracing::warn!(job = %task.job.name, error = %e, "cron: saving user message failed");
     }

@@ -110,16 +110,13 @@ impl RelayExit {
 /// `..Default::default()` functional update — does not compile downstream
 /// (E0639). `::default()` plus field assignment is the only shape available, and
 /// `RelayConfig::new` / `TlsConfig::new` have no `Default` at all.
-pub fn build_server_config(
-    plan: &ServePlan,
-) -> Result<RelayServerServerConfig, RelayServerError> {
+pub fn build_server_config(plan: &ServePlan) -> Result<RelayServerServerConfig, RelayServerError> {
     let mut config = RelayServerServerConfig::default();
     let mut relay = RelayServerConfig::new(plan.http_addr);
 
     if let Some(tls) = plan.tls.as_ref() {
-        let server_config =
-            crate::adapters::pem_tls::load_server_tls_config(&tls.cert, &tls.key)
-                .map_err(RelayServerError::Certificate)?;
+        let server_config = crate::adapters::pem_tls::load_server_tls_config(&tls.cert, &tls.key)
+            .map_err(RelayServerError::Certificate)?;
         relay.tls = Some(RelayServerTlsConfig::new(
             tls.https_addr,
             // ⛔ `CertConfig` is `#[non_exhaustive]` as an enum, so a `match` on

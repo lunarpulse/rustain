@@ -187,6 +187,15 @@ static CONTEXT_ADAPTERS: &[&AdapterDescriptor] = &[
         feature_gate: None,
         fallback: None,
     },
+    // Story 18.4a (code-review P3): without this entry
+    // `ProfileLoader::validate_adapter` rejected `[context] adapter =
+    // "composite"` before composition ever reached the arm, so FR151's peer
+    // context was unselectable through the durable profile surface.
+    &AdapterDescriptor {
+        name: "composite",
+        feature_gate: None,
+        fallback: None,
+    },
 ];
 
 #[cfg(test)]
@@ -199,6 +208,16 @@ mod tests {
         assert_eq!(names, vec!["noop", "project-scoped", "daily-log"]);
     }
 
+    #[test]
+    fn lookup_composite_context_is_profile_selectable() {
+        // Code-review P3: this descriptor is the durable-profile half of
+        // FR151. Without it ProfileLoader rejects `[context] adapter =
+        // "composite"` before composition reaches the arm.
+        let desc = AdapterCatalog::lookup(PortDimension::Context, "composite")
+            .expect("composite context is catalogued");
+        assert!(desc.feature_gate.is_none());
+        assert_eq!(desc.fallback, None);
+    }
     #[test]
     fn lookup_telegram_has_feature_gate() {
         let desc = AdapterCatalog::lookup(PortDimension::Channels, "telegram").unwrap();

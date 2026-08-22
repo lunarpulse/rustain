@@ -1623,6 +1623,7 @@ pub async fn run() -> Result<()> {
         )
             as Arc<dyn crate::domain::ports::MemoryPort>)),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: app_config.search.clone(),
         #[cfg(feature = "meta-search")]

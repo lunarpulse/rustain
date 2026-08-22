@@ -47,6 +47,7 @@ pub mod list;
 pub mod ping;
 pub mod revoke;
 pub mod rows;
+pub mod share;
 pub mod show;
 
 /// `peer` subcommand actions. Declared beside its handlers, mirroring
@@ -113,6 +114,31 @@ pub enum PeerAction {
         /// count. Ignored when `--count` is 1.
         #[arg(long)]
         interval: Option<String>,
+    },
+    /// Share one room artifact's signed handle into a Topic with a pinned peer.
+    ///
+    /// ⚑ **A handle, never a body.** What crosses is a signed reference — the
+    /// artifact id, its content hash, its producer, and a ≤240-byte summary.
+    /// The artifact's contents stay on this host. The peer's agent reads the
+    /// summary as *tainted* context: attribution, never truth.
+    ///
+    /// ⛔ Disclosure is an explicit operator act. Nothing auto-shares: a Topic
+    /// gains a handle only when someone runs this verb.
+    Share {
+        /// The alias to share with, as recorded by `peer add`.
+        alias: String,
+        /// The room artifact whose handle is shared. `rustain` prints artifact
+        /// ids in `/artifacts`.
+        artifact: String,
+        /// The Topic to share into. A Topic is a correlation id — teammates use
+        /// the same string to share one thread of architecture context.
+        #[arg(long)]
+        topic: String,
+        /// A ≤240-byte human summary. Defaults to a line derived from the
+        /// artifact's own kind and producer. ⛔ Refused, never truncated: a
+        /// shortened summary is a different claim than the one signed.
+        #[arg(long)]
+        summary: Option<String>,
     },
     /// Show the transport roster from `.rustain/p2p.json`.
     ///

@@ -2,7 +2,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::models::{AgentId, NodeState, OwnershipKind};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// A conversation thread key — **and, since Story 18.4a, a Topic key**
+/// (`Topic := CorrelationId`, COLLAB D2). ⛔ No `TopicId` newtype exists: the
+/// field is already carried and signed in `AgentEnvelopeHeader`, so keying a
+/// Topic costs no wire change.
+///
+/// `Ord` is derived so a Topic can key a `BTreeMap` — the replicated log is
+/// iterated to build a bundle, and NFR71 requires that iteration to be
+/// deterministic. ⛔ A `HashMap` there would make assembly order depend on a
+/// per-process random seed.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CorrelationId(pub String);
 
 impl CorrelationId {
@@ -17,6 +26,20 @@ pub enum MessageKind {
     PeerMessage,
     OwnerReport,
     Refusal,
+    /// Topic replication traffic (Story 18.4a, FR150).
+    ///
+    /// ⛔ **Not a message.** A frame of this kind is never delivered to an
+    /// agent, never materializes a peer node, and never reaches the message
+    /// bus: the verified-peer delivery front door routes it into the Topic
+    /// store before any of that. Giving it its own kind rather than smuggling
+    /// handles inside a `PeerMessage` body is what makes that routing a
+    /// compile-checked branch instead of a body sniff.
+    ///
+    /// ⚠ An older build refuses this kind rather than mis-reading it: the enum
+    /// is `#[non_exhaustive]` but has no `#[serde(other)]`, so the envelope
+    /// fails to deserialize and the frame is refused. Fail-closed is the right
+    /// direction for a kind that carries replication state.
+    TopicGossip,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

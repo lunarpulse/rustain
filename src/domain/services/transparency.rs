@@ -44,7 +44,7 @@ use std::path::PathBuf;
 
 use crate::domain::models::{
     Direction, FrameRefusal, JournalEntry, JournalRecord, PeerAdmissionOutcome,
-    PeerFrameAttemptOutcome, RejectReason, RoomEvent, node_journal,
+    PeerFrameAttemptOutcome, PeerId, RejectReason, RoomEvent, node_journal,
 };
 
 /// Longest disclosable free-text field rendered by any transparency surface.
@@ -130,6 +130,18 @@ pub enum TransparencyKind {
     /// The six touch points are paid: variant, glyph, wire label, the fold arm,
     /// the filter parse arm, and the fixtures.
     PeerFrameAttempted,
+    /// Two irreconcilable heads were seen for one peer's Topic feed at one
+    /// sequence (Story 18.4a, FR150-a).
+    ///
+    /// ⛔ Distinct from [`Self::Rejected`], which records that this host refused
+    /// something: nothing is refused here. The row states that this host saw two
+    /// claims about one feed position and they disagree — ⛔ never that the peer
+    /// was excluded, that the divergence was adjudicated, or that either head is
+    /// the true one. Detection and recording only.
+    ///
+    /// The six touch points are paid: variant, glyph, wire label, the fold arm,
+    /// the filter parse arm, and this story's own coverage.
+    PeerEquivocated,
     /// Interaction became visible in the audit spine before interruption routing.
     InteractionSurfaced,
     /// A batch of prior digest-tier interactions was shown to the operator.
@@ -159,6 +171,8 @@ impl TransparencyKind {
             // ↗ is unused by every other kind: outbound, and about a decision
             // made at the other end.
             Self::PeerFrameAttempted => "↗",
+            // ≠ is unused by every other kind: two heads that do not reconcile.
+            Self::PeerEquivocated => "≠",
             Self::InteractionSurfaced => "!",
             Self::DigestFlushed => "≋",
             _ => "·",
@@ -179,6 +193,7 @@ impl TransparencyKind {
             Self::RoomRoleRevoked => "room-role-revoked",
             Self::TransportAdmission => "transport-admission",
             Self::PeerFrameAttempted => "peer-frame",
+            Self::PeerEquivocated => "peer-equivocated",
             Self::InteractionSurfaced => "surfaced",
             Self::DigestFlushed => "digest-flushed",
             _ => "unknown",
@@ -463,6 +478,35 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             Some(correlation.clone()),
             peer_frame_summary(*outcome, *refusal, *bytes),
         ),
+        // Story 18.4a (AC4, FR150-a) — two irreconcilable heads for one feed
+        // position. ⚠ This arm is **not compile-forced**: the match below ends
+        // in `_ => return None`, so a new variant that omits it silently
+        // vanishes from `/team log` rather than failing the build.
+        //
+        // The row renders, decided rather than defaulted: an operator whose host
+        // saw a peer contradict itself must be able to see that it happened and
+        // when. ⛔ The summary states the observation only — never that the peer
+        // was excluded, that a head was adjudicated true, or that anything was
+        // enforced. Nothing was.
+        //
+        // `peer` is the advertiser; the summary names the `issuer` whose feed
+        // diverged, because the two are frequently different identities and
+        // collapsing them would make the cross-peer case unreadable.
+        RoomEvent::PeerEquivocated {
+            peer,
+            issuer,
+            topic,
+            sequence,
+            ..
+        } => (
+            TransparencyKind::PeerEquivocated,
+            Direction::Inbound,
+            peer.as_ref()
+                .map(|peer| peer.as_str().to_owned())
+                .unwrap_or_else(|| "—".to_owned()),
+            Some(topic.clone()),
+            peer_equivocation_summary(issuer.as_ref(), *sequence),
+        ),
         // Retractions mutate the prior projected row in `fold_transparency`;
         // they never create a second visible row.
         RoomEvent::AutoResponseRetracted { .. } => return None,
@@ -540,6 +584,26 @@ fn transport_admission_summary(alias: &str, outcome: PeerAdmissionOutcome) -> St
         PeerAdmissionOutcome::Unknown => {
             format!("transport admission outcome for '{alias}' is unknown; no admission claim")
         }
+    }
+}
+
+/// Copy for a divergent-head row (Story 18.4a, FR150-a).
+///
+/// ⛔ States the observation and stops. It does **not** say the peer lied, that
+/// it was excluded, that either head is the true one, or that anything was
+/// enforced — this host compared two claims and they disagree, and that is the
+/// entire content of the record.
+fn peer_equivocation_summary(issuer: Option<&PeerId>, sequence: u64) -> String {
+    match issuer {
+        Some(issuer) => format!(
+            "two different heads seen for {}'s topic feed at sequence {sequence}; \
+             both are recorded, nothing was excluded",
+            issuer.as_str()
+        ),
+        None => format!(
+            "two different heads seen for a topic feed at sequence {sequence}; \
+             the feed owner was not named, and nothing was excluded"
+        ),
     }
 }
 
@@ -699,12 +763,14 @@ impl TransparencyFilter {
                         "room-role-revoked" => TransparencyKind::RoomRoleRevoked,
                         "transport-admission" => TransparencyKind::TransportAdmission,
                         "peer-frame" => TransparencyKind::PeerFrameAttempted,
+                        "peer-equivocated" => TransparencyKind::PeerEquivocated,
                         "unknown" => TransparencyKind::Unknown,
                         _ => {
                             return Err(format!(
                                 "unknown kind `{value}` — valid: accepted, refused, \
                                  awaiting-approval, status-query, disclosed, room-role-granted, \
-                                 room-role-revoked, transport-admission, peer-frame, unknown"
+                                 room-role-revoked, transport-admission, peer-frame, \
+                                 peer-equivocated, unknown"
                             ));
                         }
                     }));

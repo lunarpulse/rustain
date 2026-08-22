@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
-    AgentEnvelope, AgentId, AgentMessage, AgentMetrics, CapabilityTokenId, Envelope, MessageHeader,
-    MessageKind, NodeState, PeerId, SubagentEnvelope, SubagentEvent,
+    AgentEnvelope, AgentId, AgentMessage, AgentMetrics, CapabilityTokenId, CorrelationId, Envelope,
+    MessageHeader, MessageKind, NodeState, PeerId, SubagentEnvelope, SubagentEvent,
 };
 use crate::domain::ports::{
     AgentMessageBus, PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder,
@@ -42,6 +42,30 @@ const SETTLEMENT_CAPACITY: usize = 256;
 /// A real deployment uses a handful of agent paths per peer; thirty-two is
 /// generous for that and finite for the other case.
 const MAX_SENDERS_PER_PEER: usize = 32;
+
+/// The sender path suffix a topic frame uses, under this host's own `PeerId`.
+pub const TOPIC_SENDER_SUFFIX: &str = "topic-gossip";
+
+/// The recipient path suffix a topic frame addresses, under this host's own
+/// `PeerId`. ⚑ No node is ever materialized for it — a topic frame branches
+/// away before `ensure_peer_context` — but the name stays inside this host's
+/// namespace so the invariant does not depend on that branch.
+pub const TOPIC_RECIPIENT_SUFFIX: &str = "topic-gossip-peer";
+
+/// Longest a topic frame stays valid, in wall milliseconds.
+///
+/// A head advertisement is a statement about *now*; one that stays replayable
+/// for hours is one an observer can hold and re-present. Sixty seconds matches
+/// the ping frame's ceiling, and for the same reason.
+pub const TOPIC_FRAME_TTL_MS: i64 = 60_000;
+
+/// How long a shared handle stays live, in wall milliseconds.
+///
+/// ⚑ Longer than a frame's TTL on purpose: a frame is in flight for seconds, a
+/// handle is context a teammate's agent reads across a working day. Bounded
+/// anyway, because an immortal handle is a claim nobody can withdraw — and this
+/// cut ships no cross-host retract (`DF-18-4-CROSSHOST-RETRACT`, target R4).
+pub const HANDLE_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 
 /// Recipient consent decision, separate from operational consumer failures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +134,55 @@ pub struct VerifiedPeerFrameHandler {
     pending_ingest: Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), PeerDeliveryError>>>>>,
     recorder: Arc<dyn PeerInteractionRecorder>,
     settlements: broadcast::Sender<FrameSettlement>,
+    /// Story 18.4a — the replicated Topic log, shared with the context provider
+    /// that reads it. ⛔ Two stores is a host whose agent reads a different log
+    /// than the one its transport writes, so the composition root passes one
+    /// `Arc` to both.
+    topics: Arc<crate::adapters::rap::topic::PeerTopicStore>,
+    /// Where a divergent head is journaled and where re-gossip is sent from.
+    ///
+    /// ⚑ Filled **after** construction, and that is forced by the composition
+    /// order rather than chosen: the handler is built by
+    /// `AttachServer::configure_peer_recorder`, and the transport it must
+    /// re-gossip on is bound later, by the listener composition that receives
+    /// this handler. A `OnceLock` makes the late binding explicit and
+    /// single-shot — ⛔ never a slot a second composition can silently replace.
+    ///
+    /// Empty in the composition paths that own no transport; a topic frame is
+    /// then admitted and compared but nothing is written or re-advertised,
+    /// which is refused honestly rather than passed off as success.
+    topic_effects: Arc<std::sync::OnceLock<TopicEffects>>,
+    /// This sender's outbound gossip position per peer, for the life of one
+    /// process. ⛔ Never durable: 18.4d's D9 rejected a durable sender cursor
+    /// with evidence — the receiver's `ReplayWindow` is in memory, so a sender
+    /// that remembers a head the receiver forgot forks the feed permanently.
+    /// The position starts optimistically and self-corrects once from what the
+    /// receiver names.
+    gossip_positions: Arc<Mutex<HashMap<PeerId, crate::domain::models::FeedPosition>>>,
+    /// Injected clock, mirroring `IrohPeerIngress::with_now`, so the topic path
+    /// can be driven deterministically. Wall **milliseconds** — the unit the
+    /// peer-frame verify seam on this path uses.
+    now: Arc<dyn Fn() -> i64 + Send + Sync>,
+}
+
+/// The two effects a topic frame can have beyond the in-memory store.
+#[derive(Clone)]
+pub struct TopicEffects {
+    /// Journal root for `RoomEvent::PeerEquivocated`.
+    pub workspace: std::path::PathBuf,
+    /// The transport the re-gossip fan-out goes out on.
+    pub transport: Arc<dyn crate::domain::ports::PeerTransport>,
+    /// This host's signer, for the re-gossip frame.
+    pub signer: crate::adapters::rap::AgentSigner,
+}
+
+impl std::fmt::Debug for TopicEffects {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TopicEffects")
+            .field("workspace", &self.workspace)
+            .finish_non_exhaustive()
+    }
 }
 
 impl VerifiedPeerFrameHandler {
@@ -130,7 +203,54 @@ impl VerifiedPeerFrameHandler {
             verified_senders: Arc::new(Mutex::new(VerifiedSenders::default())),
             pending_ingest: Arc::new(Mutex::new(HashMap::new())),
             settlements: broadcast::Sender::new(SETTLEMENT_CAPACITY),
+            topics: Arc::new(crate::adapters::rap::topic::PeerTopicStore::new()),
+            topic_effects: Arc::new(std::sync::OnceLock::new()),
+            gossip_positions: Arc::new(Mutex::new(HashMap::new())),
+            now: Arc::new(|| {
+                crate::domain::clock::Clock::wall_now_ms(
+                    &crate::domain::clock::SystemClock::default(),
+                )
+            }),
         }
+    }
+
+    /// Bind this handler to the Topic log the agent's context provider reads.
+    ///
+    /// ⚑ Rule 1, first half: without this the handler fills a store nothing
+    /// reads. The composition root passes the **same** `Arc` the `"composite"`
+    /// context adapter was built with.
+    #[must_use]
+    pub fn with_topics(mut self, topics: Arc<crate::adapters::rap::topic::PeerTopicStore>) -> Self {
+        self.topics = topics;
+        self
+    }
+
+    /// Bind the journal and the transport a topic frame's effects need.
+    ///
+    /// ⚑ Rule 1, second half: without this, `PeerTransport::gossip_topic` has
+    /// no production caller and `RoomEvent::PeerEquivocated` has no producer.
+    /// Late-bound because the transport is composed after the handler.
+    ///
+    /// Returns `false` when effects were already bound — ⛔ a second
+    /// composition never silently replaces the first.
+    pub fn bind_topic_effects(&self, effects: TopicEffects) -> bool {
+        self.topic_effects.set(effects).is_ok()
+    }
+
+    /// Replace the wall-millisecond clock this handler reads (hermetic tests).
+    ///
+    /// Mirrors `IrohPeerIngress::with_now` rather than inventing a second
+    /// injection shape. The double is a `MockClock`; ⛔ not a sleep.
+    #[must_use]
+    pub fn with_now(mut self, now: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.now = Arc::new(now);
+        self
+    }
+
+    /// The Topic log this handler fills.
+    #[must_use]
+    pub fn topics(&self) -> Arc<crate::adapters::rap::topic::PeerTopicStore> {
+        Arc::clone(&self.topics)
     }
 
     /// Observe terminal frame outcomes, including those that settle after the
@@ -155,9 +275,55 @@ impl VerifiedPeerFrameHandler {
         envelope: AgentEnvelope<serde_json::Value>,
         peer_id: PeerId,
     ) -> Result<(), PeerDeliveryError> {
+        // ⚑ Code-review P9: the shared header rules run BEFORE the kind
+        // dispatch, so a topic frame is held to the same contract as a message
+        // frame. The message path re-checks the identifier ceiling inside
+        // `translate_verified_peer_envelope`; without this early guard the
+        // topic branch skipped it, and an admitted peer could store
+        // frame-sized correlation ids as Topic keys. The namespace rule is
+        // uniform too: every admitted frame's recipient stays inside the
+        // sender's own identity, whatever the kind.
+        if envelope.header.sender.as_str().len() > MAX_PEER_ID_BYTES
+            || envelope.header.recipient.as_str().len() > MAX_PEER_ID_BYTES
+            || envelope.header.correlation_id.0.len() > MAX_PEER_ID_BYTES
+        {
+            return Err(PeerDeliveryError::IdentifierTooLong);
+        }
+        if !recipient_rooted_at(&envelope.header.recipient, &peer_id) {
+            return Err(PeerDeliveryError::RecipientNotInSenderNamespace {
+                recipient: envelope.header.recipient.as_str().to_owned(),
+                peer_id: peer_id.to_string(),
+            });
+        }
+        // Story 18.4a — replication traffic branches **before** anything that
+        // makes a frame a message. A topic frame materializes no node, binds no
+        // sender name, reaches no bus and wakes no agent: it updates the Topic
+        // log and may journal an observation, and that is all. Branching on the
+        // signed `kind` rather than sniffing the body is what keeps that a
+        // compile-checked decision.
+        if envelope.header.kind == MessageKind::TopicGossip {
+            return self.handle_topic_frame(envelope, peer_id).await;
+        }
         let mut local = translate_verified_peer_envelope(envelope)?;
         self.bind_verified_sender(&local.header.sender, &peer_id)
             .await?;
+        // ⚑ DF-18-4d-RECIPIENT-NAMESPACE, closed here (18.4a owns the verified-
+        // peer delivery front door). `header.sender` has been rooted at the
+        // signer's `PeerId` since 17.1a — `sender_bound_to_signer` enforces it
+        // on both the signing and the verifying side — but `header.recipient`
+        // was materialized **verbatim**, so one admitted peer could name a node
+        // inside another peer's namespace and this host would create it. The
+        // recipient is now held to the same rule as the sender: an admitted
+        // peer may address a node under its own identity and nowhere else.
+        //
+        // ⛔ Refused, ⛔ never rewritten: silently re-rooting the name would make
+        // two different senders' frames land on one node.
+        if !recipient_rooted_at(&local.header.recipient, &peer_id) {
+            return Err(PeerDeliveryError::RecipientNotInSenderNamespace {
+                recipient: local.header.recipient.as_str().to_owned(),
+                peer_id: peer_id.to_string(),
+            });
+        }
         local.header.verified_peer_id = Some(peer_id);
         let recipient = local.header.recipient.clone();
         self.ensure_peer_context(recipient.clone()).await?;
@@ -194,6 +360,359 @@ impl VerifiedPeerFrameHandler {
             // Keep ownership of this correlation until the worker settles.
             // Otherwise a late worker can remove and satisfy a retry's sender.
             Err(_) => Err(PeerDeliveryError::IngestTimeout),
+        }
+    }
+
+    /// Admit one verified topic-gossip frame, journal any divergence, and
+    /// re-advertise what this host holds (Story 18.4a — FR150, FR150-a).
+    ///
+    /// # Ordering is the contract
+    ///
+    /// 1. prepare the admission against pre-state (nothing mutates),
+    /// 2. append the durable record for every divergence,
+    /// 3. commit the admission,
+    /// 4. **then** re-gossip — and only when the admission changed what this
+    ///    host would advertise.
+    ///
+    /// ⚑ Code-review P6: journaling happens **before** the commit, so a journal
+    /// failure leaves the store untouched — a retried frame (the ingress rolls
+    /// back the replay reservation on an error) cannot advance a feed twice or
+    /// journal the same observation twice.
+    ///
+    /// ⚑ Code-review D4 (team ruling): re-gossip fires only when the admission
+    /// admitted handles — the one event that changes this host's advertised
+    /// holdings. A heads-only frame changes only the observation map, so
+    /// re-advertising after it re-signs and forwards an unchanged holdings set
+    /// around the membership cycle forever. The durable side must not depend
+    /// on a remote hearing about it — the same rule the transport ingress
+    /// states for admission refusals. A re-gossip that fails is logged and
+    /// dropped: it is fire-and-forget by construction, and a peer that never
+    /// hears an advertisement simply keeps the head it holds.
+    async fn handle_topic_frame(
+        &self,
+        envelope: AgentEnvelope<serde_json::Value>,
+        peer_id: PeerId,
+    ) -> Result<(), PeerDeliveryError> {
+        let gossip: crate::adapters::rap::topic::TopicGossip =
+            serde_json::from_value(envelope.body.clone())
+                .map_err(|error| PeerDeliveryError::TopicRefused(error.to_string()))?;
+        let now_ms = (self.now)();
+        let prepared = self
+            .topics
+            .prepare(&envelope.header, &peer_id, gossip, now_ms)
+            .await
+            .map_err(|error| PeerDeliveryError::TopicRefused(error.to_string()))?;
+
+        if !prepared.divergences.is_empty() {
+            let Some(effects) = self.topic_effects.get() else {
+                // ⛔ Not silently `Ok`: a build with no journal and no transport
+                // cannot honour the record-and-advertise half, and saying so is
+                // the difference between "nothing happened" and "we did not
+                // notice".
+                return Err(PeerDeliveryError::TopicRefused(
+                    "a divergent topic head was observed but this host has no journal bound to \
+                     record it"
+                        .to_owned(),
+                ));
+            };
+            for divergence in &prepared.divergences {
+                let event = divergence.to_room_event();
+                match crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+                    &effects.workspace,
+                )
+                .await
+                {
+                    Ok(journal) => {
+                        if let Err(error) = journal.append_room(event).await {
+                            return Err(PeerDeliveryError::TopicRefused(format!(
+                                "two different topic heads were seen but the observation could \
+                                 not be recorded ({error})"
+                            )));
+                        }
+                    }
+                    Err(error) => {
+                        return Err(PeerDeliveryError::TopicRefused(format!(
+                            "two different topic heads were seen but the journal could not be \
+                             opened ({error})"
+                        )));
+                    }
+                }
+            }
+        }
+
+        let admission = self.topics.commit(prepared).await;
+
+        if admission.head.is_some()
+            && let Some(effects) = self.topic_effects.get()
+        {
+            self.regossip(effects, &peer_id, &admission).await;
+        }
+        Ok(())
+    }
+
+    /// The operator-disclosure producer (Story 18.4a; code-review D1 + D3).
+    ///
+    /// One call is the whole act, in the one process that holds both halves:
+    /// grant the addressee membership of the Topic (**D1** — the share act IS
+    /// the capability grant; without it a Topic's founder is its only member
+    /// forever and re-gossip never fans out), mint the signed handle,
+    /// advertise it on the bound transport, and record the **accepted** frame
+    /// into this host's own log.
+    ///
+    /// ⚑ **P1/P2, structural:** the recorded header is the frame actually sent
+    /// and accepted — ⛔ never a fabricated header (a head computed over a
+    /// header that never shipped false-fires `PeerEquivocated` on every
+    /// receiver), and ⛔ never a refused attempt (a refused frame chained
+    /// locally desyncs this host's feed from every receiver's, permanently).
+    /// The frame carries no self-head in its payload: the receiver computes
+    /// the head from the frame itself, so the two cannot disagree.
+    ///
+    /// # Errors
+    ///
+    /// [`PeerDeliveryError::TopicRefused`] when no transport is bound (the
+    /// daemon runs without the p2p listener), when the advertisement could not
+    /// be written, or when the receiver corrected the feed position twice —
+    /// in every case **nothing was recorded and nothing was granted... except
+    /// the membership grant**, which is local bookkeeping the operator asked
+    /// for and a refused send does not revoke.
+    pub async fn share_handle(
+        &self,
+        addressee: &PeerId,
+        artifact: &crate::domain::models::EvidenceArtifact,
+        topic: &crate::domain::models::CorrelationId,
+        summary: crate::domain::models::ContextSummary,
+    ) -> Result<(), PeerDeliveryError> {
+        let Some(effects) = self.topic_effects.get() else {
+            return Err(PeerDeliveryError::TopicRefused(
+                "this daemon has no peer transport bound; start it with the p2p listener to share"
+                    .to_owned(),
+            ));
+        };
+        let local = effects.signer.identity().peer_id.clone();
+        let now_ms = (self.now)();
+        let handle = crate::domain::models::ContextRef {
+            artifact: artifact.id.clone(),
+            content_hash: artifact.content_hash,
+            producer: artifact.producer.clone(),
+            // ⛔ Always this host's own identity: a handle issued under another
+            // peer's name is the relabelling COLLAB D7 forbids, and the
+            // receiver refuses it anyway.
+            issuer: local.clone(),
+            summary,
+            // This host holds the artifact; it did not necessarily author it.
+            provenance: crate::domain::models::ContextRefProvenance::Observed,
+            not_after: now_ms.saturating_add(HANDLE_TTL_MS),
+        };
+
+        // D1: the operator's share act is the grant. Local, first, and kept
+        // even if the send fails — the grant is this host's bookkeeping of a
+        // disclosure decision the operator already made.
+        self.topics.grant_membership(topic, addressee).await;
+
+        let mut position = self
+            .gossip_positions
+            .lock()
+            .await
+            .get(addressee)
+            .cloned()
+            .unwrap_or_else(crate::domain::models::FeedPosition::start);
+        for attempt in 0..2u32 {
+            // ⚑ Heads are NOT embedded: the receiver derives this host's head
+            // from the frame itself. An embedded self-head computed over
+            // anything else is the false-equivocation defect (P1).
+            let body = match serde_json::to_value(crate::adapters::rap::topic::TopicGossip {
+                refs: vec![handle.clone()],
+                heads: Vec::new(),
+            }) {
+                Ok(body) => body,
+                Err(error) => {
+                    return Err(PeerDeliveryError::TopicRefused(format!(
+                        "the topic frame could not be encoded ({error})"
+                    )));
+                }
+            };
+            let envelope = topic_frame(&effects.signer, topic, &position, now_ms, body)?;
+            match effects
+                .transport
+                .gossip_topic(addressee, envelope.clone())
+                .await
+            {
+                Ok(guidance) => {
+                    let corrected = guidance
+                        .as_ref()
+                        .and_then(|offered| position.accept_guidance(offered));
+                    match corrected {
+                        Some(next) if attempt == 0 => {
+                            // Refused with guidance: re-sign once at the
+                            // receiver's position. ⛔ Nothing is recorded for
+                            // the refused frame (P2).
+                            position = next;
+                            continue;
+                        }
+                        Some(_) => {
+                            return Err(PeerDeliveryError::TopicRefused(
+                                "the peer's expected feed position moved twice; the share was \
+                                 not recorded and may not have landed"
+                                    .to_owned(),
+                            ));
+                        }
+                        None => {
+                            // Accepted (or no position volunteered). Record the
+                            // frame actually sent — the header the receiver
+                            // chained — so this host's log is the same function
+                            // of the same frames (AC8's "both hosts agree").
+                            self.topics
+                                .record_local(&envelope.header, &local, vec![handle])
+                                .await
+                                .map_err(|error| {
+                                    PeerDeliveryError::TopicRefused(format!(
+                                        "the local topic head did not advance ({error})"
+                                    ))
+                                })?;
+                            if let Ok(hash) = crate::adapters::rap::entry_hash(&envelope.header) {
+                                let advanced = crate::domain::models::FeedPosition::advanced(
+                                    position.next_sequence,
+                                    hash,
+                                );
+                                self.gossip_positions
+                                    .lock()
+                                    .await
+                                    .insert(addressee.clone(), advanced);
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(error) => {
+                    return Err(PeerDeliveryError::TopicRefused(format!(
+                        "the advertisement could not be written ({error})"
+                    )));
+                }
+            }
+        }
+        Err(PeerDeliveryError::TopicRefused(
+            "the advertisement was never written".to_owned(),
+        ))
+    }
+
+    /// Advertise the heads this host holds to the Topic's other members.
+    ///
+    /// ⚑ **This is the production caller of `PeerTransport::gossip_topic`**, and
+    /// it is what makes divergence detection *cross-peer*: peer C learns what
+    /// peer B observed about peer A's feed, which C's own `ReplayWindow`
+    /// structurally cannot see.
+    ///
+    /// ⛔ Heads only. Re-advertising another peer's signed **handles** is
+    /// authorized re-publication (FR155), struck from this story and deferred
+    /// with `DF-18-CRYPTO-CLUSTER` item C5.
+    ///
+    /// ⛔ Members only (AC7): a peer with no membership grant for the Topic is
+    /// not sent the hashes. The hash list is itself disclosure.
+    async fn regossip(
+        &self,
+        effects: &TopicEffects,
+        origin: &PeerId,
+        admission: &crate::adapters::rap::topic::TopicAdmission,
+    ) {
+        if admission.holdings.is_empty() {
+            return;
+        }
+        let body = match serde_json::to_value(crate::adapters::rap::topic::TopicGossip {
+            refs: Vec::new(),
+            heads: admission.holdings.clone(),
+        }) {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::warn!(error = %error, "topic head advertisement could not be encoded");
+                return;
+            }
+        };
+        let local = effects.signer.identity().peer_id.clone();
+        for member in &admission.members {
+            // ⛔ Never back to the peer this frame came from (that is an echo,
+            // not an observation) and never to this host's own identity.
+            if member == origin || member == &local {
+                continue;
+            }
+            self.advertise_once(effects, member, &admission.topic, &body)
+                .await;
+        }
+    }
+
+    /// Write one advertisement, self-correcting the feed position at most once.
+    ///
+    /// The retry is bounded at one because a hostile or buggy receiver must not
+    /// be able to spin the sender — the same ceiling `peer ping` applies, and
+    /// for the same reason.
+    async fn advertise_once(
+        &self,
+        effects: &TopicEffects,
+        member: &PeerId,
+        topic: &crate::domain::models::CorrelationId,
+        body: &serde_json::Value,
+    ) {
+        let mut position = self
+            .gossip_positions
+            .lock()
+            .await
+            .get(member)
+            .cloned()
+            .unwrap_or_else(crate::domain::models::FeedPosition::start);
+        for attempt in 0..2u32 {
+            let envelope = match topic_frame(
+                &effects.signer,
+                topic,
+                &position,
+                (self.now)(),
+                body.clone(),
+            ) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    tracing::warn!(error = %error, "topic head advertisement could not be signed");
+                    return;
+                }
+            };
+            let header_hash = crate::adapters::rap::entry_hash(&envelope.header).ok();
+            match effects.transport.gossip_topic(member, envelope).await {
+                Ok(guidance) => {
+                    let corrected = guidance
+                        .as_ref()
+                        .and_then(|offered| position.accept_guidance(offered));
+                    match corrected {
+                        Some(next) if attempt == 0 => {
+                            position = next;
+                            continue;
+                        }
+                        _ => {
+                            // Optimistically advance. ⛔ Not a claim the peer
+                            // took it: the position is this sender's own
+                            // bookkeeping, and the receiver corrects it on the
+                            // next frame if it disagrees.
+                            if let Some(hash) = header_hash {
+                                let advanced = crate::domain::models::FeedPosition::advanced(
+                                    position.next_sequence,
+                                    hash,
+                                );
+                                self.gossip_positions
+                                    .lock()
+                                    .await
+                                    .insert(member.clone(), advanced);
+                            }
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    // Fire-and-forget: a peer that never hears this keeps the
+                    // head it holds, which is a correct state, not a lost one.
+                    tracing::debug!(
+                        peer = %member,
+                        error = %error,
+                        "topic head advertisement was not delivered"
+                    );
+                    return;
+                }
+            }
         }
     }
 
@@ -489,6 +1008,69 @@ async fn settle(
     });
 }
 
+/// Peer-path invariant, recipient side (`DF-18-4d-RECIPIENT-NAMESPACE`).
+///
+/// Mirrors the shipped sender rule (`rap::wire::sender_bound_to_signer`) rather
+/// than inventing a second one: a recipient is the bare `PeerId` or a peer path
+/// `<peer_id>/<child>[/...]` under it. ⛔ The rule is deliberately the *same*
+/// shape — a second, subtly different namespace predicate is how one side ends
+/// up admitting what the other refuses.
+#[must_use]
+pub fn recipient_rooted_at(recipient: &AgentId, peer_id: &PeerId) -> bool {
+    let name = recipient.as_str();
+    let pid = peer_id.as_str();
+    name == pid || name.starts_with(&format!("{pid}/"))
+}
+
+/// Sign one topic-gossip frame from this host (Story 18.4a).
+///
+/// # The wire identities are protocol, not fixture detail
+///
+/// Both are rooted at **this host's own** `PeerId`, exactly as `peer ping`'s
+/// are: a sender may only ever name a node inside its own identity namespace,
+/// so this producer can never ask a receiver to materialize a node it did not
+/// choose. ⚑ In practice the receiver materializes nothing at all — a topic
+/// frame branches away before `ensure_peer_context` — but the invariant is
+/// stated by the identity rather than relied on from the branch.
+///
+/// `not_after_ms` is wall **milliseconds**, the unit this frame path's verify
+/// seam uses; ⛔ not the seconds a `PeerTicket` uses.
+///
+/// # Errors
+///
+/// Propagates a signing failure from the single `rap::wire` sign seam.
+pub fn topic_frame(
+    signer: &crate::adapters::rap::AgentSigner,
+    topic: &CorrelationId,
+    position: &crate::domain::models::FeedPosition,
+    now_ms: i64,
+    body: serde_json::Value,
+) -> Result<AgentEnvelope<serde_json::Value>, PeerDeliveryError> {
+    let local = signer.identity().peer_id.clone();
+    let sender = AgentId::from_peer_path(&format!("{}/{TOPIC_SENDER_SUFFIX}", local.as_str()))
+        .map_err(|error| PeerDeliveryError::TopicRefused(error.to_string()))?;
+    let recipient =
+        AgentId::from_peer_path(&format!("{}/{TOPIC_RECIPIENT_SUFFIX}", local.as_str()))
+            .map_err(|error| PeerDeliveryError::TopicRefused(error.to_string()))?;
+    signer
+        .sign(
+            sender,
+            recipient,
+            topic.clone(),
+            MessageKind::TopicGossip,
+            position.next_sequence,
+            now_ms.saturating_add(TOPIC_FRAME_TTL_MS),
+            format!(
+                "topic-{}-{now_ms}-{}",
+                std::process::id(),
+                position.next_sequence
+            ),
+            position.prev_hash.clone(),
+            body,
+        )
+        .map_err(|error| PeerDeliveryError::TopicRefused(error.to_string()))
+}
+
 pub fn translate_verified_peer_envelope(
     envelope: AgentEnvelope<serde_json::Value>,
 ) -> Result<Envelope<AgentMessage>, PeerDeliveryError> {
@@ -560,6 +1142,20 @@ pub enum PeerDeliveryError {
     ContextClosed,
     #[error("delivery receipt event channel closed")]
     EventChannelClosed,
+    /// A topic-gossip frame was refused (Story 18.4a).
+    ///
+    /// ⛔ Distinct from every delivery arm above: nothing was delivered,
+    /// nothing was materialized, and no agent saw the frame. It carries the
+    /// reason the replication layer declined it.
+    #[error("peer topic frame refused: {0}")]
+    TopicRefused(String),
+    /// The frame named a recipient outside the sending peer's own namespace
+    /// (`DF-18-4d-RECIPIENT-NAMESPACE`, closed by Story 18.4a).
+    ///
+    /// ⛔ Never rewritten into a legal name: re-rooting would let two senders'
+    /// frames land on one node.
+    #[error("peer {peer_id} may not address {recipient}: it is outside that peer's namespace")]
+    RecipientNotInSenderNamespace { recipient: String, peer_id: String },
 }
 
 #[cfg(test)]
@@ -618,11 +1214,26 @@ mod tests {
         PeerIdentity::from_public_key(vec![7; 32]).expect("test peer identity")
     }
 
+    /// The fixture recipient, rooted at the fixture peer's own namespace — the
+    /// shape every shipped producer signs and the shape
+    /// `DF-18-4d-RECIPIENT-NAMESPACE` (closed by 18.4a) now requires of a
+    /// recipient. ⚠ Pre-18.4a these fixtures used bare `peer-agent` /
+    /// `local-peer-session`, which no receiver accepts any more.
+    fn fixture_recipient() -> AgentId {
+        let pid = peer().peer_id.as_str().to_owned();
+        AgentId::from_peer_path(&format!("{pid}/local-peer-session"))
+            .expect("peer-rooted fixture recipient")
+    }
+
     fn envelope(kind: MessageKind, body: serde_json::Value) -> AgentEnvelope<serde_json::Value> {
+        let recipient = fixture_recipient();
+        let pid = peer().peer_id.as_str().to_owned();
+        let sender = AgentId::from_peer_path(&format!("{pid}/peer-agent"))
+            .expect("peer-rooted fixture sender");
         AgentEnvelope::new(
             AgentEnvelopeHeader {
-                sender: AgentId::from_validated("peer-agent"),
-                recipient: AgentId::from_validated("local-peer-session"),
+                sender,
+                recipient,
                 correlation_id: CorrelationId::new("corr-1"),
                 kind,
                 sequence: 9,
@@ -678,7 +1289,7 @@ mod tests {
             .handle_verified_peer_frame(signed, peer_id.clone())
             .await
             .unwrap();
-        let id = AgentId::from_validated("local-peer-session");
+        let id = fixture_recipient();
         assert!(node_tree.delivery_target(&id).await.is_some());
 
         // The restart: a fresh handler (empty in-memory set) over a tree
@@ -726,7 +1337,7 @@ mod tests {
             .handle_verified_peer_frame(signed, peer_id)
             .await
             .unwrap();
-        let id = AgentId::from_validated("local-peer-session");
+        let id = fixture_recipient();
         assert!(
             !node_tree.retire_unresumed_peer_context(&id).await,
             "a live context is not a husk"
@@ -796,16 +1407,10 @@ mod tests {
                 ..
             }) if correlation_id == CorrelationId::new("corr-1")
         ));
-        assert!(
-            node_tree
-                .is_tainted(&AgentId::from_validated("local-peer-session"))
-                .await
-        );
+        assert!(node_tree.is_tainted(&fixture_recipient()).await);
         handler.clear_all_taint().await;
         assert!(
-            !node_tree
-                .is_tainted(&AgentId::from_validated("local-peer-session"))
-                .await,
+            !node_tree.is_tainted(&fixture_recipient()).await,
             "a local true-context reset must clear the peer-tainted context"
         );
     }
@@ -819,7 +1424,7 @@ mod tests {
             .handle_verified_peer_frame(signed, peer_id.clone())
             .await
             .unwrap();
-        let id = AgentId::from_validated("local-peer-session");
+        let id = fixture_recipient();
         node_tree
             .cascade_kill(&id, Duration::from_secs(1))
             .await
@@ -1051,7 +1656,6 @@ mod tests {
         );
         let signed = envelope(MessageKind::PeerMessage, serde_json::json!("hello"));
         let peer_id = signed.signer.peer_id.clone();
-
         handler
             .handle_verified_peer_frame(signed, peer_id)
             .await
@@ -1158,7 +1762,7 @@ mod tests {
             let _ = handler.handle_verified_peer_frame(signed, peer_id).await;
         }
         let target = tree
-            .delivery_target(&AgentId::from_validated("local-peer-session"))
+            .delivery_target(&fixture_recipient())
             .await
             .expect("the peer node must still be registered");
         (
@@ -1299,7 +1903,7 @@ mod tests {
             consumer.0.lock().await.is_empty(),
             "content must not reach the consumer before its acceptance is durable"
         );
-        let recipient = AgentId::from_validated("local-peer-session");
+        let recipient = fixture_recipient();
         let status = tree
             .status_rx(&recipient)
             .await

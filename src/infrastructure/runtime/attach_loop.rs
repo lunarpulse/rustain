@@ -1720,6 +1720,10 @@ mod tests {
             | ClientFrame::ConsolidationResolve { .. }
             | ClientFrame::ResolvePeerDraft { .. }
             | ClientFrame::RetractAutoResponse { .. }
+            // Story 18.4a code-review D3: a trusted-local Topic share mutates
+            // the daemon-owned topic log and membership, NOT memory — it stays
+            // outside this memory-write-surface ratchet.
+            | ClientFrame::PeerShare { .. }
             | ClientFrame::PeerEnvelope(_)
             | ClientFrame::Detach => {}
         }

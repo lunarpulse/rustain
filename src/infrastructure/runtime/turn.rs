@@ -53,6 +53,20 @@ pub async fn run_turn(
     parent_trace: Option<crate::domain::models::TraceContext>,
     session_id: String,
     turn_origin: TurnOrigin,
+    // Whether this turn's assembled context already contains peer-origin
+    // material (Story 18.4a, FR151).
+    //
+    // ⚑ THE BRIDGE THAT WAS MISSING. `TurnOrigin::provenance()` returns
+    // `SelfOriginated` only for `RemotePeer`, and the sole mid-turn escalation
+    // was a completed tool call whose name began `"a2a__"` — so a locally
+    // initiated turn that assembled peer-sourced context dispatched destructive
+    // tools as `UserOriginated` and the taint gate never fired. The bundle's
+    // provenance and this turn's taint bit were not connected by anything.
+    //
+    // ⛔ Derived by the caller from `ContextBundle::has_peer_origin()`, which
+    // recomputes from each entry's `ContextSource`. There is no field a peer
+    // can set to clear it (17.1b's Vex rule).
+    context_tainted: bool,
 ) {
     #[cfg(any(test, feature = "test-instrumentation"))]
     RUN_TURN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -70,7 +84,15 @@ pub async fn run_turn(
     let mut iteration = 0;
     // Once remote content enters this turn's context, every later destructive
     // dispatch is self-originated even when the turn itself began interactively.
-    let mut context_tainted = turn_origin.provenance() == ProvenanceTag::SelfOriginated;
+    //
+    // ⚑ Two sources, ⛔ never one (Story 18.4a): the turn's own route, and the
+    // assembled context it was handed. Before this story the comment above
+    // claimed the broader property while only the route half was wired, so a
+    // locally initiated turn carrying peer context dispatched as
+    // `UserOriginated` and FR151's *"peer context is read, never a silent
+    // driver of a destructive action"* was false.
+    let mut context_tainted =
+        context_tainted || turn_origin.provenance() == ProvenanceTag::SelfOriginated;
     loop {
         iteration += 1;
         if iteration > MAX_TOOL_ITERATIONS {

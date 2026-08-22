@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::domain::models::{
-    AgentEnvelope, AgentEnvelopeHeader, AgentId, CorrelationId, Ed25519Sig, MessageKind, PeerId,
-    PeerIdentity,
+    AgentEnvelope, AgentEnvelopeHeader, AgentId, CorrelationId, Ed25519Sig, FEED_ENTRY_HASH_BYTES,
+    MessageKind, PeerId, PeerIdentity,
 };
 
 pub const RAP_DOMAIN: &[u8] = b"RAP/1\0";
@@ -129,6 +129,21 @@ pub fn sign_envelope<T: Serialize>(
     // sender is not rooted at the signer's own PeerId.
     if !sender_bound_to_signer(&sender, &signer.peer_id) {
         return Err(VerifyError::SenderSignerMismatch);
+    }
+    // ⚑ 18.4d D9 warned about this seam and 18.4a closes it: `sequence` and
+    // `prev_hash` were written into the signed header **unvalidated**, so a
+    // caller (or a hostile receiver's guidance that reached one) could sign a
+    // header at `u64::MAX` — wedging the receiver's feed permanently — or a
+    // `prev_hash` of the wrong width, which no receiver can ever match.
+    // Validating here means the malformed header cannot be produced at all,
+    // rather than being produced and refused one hop later.
+    if sequence == 0 || sequence == u64::MAX {
+        return Err(VerifyError::SequenceOutOfRange { sequence });
+    }
+    if !prev_hash.is_empty() && prev_hash.len() != FEED_ENTRY_HASH_BYTES {
+        return Err(VerifyError::PrevHashWidth {
+            bytes: prev_hash.len(),
+        });
     }
     let payload = canonical_json(&body)?;
     let content_hash = Sha256::digest(&payload).to_vec();
@@ -265,6 +280,20 @@ impl ReplayWindow {
         prev_hash: &[u8],
         nonce: &str,
     ) -> Result<(), VerifyError> {
+        // ⚑ DF-18-4a-SEQUENCE-CEILING (inherited from 18.4d's review, which
+        // recorded it with no id). `sequence` was only ever checked as
+        // `<= highest`, so a frame at `u64::MAX` committed a head no successor
+        // could ever chain to: `highest.saturating_add(1)` saturates at
+        // `u64::MAX`, every later frame is `<= highest`, and the feed is wedged
+        // **forever** with no operator action that clears it. Sequence `0` is
+        // refused for the mirror reason — `FeedPosition::start()` is 1, so a
+        // zero can only come from a sender that is not following the rule.
+        //
+        // ⛔ Checked before the pending/feed lookups so a wedging value cannot
+        // reserve anything on its way to being refused.
+        if sequence == 0 || sequence == u64::MAX {
+            return Err(VerifyError::SequenceOutOfRange { sequence });
+        }
         if self.pending.contains_key(peer_id) {
             return Err(VerifyError::ReplayPending {
                 peer_id: peer_id.to_string(),
@@ -420,6 +449,17 @@ pub enum VerifyError {
     FeedForkOrGap { peer_id: String },
     #[error("reused nonce from {peer_id}: {nonce}")]
     NonceReplay { peer_id: String, nonce: String },
+    /// A feed sequence outside the range a chain can advance through.
+    ///
+    /// ⚑ `u64::MAX` is the wedge: `highest.saturating_add(1)` saturates there,
+    /// so once committed no later frame can ever exceed it and the feed is
+    /// unusable for the life of the receiver. `0` is refused because
+    /// `FeedPosition::start()` is 1.
+    #[error("feed sequence {sequence} is outside the usable range (1..u64::MAX)")]
+    SequenceOutOfRange { sequence: u64 },
+    /// A `prev_hash` that is neither absent nor exactly one entry hash wide.
+    #[error("prev_hash is {bytes} bytes; a feed predecessor is empty or exactly 32")]
+    PrevHashWidth { bytes: usize },
 }
 
 /// SHA-256 of the canonical signed header. This is the per-sender feed entry
@@ -575,6 +615,48 @@ mod tests {
             verify_envelope(&env, 1_000, None),
             Err(VerifyError::ContentHashMismatch)
         ));
+    }
+
+    /// `DF-18-4a-SEQUENCE-CEILING`: the receive-side guard, pinned at the
+    /// private seam a hand-rolled signer would hit. The sign seam refuses to
+    /// *produce* the value (defence in depth's first layer); this pins the
+    /// second.
+    #[test]
+    fn sequence_at_u64_max_cannot_reserve_and_the_feed_still_advances() {
+        let signer = signer(7);
+        let peer = signer.identity().peer_id.clone();
+        let mut window = ReplayWindow::default();
+
+        // A legal first frame reserves and commits.
+        let first = envelope(1, 2_000);
+        let reservation =
+            verify_envelope_reserved(&first, 1_000, &mut window).expect("genesis reserves");
+        assert!(window.commit(reservation));
+
+        // The wedge: sequence u64::MAX is refused before it can reserve — even
+        // though `highest (1) < u64::MAX`, which is exactly the shape the old
+        // `sequence <= highest` check waved through.
+        assert!(matches!(
+            window.validate_candidate(&peer, u64::MAX, &entry_hash(&first.header).unwrap(), "n2"),
+            Err(VerifyError::SequenceOutOfRange { sequence: u64::MAX })
+        ));
+        assert!(matches!(
+            window.validate_candidate(&peer, 0, &entry_hash(&first.header).unwrap(), "n0"),
+            Err(VerifyError::SequenceOutOfRange { sequence: 0 })
+        ));
+        assert!(
+            window.pending.is_empty(),
+            "a refused ceiling value must not hold a reservation"
+        );
+
+        // The feed still advances at the real next position.
+        let next = envelope(2, 2_000);
+        assert!(
+            window
+                .validate_candidate(&peer, 2, &entry_hash(&first.header).unwrap(), "n3")
+                .is_ok()
+        );
+        let _ = next;
     }
 
     #[test]

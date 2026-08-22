@@ -461,6 +461,7 @@ async fn run_daemon_foreground(
             domain_tx.clone(),
             config.assembler.strategy.clone(),
             Some(channel_turn_tx),
+            core.peer_topic_store.clone(),
         );
         crate::infrastructure::composition::build_channels(chan_name, chan_config, &chan_ctx)
             .unwrap_or_else(|e| {
@@ -586,8 +587,11 @@ async fn run_daemon_foreground(
             .with_notices(notices),
     );
     server
-        .configure_peer_recorder(transparency.clone()
-            as std::sync::Arc<dyn crate::domain::ports::PeerInteractionRecorder>)
+        .configure_peer_recorder(
+            transparency.clone()
+                as std::sync::Arc<dyn crate::domain::ports::PeerInteractionRecorder>,
+            core.peer_topic_store.clone(),
+        )
         .await;
     arm_node_recovery_harness(&server).await?;
 
@@ -1023,6 +1027,31 @@ async fn compose_p2p_listener(
         }
     }
 
+    // ⚑ Story 18.4a, Rule 1 — the topic mechanism's production producer is
+    // wired HERE and nowhere else: this is the first point at which a bound
+    // transport exists to re-gossip on. Without this call
+    // `PeerTransport::gossip_topic` has no production caller and
+    // `RoomEvent::PeerEquivocated` has no producer, which is the
+    // mechanism-without-a-trigger class this epic has paid for three times.
+    //
+    // The signer is derived from the **same** secret key the endpoint bound, so
+    // the identity that signs an advertisement is the identity that carries it.
+    {
+        let signer = crate::adapters::rap::AgentSigner::from_signing_key(
+            ed25519_dalek::SigningKey::from_bytes(&transport_secret_key),
+        );
+        let bound = handler.bind_topic_effects(crate::adapters::rap::TopicEffects {
+            workspace: workspace.to_path_buf(),
+            transport: transport.clone() as std::sync::Arc<dyn PeerTransport>,
+            signer,
+        });
+        if !bound {
+            tracing::warn!(
+                "topic replication effects were already bound; this listener did not rebind them"
+            );
+        }
+    }
+
     let ingress = std::sync::Arc::new(crate::adapters::iroh::IrohPeerIngress::new(
         transport.clone(),
         handler,
@@ -1166,18 +1195,21 @@ mod p2p_listener_composition_tests {
         .expect("bind client");
 
         let signer = AgentSigner::from_signing_key(client_key);
-        let sender = AgentId::from_peer_path(&format!(
-            "{}/peer-transport",
-            signer.identity().peer_id.as_str()
-        ))
-        .expect("peer-rooted sender");
+        let pid = signer.identity().peer_id.as_str();
+        let sender =
+            AgentId::from_peer_path(&format!("{pid}/peer-transport")).expect("peer-rooted sender");
+        // ⚑ Rooted at the sender's own namespace (the recipient rule 18.4a
+        // enforces, `DF-18-4d-RECIPIENT-NAMESPACE`); pre-18.4a this fixture
+        // addressed a bare `local-recipient`, which is refused now.
+        let recipient = AgentId::from_peer_path(&format!("{pid}/local-recipient"))
+            .expect("peer-rooted recipient");
         let not_after =
             crate::domain::clock::Clock::wall_now_ms(&crate::domain::clock::SystemClock::default())
                 + 60_000;
         let envelope = signer
             .sign(
                 sender,
-                AgentId::parse("local-recipient").expect("recipient"),
+                recipient.clone(),
                 CorrelationId::new("composition-1"),
                 MessageKind::PeerMessage,
                 1,

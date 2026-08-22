@@ -7879,6 +7879,23 @@ mod tests {
                          bytes={bytes} outcome={outcome:?} refusal={refusal:?}"
                     ));
                 }
+                // 18.4a: same reason. A fan-out trace observes no peer topic
+                // head, but the in-crate match must name the variant to compile.
+                RoomEvent::PeerEquivocated {
+                    peer,
+                    issuer,
+                    topic,
+                    sequence,
+                    held,
+                    advertised,
+                } => {
+                    let p = peer.as_ref().map(|peer| it.sym(peer.as_str()));
+                    let i = issuer.as_ref().map(|issuer| it.sym(issuer.as_str()));
+                    lines.push(format!(
+                        "journal PeerEquivocated peer={p:?} issuer={i:?} topic={topic:?} \
+                         sequence={sequence} held={held:?} advertised={advertised:?}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

@@ -54,7 +54,10 @@ mod tests {
     fn a_substituted_value_carrying_a_placeholder_is_not_re_expanded() {
         // The property the whole module exists for, asserted where the engine
         // now lives as well as at its `daemon::service` caller.
-        let out = render_template("A={one} B={two}", &[("one", "{two}-literal"), ("two", "SECOND")]);
+        let out = render_template(
+            "A={one} B={two}",
+            &[("one", "{two}-literal"), ("two", "SECOND")],
+        );
         assert_eq!(out, "A={two}-literal B=SECOND");
     }
 

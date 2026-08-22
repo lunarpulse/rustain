@@ -57,9 +57,8 @@ pub fn load_server_tls_config(
     key_path: &Path,
 ) -> Result<rustls::ServerConfig, PemTlsError> {
     let read = |path: &Path| -> Result<Vec<u8>, PemTlsError> {
-        std::fs::read(path).map_err(|error| {
-            PemTlsError(format!("reading {}: {error}", path.display()))
-        })
+        std::fs::read(path)
+            .map_err(|error| PemTlsError(format!("reading {}: {error}", path.display())))
     };
 
     let cert_pem = read(cert_path)?;
@@ -81,7 +80,10 @@ pub fn load_server_tls_config(
     let key_pem = read(key_path)?;
     let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
         .map_err(|error| {
-            PemTlsError(format!("parsing private key {}: {error}", key_path.display()))
+            PemTlsError(format!(
+                "parsing private key {}: {error}",
+                key_path.display()
+            ))
         })?
         .ok_or_else(|| {
             PemTlsError(format!(

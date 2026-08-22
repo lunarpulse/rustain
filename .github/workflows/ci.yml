@@ -219,6 +219,15 @@ jobs:
           # to be named here.
           cargo test --features p2p-test-utils,relay-server \
             --test conformance_p2p_relay_server
+          # Story 18.4a — Topic replication, equivocation, taint and the
+          # relay-only convergence keystone. Its stem contains `p2p`, so
+          # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` forces it
+          # to be named here; it needs `p2p-test-utils` for the hermetic relay
+          # fixture and `bind_without_direct_paths` (the `clear_ip_transports`
+          # seam, additionally `debug_assertions`-gated, so this command must
+          # stay a debug-profile run).
+          cargo test --features p2p-test-utils \
+            --test conformance_18_4a_p2p_topic
 
   mcp:
     name: MCP Feature

@@ -23,6 +23,7 @@ mod completion;
 mod config;
 mod content;
 pub mod context_bundle;
+pub mod context_ref;
 pub mod conversation;
 pub mod credential;
 pub mod cron_config;
@@ -278,6 +279,11 @@ pub use catalog_delta::CatalogDelta;
 pub use context_bundle::{
     AssembleDiagnostics, ContextBudget, ContextBundle, ContextSource, ProvenancedEntry, Relevance,
     RetrievalMethod, estimate_tokens,
+};
+#[allow(unused_imports)]
+pub use context_ref::{
+    ContextRef, ContextRefError, ContextRefProvenance, ContextSummary, HeadVerdict,
+    MAX_CONTEXT_SUMMARY_BYTES, TopicHead,
 };
 pub use doc_key::DocKey;
 pub use filtered_catalog::FilteredCatalog;

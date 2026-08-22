@@ -311,7 +311,7 @@ Adapter-local config (`[context.config]`):
 | Tools      | builtin-only, builtin-full, composite        |
 | Channels   | terminal, telegram (feature-gated)          |
 | Scheduler  | none, cron (feature-gated)                  |
-| Context    | default, daily (alias of default), noop      |
+| Context    | default, daily (alias of default), noop, composite (default + peer-origin context, tainted; Story 18.4a) |
 
 ### MCP Servers
 

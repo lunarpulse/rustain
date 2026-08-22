@@ -874,6 +874,11 @@ pub async fn run_ask_core(
         None,
         session_id,
         TurnOrigin::Interactive,
+        // Story 18.4a scope boundary: `rustain ask` composes its own turn
+        // without the TUI's `inject_assembled_context` seam, so no
+        // `ContextBundle` exists here and no peer-origin entry can be present.
+        // ⛔ Not a suppressed taint — the absence is structural.
+        false,
     ));
     // Drop local Arc clones of tools/tool_scheduler so any event senders
     // held inside ToolSetPort adaptors are released. The spawned run_turn

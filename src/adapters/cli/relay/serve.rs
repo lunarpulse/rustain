@@ -274,7 +274,8 @@ impl ServePlan {
         if args.cert.is_some() != args.key.is_some() {
             return Err(ServeRefusal::IncompleteCertPair);
         }
-        if args.dev && (args.cert.is_some() || args.https_addr.is_some() || args.quic_addr.is_some())
+        if args.dev
+            && (args.cert.is_some() || args.https_addr.is_some() || args.quic_addr.is_some())
         {
             return Err(ServeRefusal::DevWithTls);
         }
@@ -931,7 +932,10 @@ mod tests {
         assert!(exec.contains("--https-addr 0.0.0.0:443"), "{exec}");
         assert!(exec.contains("--quic-addr 0.0.0.0:7842"), "{exec}");
         assert!(exec.contains("--hostname relay.example"), "{exec}");
-        assert!(exec.contains("/usr/local/bin/rustain relay serve"), "{exec}");
+        assert!(
+            exec.contains("/usr/local/bin/rustain relay serve"),
+            "{exec}"
+        );
         // The certificates the process reads are the ones systemd loaded.
         assert!(exec.contains("--cert %d/relay.crt"), "{exec}");
         assert!(exec.contains("--key %d/relay.key"), "{exec}");
@@ -1094,7 +1098,9 @@ mod tests {
                 "the {reason:?} arm must say why: {block}"
             );
             assert!(
-                !lines.iter().any(|line| line.trim_start().starts_with("url ")),
+                !lines
+                    .iter()
+                    .any(|line| line.trim_start().starts_with("url ")),
                 "no URL may be printed on the {reason:?} arm: {block}"
             );
         }
@@ -1230,11 +1236,10 @@ mod tests {
 
     #[test]
     fn the_template_is_the_checked_in_file_not_a_copy() {
-        let checked_in =
-            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                "dist/rustain-relay.service.template",
-            ))
-            .expect("the shipped template");
+        let checked_in = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("dist/rustain-relay.service.template"),
+        )
+        .expect("the shipped template");
         assert_eq!(
             SERVICE_TEMPLATE, checked_in,
             "include_str! is what keeps the generator and the reference from drifting"

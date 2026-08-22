@@ -46,8 +46,8 @@ use rustain::adapters::p2p_reach::peer_dial_map_from_workspace;
 use rustain::adapters::rap::{AgentSigner, ReplayWindow, verify_envelope};
 use rustain::adapters::relay_config::{load_workspace_relay_config, relay_url_set};
 use rustain::domain::models::{
-    AgentEnvelope, AgentId, CorrelationId, FrameOutcome, FrameReply, MessageKind,
-    PathObservation, PeerId, PeerTicket, RelayConfigState, RelayMode, RelaySet,
+    AgentEnvelope, AgentId, CorrelationId, FrameOutcome, FrameReply, MessageKind, PathObservation,
+    PeerId, PeerTicket, RelayConfigState, RelayMode, RelaySet,
 };
 use rustain::domain::ports::{PeerAddress, PeerTransport};
 use rustain::domain::services::peer_reach_filter::{

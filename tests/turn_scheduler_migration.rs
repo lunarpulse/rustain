@@ -359,6 +359,7 @@ async fn turn_scheduler_migration() {
         None,
         "sess-test".into(),
         rustain::domain::models::TurnOrigin::Interactive,
+        false,
     )
     .await;
 
@@ -452,6 +453,7 @@ async fn successful_a2a_result_taints_next_main_turn_dispatch() {
         None,
         "sess-taint".into(),
         rustain::domain::models::TurnOrigin::Interactive,
+        false,
     ));
 
     tokio::time::timeout(Duration::from_secs(1), async {

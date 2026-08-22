@@ -194,10 +194,18 @@ fn signed_envelope_to(
         signer.identity().peer_id.as_str()
     ))
     .expect("peer-rooted sender");
+    // ⚑ Rooted at the signer's own namespace — the recipient rule 18.4a
+    // enforces (`DF-18-4d-RECIPIENT-NAMESPACE`). Pre-18.4a this helper took a
+    // bare recipient string, which the delivery front door now refuses.
+    let recipient = if recipient.contains('/') {
+        recipient.to_owned()
+    } else {
+        format!("{}/{recipient}", signer.identity().peer_id.as_str())
+    };
     signer
         .sign(
             sender,
-            AgentId::parse(recipient).expect("recipient"),
+            AgentId::parse(&recipient).expect("recipient"),
             CorrelationId::new(correlation),
             MessageKind::PeerMessage,
             sequence,

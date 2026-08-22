@@ -274,8 +274,42 @@ pub enum ClientFrame {
         #[serde(default)]
         target_seq: Option<u64>,
     },
+    /// Share one room artifact's signed handle into a Topic with a pinned peer
+    /// (Story 18.4a; code-review D3). TrustedLocal + ReadWrite only.
+    ///
+    /// Routed through the daemon rather than dialed from the CLI because the
+    /// daemon is the one process holding both the Topic store and the bound
+    /// transport — a CLI-side endpoint would sign with the same identity key
+    /// over a second connection and fork the receiver's feed, and its store
+    /// would be dropped at exit, so the sender host would never retain its
+    /// own log.
+    PeerShare {
+        /// The alias to share with, as recorded by `peer add`.
+        alias: String,
+        /// The room artifact whose handle is shared.
+        artifact: String,
+        /// The Topic to share into (a correlation id).
+        topic: String,
+        /// A ≤240-byte human summary; `None` derives one from the artifact.
+        summary: Option<String>,
+    },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
+}
+
+/// The outcome of a [`ClientFrame::PeerShare`] (Story 18.4a).
+///
+/// ⛔ `Advertised` says the handle was advertised, ⛔ never that the peer took
+/// it, agreed with it, or read it: topic gossip is fire-and-forget and nothing
+/// answered. `Refused` carries the operator-ready reason; every refusal arm
+/// says what was **not** done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PeerShareOutcome {
+    /// The signed handle was written to the peer and recorded locally.
+    Advertised,
+    /// Nothing was shared; `reason` is the operator-ready line.
+    Refused { reason: String },
 }
 
 /// Daemon → client frames.
@@ -317,6 +351,8 @@ pub enum DaemonFrame {
     },
     /// Peer envelope was verified and accepted by the daemon wire boundary.
     PeerAccepted { sequence: u64 },
+    /// The outcome of a [`ClientFrame::PeerShare`] (Story 18.4a).
+    PeerShareResult { outcome: PeerShareOutcome },
     /// Acknowledge a clean [`ClientFrame::Detach`].
     Detached,
     /// A protocol-level error (e.g. version mismatch, read-only write attempt).

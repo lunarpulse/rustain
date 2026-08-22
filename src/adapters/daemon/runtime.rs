@@ -28,12 +28,12 @@ use crate::adapters::filesystem::FileSystemStorage;
 use crate::domain::errors::AdapterCompositionError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
-    AppConfig, AssemblyBudget, ChannelKind, ChatMessage, CompletionOptions, Conversation,
-    MessageRole, SkillActivationSet, TurnOrigin, generate_message_id,
+    AppConfig, AssemblyBudget, ChannelKind, ChatMessage, CompletionOptions, ContextBudget,
+    Conversation, Message, MessageRole, SkillActivationSet, TurnOrigin, generate_message_id,
 };
 use crate::domain::ports::{
-    ContextAssemblerPort, MemoryPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider,
-    ToolSetPort, UsageLedgerPort,
+    ContextAssemblerPort, ContextPort, MemoryPort, PersonaPort, SecurityPort, StoragePort,
+    StreamingProvider, ToolSetPort, UsageLedgerPort,
 };
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::message_builder;
@@ -64,6 +64,13 @@ pub struct DaemonCore {
     pub security: Arc<dyn SecurityPort>,
     /// Eager — persona/system-prompt source.
     pub persona: Arc<dyn PersonaPort>,
+    /// Story 18.4a — the replicated Topic log this daemon fills.
+    ///
+    /// ⚑ Eager and shared: the verified-peer delivery front door writes into
+    /// it, and the `"composite"` context adapter — composed from the same
+    /// `ComposeContext` — reads it. ⛔ One `Arc`, or a host's agent reads a
+    /// different log than the one its transport writes.
+    pub peer_topic_store: Arc<crate::adapters::rap::PeerTopicStore>,
     runtime: OnceCell<Arc<DaemonTurnRuntime>>,
     factory: TurnRuntimeFactory,
     /// How many times the factory has built the runtime — the AC1b fast-gate
@@ -81,6 +88,7 @@ impl DaemonCore {
         storage: Arc<dyn StoragePort>,
         security: Arc<dyn SecurityPort>,
         persona: Arc<dyn PersonaPort>,
+        peer_topic_store: Arc<crate::adapters::rap::PeerTopicStore>,
         factory: TurnRuntimeFactory,
     ) -> Self {
         Self {
@@ -90,6 +98,7 @@ impl DaemonCore {
             storage,
             security,
             persona,
+            peer_topic_store,
             runtime: OnceCell::new(),
             factory,
             build_count: Arc::new(AtomicUsize::new(0)),
@@ -136,7 +145,15 @@ pub struct DaemonTurnRuntime {
     pub tools: Arc<dyn ToolSetPort>,
     pub tool_scheduler: Arc<ToolScheduler>,
     pub persona: Arc<dyn PersonaPort>,
+    /// Message-tier context assembler, shared with the local driver.
     pub context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
+    /// Bundle-tier context for the daemon's interactive operator turn (Story
+    /// 18.4a, code-review D2). Composed from the **same** `ComposeContext` as
+    /// the p2p delivery handler's `PeerTopicStore`, so the daemon is the one
+    /// process that both fills and reads the log. Remote preloaded turns never
+    /// touch it: their origin already taints them and FR151 is about the local
+    /// operator reading teammates' context.
+    pub context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
     pub storage: Arc<dyn StoragePort>,
     pub fs_storage: Arc<FileSystemStorage>,
     pub usage_ledger: Arc<dyn UsageLedgerPort>,
@@ -159,7 +176,10 @@ impl DaemonTurnRuntime {
     /// runs independent of any socket, so it survives client detach (AC4).
     ///
     /// The inbound message is tagged with the supplied channel origin (AC5/AC8).
-    pub fn drive_turn(
+    /// An interactive operator turn additionally assembles the daemon-owned
+    /// bundle-tier context before spawning; channel and remote-peer turns do
+    /// not (Story 18.4a, code-review D2).
+    pub async fn drive_turn(
         &self,
         text: String,
         origin: ChannelKind,
@@ -168,6 +188,8 @@ impl DaemonTurnRuntime {
         turn_origin: TurnOrigin,
         turn_cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
+        let interactive_operator =
+            matches!(&turn_origin, TurnOrigin::Interactive) && origin == ChannelKind::Terminal;
         // Append the user message tagged with its origin channel (AC5).
         conversation.messages.push(ChatMessage {
             id: generate_message_id(),
@@ -185,13 +207,36 @@ impl DaemonTurnRuntime {
             retracted_at_ms: None,
         });
 
-        self.drive_preloaded_turn(conversation, domain_tx, turn_origin, turn_cancel)
+        let mut messages = self.assemble_messages(conversation);
+        // ⚑ Code-review D2: the daemon is the sole store owner and the
+        // attach-mode operator turn is its only interactive turn. Local mode
+        // owns no listener; remote/channel paths are not the local operator
+        // reading teammates' context and keep their established taint rules.
+        let context_tainted = if interactive_operator {
+            self.inject_interactive_peer_context(&mut messages, &text)
+                .await
+        } else {
+            false
+        };
+        self.spawn_turn(
+            messages,
+            conversation,
+            domain_tx,
+            turn_origin,
+            turn_cancel,
+            context_tainted,
+        )
     }
 
     /// Drive a turn whose user message was already appended by a verified
     /// transport ingest. This keeps receipt/replay commit tied to local context
     /// mutation while still routing the resulting tools through the typed
     /// [`TurnOrigin::RemotePeer`] path.
+    ///
+    /// ⛔ Remote preloaded turns deliberately skip bundle-tier context
+    /// injection: their `TurnOrigin::provenance()` already marks them
+    /// `SelfOriginated`, and FR151 is the local operator reading peer context —
+    /// never a peer driving a turn on this host.
     pub fn drive_preloaded_turn(
         &self,
         conversation: &mut Conversation,
@@ -199,8 +244,23 @@ impl DaemonTurnRuntime {
         turn_origin: TurnOrigin,
         turn_cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
-        // Assemble the API message list via the Message-tier assembler (same seam
-        // as `LocalTurnDriver::submit`), falling back to `build_api_messages`.
+        let messages = self.assemble_messages(conversation);
+        self.spawn_turn(
+            messages,
+            conversation,
+            domain_tx,
+            turn_origin,
+            turn_cancel,
+            false,
+        )
+    }
+
+    /// Assemble the message tier shared by interactive and preloaded daemon
+    /// paths, then shape compaction exactly once.
+    fn assemble_messages(&self, conversation: &Conversation) -> Vec<Message> {
+        // Assemble the API message list via the Message-tier assembler (same
+        // seam as `LocalTurnDriver::submit`), falling back to
+        // `build_api_messages`.
         let mut messages = match self.context_assembler.load().as_ref() {
             Some(assembler) => {
                 assembler
@@ -215,7 +275,65 @@ impl DaemonTurnRuntime {
             None => message_builder::build_api_messages(conversation),
         };
         crate::domain::services::compaction::shape_compacted_messages(conversation, &mut messages);
+        messages
+    }
 
+    /// Assemble and attach the daemon-owned context bundle for one interactive
+    /// operator turn, returning whether the attached bundle carried peer-origin
+    /// material.
+    ///
+    /// Mirrors `inject_assembled_context`'s payload shape without importing the
+    /// TUI handler: the daemon has no `TuiState` cache, so no stale-bundle
+    /// toggle hazard exists here. The same `ContextBundle::has_peer_origin`
+    /// derivation feeds `run_turn`; peer-supplied taint remains structurally
+    /// impossible (FR151 / 17.1b Vex rule).
+    async fn inject_interactive_peer_context(&self, messages: &mut [Message], text: &str) -> bool {
+        const CONTEXT_INJECTION_BUDGET_TOKENS: usize = 4096;
+
+        let context = self.context.load_full();
+        let bundle = match context
+            .assemble(text, ContextBudget::new(CONTEXT_INJECTION_BUDGET_TOKENS))
+            .await
+        {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "daemon interactive context assemble failed — turn proceeds without peer context"
+                );
+                return false;
+            }
+        };
+        if let Some(prefix) = bundle.to_prefix() {
+            if let Some(target) = messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.role == MessageRole::User)
+            {
+                target.context_prefix =
+                    Some(crate::domain::services::compaction::compose_context_prefix(
+                        target.context_prefix.take(),
+                        prefix,
+                    ));
+            } else {
+                tracing::warn!(
+                    "daemon interactive context prefix target not found — no user message in batch"
+                );
+            }
+        }
+        bundle.has_peer_origin()
+    }
+
+    /// Resolve the model and spawn the common `run_turn` engine.
+    fn spawn_turn(
+        &self,
+        messages: Vec<Message>,
+        conversation: &Conversation,
+        domain_tx: &mpsc::UnboundedSender<AppEvent>,
+        turn_origin: TurnOrigin,
+        turn_cancel: CancellationToken,
+        context_tainted: bool,
+    ) -> tokio::task::JoinHandle<()> {
         // System prompt (persona; no per-turn skill activation headless).
         let persona_prompt = self.persona.system_prompt(&self.workspace);
         let empty_set = SkillActivationSet::new();
@@ -272,6 +390,7 @@ impl DaemonTurnRuntime {
             None,
             session_id,
             turn_origin,
+            context_tainted,
         ))
     }
 }
@@ -280,8 +399,8 @@ impl DaemonTurnRuntime {
 mod tests {
     use super::*;
     use crate::adapters::noop::{
-        NoOpApprovalPersistence, NoOpPersona, NoOpProvider, NoOpSecurity, NoOpStorage, NoOpToolSet,
-        NoOpUsageLedger,
+        NoOpApprovalPersistence, NoOpContext, NoOpPersona, NoOpProvider, NoOpSecurity, NoOpStorage,
+        NoOpToolSet, NoOpUsageLedger,
     };
 
     /// Build a minimal all-NoOp `DaemonTurnRuntime` for the laziness gate. Cheap,
@@ -301,6 +420,9 @@ mod tests {
             tool_scheduler,
             persona: Arc::new(NoOpPersona),
             context_assembler: Arc::new(ArcSwap::from_pointee(None)),
+            context: Arc::new(ArcSwap::from_pointee(
+                Arc::new(NoOpContext) as Arc<dyn ContextPort>
+            )),
             storage: Arc::new(NoOpStorage),
             fs_storage: Arc::new(FileSystemStorage::with_workspace_root(
                 sessions,
@@ -326,6 +448,7 @@ mod tests {
             Arc::new(NoOpStorage),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             Box::new(move || Ok(noop_runtime(ws.clone()))),
         )
     }
@@ -362,14 +485,16 @@ mod tests {
             ..Default::default()
         };
         let (bus, _rx) = crate::infrastructure::runtime::event_bus::EventBus::new(8);
-        let handle = rt.drive_turn(
-            "hello".into(),
-            ChannelKind::Telegram,
-            &mut conversation,
-            &bus.domain_tx,
-            TurnOrigin::Interactive,
-            CancellationToken::new(),
-        );
+        let handle = rt
+            .drive_turn(
+                "hello".into(),
+                ChannelKind::Telegram,
+                &mut conversation,
+                &bus.domain_tx,
+                TurnOrigin::Interactive,
+                CancellationToken::new(),
+            )
+            .await;
         handle.abort();
         assert_eq!(conversation.messages.len(), 1);
         assert_eq!(conversation.messages[0].origin, ChannelKind::Telegram);

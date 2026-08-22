@@ -794,6 +794,54 @@ pub enum RoomEvent {
         #[serde(default)]
         outcome: PeerAdmissionOutcome,
     },
+    /// Two irreconcilable heads were seen for one peer's Topic feed at one
+    /// sequence (Story 18.4a, FR150-a).
+    ///
+    /// # What this record is
+    ///
+    /// An observation this host made, and nothing more. It says: *at sequence
+    /// `n` of `issuer`'s feed for this Topic, `peer` advertised a head that
+    /// disagrees with the head this host already held.* ⛔ It is **detection and
+    /// recording only**. It does not block, punish or exclude the peer; nothing
+    /// downstream may describe it as authenticated, as an accusation, or as
+    /// settled fact about who was wrong. Excluding an equivocating peer needs
+    /// the revocation/rekey path, which defers with `DF-18-CRYPTO-CLUSTER`.
+    ///
+    /// # Why the local feed check is not enough
+    ///
+    /// `ReplayWindow` already refuses a frame that does not chain to the head it
+    /// holds — but per connection, in memory, producing no durable record, and
+    /// only for frames that peer sent **this** host. It structurally cannot see
+    /// what a *different* peer says about the same feed. This is that
+    /// cross-peer half, which is why `peer` and `issuer` are separate fields.
+    ///
+    /// # Identity only
+    ///
+    /// ⛔ Carries no address and no dialing identifier of any kind (NFR74) — a
+    /// [`PeerId`], the Topic's correlation, the sequence and the two heads, and
+    /// nothing else. That prohibition is pinned by a scan over this whole file,
+    /// comments included, which is why none is named here.
+    PeerEquivocated {
+        /// The peer whose advertisement disagreed with what this host held.
+        #[serde(default)]
+        peer: Option<PeerId>,
+        /// Whose feed the two heads describe. Frequently a **different**
+        /// identity from `peer`: an advertisement about someone else's feed is
+        /// the whole reason this record exists.
+        #[serde(default)]
+        issuer: Option<PeerId>,
+        /// The Topic, which is a correlation id (`Topic := CorrelationId`).
+        #[serde(default)]
+        topic: String,
+        #[serde(default)]
+        sequence: u64,
+        /// Lowercase hex of the head this host already held.
+        #[serde(default)]
+        held: String,
+        /// Lowercase hex of the head that was advertised.
+        #[serde(default)]
+        advertised: String,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -1189,7 +1237,18 @@ impl OrchestrationRoom {
             // from a CLI process that owns no node at all. It renders through
             // the transparency projection, which is where a peer-interaction
             // fact belongs.
-            | RoomEvent::PeerFrameAttempted { .. } => {}
+            | RoomEvent::PeerFrameAttempted { .. }
+            // A divergent Topic head is a fact about one peer's *feed*, not
+            // about a room node: the Topic is a correlation, no node/wave/
+            // artifact/approval exists for it to attach to, and the peer whose
+            // feed diverged may own no node on this host at all. Decided as a
+            // deliberate no-op rather than defaulted — the precedent for a
+            // decided no-op is `role_events_are_room_read_model_no_ops_and_
+            // replay_idempotently` (18.3a), and the precedent for rendering is
+            // 18.4b's `PeerAdmissionRecorded`. It renders through the
+            // transparency projection, which is where a peer-interaction fact
+            // belongs.
+            | RoomEvent::PeerEquivocated { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

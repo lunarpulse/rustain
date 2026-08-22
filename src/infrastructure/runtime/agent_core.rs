@@ -53,6 +53,14 @@ pub struct AgentCore {
     pub sandbox: Arc<ArcSwap<Arc<dyn SandboxManager>>>,
     /// Story 14.5 — filesystem scratch-dir isolation seam.
     pub isolation: Arc<ArcSwap<Arc<dyn IsolationProvider>>>,
+    /// Story 18.4a — the replicated Topic log this host holds.
+    ///
+    /// ⚑ Carried on the core rather than rebuilt per composition so the
+    /// `"composite"` context adapter and the verified-peer delivery front door
+    /// share **one** `Arc`. A warm profile swap re-composes the context port
+    /// from the snapshotted `ComposeContext`, which holds the same store — so
+    /// the log survives a reload that replaces the adapter reading it.
+    pub peer_topic_store: Arc<crate::adapters::rap::PeerTopicStore>,
     /// Story 9.7 Phase B — shared merged BM25 index for meta-search.
     /// `None` when the `meta-search` feature is compiled but no `[search]`
     /// knob is "on" per ADR-09-01 v2.1 §W1 inherited.
@@ -102,6 +110,7 @@ impl AgentCore {
             isolation: Self::wrap(Arc::new(
                 crate::adapters::isolation::CowIsolationProvider::default(),
             ) as Arc<dyn IsolationProvider>),
+            peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             #[cfg(feature = "meta-search")]
             merged_index: ArcSwap::from_pointee(
                 None as Option<Arc<crate::infrastructure::search::MergedIndex>>,

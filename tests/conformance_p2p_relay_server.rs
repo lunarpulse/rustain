@@ -58,8 +58,8 @@ use rustain::adapters::rap::{AgentSigner, ReplayWindow, verify_envelope};
 use rustain::adapters::relay_config::{load_workspace_relay_config, relay_url_set};
 use rustain::adapters::relay_server::{RelayExit, serve, spawn_relay};
 use rustain::domain::models::{
-    AgentEnvelope, AgentId, CorrelationId, FrameOutcome, FrameReply, MessageKind,
-    PathObservation, PeerId, RelayConfigState,
+    AgentEnvelope, AgentId, CorrelationId, FrameOutcome, FrameReply, MessageKind, PathObservation,
+    PeerId, RelayConfigState,
 };
 use rustain::domain::ports::{PeerAddress, PeerTransport};
 use rustain::domain::services::peer_reach_filter::{canonical_relay_url, describe_reach};
@@ -74,11 +74,9 @@ const DEADLINE: Duration = Duration::from_secs(30);
 /// Real PEM files, for the **production** `--cert`/`--key` path.
 fn self_signed_pems() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().expect("tls dir");
-    let cert = rcgen::generate_simple_self_signed(vec![
-        "localhost".to_owned(),
-        "127.0.0.1".to_owned(),
-    ])
-    .expect("self-signed certificate");
+    let cert =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+            .expect("self-signed certificate");
     let cert_path = dir.path().join("relay.crt");
     let key_path = dir.path().join("relay.key");
     std::fs::write(&cert_path, cert.cert.pem()).expect("write cert");
@@ -272,7 +270,10 @@ async fn the_dev_path_binds_one_loopback_socket_and_nothing_else() {
         "address discovery inherits the TLS config, so without one it cannot spawn"
     );
 
-    assert_eq!(serve(server, std::future::ready(())).await, RelayExit::Cancelled);
+    assert_eq!(
+        serve(server, std::future::ready(())).await,
+        RelayExit::Cancelled
+    );
 }
 
 /// AC2 keystone: rustain refuses the collision **before** `Server::spawn`.
@@ -319,7 +320,10 @@ async fn the_printed_url_is_one_this_builds_client_keeps() {
     let (_dir, cert, key) = self_signed_pems();
     let (server, url) = our_relay(&cert, &key).await;
 
-    assert!(url.ends_with('/'), "the canonical form is what is printed: {url}");
+    assert!(
+        url.ends_with('/'),
+        "the canonical form is what is printed: {url}"
+    );
     assert_eq!(
         canonical_relay_url(&url),
         Some(url.clone()),
@@ -337,7 +341,10 @@ async fn the_printed_url_is_one_this_builds_client_keeps() {
         "the printed URL must survive the peer-side membership check verbatim"
     );
 
-    assert_eq!(serve(server, std::future::ready(())).await, RelayExit::Cancelled);
+    assert_eq!(
+        serve(server, std::future::ready(())).await,
+        RelayExit::Cancelled
+    );
 }
 
 // ── AC4 — the round trip through a relay this product built ─────────────────
@@ -482,7 +489,10 @@ async fn a_signed_envelope_round_trips_through_our_own_relay_and_it_says_so() {
 
     sender.shutdown().await.expect("shutdown sender");
     receiver.shutdown().await.expect("shutdown receiver");
-    assert_eq!(serve(relay, std::future::ready(())).await, RelayExit::Cancelled);
+    assert_eq!(
+        serve(relay, std::future::ready(())).await,
+        RelayExit::Cancelled
+    );
 }
 
 /// AC4 mutant (a), as a live discriminator: the counters name a HOST.
@@ -531,7 +541,10 @@ async fn a_relay_nobody_configured_stays_at_zero_while_its_twin_carries_the_traf
     });
     tokio::time::timeout(
         DEADLINE,
-        sender.send_to(&receiver_peer, signed_envelope(74, "twin-relay-discrimination")),
+        sender.send_to(
+            &receiver_peer,
+            signed_envelope(74, "twin-relay-discrimination"),
+        ),
     )
     .await
     .expect("answered")
@@ -551,8 +564,14 @@ async fn a_relay_nobody_configured_stays_at_zero_while_its_twin_carries_the_traf
 
     sender.shutdown().await.expect("shutdown sender");
     receiver.shutdown().await.expect("shutdown receiver");
-    assert_eq!(serve(chosen, std::future::ready(())).await, RelayExit::Cancelled);
-    assert_eq!(serve(unused, std::future::ready(())).await, RelayExit::Cancelled);
+    assert_eq!(
+        serve(chosen, std::future::ready(())).await,
+        RelayExit::Cancelled
+    );
+    assert_eq!(
+        serve(unused, std::future::ready(())).await,
+        RelayExit::Cancelled
+    );
 }
 
 /// AC4 mutant (b): restore the direct path and the relay is bypassed.
@@ -568,10 +587,9 @@ async fn the_same_exchange_with_a_direct_path_bypasses_the_relay_entirely() {
     let workspace = tempfile::tempdir().expect("workspace");
     let mode = relay_config(workspace.path(), &[url.as_str()]).mode();
 
-    let receiver =
-        IrohPeerTransport::bind(signing_key(75).to_bytes(), HashMap::new(), &mode)
-            .await
-            .expect("bind receiver");
+    let receiver = IrohPeerTransport::bind(signing_key(75).to_bytes(), HashMap::new(), &mode)
+        .await
+        .expect("bind receiver");
     let receiver_peer = peer_of(75);
     let mut inbound = receiver.inbound().expect("inbound");
     let direct = receiver.local_address().expect("a direct address");
@@ -606,7 +624,10 @@ async fn the_same_exchange_with_a_direct_path_bypasses_the_relay_entirely() {
 
     sender.shutdown().await.expect("shutdown sender");
     receiver.shutdown().await.expect("shutdown receiver");
-    assert_eq!(serve(relay, std::future::ready(())).await, RelayExit::Cancelled);
+    assert_eq!(
+        serve(relay, std::future::ready(())).await,
+        RelayExit::Cancelled
+    );
 }
 
 // ── AC5b — the serve loop's exit discipline ─────────────────────────────────
@@ -678,8 +699,7 @@ async fn a_cancelled_tls_relay_releases_all_three_sockets() {
         .expect("the serve task");
     assert_eq!(exit, RelayExit::Cancelled);
 
-    std::net::TcpListener::bind(http)
-        .expect("the probe socket was released before serve returned");
+    std::net::TcpListener::bind(http).expect("the probe socket was released before serve returned");
     std::net::TcpListener::bind(https)
         .expect("the relay socket was released before serve returned");
     std::net::UdpSocket::bind(quic)
@@ -888,5 +908,3 @@ fn the_disclosure_states_membership_reach_and_the_restart_effect() {
     assert!(block.contains("restart ends every connection"), "{block}");
     assert!(block.contains("kept, queued or recoverable"), "{block}");
 }
-
-

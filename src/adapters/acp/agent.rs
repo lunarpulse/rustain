@@ -731,6 +731,13 @@ impl RustainAcpAgent {
             TurnOrigin::Acp {
                 session_id: session_key.clone(),
             },
+            // Story 18.4a scope boundary, ⚑ stated rather than left silent: the
+            // ACP surface holds **no** `ContextPort` reference at all, so no
+            // peer-origin context can enter an ACP turn and there is no bundle
+            // to derive a taint bit from. ⛔ Not an oversight — peer context
+            // injects on the local operator's interactive turn and nowhere
+            // else, which is what FR151 asks for.
+            false,
         ));
         drop(tools);
         drop(tool_scheduler);
