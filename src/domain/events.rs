@@ -496,6 +496,9 @@ pub enum DomainKey {
     CtrlH,
     CtrlK,
     CtrlP,
+    /// Ctrl+Q — quit from any focus. Journey 0's quit key (Story 19.3);
+    /// plain `q` stays chat-focus-only.
+    CtrlQ,
     CtrlR,
     CtrlT,
     CtrlU,

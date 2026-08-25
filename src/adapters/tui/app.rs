@@ -2511,6 +2511,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         DomainKey::CtrlB if state.focus == FocusState::Chat => InputAction::ScrollFullPageUp,
         DomainKey::CtrlH => InputAction::ToggleSidebar,
         DomainKey::CtrlT => InputAction::NewTab,
+        // Ctrl+Q — quit from any focus (Journey 0's own key). Story 19.3.
+        // Deliberately NOT CtrlC's CancelOrQuit: Ctrl+C cancels a running
+        // stream/wave first (:1491-1494); Ctrl+Q means quit, exactly like
+        // plain `q` from chat focus (:1227).
+        DomainKey::CtrlQ => InputAction::Quit,
         // Tab/focus cycling (AC11):
         // Story 16.6 AC5: Chat Tab now emits CycleInvocationInFocusedTurn first.
         // The event-loop dispatcher checks the guard (focused turn + expanded + >= 2 invocations)
@@ -3172,6 +3177,15 @@ fn handle_help_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction 
             state.needs_redraw = true;
             InputAction::CancelOrQuit
         }
+        // Ctrl+Q: pass through to quit — same reasoning as Ctrl+C above, and the
+        // overlay itself renders the `Ctrl+Q — Quit (any focus)` binding, so
+        // swallowing it here would make the help text lie about itself.
+        // Story 19.3 (Journey 0), code review D2.
+        DomainKey::CtrlQ => {
+            state.focus = state.help_overlay.close();
+            state.needs_redraw = true;
+            InputAction::Quit
+        }
         _ => InputAction::Consumed,
     }
 }
@@ -3648,6 +3662,12 @@ pub fn convert_crossterm_event(
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('t') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlT));
             }
+            // Ctrl+Q → quit from any focus. Story 19.3 (Journey 0).
+            // Deliberately NOT CtrlC's CancelOrQuit: Ctrl+C cancels a running
+            // stream first; Ctrl+Q means quit.
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('q') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlQ));
+            }
             // Ctrl+U → clear search query in Search overlay (Story 4-4, standard readline)
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('u') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlU));
@@ -3978,6 +3998,367 @@ mod tests {
             result,
             Some(DomainInputEvent::SpecialKey(DomainKey::AltV))
         ));
+    }
+
+    // ── Story 19.3: Ctrl+Q quits from any focus (Journey 0) ────────────────
+
+    /// AC1 — Ctrl+Q translates at the crossterm boundary (the ONLY place
+    /// crossterm types are mapped, FR16).
+    #[test]
+    fn ctrl_q_maps_to_ctrl_q_domain_key() {
+        let event = ctrl_key('q');
+        assert!(matches!(
+            convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default()),
+            Some(DomainInputEvent::SpecialKey(DomainKey::CtrlQ))
+        ));
+    }
+
+    /// AC1 — full front-door chain from the real crossterm event: Chat focus
+    /// → Quit. Drives convert_crossterm_event → handle_input; never a
+    /// hand-fabricated DomainInputEvent.
+    #[test]
+    fn ctrl_q_event_quits_from_chat_focus() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let evt = ctrl_key('q');
+        let converted =
+            convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default())
+                .expect("Ctrl+Q must produce a domain event");
+        assert_eq!(handle_input(&mut state, &converted), InputAction::Quit);
+    }
+
+    /// AC1 — Input focus WITH TEXT TYPED still quits (Sam is mid-thought in
+    /// the input box; the PRD's Journey 0 key must not insert a character).
+    /// This is the AC1 mutant's tripwire: without the crossterm Ctrl+Q arm
+    /// the event degrades to KeyPress('q') and inserts instead of quitting.
+    #[test]
+    fn ctrl_q_event_quits_from_input_focus_with_text_typed() {
+        let mut state = make_state();
+        state.focus = FocusState::Input;
+        state.input_buffer = "half-written thought".to_string();
+        state.cursor_position = state.input_buffer.chars().count();
+        let evt = ctrl_key('q');
+        let converted =
+            convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default())
+                .expect("Ctrl+Q must produce a domain event");
+        assert_eq!(handle_input(&mut state, &converted), InputAction::Quit);
+        assert_eq!(
+            state.input_buffer, "half-written thought",
+            "Ctrl+Q must not insert a character"
+        );
+    }
+
+    /// AC1 positive control — plain `q` in Chat focus still quits (app.rs:1227).
+    #[test]
+    fn plain_q_in_chat_focus_still_quits() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::KeyPress('q')),
+            InputAction::Quit
+        );
+    }
+
+    /// AC2 expectation: the row either yields Quit or is a documented Skip
+    /// whose reason the story's Completion Notes repeat verbatim (A4).
+    #[derive(Debug)]
+    enum CtrlQRowExpectation {
+        Quit,
+        Skip(&'static str),
+    }
+
+    /// AC2 — for every FocusState reachable in a headless test, Ctrl+Q either
+    /// yields Quit or the row is an explicit Skip("reason") documented in the
+    /// story's Completion Notes. Rows are production-shaped: guards that gate
+    /// on a flag (palette, which-key, reverse search, autocomplete) get the
+    /// flag set exactly as the opening path sets it, because focus-only is
+    /// not the state production enters. `Overlay(Autocomplete(_))` is not a
+    /// row at all: no production site ever sets that focus value (the popup
+    /// lives at focus==Input, covered by the autocomplete row below).
+    #[test]
+    fn ctrl_q_from_every_focus_state_either_quits_or_is_documented() {
+        struct Row {
+            label: &'static str,
+            setup: Box<dyn Fn(&mut TuiState)>,
+            expect: CtrlQRowExpectation,
+        }
+        fn sidebar(panel: crate::domain::models::visual::PanelType) -> Box<dyn Fn(&mut TuiState)> {
+            Box::new(move |s| {
+                s.focus = FocusState::Sidebar { panel, selected: 0 };
+            })
+        }
+        fn overlay(ot: OverlayType) -> Box<dyn Fn(&mut TuiState)> {
+            Box::new(move |s| {
+                s.focus = FocusState::Overlay(ot.clone());
+            })
+        }
+        fn confirmation(ct: ConfirmationType) -> Box<dyn Fn(&mut TuiState)> {
+            Box::new(move |s| {
+                s.focus = FocusState::Overlay(OverlayType::Confirmation(ct.clone()));
+            })
+        }
+
+        use crate::domain::models::visual::PanelType;
+
+        let rows = vec![
+            // ── Non-modal surfaces: the Journey 0 named surfaces quit ──
+            Row {
+                label: "Input (empty buffer)",
+                setup: Box::new(|s| s.focus = FocusState::Input),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Input (text typed)",
+                setup: Box::new(|s| {
+                    s.focus = FocusState::Input;
+                    s.input_buffer = "draft".to_string();
+                    s.cursor_position = 5;
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Chat",
+                setup: Box::new(|s| s.focus = FocusState::Chat),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar History",
+                setup: sidebar(PanelType::History),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Tasks",
+                setup: sidebar(PanelType::Tasks),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Agents",
+                setup: sidebar(PanelType::Agents),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Adapters",
+                setup: sidebar(PanelType::Adapters),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar TransparencyLog",
+                setup: sidebar(PanelType::TransparencyLog),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Room",
+                setup: sidebar(PanelType::Room),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Artifacts",
+                setup: sidebar(PanelType::Artifacts),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Input with autocomplete popup active (production shape)",
+                setup: Box::new(|s| {
+                    s.focus = FocusState::Input;
+                    s.autocomplete.active = true;
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            // ── Cards whose special-key handling has NO interceptor: Ctrl+Q
+            // reaches the global site and quits. Their y/n/e verbs are char
+            // keys; quitting abandons the card without performing it.
+            Row {
+                label: "Confirmation(PlanApproval) (no special-key interceptor)",
+                setup: confirmation(ConfirmationType::PlanApproval),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Confirmation(ArtifactApply) (no special-key interceptor)",
+                setup: confirmation(ConfirmationType::ArtifactApply),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Confirmation(PeerAdd) (no special-key interceptor)",
+                setup: confirmation(ConfirmationType::PeerAdd),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            // ── Documented Skips: the overlay handler owns the keyboard and
+            // consumes the key (same Tier-1 posture Ctrl+T/Ctrl+H already
+            // have). Reasons repeat verbatim in Completion Notes.
+            Row {
+                label: "Overlay(CommandPalette) with palette open",
+                setup: Box::new(|s| {
+                    s.command_palette.open(FocusState::Input);
+                    s.focus = FocusState::Overlay(OverlayType::CommandPalette);
+                }),
+                expect: CtrlQRowExpectation::Skip(
+                    "CommandPalette: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(WhichKey) with which-key open",
+                setup: Box::new(|s| {
+                    s.which_key.open(FocusState::Input);
+                    s.focus = FocusState::Overlay(OverlayType::WhichKey);
+                }),
+                expect: CtrlQRowExpectation::Skip(
+                    "WhichKey: any special key dismisses the overlay; the key is spent dismissing",
+                ),
+            },
+            // Help was a documented Skip until the code review (D2): the overlay
+            // RENDERS the `Ctrl+Q — Quit (any focus)` binding, so swallowing the
+            // key made the help text lie about itself. `handle_help_overlay_key`
+            // now passes Ctrl+Q through exactly as it already passed Ctrl+C.
+            Row {
+                label: "Overlay(Help) (passes Ctrl+Q through, like Ctrl+C)",
+                setup: overlay(OverlayType::Help),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Overlay(ModelSelector)",
+                setup: overlay(OverlayType::ModelSelector),
+                expect: CtrlQRowExpectation::Skip(
+                    "ModelSelector: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(ProfileSwitcher)",
+                setup: overlay(OverlayType::ProfileSwitcher),
+                expect: CtrlQRowExpectation::Skip(
+                    "ProfileSwitcher: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(ReverseSearch) with reverse search active",
+                setup: Box::new(|s| {
+                    s.reverse_search.active = true;
+                    s.focus = FocusState::Overlay(OverlayType::ReverseSearch);
+                }),
+                expect: CtrlQRowExpectation::Skip(
+                    "ReverseSearch: consumes all but Ctrl+P/Ctrl+X; Esc closes, Ctrl+C cancels",
+                ),
+            },
+            Row {
+                label: "Overlay(Search)",
+                setup: overlay(OverlayType::Search),
+                expect: CtrlQRowExpectation::Skip(
+                    "Search: Tier-1 overlay consumes ALL special keys by design (Story 4-4)",
+                ),
+            },
+            Row {
+                label: "Overlay(CrossSearch)",
+                setup: overlay(OverlayType::CrossSearch),
+                expect: CtrlQRowExpectation::Skip(
+                    "CrossSearch: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(BookmarkList)",
+                setup: overlay(OverlayType::BookmarkList),
+                expect: CtrlQRowExpectation::Skip(
+                    "BookmarkList: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(WaveOverlay)",
+                setup: overlay(OverlayType::WaveOverlay),
+                expect: CtrlQRowExpectation::Skip(
+                    "WaveOverlay: consumes all special keys; Esc closes first (entry needs a wave run)",
+                ),
+            },
+            Row {
+                label: "Overlay(UsagePanel)",
+                setup: overlay(OverlayType::UsagePanel),
+                expect: CtrlQRowExpectation::Skip(
+                    "UsagePanel: consumes all special keys; Esc/Ctrl+C close it",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(Permission))",
+                setup: confirmation(ConfirmationType::Permission),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(Permission): modal Esc answers (deny) first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(PermissionFeedback))",
+                setup: confirmation(ConfirmationType::PermissionFeedback),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(PermissionFeedback): modal Esc cancels first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(Question))",
+                setup: confirmation(ConfirmationType::Question),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(Question): modal Esc cancels the question first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(DeleteConfirmation))",
+                setup: confirmation(ConfirmationType::DeleteConfirmation(
+                    crate::domain::models::visual::DeleteConfirmTarget::Single {
+                        id: "conv-1".to_string(),
+                        title: "t".to_string(),
+                    },
+                )),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(DeleteConfirmation): destructive modal Esc cancels first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(Fork))",
+                setup: confirmation(ConfirmationType::Fork),
+                expect: CtrlQRowExpectation::Skip("Confirmation(Fork): modal Esc cancels first"),
+            },
+            Row {
+                label: "Overlay(Confirmation(Rewind))",
+                setup: confirmation(ConfirmationType::Rewind),
+                expect: CtrlQRowExpectation::Skip("Confirmation(Rewind): modal Esc cancels first"),
+            },
+            Row {
+                label: "Overlay(Confirmation(ExportOverwrite))",
+                setup: confirmation(ConfirmationType::ExportOverwrite(std::path::PathBuf::from(
+                    "/tmp/out.md",
+                ))),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(ExportOverwrite): modal Esc cancels first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(SkillTrust))",
+                setup: confirmation(ConfirmationType::SkillTrust),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(SkillTrust): modal Esc declines first (5-2 AC4)",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(SkillTrustInspect))",
+                setup: confirmation(ConfirmationType::SkillTrustInspect),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(SkillTrustInspect): modal Esc returns to prompt first",
+                ),
+            },
+        ];
+
+        for row in rows {
+            let mut state = make_state();
+            (row.setup)(&mut state);
+            let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlQ));
+            match row.expect {
+                CtrlQRowExpectation::Quit => {
+                    assert_eq!(action, InputAction::Quit, "row {}", row.label);
+                }
+                CtrlQRowExpectation::Skip(reason) => {
+                    assert_ne!(
+                        action,
+                        InputAction::Quit,
+                        "row {} documented Skip({reason:?}) but it quits — update the story docs",
+                        row.label
+                    );
+                }
+            }
+        }
     }
 
     // ── handle_special_key via handle_input ─────────────────────────────────

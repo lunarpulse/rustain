@@ -46,6 +46,7 @@ pub mod search;
 pub mod shared;
 pub mod team_command;
 pub mod transparency;
+pub mod turn_finalize;
 pub mod usage_panel;
 
 /// Handler-to-dispatch contract per ADR-08-01 §D1.

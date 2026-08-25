@@ -990,6 +990,7 @@ pub async fn run(
                                         continue;
                                     }
                                     DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlC)
+                                    | DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlQ)
                                     | DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc) => {
                                         // Always allow quit escape hatch
                                         state.feedback_blocks.remove("recovery");
@@ -1087,6 +1088,16 @@ pub async fn run(
                                         state.needs_redraw = true;
                                         continue;
                                     }
+                                    // Story 19.3 (code review D1): Ctrl+Q means quit,
+                                    // and the carryover prompt must not eat it. Esc above
+                                    // DECLINES carryover (fresh tab) rather than quitting,
+                                    // so this cannot be folded into that arm.
+                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlQ) => {
+                                        state.feedback_blocks.remove("carryover");
+                                        state.active_feedback_id = None;
+                                        state.should_quit = true;
+                                        continue;
+                                    }
                                     _ => {
                                         // Block all other input while carryover prompt is active
                                         continue;
@@ -1118,6 +1129,16 @@ pub async fn run(
                                             state.feedback_blocks.remove(&fb_id);
                                         }
                                         state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    // Story 19.3 (code review D1): Ctrl+Q quits rather than
+                                    // being blocked by the wildcard below. Esc above only
+                                    // dismisses the override banner.
+                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlQ) => {
+                                        if let Some(fb_id) = state.active_feedback_id.take() {
+                                            state.feedback_blocks.remove(&fb_id);
+                                        }
+                                        state.should_quit = true;
                                         continue;
                                     }
                                     _ => continue,
@@ -1423,6 +1444,21 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::Quit => {
+                                    // Story 19.3 (code review D3): a quit must not silently
+                                    // discard an in-flight reply. The partial lives in
+                                    // `streaming`, never in `conversation`, and shutdown
+                                    // persists `conversation` with clean_exit=true — so
+                                    // without this fold the response is lost AND the
+                                    // recovery prompt cannot fire. Same finalization
+                                    // CancelOrQuit performs; Ctrl+Q still QUITS (A1: it
+                                    // never degrades into a cancel).
+                                    if streaming.is_streaming {
+                                        handlers::turn_finalize::finalize_streaming_turn(
+                                            &mut streaming,
+                                            &mut conversation,
+                                            &mut _active_turn,
+                                        );
+                                    }
                                     state.should_quit = true;
                                 }
                                 InputAction::CancelOrQuit => {
@@ -1491,47 +1527,13 @@ pub async fn run(
                                         continue;
                                     }
                                     if streaming.is_streaming {
-                                        // AC12: Finalize active tool calls with [aborted] before clearing
-                                        for (_, tc) in streaming.active_tool_calls.iter_mut() {
-                                            if tc.result.is_none() {
-                                                tc.result = Some(crate::domain::models::ToolResultInfo {
-                                                    content: "[aborted]".to_string(),
-                                                    is_error: true,
-                                                });
-                                                tc.completed_at_ms = Some(crate::domain::models::session_meta::now_unix() as u64 * 1000);
-                                            }
-                                        }
-
-                                        // Abort streaming: preserve partial response
-                                        if !streaming.current_text_buffer.is_empty()
-                                            || !streaming.active_tool_calls.is_empty()
-                                        {
-                                            let content = std::mem::take(&mut streaming.current_text_buffer);
-                                            conversation.messages.push(ChatMessage {
-                                                id: generate_conversation_id(),
-                                                role: MessageRole::Assistant,
-                                                content,
-                                                content_blocks: std::mem::take(&mut streaming.current_blocks),
-                                                tool_calls: streaming.active_tool_calls.drain().map(|(_, v)| v).collect(),
-                                                created_at: crate::domain::models::session_meta::now_unix(),
-                                                token_count: None,
-                                                stop_reason: Some(crate::domain::models::StopReason::Cancelled),
-                                                synthetic: false,
-                                                images: vec![],
-                                                origin: crate::domain::models::ChannelKind::Terminal,
-                                                authorship: Default::default(),
-                                                retracted_at_ms: None,
-                                            });
-                                        }
-                                        // Abort the active turn task
-                                        if let Some(handle) = _active_turn.take() {
-                                            handle.abort();
-                                        }
-                                        // Reset streaming state
-                                        streaming.is_streaming = false;
-                                        streaming.phase = crate::domain::models::StreamingPhase::Idle;
-                                        streaming.current_blocks.clear();
-                                        streaming.active_tool_calls.clear();
+                                        // AC12 + Story 19.3 D3: one shared finalization,
+                                        // so a quit can never drop what a cancel keeps.
+                                        handlers::turn_finalize::finalize_streaming_turn(
+                                            &mut streaming,
+                                            &mut conversation,
+                                            &mut _active_turn,
+                                        );
                                         // Clear TurnQueue entirely
                                         while turn_queue.dequeue().is_some() {}
                                         // Ready for next input

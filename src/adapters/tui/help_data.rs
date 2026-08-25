@@ -533,6 +533,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     description: "Quit (from chat focus)",
                     available: true,
                 },
+                HelpBinding {
+                    key: "Ctrl+Q",
+                    description: "Quit (any focus)",
+                    available: true,
+                },
             ],
         },
     ]

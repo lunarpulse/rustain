@@ -21,6 +21,7 @@ Run these tests before marking an epic as done. Estimated time: under 5 minutes.
 | 1.5 | Chat focused | Press i | Returns focus to input box |
 | 1.6 | Input focused | Type another message, press Enter | Multi-turn conversation works, both messages visible |
 | 1.7 | Chat focused | Press q | TUI exits cleanly, terminal restored |
+| 1.8 | Input focused, text typed | Press Ctrl+Q | TUI exits cleanly from any focus (input, chat, sidebar panels) — Story 19.3 / Journey 0 |
 
 ## 2. Session Lifecycle
 
