@@ -22,3 +22,7 @@ AGENTS.md
 # A leaked signing secret lets an attacker mint binaries that pass self-update
 # verification. Store cold/offline + as a protected GitHub Actions secret.
 *.key
+
+# Litter from an interrupted journey driver (19.8): an aborted run leaves
+# *.aborted.txt next to its receipts until renamed on capture_complete.
+*.aborted.txt

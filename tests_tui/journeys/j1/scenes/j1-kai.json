@@ -1,0 +1,95 @@
+{
+  "scene": "j1-kai",
+  "personas": {
+    "scene-kai": {
+      "turns": [
+        {
+          "expect": "auth refactor",
+          "content": [
+            {
+              "type": "text",
+              "text": "Got it — the auth refactor notes are loaded. Ask me anything."
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": { "input_tokens": 210, "output_tokens": 18 }
+        },
+        {
+          "expect": "<file path=\"notes/auth.md\">",
+          "content": [
+            {
+              "type": "text",
+              "text": "Read the file. Three routes carry stale middleware."
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": { "input_tokens": 540, "output_tokens": 12 }
+        },
+        {
+          "expect": "<command name=\"deploy-staging\">",
+          "content": [
+            {
+              "type": "text",
+              "text": "Deploy-staging command body received."
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": { "input_tokens": 460, "output_tokens": 9 }
+        },
+        {
+          "expect": "propose a plan",
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "propose_plan",
+              "input": {
+                "title": "Auth refactor",
+                "tasks": [
+                  {
+                    "title": "Inventory auth routes",
+                    "description": "List every route under /auth and its middleware."
+                  }
+                ]
+              }
+            }
+          ],
+          "stop_reason": "tool_use",
+          "usage": { "input_tokens": 512, "output_tokens": 64 }
+        },
+        {
+          "expect": "Plan proposed",
+          "content": [
+            {
+              "type": "text",
+              "text": "Card is up."
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": { "input_tokens": 640, "output_tokens": 6 }
+        },
+        {
+          "expect": "Inventory auth routes",
+          "content": [
+            {
+              "type": "text",
+              "text": "executor turn one — inventory done"
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": { "input_tokens": 700, "output_tokens": 8 }
+        },
+        {
+          "expect": "second tab needle",
+          "content": [
+            {
+              "type": "text",
+              "text": "Tab two replies."
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": { "input_tokens": 300, "output_tokens": 7 }
+        }
+      ]
+    }
+  }
+}
