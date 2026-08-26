@@ -93,6 +93,23 @@ def _build_binary() -> Path:
     return BINARY
 
 
+def _resolve_binary() -> tuple[Path, bool]:
+    """Resolve the binary to spawn: ``RUSTAIN_TUI_BINARY`` when set, else the
+    debug build. Returns ``(path, overridden)``.
+
+    Read at every ``start()`` rather than at import, so a test can point one
+    harness instance at a release-profile binary (Story 19.7 AC3) without
+    mutating the module or the process env of its siblings.
+    """
+    override = os.environ.get("RUSTAIN_TUI_BINARY", "").strip()
+    if override:
+        # Resolve against the CALLER's cwd: the child is spawned with
+        # cwd=<workspace>, so a relative override that passed the existence
+        # check here would be unfindable at spawn time.
+        return Path(override).resolve(), True
+    return BINARY, False
+
+
 # ── Main Harness ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -137,12 +154,22 @@ class RustainTUI:
     _workspace_path: Path | None = field(default=None, init=False, repr=False)
     _screen: pyte.Screen | None = field(default=None, init=False, repr=False)
     _stream: pyte.Stream | None = field(default=None, init=False, repr=False)
+    _binary: Path | None = field(default=None, init=False, repr=False)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     def start(self) -> "RustainTUI":
         """Build (if requested) and spawn the TUI process."""
-        if self.build:
+        # A named binary is spawned as named: no build, and no silent fallback to
+        # target/debug — a missing path is the caller's mistake, said out loud
+        # before cargo runs and before pexpect turns it into its own error.
+        self._binary, overridden = _resolve_binary()
+        if overridden:
+            if not self._binary.exists():
+                raise FileNotFoundError(
+                    f"RUSTAIN_TUI_BINARY={self._binary} does not exist"
+                )
+        elif self.build:
             _build_binary()
 
         # Resolve workspace directory
@@ -197,7 +224,7 @@ class RustainTUI:
         # Per-test env overrides (e.g. RUSTAIN_PROFILE for MCP tests).
         if self.env_overrides:
             env.update(self.env_overrides)
-        args = [str(BINARY)]
+        args = [str(self._binary)]
         if self.fresh:
             args.append("--new")
 

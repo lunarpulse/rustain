@@ -62,6 +62,7 @@ markers = [
     "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
     "subagent: Tests that exercise in-process subagent spawning / the task tool",
     "story_18_2: Story 18-2 — Transparency & Visible Surfacing (Ctrl+X L panel, /team log)",
+    "story_19_7: Story 19-7 — Deterministic scene provider + journey-capture harness",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest
