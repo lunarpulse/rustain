@@ -257,6 +257,7 @@ pub fn stream_chunk_to_session_update(
             id,
             content,
             is_error,
+            diff: _,
         } => {
             let status = if *is_error {
                 acp::ToolCallStatus::Failed

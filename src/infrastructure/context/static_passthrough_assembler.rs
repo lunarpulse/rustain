@@ -115,6 +115,7 @@ mod tests {
             result: Some(ToolResultInfo {
                 content: "ok".to_string(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             }),
             started_at_ms: Some(0),
             completed_at_ms: Some(1),

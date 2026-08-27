@@ -253,6 +253,7 @@ impl Conversation {
                             Some(ToolResultInfo {
                                 content: output.content.clone(),
                                 is_error: output.is_error,
+                                diff: output.diff.clone(),
                             })
                         } else {
                             None

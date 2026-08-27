@@ -197,6 +197,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StoragePort for StubStorage {
+        /// Stub: no snapshots, so no display diff. Explicit because the port
+        /// has no default body (Story 19.1 code review).
+        async fn read_snapshot(
+            &self,
+            _conversation_id: &str,
+            _checkpoint: crate::domain::models::checkpoint::CheckpointId,
+            _path: &std::path::Path,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(None)
+        }
         async fn save_conversation(&self, _c: &Conversation) -> Result<(), StorageError> {
             Ok(())
         }

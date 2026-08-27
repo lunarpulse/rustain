@@ -2217,6 +2217,19 @@ impl StoragePort for FileSystemStorage {
             .await
     }
 
+    /// Story 19.1 A3 — snapshot read-back for the Write tool-block diff.
+    /// Delegates to [`FileSystemStorage::read_snapshot_inner`] (same
+    /// split as `finalize_snapshot` / `finalize_snapshot_inner`).
+    async fn read_snapshot(
+        &self,
+        conversation_id: &str,
+        checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        path: &std::path::Path,
+    ) -> Result<Option<Vec<u8>>, crate::domain::errors::StorageError> {
+        self.read_snapshot_inner(conversation_id, checkpoint, path)
+            .await
+    }
+
     // ── Rewind Transaction Journal (DF-109, AC3) ─────────────────────────────
 
     async fn begin_rewind_txn(
@@ -2408,6 +2421,94 @@ impl FileSystemStorage {
             checkpoint.0
         );
         Ok(())
+    }
+
+    /// Story 19.1 A3 — read back a snapshot's original content for display.
+    /// Mirrors `finalize_snapshot`'s key derivation (canonicalize →
+    /// workspace guard → `content_hash` → `{cp_id}_{path_hash}`), then
+    /// decodes the envelope's `original_content_b64`.
+    pub(crate) async fn read_snapshot_inner(
+        &self,
+        conversation_id: &str,
+        checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        path: &std::path::Path,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        // 1. Canonicalize the path the SAME way `snapshot_file` did.
+        //
+        // Story 19.1 code review: `snapshot_file` runs BEFORE the write, so a
+        // path that did not resolve then (a new file, or a dangling symlink)
+        // was keyed as `canonical_parent / file_name`. By the time we read
+        // back, the write has created the target, so a plain `canonicalize`
+        // resolves further — through the symlink — and hashes a DIFFERENT
+        // path, missing the snapshot forever. So try the parent-join form
+        // first and fall back to the fully-resolved form, accepting whichever
+        // actually has a snapshot on disk.
+        let mut candidates: Vec<PathBuf> = Vec::with_capacity(2);
+        if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
+            if let Ok(canonical_parent) = tokio::fs::canonicalize(parent).await {
+                candidates.push(canonical_parent.join(file_name));
+            }
+        }
+        if let Ok(p) = tokio::fs::canonicalize(path).await {
+            if !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        // 2. Workspace guard — same fail-closed rule as `snapshot_file`;
+        // outside the workspace there IS no snapshot to read.
+        let workspace_root = self.workspace_root.clone().or_else(|| {
+            self.sessions_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .map(PathBuf::from)
+        });
+        let Some(workspace_root) = workspace_root else {
+            return Ok(None);
+        };
+        let Ok(workspace_canonical) = tokio::fs::canonicalize(&workspace_root).await else {
+            return Ok(None);
+        };
+        // 3. Locate the snapshot file, trying each candidate key. The guard is
+        // applied per candidate: a candidate outside the workspace could not
+        // have been snapshotted in the first place.
+        let snapshots_dir = self.snapshots_dir(conversation_id);
+        let mut snapshot_path: Option<PathBuf> = None;
+        for canonical in &candidates {
+            if !canonical.starts_with(&workspace_canonical) {
+                continue;
+            }
+            let path_hash = content_hash(canonical.as_os_str().as_encoded_bytes());
+            let candidate = snapshots_dir.join(format!("{}_{}", checkpoint.0, path_hash));
+            if tokio::fs::try_exists(&candidate).await.unwrap_or(false) {
+                snapshot_path = Some(candidate);
+                break;
+            }
+        }
+        let Some(snapshot_path) = snapshot_path else {
+            return Ok(None);
+        };
+
+        // 4. Read + decode the envelope's original content.
+        let bytes = tokio::fs::read(&snapshot_path)
+            .await
+            .map_err(|e| StorageError::IoError(format!("read_snapshot read: {}", e)))?;
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| StorageError::SerializationError(format!("read_snapshot parse: {}", e)))?;
+        let Some(b64) = envelope
+            .get("original_content_b64")
+            .and_then(|v| v.as_str())
+        else {
+            return Ok(None);
+        };
+        use base64::Engine as _;
+        let original = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| StorageError::SerializationError(format!("read_snapshot b64: {}", e)))?;
+        Ok(Some(original))
     }
 
     /// Path to the checkpoint log file for a conversation.

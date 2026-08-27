@@ -39,6 +39,7 @@ pub fn finalize_streaming_turn(
             tc.result = Some(ToolResultInfo {
                 content: "[aborted]".to_string(),
                 is_error: true,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             });
             tc.completed_at_ms =
                 Some(crate::domain::models::session_meta::now_unix() as u64 * 1000);

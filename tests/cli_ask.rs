@@ -1236,6 +1236,7 @@ async fn p0_13_1b_g3_stream_ndjson_and_midstream_error() {
             id: "t1".into(),
             content: "r1".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         StreamChunk::Usage {
             usage,
@@ -1520,6 +1521,7 @@ async fn p0_13_1b_g4_schema_fingerprint() {
             id: "tc1".into(),
             content: "res".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         StreamChunk::Usage {
             usage,
@@ -1609,6 +1611,7 @@ async fn p0_13_1b_g5_snake_case_lint() {
             id: "t".into(),
             content: "r".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         StreamChunk::Usage {
             usage,
@@ -1653,6 +1656,7 @@ async fn p0_13_1b_final_message_json() {
             id: "t".into(),
             content: "r".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         StreamChunk::Text {
             content: "final block".into(),
@@ -1695,6 +1699,7 @@ async fn p1_13_1b_g7_empty_response() {
             id: "t".into(),
             content: "r".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         StreamChunk::TurnComplete {
             stop_reason: StopReason::EndTurn,
@@ -2722,6 +2727,7 @@ async fn p0_13_1c_final_message_only_dry_run() {
             id: "t1".into(),
             content: "Plan proposed.".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         StreamChunk::Text {
             content: "Final plan paragraph.".into(),

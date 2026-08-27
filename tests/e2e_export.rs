@@ -54,6 +54,7 @@ fn msg_with_tool_call(
             result: Some(ToolResultInfo {
                 content: tool_result.to_string(),
                 is_error: false,
+                diff: rustain::domain::models::WriteDiffState::NotAWrite,
             }),
             started_at_ms: None,
             completed_at_ms: None,

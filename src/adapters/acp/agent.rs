@@ -817,10 +817,12 @@ impl RustainAcpAgent {
                                         id,
                                         content,
                                         is_error,
+                                        diff: _,
                                     } => {
                                         let result = ToolResultInfo {
                                             content: content.clone(),
                                             is_error: *is_error,
+                                            diff: crate::domain::models::WriteDiffState::NotAWrite,
                                         };
                                         let status =
                                             Some(if *is_error { "✗ Error" } else { "✓ Success" }.to_string());

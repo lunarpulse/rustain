@@ -175,6 +175,11 @@ pub enum InvocationStatus {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    /// UI-only display-diff state riding the journaled tool result (Story
+    /// 19.1). `#[serde(default)]` — records written before the feature load
+    /// as `NotCaptured { HistoricalOrReattached }`, never as `NewFile`.
+    #[serde(default)]
+    pub diff: super::diff::WriteDiffState,
 }
 
 // ---------------------------------------------------------------------------
@@ -349,13 +354,14 @@ pub fn migrate_chat_message_to_turn(msg: &ChatMessage) -> Turn {
         });
 
         // One result per invocation that has a result
-        if let Some(ref result) = tc.result {
+        if let Some(result) = &tc.result {
             turn.push_part(|id| TurnPart::ToolResult {
                 id,
                 refs: invocation_id,
                 output: ToolOutput {
                     content: result.content.clone(),
                     is_error: result.is_error,
+                    diff: result.diff.clone(),
                 },
             });
         }
@@ -503,6 +509,7 @@ mod tests {
                 result: Some(ToolResultInfo {
                     content: "file contents".into(),
                     is_error: false,
+                    diff: crate::domain::models::WriteDiffState::NotAWrite,
                 }),
                 started_at_ms: Some(1_000),
                 completed_at_ms: Some(2_000),
@@ -540,6 +547,7 @@ mod tests {
                 result: Some(ToolResultInfo {
                     content: "exit 1".into(),
                     is_error: true,
+                    diff: crate::domain::models::WriteDiffState::NotAWrite,
                 }),
                 started_at_ms: Some(1_000),
                 completed_at_ms: Some(2_000),

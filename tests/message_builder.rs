@@ -86,6 +86,7 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
         result: Some(ToolResultInfo {
             content: "Plan proposed for user approval".to_string(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1000),

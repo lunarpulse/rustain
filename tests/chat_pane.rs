@@ -532,6 +532,7 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         result: Some(ToolResultInfo {
             content: "output1\noutput2\noutput3".to_string(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1000),

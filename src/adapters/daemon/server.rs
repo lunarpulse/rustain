@@ -5513,6 +5513,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StoragePort for UserOnlySaveCountingStorage {
+        /// Test double: counts saves only, holds no snapshots. Explicit
+        /// because the port has no default body (Story 19.1 code review).
+        async fn read_snapshot(
+            &self,
+            _conversation_id: &str,
+            _checkpoint: crate::domain::models::checkpoint::CheckpointId,
+            _path: &std::path::Path,
+        ) -> Result<Option<Vec<u8>>, crate::domain::errors::StorageError> {
+            Ok(None)
+        }
         async fn save_conversation(
             &self,
             conv: &Conversation,

@@ -204,10 +204,22 @@ where
 /// (see the module-level reconciliation note).
 fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
     let mut content = String::new();
-    let mut outputs: HashMap<u64, (&str, bool)> = HashMap::new();
+    // Carry the display-diff state through, exactly as the two sibling
+    // reconstruction paths do (`Conversation::…` and the chat-pane shim).
+    //
+    // Story 19.1 code review, HIGH: this path used to keep only
+    // `(content, is_error)` and hardcode the diff away, so an attached client
+    // expanding a completed overwrite fell through to the input-derived
+    // all-additions branch — painting a new-file diff over a replaced file,
+    // which is precisely what ruling A4 forbids.
+    let mut outputs: HashMap<u64, (&str, bool, &crate::domain::models::WriteDiffState)> =
+        HashMap::new();
     for part in &turn.parts {
         if let TurnPart::ToolResult { refs, output, .. } = part {
-            outputs.insert(refs.0, (output.content.as_str(), output.is_error));
+            outputs.insert(
+                refs.0,
+                (output.content.as_str(), output.is_error, &output.diff),
+            );
         }
     }
     let mut tool_calls = Vec::new();
@@ -230,9 +242,10 @@ fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
                     InvocationStatus::Cancelled => Some("⊘ Cancelled"),
                     InvocationStatus::Running | InvocationStatus::Pending => None,
                 };
-                let result = outputs.get(&id.0).map(|(c, is_err)| ToolResultInfo {
+                let result = outputs.get(&id.0).map(|(c, is_err, diff)| ToolResultInfo {
                     content: (*c).to_string(),
                     is_error: *is_err,
+                    diff: (*diff).clone(),
                 });
                 tool_calls.push(ToolCallInfo {
                     id: tool_call_id_for(&turn.id, *id),
@@ -434,14 +447,17 @@ fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
         ToolCall::Success { result, .. } => Some(ToolResultInfo {
             content: result.output.clone(),
             is_error: result.is_error,
+            diff: crate::domain::models::WriteDiffState::NotAWrite,
         }),
         ToolCall::Error { error, .. } => Some(ToolResultInfo {
             content: error.clone(),
             is_error: true,
+            diff: crate::domain::models::WriteDiffState::NotAWrite,
         }),
         ToolCall::Cancelled { reason, .. } => Some(ToolResultInfo {
             content: reason.clone(),
             is_error: true,
+            diff: crate::domain::models::WriteDiffState::NotAWrite,
         }),
         _ => None,
     };

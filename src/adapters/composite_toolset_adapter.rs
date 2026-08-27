@@ -609,6 +609,12 @@ impl ToolSetPort for CompositeToolsetAdapter {
         SwapTier::Warm
     }
 
+    /// Delegate to the builtin adapter — it owns the path resolution that the
+    /// Write display diff has to match (Story 19.1 code review).
+    fn workspace_root(&self) -> Option<std::path::PathBuf> {
+        self.builtin.workspace_root()
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

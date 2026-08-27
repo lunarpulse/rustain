@@ -197,6 +197,26 @@ pub trait StoragePort: Send + Sync {
         Ok(()) // no-op is safe — degrades to v2 semantics
     }
 
+    /// Read back the **original** (pre-write) content snapshotted for `path`
+    /// under the given checkpoint (Story 19.1 A3 — display-only channel).
+    ///
+    /// Returns `Ok(Some(original))` when a snapshot exists — including the
+    /// empty original of a new-file Write (the snapshot for a file that did
+    /// not exist holds empty bytes). Returns `Ok(None)` when no snapshot
+    /// backs the key.
+    ///
+    /// ⛔ Deliberately has NO default body. Story 19.1 code review: a
+    /// defaulted `Ok(None)` let any implementor — present or future — opt out
+    /// silently, degrading every Write diff to the fallback line with no
+    /// compile error. `path` MUST be the same absolute path the writer passed
+    /// to `snapshot_file`, or the key cannot be reproduced.
+    async fn read_snapshot(
+        &self,
+        conversation_id: &str,
+        checkpoint: CheckpointId,
+        path: &Path,
+    ) -> Result<Option<Vec<u8>>, StorageError>;
+
     // ── Rewind Transaction Journal (DF-109, AC3) ─────────────────────────────
     //
     // A transaction journal is written atomically before each phase of a rewind

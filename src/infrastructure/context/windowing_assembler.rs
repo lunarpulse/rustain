@@ -361,6 +361,7 @@ mod tests {
                 output: crate::domain::models::turn::ToolOutput {
                     content: "ok".into(),
                     is_error: false,
+                    diff: crate::domain::models::WriteDiffState::NotAWrite,
                 },
             });
         }
@@ -401,6 +402,7 @@ mod tests {
                         result: Some(ToolResultInfo {
                             content: "ok".into(),
                             is_error: false,
+                            diff: crate::domain::models::WriteDiffState::NotAWrite,
                         }),
                         started_at_ms: Some(0),
                         completed_at_ms: Some(1),

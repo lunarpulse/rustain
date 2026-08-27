@@ -28,6 +28,7 @@ pub mod conversation;
 pub mod credential;
 pub mod cron_config;
 pub mod daemon_crash;
+pub mod diff;
 pub mod doc_key;
 pub mod execution_sandbox;
 pub mod filtered_catalog;
@@ -158,6 +159,10 @@ pub use credential::{
 pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
+pub use diff::{
+    DIFF_MAX_LINES, DiffKind, DiffLine, NotCapturedReason, WriteDiffState, compute_diff,
+    display_diff,
+};
 #[allow(unused_imports)]
 pub use execution_sandbox::{
     CapabilityGrant, ComponentRef, HostImport, PreopenGrant, ResourceCaps, SandboxInvocation,

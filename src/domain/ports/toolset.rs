@@ -50,6 +50,17 @@ pub trait ToolSetPort: Send + Sync {
         crate::domain::models::HealthSummary::unknown()
     }
 
+    /// Workspace root this adapter resolves relative tool paths against.
+    ///
+    /// Story 19.1 code review: the Write display diff must derive its snapshot
+    /// key from the SAME absolute path `execute_write` snapshotted. Returning
+    /// `None` means "this adapter does not resolve paths", and callers must
+    /// then decline to guess rather than fall back to the process CWD — the
+    /// coincidence that used to make the key agree.
+    fn workspace_root(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Returns the swap tier for this tools adapter.
     /// `ToolSetAdapter` (builtin) inherits the default `Hot`.
     /// `CompositeToolsetAdapter` overrides to `Warm` (Story 9.1).

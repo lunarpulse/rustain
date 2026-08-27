@@ -976,6 +976,13 @@ impl std::fmt::Debug for ToolSetAdapter {
 
 #[async_trait]
 impl ToolSetPort for ToolSetAdapter {
+    /// The root `execute_write` resolves relative `file_path`s against
+    /// (`workspace_path.join(file_path)`), so the display-diff read-back can
+    /// derive the identical snapshot key (Story 19.1 code review).
+    fn workspace_root(&self) -> Option<std::path::PathBuf> {
+        Some(self.workspace_path.clone())
+    }
+
     fn available_tools(&self) -> Vec<ToolDefinition> {
         let mut tools = vec![
             ToolDefinition {

@@ -926,6 +926,7 @@ fn test_e2e_tool_use_conversation_state() {
         id: "toolu_abc123".to_string(),
         content: "file contents here".to_string(),
         is_error: false,
+        diff: rustain::domain::models::WriteDiffState::NotAWrite,
     });
 
     h.render();

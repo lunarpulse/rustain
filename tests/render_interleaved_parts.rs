@@ -94,6 +94,7 @@ fn make_result(content: &str, is_error: bool) -> TurnPart {
         output: rustain::domain::models::ToolOutput {
             content: content.to_string(),
             is_error,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
     }
 }

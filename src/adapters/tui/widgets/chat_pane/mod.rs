@@ -638,11 +638,13 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
                             ToolResultInfo {
                                 content: output.content.clone(),
                                 is_error: output.is_error,
+                                diff: output.diff.clone(),
                             }
                         } else {
                             ToolResultInfo {
                                 content: String::new(),
                                 is_error: false,
+                                diff: crate::domain::models::WriteDiffState::NotAWrite,
                             }
                         }
                     }),
@@ -653,11 +655,13 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
                             ToolResultInfo {
                                 content: output.content.clone(),
                                 is_error: output.is_error,
+                                diff: output.diff.clone(),
                             }
                         } else {
                             ToolResultInfo {
                                 content: String::new(),
                                 is_error: true,
+                                diff: crate::domain::models::WriteDiffState::NotAWrite,
                             }
                         }
                     });

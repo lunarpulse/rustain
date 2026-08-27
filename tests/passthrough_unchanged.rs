@@ -83,6 +83,7 @@ fn tool_call(id: &str, name: &str) -> ToolCallInfo {
         result: Some(ToolResultInfo {
             content: "ok".to_string(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1),

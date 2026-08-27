@@ -5,7 +5,10 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::adapters::tui::theme::Theme;
 use crate::domain::clock::Clock;
-use crate::domain::models::ToolCallInfo;
+use crate::domain::models::{
+    DIFF_MAX_LINES, DiffKind, DiffLine, NotCapturedReason, ToolCallInfo, WriteDiffState,
+    diff::cap_lines, display_diff,
+};
 
 /// Map a status chip string to its theme color.
 fn chip_color(chip: &str, theme: &Theme) -> ratatui::style::Color {
@@ -103,9 +106,133 @@ pub fn display_tool_name_cached(name: &str, cache: &mut Option<String>) -> Strin
     cache.as_ref().unwrap().clone()
 }
 
+/// The body an expanded Write/Edit success block shows INSTEAD of the raw
+/// result-content lines (Story 19.1). `None` (from [`expanded_diff_body`])
+/// means "ordinary tool" — render the output lines as before.
+enum DiffBody {
+    /// Diff lines, already elided and capped at `DIFF_MAX_LINES`. The
+    /// `… N more lines` marker is inlined by `cap_lines`, so this is the
+    /// complete body — the widget adds nothing to it.
+    Lines { lines: Vec<DiffLine> },
+    /// A4 honest one-liner — the write completed but the original content was
+    /// not captured. `reason` names WHY, so the block can never claim "no
+    /// active checkpoint" for a snapshot read failure.
+    NotCaptured {
+        bytes: usize,
+        reason: NotCapturedReason,
+    },
+    /// The write completed and changed nothing a line diff can show.
+    NoChange,
+}
+
+/// Derive the expanded-block diff body for a completed, non-error tool
+/// call (Story 19.1 A2/A3/A4). Pure function of `tc` — no I/O.
+///
+/// - **Edit** renders a hunk from its own input (`old_string` →
+///   `new_string`) — zero plumbing (A2). Memoized, because this function is
+///   called from the layout path on every frame.
+/// - **Write** renders the state the infrastructure site computed. Every
+///   variant is explicit: there is no value that means two things.
+fn expanded_diff_body(tc: &ToolCallInfo) -> Option<DiffBody> {
+    let result = tc.result.as_ref()?;
+    if result.is_error {
+        return None;
+    }
+    match tc.name.as_str() {
+        "Edit" | "edit" => {
+            let old = tc.input.get("old_string").and_then(|v| v.as_str())?;
+            let new = tc.input.get("new_string").and_then(|v| v.as_str())?;
+            // Both are mandatory and must differ (the adapter rejects
+            // anything else); malformed input falls back to output lines.
+            if old.is_empty() || old == new {
+                return None;
+            }
+            let (lines, _more) = edit_hunk(old, new);
+            if lines.is_empty() {
+                return Some(DiffBody::NoChange);
+            }
+            Some(DiffBody::Lines { lines })
+        }
+        "Write" | "write" => match &result.diff {
+            // A Write cannot legitimately be NotAWrite; the site only emits
+            // it when the input was unreadable. Fall back to output text
+            // rather than invent a diff.
+            WriteDiffState::NotAWrite => None,
+            WriteDiffState::NewFile => {
+                let content = tc.input.get("content").and_then(|v| v.as_str())?;
+                let (lines, _more) = cap_lines(display_diff("", content), DIFF_MAX_LINES);
+                if lines.is_empty() {
+                    return Some(DiffBody::NoChange);
+                }
+                Some(DiffBody::Lines { lines })
+            }
+            WriteDiffState::Diff { lines, more } if lines.is_empty() && *more == 0 => {
+                Some(DiffBody::NoChange)
+            }
+            WriteDiffState::Diff { lines, .. } => Some(DiffBody::Lines {
+                lines: lines.clone(),
+            }),
+            WriteDiffState::NotCaptured { reason } => Some(DiffBody::NotCaptured {
+                bytes: tc
+                    .input
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map_or(0, str::len),
+                reason: *reason,
+            }),
+        },
+        _ => None,
+    }
+}
+
+/// Memoized Edit hunk. `expanded_diff_body` is reached from
+/// [`tool_block_height`], which the chat pane calls for EVERY tool block on
+/// EVERY frame; computing an LCS there made frame cost scale with the size of
+/// every visible edit. The cache is keyed by the input strings' hash and is
+/// bounded — the TUI renders on one thread, so a thread-local is enough.
+fn edit_hunk(old: &str, new: &str) -> (Vec<DiffLine>, usize) {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+
+    const MEMO_CAP: usize = 256;
+    thread_local! {
+        static MEMO: RefCell<HashMap<u64, (Vec<DiffLine>, usize)>> =
+            RefCell::new(HashMap::new());
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    old.hash(&mut hasher);
+    new.hash(&mut hasher);
+    let key = hasher.finish();
+
+    MEMO.with(|memo| {
+        if let Some(hit) = memo.borrow().get(&key) {
+            return hit.clone();
+        }
+        let computed = cap_lines(display_diff(old, new), DIFF_MAX_LINES);
+        let mut m = memo.borrow_mut();
+        if m.len() >= MEMO_CAP {
+            m.clear();
+        }
+        m.insert(key, computed.clone());
+        computed
+    })
+}
+
+/// Height of the expanded body (diff lines + cap marker, A4 line, or the
+/// ordinary output lines). Keeps [`tool_block_height`] in lockstep with
+/// [`render_tool_block_lines`].
+fn expanded_body_height(tc: &ToolCallInfo) -> usize {
+    match expanded_diff_body(tc) {
+        Some(DiffBody::Lines { lines }) => lines.len(),
+        Some(DiffBody::NotCaptured { .. }) | Some(DiffBody::NoChange) => 1,
+        None => tc.result.as_ref().map_or(0, |r| r.content.lines().count()),
+    }
+}
+
 /// Compute the rendered height of a tool block.
 pub fn tool_block_height(tc: &ToolCallInfo, state: &ToolBlockState) -> usize {
-    if let Some(ref result) = tc.result {
+    if let Some(result) = &tc.result {
         if result.is_error {
             // Error: 1 line for header + error lines
             let error_lines = result.content.lines().count().max(1);
@@ -114,9 +241,8 @@ pub fn tool_block_height(tc: &ToolCallInfo, state: &ToolBlockState) -> usize {
         if state.collapsed {
             1 // One-line collapsed summary
         } else {
-            // Expanded: border top + input line + output lines + border bottom
-            let output_lines = result.content.lines().count();
-            3 + output_lines // top border + input line + output + bottom border
+            // Expanded: border top + input line + body + border bottom
+            3 + expanded_body_height(tc)
         }
     } else {
         1 // Executing — one-line with ticker
@@ -312,15 +438,55 @@ pub fn render_tool_block_lines<'a>(
                     Span::styled(input_summary, Style::default().fg(theme.colors.fg_primary)),
                 ]));
 
-                // Output lines
-                for out_line in result.content.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("│ ", Style::default().fg(theme.colors.tool_border_expanded)),
-                        Span::styled(
-                            out_line.to_string(),
-                            Style::default().fg(theme.colors.fg_secondary),
-                        ),
-                    ]));
+                // Body: for Write/Edit the inline diff replaces the raw
+                // result-content lines (Story 19.1 — FR30's "see what the
+                // tool actually changed" instead of "Successfully wrote N
+                // bytes"). Diff lines deliberately carry NO "│ " gutter so
+                // they never share a prefix with output-tail lines (A8).
+                match expanded_diff_body(tc) {
+                    Some(DiffBody::Lines { lines: dls }) => {
+                        lines.extend(render_diff_lines(&dls, theme));
+                    }
+                    Some(DiffBody::NotCaptured { bytes, reason }) => {
+                        // "overwrote" is only true when we know a file was
+                        // replaced, which is exactly the no-checkpoint case
+                        // AC4/A4 pin. For every other reason the provenance
+                        // is unknown, so say "wrote" rather than assert an
+                        // overwrite that may not have happened.
+                        let verb = match reason {
+                            NotCapturedReason::NoActiveCheckpoint => "overwrote",
+                            _ => "wrote",
+                        };
+                        lines.push(Line::from(Span::styled(
+                            format!(
+                                "{} {} bytes — previous content not captured ({})",
+                                verb,
+                                bytes,
+                                reason.describe()
+                            ),
+                            Style::default().fg(theme.colors.fg_muted),
+                        )));
+                    }
+                    Some(DiffBody::NoChange) => {
+                        lines.push(Line::from(Span::styled(
+                            "no line changes — the file content is unchanged",
+                            Style::default().fg(theme.colors.fg_muted),
+                        )));
+                    }
+                    None => {
+                        for out_line in result.content.lines() {
+                            lines.push(Line::from(vec![
+                                Span::styled(
+                                    "│ ",
+                                    Style::default().fg(theme.colors.tool_border_expanded),
+                                ),
+                                Span::styled(
+                                    out_line.to_string(),
+                                    Style::default().fg(theme.colors.fg_secondary),
+                                ),
+                            ]));
+                        }
+                    }
                 }
 
                 // Bottom border
@@ -383,107 +549,12 @@ pub fn render_peek_overlay<'a>(
     (paragraph, area)
 }
 
-/// Compute a simple line-by-line diff for Write tool display.
-/// Uses longest common subsequence (LCS) to find additions and deletions.
-#[allow(dead_code)]
-pub fn compute_diff(original: &str, new_content: &str) -> Vec<DiffLine> {
-    let old_lines: Vec<&str> = original.lines().collect();
-    let new_lines: Vec<&str> = new_content.lines().collect();
-
-    if old_lines.is_empty() {
-        // New file — all lines are additions
-        return new_lines
-            .iter()
-            .map(|l| DiffLine {
-                kind: DiffKind::Added,
-                content: l.to_string(),
-            })
-            .collect();
-    }
-
-    // Simple LCS diff
-    let m = old_lines.len();
-    let n = new_lines.len();
-
-    // Size guard: LCS is O(m*n) space. For large files, fall back to all-removed + all-added.
-    if m.saturating_mul(n) > 100_000 {
-        let mut result = Vec::with_capacity(m + n);
-        for line in &old_lines {
-            result.push(DiffLine {
-                kind: DiffKind::Removed,
-                content: line.to_string(),
-            });
-        }
-        for line in &new_lines {
-            result.push(DiffLine {
-                kind: DiffKind::Added,
-                content: line.to_string(),
-            });
-        }
-        return result;
-    }
-
-    // Build LCS table
-    let mut dp = vec![vec![0u32; n + 1]; m + 1];
-    for i in 1..=m {
-        for j in 1..=n {
-            if old_lines[i - 1] == new_lines[j - 1] {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
-            } else {
-                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
-            }
-        }
-    }
-
-    // Backtrack to produce diff
-    let mut result = Vec::new();
-    let mut i = m;
-    let mut j = n;
-
-    while i > 0 || j > 0 {
-        if i > 0 && j > 0 && old_lines[i - 1] == new_lines[j - 1] {
-            result.push(DiffLine {
-                kind: DiffKind::Context,
-                content: old_lines[i - 1].to_string(),
-            });
-            i -= 1;
-            j -= 1;
-        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
-            result.push(DiffLine {
-                kind: DiffKind::Added,
-                content: new_lines[j - 1].to_string(),
-            });
-            j -= 1;
-        } else {
-            result.push(DiffLine {
-                kind: DiffKind::Removed,
-                content: old_lines[i - 1].to_string(),
-            });
-            i -= 1;
-        }
-    }
-
-    result.reverse();
-    result
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiffKind {
-    Added,
-    Removed,
-    Context,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct DiffLine {
-    pub kind: DiffKind,
-    pub content: String,
-}
-
 /// Render diff lines with coloring.
-#[allow(dead_code)]
+///
+/// Diff rows deliberately carry no `│ ` gutter so a matcher can never confuse
+/// them with output-tail lines (ruling A8). `Elided` rows carry their own
+/// text and take no `+`/`-`/` ` prefix, so they cannot be mistaken for
+/// content either.
 pub fn render_diff_lines<'a>(diff: &[DiffLine], theme: &'a Theme) -> Vec<Line<'a>> {
     diff.iter()
         .map(|dl| {
@@ -491,6 +562,12 @@ pub fn render_diff_lines<'a>(diff: &[DiffLine], theme: &'a Theme) -> Vec<Line<'a
                 DiffKind::Added => ("+", theme.colors.success),
                 DiffKind::Removed => ("-", theme.colors.error),
                 DiffKind::Context => (" ", theme.colors.fg_secondary),
+                DiffKind::Elided => {
+                    return Line::from(Span::styled(
+                        dl.content.clone(),
+                        Style::default().fg(theme.colors.fg_muted),
+                    ));
+                }
             };
             Line::from(Span::styled(
                 format!("{} {}", prefix, dl.content),
@@ -537,6 +614,7 @@ mod tests {
             Some(ToolResultInfo {
                 content: "hello\nworld".to_string(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             }),
         );
         let state = ToolBlockState::default();
@@ -550,6 +628,7 @@ mod tests {
             Some(ToolResultInfo {
                 content: "line1\nline2\nline3".to_string(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             }),
         );
         let state = ToolBlockState {
@@ -567,6 +646,7 @@ mod tests {
             Some(ToolResultInfo {
                 content: String::new(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             }),
         );
         let state = ToolBlockState {
@@ -584,6 +664,7 @@ mod tests {
             Some(ToolResultInfo {
                 content: "error msg".to_string(),
                 is_error: true,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             }),
         );
         let state = ToolBlockState::default();
@@ -610,6 +691,7 @@ mod tests {
             Some(ToolResultInfo {
                 content: "output".to_string(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             }),
         );
         let theme = crate::adapters::tui::theme::Theme::dark();
@@ -628,6 +710,7 @@ mod tests {
             Some(ToolResultInfo {
                 content: "output line".to_string(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             }),
         );
         let theme = crate::adapters::tui::theme::Theme::dark();
@@ -649,6 +732,7 @@ mod tests {
             Some(ToolResultInfo {
                 content: "command not found".to_string(),
                 is_error: true,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             }),
         );
         let theme = crate::adapters::tui::theme::Theme::dark();
@@ -658,23 +742,6 @@ mod tests {
         assert!(lines.len() >= 2);
         let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(first.contains("✗"));
-    }
-
-    #[test]
-    fn test_diff_new_file() {
-        let diff = compute_diff("", "line1\nline2");
-        assert_eq!(diff.len(), 2);
-        assert!(diff.iter().all(|d| d.kind == DiffKind::Added));
-    }
-
-    #[test]
-    fn test_diff_modification() {
-        let diff = compute_diff(
-            "fn main() {\n    println!(\"hello\");\n}",
-            "fn main() {\n    println!(\"hello world\");\n    println!(\"goodbye\");\n}",
-        );
-        assert!(diff.iter().any(|d| d.kind == DiffKind::Added));
-        assert!(diff.iter().any(|d| d.kind == DiffKind::Context));
     }
 
     #[test]
@@ -689,5 +756,272 @@ mod tests {
         let summary = tool_summary("Bash", &serde_json::json!({"command": long_cmd}));
         assert!(summary.len() <= 63);
         assert!(summary.ends_with("..."));
+    }
+
+    fn make_write_edit_call(
+        name: &str,
+        input: serde_json::Value,
+        diff: WriteDiffState,
+    ) -> ToolCallInfo {
+        ToolCallInfo {
+            id: "test_id".to_string(),
+            name: name.to_string(),
+            input,
+            result: Some(ToolResultInfo {
+                content: "Successfully wrote 4 bytes to f.rs".to_string(),
+                is_error: false,
+                diff,
+            }),
+            started_at_ms: Some(1000000),
+            completed_at_ms: Some(1002300),
+            status: None,
+        }
+    }
+
+    fn render_expanded(tc: &ToolCallInfo) -> (Vec<String>, crate::adapters::tui::theme::Theme) {
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let state = ToolBlockState {
+            collapsed: false,
+            peek_active: false,
+        };
+        let clock = test_clock();
+        let lines = render_tool_block_lines(tc, &theme, &state, 80, &clock);
+        let strings: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        (strings, theme)
+    }
+
+    /// AC1 — Edit renders a hunk from its own input, no plumbing: the
+    /// lines contain `  a`, `- b`, `+ c` in that order, coloured
+    /// fg_secondary / error / success, and the byte-count result text is
+    /// replaced by the diff.
+    #[test]
+    fn ac1_edit_renders_hunk_from_own_input() {
+        let tc = make_write_edit_call(
+            "Edit",
+            serde_json::json!({
+                "file_path": "f.rs",
+                "old_string": "a\nb",
+                "new_string": "a\nc"
+            }),
+            WriteDiffState::NotAWrite,
+        );
+        let (lines, theme) = render_expanded(&tc);
+        let pos: Vec<Option<usize>> = ["  a", "- b", "+ c"]
+            .iter()
+            .map(|needle| lines.iter().position(|l| l == needle))
+            .collect();
+        assert!(
+            pos.iter().all(|p| p.is_some()),
+            "all hunk lines present: {lines:?}"
+        );
+        let [pa, pb, pc] = [pos[0].unwrap(), pos[1].unwrap(), pos[2].unwrap()];
+        assert!(pa < pb && pb < pc, "hunk order  a/- b/+ c: {lines:?}");
+        assert!(
+            !lines.iter().any(|l| l.contains("Successfully wrote")),
+            "the diff replaces the byte-count result text: {lines:?}"
+        );
+        // Colours (AC1): context fg_secondary, removed error, added success.
+        let rendered = render_tool_block_lines(
+            &tc,
+            &theme,
+            &ToolBlockState {
+                collapsed: false,
+                peek_active: false,
+            },
+            80,
+            &test_clock(),
+        );
+        let find_styled = |needle: &str| {
+            rendered
+                .iter()
+                .find(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                        == needle
+                })
+                .and_then(|l| l.spans.first())
+                .map(|s| s.style.fg)
+        };
+        assert_eq!(find_styled("  a"), Some(Some(theme.colors.fg_secondary)));
+        assert_eq!(find_styled("- b"), Some(Some(theme.colors.error)));
+        assert_eq!(find_styled("+ c"), Some(Some(theme.colors.success)));
+    }
+
+    /// AC2 first half — Write to a file that did not exist, diff `None`:
+    /// every line of `input.content` renders with `+` (input-derived path).
+    #[test]
+    fn ac2_write_new_file_renders_all_additions_from_input() {
+        let tc = make_write_edit_call(
+            "Write",
+            serde_json::json!({
+                "file_path": "new.rs",
+                "content": "fn a() {}\nfn b() {}"
+            }),
+            WriteDiffState::NewFile,
+        );
+        let (lines, _theme) = render_expanded(&tc);
+        assert!(lines.contains(&"+ fn a() {}".to_string()), "{lines:?}");
+        assert!(lines.contains(&"+ fn b() {}".to_string()), "{lines:?}");
+        assert!(
+            !lines.iter().any(|l| l.starts_with("- ")),
+            "a new file has no removals: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("Successfully wrote")),
+            "{lines:?}"
+        );
+    }
+
+    /// AC2 second half — Write over an existing file with a site diff:
+    /// renders `  x`, `- y`, `+ z`.
+    #[test]
+    fn ac2_write_overwrite_renders_site_diff() {
+        let tc = make_write_edit_call(
+            "Write",
+            serde_json::json!({
+                "file_path": "f.rs",
+                "content": "x\nz"
+            }),
+            WriteDiffState::from_original(b"x\ny", "x\nz"),
+        );
+        let (lines, _theme) = render_expanded(&tc);
+        assert!(lines.contains(&"  x".to_string()), "{lines:?}");
+        assert!(lines.contains(&"- y".to_string()), "{lines:?}");
+        assert!(lines.contains(&"+ z".to_string()), "{lines:?}");
+    }
+
+    /// AC4 — overwrite whose original was not captured (site marker
+    /// `NotCaptured`): exactly one muted honest line, no `+` content line.
+    /// Mutant: falling through to the all-additions branch turns this RED.
+    #[test]
+    fn ac4_overwrite_without_snapshot_renders_honest_line_only() {
+        let tc = make_write_edit_call(
+            "Write",
+            serde_json::json!({
+                "file_path": "f.rs",
+                "content": "abc"
+            }),
+            WriteDiffState::NotCaptured {
+                reason: NotCapturedReason::NoActiveCheckpoint,
+            },
+        );
+        let (lines, theme) = render_expanded(&tc);
+        assert_eq!(
+            lines
+                .iter()
+                .find(|l| l.contains("previous content not captured")),
+            Some(
+                &"overwrote 3 bytes — previous content not captured (no active checkpoint)"
+                    .to_string()
+            ),
+            "exactly the A4 line: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with("+ ") || l.starts_with("- ")),
+            "no diff content lines may be fabricated: {lines:?}"
+        );
+        // Muted colour.
+        let state = ToolBlockState {
+            collapsed: false,
+            peek_active: false,
+        };
+        let rendered = render_tool_block_lines(&tc, &theme, &state, 80, &test_clock());
+        let honest = rendered
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .contains("previous content not captured")
+            })
+            .expect("honest line rendered");
+        assert_eq!(
+            honest.spans.first().map(|s| s.style.fg),
+            Some(Some(theme.colors.fg_muted))
+        );
+        // Height lockstep: 3 frame lines + 1 honest line.
+        assert_eq!(tool_block_height(&tc, &state), 4);
+        assert_eq!(rendered.len(), 4);
+    }
+
+    /// AC5 — a 500-line diff renders 200 lines then `… 300 more lines`;
+    /// height stays in lockstep with render. Collapsed stays 1 line.
+    #[test]
+    fn ac5_expanded_diff_caps_at_200_lines() {
+        let content: String = (0..500).map(|i| format!("line{i}\n")).collect();
+        let tc = make_write_edit_call(
+            "Write",
+            serde_json::json!({
+                "file_path": "big.rs",
+                "content": content
+            }),
+            WriteDiffState::NewFile,
+        );
+        let (lines, _theme) = render_expanded(&tc);
+        let added = lines.iter().filter(|l| l.starts_with("+ ")).count();
+        assert_eq!(added, 200, "cap at DIFF_MAX_LINES: {lines:?}");
+        assert!(lines.contains(&"… 300 more lines".to_string()), "{lines:?}");
+        let state = ToolBlockState {
+            collapsed: false,
+            peek_active: false,
+        };
+        assert_eq!(
+            tool_block_height(&tc, &state),
+            lines.len(),
+            "height must equal rendered line count"
+        );
+        assert_eq!(tool_block_height(&tc, &ToolBlockState::default()), 1);
+    }
+
+    /// Height/render lockstep for the site-diff and ordinary-tool bodies.
+    #[test]
+    fn height_matches_render_for_write_and_other_tools() {
+        let state = ToolBlockState {
+            collapsed: false,
+            peek_active: false,
+        };
+        let clock = test_clock();
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let cases = vec![
+            make_write_edit_call(
+                "Write",
+                serde_json::json!({"file_path": "f.rs", "content": "a\nb\nc"}),
+                WriteDiffState::from_original(b"a\nx\nc", "a\nb\nc"),
+            ),
+            make_write_edit_call(
+                "Edit",
+                serde_json::json!({
+                    "file_path": "f.rs",
+                    "old_string": "a",
+                    "new_string": "b"
+                }),
+                WriteDiffState::NotAWrite,
+            ),
+            make_tool_call(
+                "Bash",
+                Some(ToolResultInfo {
+                    content: "one\ntwo".to_string(),
+                    is_error: false,
+                    diff: crate::domain::models::WriteDiffState::NotAWrite,
+                }),
+            ),
+        ];
+        for tc in cases {
+            let rendered = render_tool_block_lines(&tc, &theme, &state, 80, &clock);
+            assert_eq!(
+                tool_block_height(&tc, &state),
+                rendered.len(),
+                "height/render lockstep for {}",
+                tc.name
+            );
+        }
     }
 }

@@ -258,6 +258,7 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                                                 tc.result = Some(ToolResultInfo {
                                                     content: content_str,
                                                     is_error: is_error.unwrap_or(false),
+                                                    diff: crate::domain::models::WriteDiffState::NotAWrite,
                                                 });
                                             }
                                             None => {

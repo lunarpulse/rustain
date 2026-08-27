@@ -37,6 +37,7 @@ fn assistant_turn(started_at: i64, prose: &str, tool: &str, path: &str) -> Turn 
         output: rustain::domain::models::turn::ToolOutput {
             content: "ok".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
     });
     t
@@ -73,6 +74,7 @@ fn assistant_chat(t: &Turn) -> ChatMessage {
                 result: Some(ToolResultInfo {
                     content: "ok".into(),
                     is_error: false,
+                    diff: rustain::domain::models::WriteDiffState::NotAWrite,
                 }),
                 started_at_ms: Some(0),
                 completed_at_ms: Some(1),

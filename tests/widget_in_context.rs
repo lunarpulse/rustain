@@ -150,6 +150,7 @@ fn test_tool_block_in_full_layout() {
                 result: Some(rustain::domain::models::ToolResultInfo {
                     content: "fn main() {}".to_string(),
                     is_error: false,
+                    diff: rustain::domain::models::WriteDiffState::NotAWrite,
                 }),
                 started_at_ms: Some(0),
                 completed_at_ms: Some(100),
