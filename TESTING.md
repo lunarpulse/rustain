@@ -2,11 +2,16 @@
 
 Run these tests before marking an epic as done. Estimated time: under 5 minutes.
 
-## Prerequisites
+## Prerequisites — the gate every story must run before claiming "gates green"
 
-- `cargo test` passes (all unit + integration + E2E tests green)
-- `cargo clippy` clean (no new warnings)
-- Build: `cargo build`
+- **`cargo test --all-targets --no-fail-fast`** — the WHOLE suite, not a hand-picked target list.
+  ⚠ **This wording is deliberate and was paid for.** Stories 19-3, 19-7, 19-8 and 19-1 each reported "gates green" from a narrow `--test <target>` enumeration, and all four missed that `conformance_18_3a_f_resolution` was red — a hard gate in CI's `check` job with no `continue-on-error`, so CI was red for four consecutive stories while every story record said otherwise. A ratchet you do not run is not a ratchet. `--no-fail-fast` matters too: without it the first failure hides the rest.
+- **Ratchet targets, which a narrow run is most likely to skip.** Both of these pin `event_loop.rs` line growth, and they must agree:
+  - `cargo test --test conformance` — `EVENT_LOOP_BASELINE_LINES` + soft/hard budget, plus the async-lock ratchet
+  - `cargo test --test conformance_18_3a_f_resolution -- --test-threads=1` — the resolve-verb budget (same effective ceiling by construction)
+- `cargo clippy --all-targets -- -D warnings` — **strict, not advisory.** A story's own files must be warning-free.
+- `cargo fmt --check`
+- `cargo build --release`
 
 ---
 

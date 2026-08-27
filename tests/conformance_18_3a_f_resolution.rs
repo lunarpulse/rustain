@@ -1964,14 +1964,40 @@ fn the_resolve_result_never_claims_the_workspace_changed() {
 fn the_resolve_verb_costs_the_event_loop_nothing() {
     let loop_source = source("src/infrastructure/runtime/event_loop.rs");
     let lines = loop_source.lines().count();
-    assert!(
-        lines <= 11_321,
-        "event_loop.rs has {lines} lines — put logic in artifact_bridge.rs, do not bump the cap"
-    );
-    // ⚑ RE-BASED 2026-08-14 by Story 18.4b, from 11_285. That story's whole
-    // deliverable is a new operator surface, so unlike 18.3a-f it cannot cost
-    // the loop zero; it is amended here rather than paralleled by a second pin.
-    // Its budget is accounted for exactly:
+    // ⚑ CONVERTED FROM AN EXACT PIN TO A BUDGET, 2026-08-27 (owner ruling,
+    // during the Story 19.1 code review). What this test protects is unchanged:
+    // the resolve verb must not put logic in the event loop. What changed is the
+    // instrument, because `assert_eq!` on the line count of an 11k-line file
+    // guarantees its own recurrence — every unrelated story that adds one
+    // compiler-forced line turns it red, and a gate that is red for reasons
+    // outside the story looking at it gets walked past rather than fixed.
+    //
+    // It was in fact walked past FOUR times, and the drift is on the record:
+    //
+    //   1dff997  19-4  11_300  ← the pin's own value; green
+    //   4607ba1  19-3  11_302  ← +2, Ctrl+Q quit binding. THE PIN WENT RED HERE
+    //   e278fdf  19-7  11_302  ← inherited red, closed `done`
+    //   fd1525f  19-8  11_302  ← inherited red, closed `done`
+    //   891d561  19-1  11_304  ← +2, compiler-forced display-diff field
+    //                             completions on ToolResultInfo literals
+    //
+    // ⛔ This target is NOT missing from CI — it is a hard gate in the `check`
+    // job (`.github/workflows/ci.yml`) and again in the a2a lane, with no
+    // `continue-on-error`. So CI has been red since 19-3 and four stories
+    // closed anyway. The budget below is the instrument fix; the process fix is
+    // that each story's own gate command must run this target locally, which is
+    // why it is now named in `TESTING.md`'s gate row.
+    //
+    // The ceiling is deliberately the SAME effective ceiling as the sibling
+    // ratchet in `tests/conformance.rs` (`EVENT_LOOP_BASELINE_LINES` 11_237
+    // + soft 75 = 11_312), so the two pins on this one file can never again
+    // disagree about what is allowed. Growth past it is still a design failure,
+    // not a budget question.
+    //
+    // ⚑ Baseline RE-BASED 2026-08-14 by Story 18.4b, from 11_285. That story's
+    // whole deliverable is a new operator surface, so unlike 18.3a-f it cannot
+    // cost the loop zero; it is amended here rather than paralleled by a second
+    // pin. Its budget is accounted for exactly:
     //
     //   +2  the `/peer` dispatch arm, before the adapter-override catch-all
     //   +4  the PeerAddConfirm | PeerAddDecline resolution arm
@@ -1981,13 +2007,20 @@ fn the_resolve_verb_costs_the_event_loop_nothing() {
     //
     // Everything else lives in `peer_bridge.rs`, `cli/peer/*` and
     // `handlers/peer_command.rs`.
-    assert_eq!(
-        lines, 11_300,
-        "18.3a-f budgeted ZERO added lines (ruling A7) and 18.4b re-based this to \
-         11_300 for exactly 15 accounted lines. Growth beyond that is a design \
-         failure, not a budget question: reuse the card slot, the ConfirmationType, \
-         the InputActions, the render branch and the single effect call, and put \
-         verb logic in a bridge."
+    const RESOLVE_BASELINE_LINES: usize = 11_300;
+    const RESOLVE_SOFT_BUDGET: usize = 12;
+    let ceiling = RESOLVE_BASELINE_LINES + RESOLVE_SOFT_BUDGET;
+    assert!(
+        lines <= ceiling,
+        "event_loop.rs has {lines} lines, over the {ceiling}-line budget \
+         ({RESOLVE_BASELINE_LINES} baseline + {RESOLVE_SOFT_BUDGET} soft). \
+         18.3a-f budgeted ZERO added lines (ruling A7) and 18.4b re-based the \
+         baseline for exactly 15 accounted lines. Growth beyond the budget is a \
+         design failure, not a budget question: reuse the card slot, the \
+         ConfirmationType, the InputActions, the render branch and the single \
+         effect call, and put verb logic in a bridge. If growth is genuinely \
+         unavoidable, account for it line-by-line in the comment above this \
+         assertion and record a RATCHET-SIGNOFF — do not simply raise the number."
     );
 
     // ⛔ No second card slot, ConfirmationType, InputAction or render branch.
