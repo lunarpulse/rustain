@@ -1,0 +1,86 @@
+{
+  "scene": "j2-jordan",
+  "personas": {
+    "scene-jordan": {
+      "turns": [
+        {
+          "expect": "audit src/auth",
+          "content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "src/auth/parse.rs"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 455, "output_tokens": 36}
+        },
+        {
+          "expect": "J2-JORDAN-FILE-NEEDLE",
+          "content": [
+            {"type": "text", "text": "## Findings\n\n**Unchecked unwrap** on user input:\n\n```rust\nlet n = s.parse::<u32>().unwrap();\n```\n\n- A malformed port string aborts the process instead of returning an error.\n"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 612, "output_tokens": 74}
+        },
+        {
+          "expect": "advisory database",
+          "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "printf 'J2-JORDAN-BASH-NEEDLE advisory-db offline\\n'"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 688, "output_tokens": 41}
+        },
+        {
+          "expect": "J2-JORDAN-BASH-NEEDLE",
+          "content": [
+            {"type": "text", "text": "No advisories apply offline."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 742, "output_tokens": 11}
+        },
+        {
+          "expect": "propose a fix",
+          "content": [
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "src/auth/parse.rs", "content": "pub fn parse_port(s: &str) -> u32 {\n    // J2-JORDAN-FILE-NEEDLE\n    let n = s.parse::<u32>().unwrap_or(0); // J2-NEW\n    n\n}\n// auth parse helper\n"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 831, "output_tokens": 96}
+        },
+        {
+          "expect": "Successfully wrote",
+          "content": [
+            {"type": "text", "text": "Fix applied."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 905, "output_tokens": 9}
+        },
+        {
+          "expect": "quick check",
+          "content": [
+            {"type": "text", "text": "Complete."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 948, "output_tokens": 7}
+        },
+        {
+          "expect": "explain the reasoning",
+          "content": [
+            {"type": "text", "text": "Detailed reasoning follows."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 991, "output_tokens": 10}
+        }
+      ]
+    },
+    "scene-jordan-or": {
+      "wire": "openai",
+      "turns": [
+        {
+          "expect": "different provider",
+          "content": [
+            {"type": "text", "text": "Same answer, other wire."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 1024, "output_tokens": 8}
+        }
+      ]
+    }
+  }
+}

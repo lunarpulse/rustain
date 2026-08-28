@@ -1,0 +1,57 @@
+{
+  "scene": "j0-sam",
+  "personas": {
+    "scene-sam": {
+      "turns": [
+        {
+          "expect": "J0-SAM-MSG-1",
+          "content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "src/main.rs"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 412, "output_tokens": 34}
+        },
+        {
+          "expect": "J0-SAM-FILE-NEEDLE",
+          "content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "src/lib.rs"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 528, "output_tokens": 29}
+        },
+        {
+          "expect": "J0-SAM-LIB-NEEDLE",
+          "content": [
+            {"type": "text", "text": "Two source files, one entry point.\nmain() loads the config, unwraps it, and calls run().\nThe unwrap is the only place a bad config can panic."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 641, "output_tokens": 58}
+        },
+        {
+          "expect": "refactor the error handling",
+          "content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "src/main.rs"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 703, "output_tokens": 33}
+        },
+        {
+          "expect": "J0-SAM-FILE-NEEDLE",
+          "content": [
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "src/main.rs", "content": "fn main() { // J0-SAM-FILE-NEEDLE\n    let cfg = load();\n    let v = cfg.expect(\"config\"); // J0-SAM-NEW\n    run(v);\n}\n"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 812, "output_tokens": 91}
+        },
+        {
+          "expect": "Successfully wrote",
+          "content": [
+            {"type": "text", "text": "Rewrote the error handling."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 894, "output_tokens": 12}
+        }
+      ]
+    }
+  }
+}
