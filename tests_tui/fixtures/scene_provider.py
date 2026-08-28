@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic scene provider — an Anthropic Messages API stand-in for journey captures.
+"""Deterministic scene provider — an Anthropic Messages *and* OpenAI-compat stand-in.
 
 The real `rustain` binary talks to this process over HTTP exactly as it would talk
 to Anthropic: `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` and an `ANTHROPIC_API_KEY`
@@ -39,12 +39,22 @@ Endpoints answered (nothing else — any other verb or path is logged
   use it, and a 404 there fills a receipt with WARNs).
 * ``GET /api.json``   → ``200 {}`` (models.dev; point ``RUSTAIN_MODELS_DEV_URL`` here
   or the default ``models-dev`` feature reaches the real host on a stale cache).
+* ``POST /v1/chat/completions`` (also ``/chat/completions``) with ``"stream": true``
+  → a scene turn served on the **OpenAI wire** (Story 19.9 A11), for a persona keyed
+  by the presented **Bearer** value. This is the wire the OpenRouter / OpenAI-compat
+  adapter speaks (``POST {base_url}/chat/completions``, ``openai/mod.rs``), and its
+  health check is the same ``GET {base_url}/models`` below — so a config-path
+  ``[provider.openrouter] base_url = "<stub>/v1"`` boots and streams against this
+  process with no product change. **Text turns only** in this cut: a ``tool_calls``
+  arm is future work, and a persona declared ``"wire": "openai"`` whose turns script
+  a ``tool_use`` block is a load-time error (exit 2).
 
 ── Scene file format (pinned; 19.8/19.9/19.10/19.13/19.26 consume it) ────────────
 
     {"scene": "<name>",
      "personas": {
        "<api-key-value>": {
+         "wire": "anthropic" | "openai",        # optional, default "anthropic"
          "turns": [
            {"expect": "<substring of last user text>",
             "content": [ {"type":"text","text":"…"}
@@ -56,6 +66,12 @@ Endpoints answered (nothing else — any other verb or path is logged
 A tool turn ends ``stop_reason: "tool_use"`` and the binary's next POST carries the
 ``tool_result``; the scene's next turn ``expect``s text from that result or from the
 user. Shorthand: a top-level ``"turns"`` is persona ``"*"`` (any key).
+
+``wire`` names which endpoint a persona is served on, and is validated at load:
+an ``"openai"`` persona may script text turns only (exit 2 otherwise), and a POST
+that reaches the *other* wire's endpoint for a declared persona is a **desync**,
+not a silent cross-serve — so a mis-routed capture fails loudly instead of
+passing on the wrong credential.
 
 Personas are keyed by **the api-key value the binary presents** — that is how eight
 personas share one stub with zero product config: eight data dirs, eight key values,
@@ -76,6 +92,11 @@ the product and fed back to the stub.
     {"n":1,"method":"POST","path":"/v1/messages","persona":"scene-sam",
      "auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":1,
      "last_user":"<≤120 chars>","tools":12,"tool_results":0,"desync":false}
+
+An OpenAI-wire row carries ``"path":"/v1/chat/completions"``, ``"auth":"bearer"``
+and ``"wire":"openai"`` alongside the same ``stream``/``model``/``turn``/
+``last_user``/``tools``/``tool_results``/``desync`` fields. Anthropic-wire rows are
+byte-identical to 19.7's and carry no ``wire`` field.
 
 Boot calls log ``"kind":"health_check"`` (``stream`` absent, ``max_tokens`` 1),
 ``"kind":"probe"`` (``GET /v1/models``), ``"kind":"models_dev"`` (``GET /api.json``)
@@ -105,6 +126,9 @@ LAST_USER_MAX = 120
 VALID_STOP_REASONS = ("end_turn", "tool_use")
 TITLE_SYSTEM_PREFIX = "Generate a concise title"
 TITLE_TEXT = "Scene capture"
+WIRE_ANTHROPIC = "anthropic"
+WIRE_OPENAI = "openai"
+VALID_WIRES = (WIRE_ANTHROPIC, WIRE_OPENAI)
 
 
 class SceneError(Exception):
@@ -139,12 +163,31 @@ class Scene:
             raise SceneError(f"{path}: 'personas' must be a non-empty object")
 
         self.turns: dict[str, list[dict]] = {}
+        self.wires: dict[str, str] = {}
         for key, body in personas.items():
             if not isinstance(body, dict) or not isinstance(body.get("turns"), list):
                 raise SceneError(f"{path}: persona {key!r} must be an object with a 'turns' list")
+            wire = body.get("wire", WIRE_ANTHROPIC)
+            if wire not in VALID_WIRES:
+                raise SceneError(
+                    f"{path}: persona {key!r} declares wire {wire!r}; must be one of {VALID_WIRES}"
+                )
             for i, turn in enumerate(body["turns"], start=1):
                 _validate_turn(path, key, i, turn)
+                # A11: the OpenAI arm serves TEXT turns only in this cut. A
+                # tool_calls arm is future work, so a scene that scripts one is
+                # an authoring error caught at load — never a turn served with
+                # its tool_use silently dropped.
+                if wire == WIRE_OPENAI and any(
+                    block.get("type") == "tool_use" for block in turn["content"]
+                ):
+                    raise SceneError(
+                        f"{path}: persona {key!r} turn {i} scripts a tool_use block, but this"
+                        f" persona is declared on the {WIRE_OPENAI!r} wire, which serves TEXT"
+                        " turns only (Story 19.9 A11 — a tool_calls arm is future work)"
+                    )
             self.turns[key] = body["turns"]
+            self.wires[key] = wire
 
         self._cursor: dict[str, int] = {key: 0 for key in self.turns}
         self._lock = threading.Lock()
@@ -340,6 +383,102 @@ def _desync_sse(reason: str) -> bytes:
     return _event({"type": "error", "error": {"type": "scene_desync", "message": reason}})
 
 
+# ── SSE, OpenAI wire (Story 19.9 A11) ────────────────────────────────────────
+
+
+def _openai_frame(payload: dict) -> bytes:
+    """One OpenAI-style SSE frame. The OpenAI adapter carries no `event:` name —
+    `SseLineBuffer` synthesises `"message"` — and dispatches purely on the JSON
+    body, so only `data:` is emitted here."""
+    return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n".encode()
+
+
+def _openai_turn_sse(scene: Scene, persona: str, number: int, turn: dict, model: str) -> bytes:
+    """Render a TEXT scene turn as the SSE stream `OpenAiStreamTransformer` parses.
+
+    Shape pinned from the adapter, not from docs (Story 19.9 T0.3(9)):
+
+    * ``object`` is a REQUIRED field of ``OpenAiStreamEvent`` (`openai/types.rs`) —
+      a chunk without it fails deserialization, the transformer logs a parse warning
+      and returns no chunks, and the turn never completes.
+    * ``choices[].delta.content`` becomes ``StreamChunk::Text``; ``finish_reason:
+      "stop"`` becomes ``StreamChunk::TurnComplete`` (`openai/stream.rs`).
+    * ``usage`` rides a FINAL chunk with ``choices: []`` — the shape the adapter's
+      own comment names for ``stream_options.include_usage = true``, which
+      `OpenAiRequest::from` always sets. It becomes ``StreamChunk::Usage``, and
+      `run_turn` drains the whole stream before minting the ledger row, so a usage
+      chunk after ``TurnComplete`` still lands in ``tokensOut``.
+    * ``data: [DONE]`` is skipped by the transformer and is emitted last because
+      every real capture carries it.
+    """
+    usage = turn["usage"]
+    text = "".join(block["text"] for block in turn["content"] if block["type"] == "text")
+    chunk_id = f"scene-{scene.name}-{persona}-{number}"
+
+    def envelope(choices: list, extra: dict | None = None) -> dict:
+        payload = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": model,
+            "choices": choices,
+        }
+        if extra:
+            payload.update(extra)
+        return payload
+
+    out = bytearray()
+    out += _openai_frame(
+        envelope([{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}])
+    )
+    out += _openai_frame(
+        envelope([{"index": 0, "delta": {"content": text}, "finish_reason": None}])
+    )
+    out += _openai_frame(envelope([{"index": 0, "delta": {}, "finish_reason": "stop"}]))
+    out += _openai_frame(
+        envelope(
+            [],
+            {
+                "usage": {
+                    "prompt_tokens": usage["input_tokens"],
+                    "completion_tokens": usage["output_tokens"],
+                    "total_tokens": usage["input_tokens"] + usage["output_tokens"],
+                }
+            },
+        )
+    )
+    out += b"data: [DONE]\n\n"
+    return bytes(out)
+
+
+def _last_user_openai(body: dict) -> str:
+    """Text of the last user-role message on the OpenAI wire.
+
+    ``messages[].content`` is a plain string in the common case and a list of
+    ``{"type":"text","text":…}`` parts in the multimodal case (`openai/types.rs`);
+    both are searched so an ``expect`` cannot depend on which one the adapter chose.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                block["text"]
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            )
+        return ""
+    return ""
+
+
 def _title_sse() -> bytes:
     """A minimal end_turn stream for the product's title call."""
     out = bytearray()
@@ -512,7 +651,12 @@ class SceneHandler(BaseHTTPRequestHandler):
         else:
             self._unknown()
 
+    OPENAI_PATHS = ("/v1/chat/completions", "/chat/completions")
+
     def do_POST(self) -> None:  # noqa: N802 - stdlib hook
+        if self.path in self.OPENAI_PATHS:
+            self._openai_completions()
+            return
         if self.path != "/v1/messages":
             self._unknown()
             return
@@ -589,6 +733,13 @@ class SceneHandler(BaseHTTPRequestHandler):
             return
 
         persona = self.scene.resolve_persona(presented)
+        if persona != UNKNOWN_PERSONA and self.scene.wires[persona] != WIRE_ANTHROPIC:
+            # A declared persona reaching the WRONG wire is a mis-route, not a
+            # cross-serve: the credential and the endpoint disagree about which
+            # provider the product thinks it is talking to. Loud (A11).
+            self._mismatched_wire(persona, scheme, body, WIRE_ANTHROPIC)
+            return
+
         haystack, tool_results = _last_user(body)
         if persona == UNKNOWN_PERSONA:
             number, turn, reason = 0, None, (
@@ -619,6 +770,122 @@ class SceneHandler(BaseHTTPRequestHandler):
             self._respond_or_mark(200, "text/event-stream", _desync_sse(reason))
             return
         self._respond_or_mark(200, "text/event-stream", _turn_sse(self.scene, persona, number, turn))
+
+    # ── the OpenAI-compat wire (Story 19.9 A11) ──────────────────────────
+    def _openai_completions(self) -> None:
+        """``POST /v1/chat/completions`` — one scene turn on the OpenAI wire.
+
+        Persona is keyed by the presented **Bearer** value, exactly as the
+        Anthropic arm keys on the presented `x-api-key`: `_auth` already returns
+        `("bearer", token)`, and an undeclared value resolves to `<unknown>`,
+        desyncs, and is never written to the log.
+        """
+        body = self._read_body()
+        if body is None:
+            self.log.write({"method": self.command, "path": self.path, "kind": "unknown"})
+            self.state.mark_failure()
+            self._respond(400, "application/json", b'{"error":"unparseable body"}')
+            return
+        scheme, presented = _auth(self.headers)
+
+        if not body.get("stream"):
+            # The adapter always streams (`OpenAiRequest::from` sets `stream:
+            # true`), so a stream-less body is contract drift, not a health
+            # check — the OpenAI health check is `GET {base_url}/models`.
+            self.log.write({"method": self.command, "path": self.path, "kind": "unknown"})
+            self.state.mark_failure()
+            self._respond(404, "application/json", b'{"error":"unknown request"}')
+            return
+
+        persona = self.scene.resolve_persona(presented)
+        if persona != UNKNOWN_PERSONA and self.scene.wires[persona] != WIRE_OPENAI:
+            self._mismatched_wire(persona, scheme, body, WIRE_OPENAI)
+            return
+
+        haystack = _last_user_openai(body)
+        if persona == UNKNOWN_PERSONA:
+            number, turn, reason = 0, None, (
+                "the presented bearer credential is not a scene key — "
+                f"scene {self.scene.name} declares {len(self.scene.turns)} persona(s)"
+            )
+        else:
+            number, turn, reason = self.scene.take_turn(persona, haystack)
+
+        model = str(body.get("model", ""))
+        self.log.write(
+            {
+                "method": "POST",
+                "path": self.path,
+                "persona": persona,
+                "auth": scheme,
+                "wire": WIRE_OPENAI,
+                "stream": bool(body.get("stream")),
+                "model": model,
+                "turn": number,
+                "last_user": _clip(haystack, LAST_USER_MAX),
+                "tools": len(body.get("tools") or []),
+                "tool_results": 0,
+                "desync": turn is None,
+            }
+        )
+
+        if turn is None:
+            # There is no error frame in the OpenAI stream contract, so a desync
+            # is a hard 400: `stream_completion` short-circuits on
+            # `!status.is_success()` and the product paints the error instead of
+            # hanging on a stream that will never complete.
+            self.state.mark_failure()
+            self._respond(
+                400,
+                "application/json",
+                json.dumps(
+                    {"error": {"type": "scene_desync", "message": reason}},
+                    separators=(",", ":"),
+                ).encode(),
+            )
+            return
+        self._respond_or_mark(
+            200,
+            "text/event-stream",
+            _openai_turn_sse(self.scene, persona, number, turn, model),
+        )
+
+    def _mismatched_wire(self, persona: str, scheme: str, body: dict, reached: str) -> None:
+        """A declared persona arrived on the wrong endpoint — log it as a desync
+        without consuming a turn, and answer loud on the wire it reached."""
+        declared = self.scene.wires[persona]
+        reason = (
+            f"persona {persona} is declared on the {declared!r} wire but this request "
+            f"reached the {reached!r} endpoint {self.path}"
+        )
+        row = {
+            "method": "POST",
+            "path": self.path,
+            "persona": persona,
+            "auth": scheme,
+            "stream": bool(body.get("stream")),
+            "model": str(body.get("model", "")),
+            "turn": 0,
+            "last_user": "",
+            "tools": len(body.get("tools") or []),
+            "tool_results": 0,
+            "desync": True,
+        }
+        if reached == WIRE_OPENAI:
+            row["wire"] = WIRE_OPENAI
+        self.log.write(row)
+        self.state.mark_failure()
+        if reached == WIRE_OPENAI:
+            self._respond(
+                400,
+                "application/json",
+                json.dumps(
+                    {"error": {"type": "scene_wire_mismatch", "message": reason}},
+                    separators=(",", ":"),
+                ).encode(),
+            )
+        else:
+            self._respond_or_mark(200, "text/event-stream", _desync_sse(reason))
 
 
 class ServerState:
