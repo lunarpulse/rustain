@@ -329,6 +329,13 @@ pub struct MessageHeightKey {
 pub struct CachedTurnLayout {
     pub height: usize,
     pub block_offsets: Vec<usize>,
+    /// Story 19.9 A3: `(start_offset, tool_call_id)` for every
+    /// `TurnPart::ToolInvocation` in this turn, in part order. `block_offsets`
+    /// cannot serve this: it interleaves prose/reasoning starts with tool-block
+    /// starts and carries no id, so a consumer cannot tell WHICH tool block a
+    /// boundary belongs to — which is exactly why keyboard focus could only
+    /// ever resolve to the conversation's first tool call.
+    pub tool_block_offsets: Vec<(usize, String)>,
 }
 
 /// Cache of rendered line heights, keyed by turn or message.
@@ -3216,6 +3223,7 @@ mod tests {
         let layout = CachedTurnLayout {
             height: 42,
             block_offsets: vec![0, 10, 20],
+            tool_block_offsets: vec![],
         };
         cache.set(key.clone(), layout.clone());
         assert_eq!(cache.get(&key).unwrap().height, 42);
@@ -3250,6 +3258,7 @@ mod tests {
             CachedTurnLayout {
                 height: 5,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.invalidate_all();
@@ -3273,6 +3282,7 @@ mod tests {
             CachedTurnLayout {
                 height: 1,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -3286,6 +3296,7 @@ mod tests {
             CachedTurnLayout {
                 height: 2,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.invalidate_turn(&t1);
@@ -3332,6 +3343,7 @@ mod tests {
             CachedTurnLayout {
                 height: 1,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -3345,6 +3357,7 @@ mod tests {
             CachedTurnLayout {
                 height: 2,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -3358,6 +3371,7 @@ mod tests {
             CachedTurnLayout {
                 height: 3,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.evict_turns_not_in([&t1, &t3].into_iter());

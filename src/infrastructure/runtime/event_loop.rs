@@ -9554,6 +9554,7 @@ fn render(
                         state.pending_plan_card.as_ref(),
                         liveness_ref,
                         open_prose_ref,
+                        state.focused_tool_id.as_deref(),
                     );
                     content_height = result.total_content_height;
                     block_bounds = result.block_boundaries;

@@ -724,6 +724,7 @@ pub(super) fn expanded_turn_height(
         return CachedTurnLayout {
             height: 0,
             block_offsets: vec![],
+            tool_block_offsets: vec![],
         };
     }
 
@@ -738,6 +739,7 @@ pub(super) fn expanded_turn_height(
 
     let mut height: usize = 0;
     let mut block_offsets: Vec<usize> = Vec::new();
+    let mut tool_block_offsets: Vec<(usize, String)> = Vec::new();
     let mut prev: Option<&TurnPart> = None;
     let mut running_count: usize = 0;
 
@@ -766,6 +768,9 @@ pub(super) fn expanded_turn_height(
             TurnPart::ToolInvocation { id, status, .. } => {
                 block_offsets.push(height);
                 let tc = adapter_shim(turn, part, result_map.get(id).copied());
+                // Story 19.9 A3: the id travels with the START offset so
+                // keyboard focus can name THIS block, not the first one.
+                tool_block_offsets.push((height, tc.id.clone()));
                 let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                 height += tool_block::tool_block_height(&tc, &tb_state);
                 if *status == InvocationStatus::Running {
@@ -785,6 +790,7 @@ pub(super) fn expanded_turn_height(
     CachedTurnLayout {
         height,
         block_offsets,
+        tool_block_offsets,
     }
 }
 
@@ -798,6 +804,7 @@ pub(super) fn collapsed_turn_height(
     CachedTurnLayout {
         height: 1,
         block_offsets: vec![],
+        tool_block_offsets: vec![],
     }
 }
 
@@ -1348,6 +1355,7 @@ pub fn render(
         None,
         None, // liveness
         None, // open_prose
+        None, // current_focus (test-only wrapper; keystones use render_with_search)
     )
 }
 
@@ -1388,6 +1396,7 @@ pub fn render_attached(
         None,
         None, // liveness
         None, // open_prose
+        None, // current_focus
         true,
     )
 }
@@ -1433,6 +1442,9 @@ pub fn render_with_search(
     pending_plan_card: Option<&PendingPlanCard>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     open_prose: Option<&str>,
+    // Story 19.9 A3: `state.focused_tool_id` from the caller. See
+    // `find_focused_tool_id` for the rule this feeds.
+    current_focus: Option<&str>,
 ) -> RenderResult {
     render_with_search_impl(
         frame,
@@ -1455,6 +1467,7 @@ pub fn render_with_search(
         pending_plan_card,
         liveness,
         open_prose,
+        current_focus,
         false,
     )
 }
@@ -1481,6 +1494,10 @@ fn render_with_search_impl(
     pending_plan_card: Option<&PendingPlanCard>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     open_prose: Option<&str>,
+    // Story 19.9 A3: the focus the caller currently holds
+    // (`state.focused_tool_id`). Kept when no tool block starts in the top 3
+    // rows but that block is still visible — the `Tab` cycle depends on it.
+    current_focus: Option<&str>,
     show_terminal_origin_prefix: bool,
 ) -> RenderResult {
     let empty = RenderResult {
@@ -1536,6 +1553,10 @@ fn render_with_search_impl(
     // Walk conversation.messages for layout; dispatch on role for height calc.
     let mut message_heights: Vec<usize> = Vec::with_capacity(msg_count + 1);
     let mut block_boundaries: Vec<usize> = Vec::new();
+    // Story 19.9 A3: (start_line, tool_call_id) for every tool block in the
+    // laid-out conversation. Parallel to `block_boundaries`, but id-carrying
+    // and start-anchored, which is what makes per-block keyboard focus possible.
+    let mut tool_block_boundaries: Vec<(usize, String)> = Vec::new();
     let mut message_boundaries: Vec<usize> = Vec::new();
     let mut user_message_boundaries: Vec<usize> = Vec::new();
     let mut cumulative_offset: usize = 0;
@@ -1618,6 +1639,9 @@ fn render_with_search_impl(
                     for offset in &layout.block_offsets {
                         block_boundaries.push(cumulative_offset + offset);
                     }
+                    for (offset, id) in &layout.tool_block_offsets {
+                        tool_block_boundaries.push((cumulative_offset + offset, id.clone()));
+                    }
                 } else {
                     // TODO(S16.10-cleanup): No matching turn — fall back to legacy height calc
                     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
@@ -1633,6 +1657,10 @@ fn render_with_search_impl(
                     );
                     for tc in &msg.tool_calls {
                         let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+                        // A3: the block's START, before its height is added —
+                        // `block_boundaries` keeps pushing the end (unchanged,
+                        // it anchors scrolling), the focus list needs the start.
+                        tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
                         h += tool_block::tool_block_height(tc, &tb_state);
                         block_boundaries.push(cumulative_offset + h);
                     }
@@ -1677,6 +1705,7 @@ fn render_with_search_impl(
                 };
                 for tc in &msg.tool_calls {
                     let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+                    tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
                     h += tool_block::tool_block_height(tc, &tb_state);
                     block_boundaries.push(cumulative_offset + h);
                 }
@@ -1739,7 +1768,13 @@ fn render_with_search_impl(
             if cumulative_offset > 0 {
                 cumulative_offset += spacing;
             }
-            let h = expanded_turn_height(ot, theme, width, tool_block_states).height;
+            let layout = expanded_turn_height(ot, theme, width, tool_block_states);
+            // A3: a still-open turn's tool blocks are focusable too — the claim
+            // is that EVERY tool block can be expanded, not every committed one.
+            for (offset, id) in &layout.tool_block_offsets {
+                tool_block_boundaries.push((cumulative_offset + offset, id.clone()));
+            }
+            let h = layout.height;
             cumulative_offset += h;
             h
         }
@@ -2215,12 +2250,18 @@ fn render_with_search_impl(
     let widget = Paragraph::new(Text::from(lines));
     frame.render_widget(widget, area);
 
+    // A3: `tool_call_id_for` is `tc_{turn_id}_{part_id}`, so the focused turn's
+    // blocks are exactly the ids carrying this prefix — no parallel bookkeeping.
+    let focused_turn_prefix = view_state
+        .focused_turn
+        .as_ref()
+        .map(|t| format!("tc_{}_", t.0));
     let focused_tool_id = find_focused_tool_id(
-        conversation,
-        streaming,
-        &block_boundaries,
+        &tool_block_boundaries,
         visible_start,
         visible_end,
+        current_focus,
+        focused_turn_prefix.as_deref(),
     );
 
     RenderResult {
@@ -2232,44 +2273,89 @@ fn render_with_search_impl(
     }
 }
 
-/// Find the tool block id at the top of the viewport for keyboard focus.
-/// Returns the id of the first tool block whose content falls within the top
-/// 3 lines of the visible viewport.
+/// Resolve which tool block holds keyboard focus for this frame.
+///
+/// Story 19.9 A3 (FR29 — collapsible tool blocks, *plural*). The pre-19.9
+/// heuristic returned `all_tool_ids.first()` whenever ANY block boundary —
+/// prose, message or tool — landed in the viewport's top 3 rows, and
+/// `event_loop.rs` writes this result back into `state.focused_tool_id` every
+/// frame. Two consequences, both measured under a PTY at Task 0 (story Debug
+/// Log, T0.3(1)): a conversation whose first tool call was a `Read` made every
+/// later `Write`/`Bash` block permanently unreachable by keyboard, and the
+/// `Tab` cycle (`CycleInvocationInFocusedTurn`, `event_loop.rs`) was undone
+/// before the next `Enter` could act on it.
+///
+/// The rule, in order:
+/// 1. If `current_focus` names a visible tool block AND that block belongs to
+///    the currently focused turn (or no turn is focused), KEEP it. An explicit
+///    selection — `Tab` inside the focused turn — is the user's, and a
+///    recompute may not take it away while the block is on screen.
+/// 2. Otherwise, if a turn IS focused (`]]` / `[[` / `zz`), focus that turn's
+///    first visible tool block. Moving to a turn re-seats focus into it, which
+///    is what makes a single-invocation turn's block reachable at all: it may
+///    sit in the conversation's last viewport-height of lines, where no amount
+///    of scrolling can bring it to the top.
+/// 3. Otherwise focus the visible tool block NEAREST to `visible_start` —
+///    plain scroll steering (`g`/`G`/`j`/`k`/`J`/`K`).
+/// 4. Otherwise `None`: no tool block is on screen and `Enter` is a no-op.
+///
+/// `focused_turn_prefix` is `"tc_<turn_id>_"`. Ids are minted by
+/// `tool_call_id_for` as `tc_{turn_id}_{part_id}`, so turn membership is a
+/// prefix test and needs no second list to drift out of sync.
+///
+/// ⚑ A3(2) as authored had two rules — a three-row window first, the keep-branch
+/// second — and both were corrected at T0.3(1) against the real product, under a
+/// PTY, with the panes in the story's Debug Log:
+///
+/// * A conversation shorter than the viewport cannot scroll at all, so no block
+///   start can ever enter the top three rows. The authored rule would have made
+///   `Enter` dead for exactly the short conversations where the old (wrong)
+///   heuristic at least did something — a regression, not a fix.
+/// * Window-priority silently re-broke the `Tab` cycle whenever any block
+///   happened to sit at the viewport top, which is the coupling A3 exists to
+///   remove.
+/// * Nearest-visible alone still could not reach a single-invocation turn near
+///   the tail (measured: `J`-walking to the end left the earlier `Bash` block
+///   top-most and the `Write` unreachable) — hence rule 2.
+///
+/// The result subsumes the window, keeps all three A3(3) keystones true, and
+/// keeps every A3(3) mutant RED.
 fn find_focused_tool_id(
-    conversation: &Conversation,
-    streaming: &StreamingState,
-    block_boundaries: &[usize],
+    tool_block_boundaries: &[(usize, String)],
     visible_start: usize,
-    _visible_end: usize,
+    visible_end: usize,
+    current_focus: Option<&str>,
+    focused_turn_prefix: Option<&str>,
 ) -> Option<String> {
-    // Collect all tool call ids from conversation and streaming
-    let all_tool_ids: Vec<String> = conversation
-        .messages
-        .iter()
-        .flat_map(|m| m.tool_calls.iter())
-        .chain(streaming.active_tool_calls.values())
-        .map(|tc| tc.id.clone())
-        .collect();
+    let visible = |start: usize| start >= visible_start && start < visible_end;
+    let in_focused_turn =
+        |id: &str| focused_turn_prefix.is_none_or(|prefix| id.starts_with(prefix));
 
-    if all_tool_ids.is_empty() {
-        return None;
-    }
-
-    // Find the block boundary closest to visible_start (within 3 lines).
-    // Block boundaries include tool block starts — match by index into the
-    // tool_ids list (tool blocks are appended to boundaries in order).
-    // For MVP: return the first tool id if any boundary is near viewport top.
-    for &boundary in block_boundaries {
-        if boundary >= visible_start && boundary < visible_start + 3 {
-            // A block boundary is at the viewport top.
-            // Find the tool id that corresponds to this boundary.
-            // Since tool block boundaries are interleaved with message boundaries,
-            // we return the first tool call as the focused one.
-            return all_tool_ids.into_iter().next();
+    if let Some(current) = current_focus {
+        if in_focused_turn(current)
+            && tool_block_boundaries
+                .iter()
+                .any(|(start, id)| id == current && visible(*start))
+        {
+            return Some(current.to_string());
         }
     }
 
-    None
+    if let Some(prefix) = focused_turn_prefix {
+        if let Some((_, id)) = tool_block_boundaries
+            .iter()
+            .filter(|(start, id)| visible(*start) && id.starts_with(prefix))
+            .min_by_key(|(start, _)| *start)
+        {
+            return Some(id.clone());
+        }
+    }
+
+    tool_block_boundaries
+        .iter()
+        .filter(|(start, _)| visible(*start))
+        .min_by_key(|(start, _)| *start)
+        .map(|(_, id)| id.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -2321,6 +2407,65 @@ mod parts_aware_tests {
         }
         turn.stop_reason = stop_reason;
         turn
+    }
+
+    // ── Story 19.9 A3: the cached layout carries one (start, id) per tool ──
+
+    /// `tool_block_offsets` must hold exactly one entry per `ToolInvocation`,
+    /// in part order, with the canonical mirror id — otherwise
+    /// `find_focused_tool_id` cannot name a block other than the first.
+    ///
+    /// Mutant (executed RED at Task 1): delete the
+    /// `tool_block_offsets.push(...)` in the `ToolInvocation` arm.
+    #[test]
+    fn expanded_turn_layout_carries_one_tool_block_offset_per_invocation() {
+        let mut turn = Turn::new("claude".into(), 1_700_000_000_000);
+        turn.id = crate::domain::models::TurnId("t-off".into());
+        let read_pid = turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "Read".to_string(),
+            args: serde_json::json!({}),
+            status: InvocationStatus::Success,
+            started_at: 1_700_000_000_000,
+            ended_at: Some(1_700_000_001_000),
+        });
+        turn.push_part(|id| TurnPart::Prose {
+            id,
+            text: "between".to_string(),
+        });
+        let write_pid = turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "Write".to_string(),
+            args: serde_json::json!({}),
+            status: InvocationStatus::Success,
+            started_at: 1_700_000_002_000,
+            ended_at: Some(1_700_000_003_000),
+        });
+        turn.stop_reason = Some(StopReason::EndTurn);
+
+        let layout = expanded_turn_height(&turn, &Theme::dark(), 80, &HashMap::new());
+        let ids: Vec<&str> = layout
+            .tool_block_offsets
+            .iter()
+            .map(|(_, id)| id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                tool_call_id_for(&turn.id, read_pid).as_str(),
+                tool_call_id_for(&turn.id, write_pid).as_str(),
+            ],
+            "one entry per ToolInvocation, in part order, with the mirror id"
+        );
+        // Starts are the offsets `block_offsets` records for the same parts:
+        // the tool arm pushes both from the same `height` value.
+        assert_eq!(layout.tool_block_offsets[0].0, layout.block_offsets[0]);
+        assert_eq!(layout.tool_block_offsets[1].0, layout.block_offsets[2]);
+        assert!(
+            layout.tool_block_offsets[0].0 < layout.tool_block_offsets[1].0,
+            "offsets must be the blocks' STARTS, in increasing order: {:?}",
+            layout.tool_block_offsets
+        );
     }
 
     // ── AC2 / AC3: gutter_lines and inter_part_blank_lines ──
@@ -2822,6 +2967,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 5,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         assert!(tab_render_state.height_cache.get(&key).is_some());
@@ -2848,6 +2994,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 1,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         assert!(tab_render_state.height_cache.get(&key).is_some());
@@ -2907,6 +3054,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 10,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -2914,6 +3062,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 20,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         assert_eq!(cache.get(&key_v0).unwrap().height, 10);
@@ -2943,6 +3092,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 5,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -2950,6 +3100,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 8,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         assert_eq!(cache.get(&key_w80).unwrap().height, 5);
@@ -3233,6 +3384,7 @@ mod parts_aware_tests {
                     None,
                     None, // liveness
                     None, // open_prose
+                    None, // current_focus
                 );
             })
             .unwrap();
@@ -3268,6 +3420,7 @@ mod parts_aware_tests {
                     None,
                     None, // liveness
                     None, // open_prose
+                    None, // current_focus
                 );
             })
             .unwrap();
@@ -3305,6 +3458,7 @@ mod parts_aware_tests {
                     None,
                     None, // liveness
                     None, // open_prose
+                    None, // current_focus
                 );
             })
             .unwrap();

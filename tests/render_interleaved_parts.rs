@@ -131,6 +131,7 @@ fn render_text(
             None,
             None, // liveness
             None, // open_prose
+            None, // current_focus
         );
     });
     use ratatui::buffer::Buffer;

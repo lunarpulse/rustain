@@ -308,6 +308,7 @@ fn test_height_cache_invalidate_turn() {
         rustain::adapters::tui::state::CachedTurnLayout {
             height: 3,
             block_offsets: vec![],
+            tool_block_offsets: vec![],
         },
     );
     cache.set(
@@ -315,6 +316,7 @@ fn test_height_cache_invalidate_turn() {
         rustain::adapters::tui::state::CachedTurnLayout {
             height: 7,
             block_offsets: vec![],
+            tool_block_offsets: vec![],
         },
     );
     cache.invalidate_turn(&turn_a);
