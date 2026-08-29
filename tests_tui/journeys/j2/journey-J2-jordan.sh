@@ -188,13 +188,22 @@ Bash: the PRD's curl is replaced by a local printf — offline capture; the
 markdown: styling is invisible under NO_COLOR/pyte — the fence content and the
   heading text are asserted as a positive control only, paired with the tools
   count that proves the agent filter reached the wire
-model switch: proved from the request log's per-row `model` field; no model name
-  is a screen needle
+model switch: proved from the request log's per-row `model`/`path` fields; the
+  on-screen flashes are switch-specific witnesses only (they accumulate, so a
+  bare "Switched to" cannot tell them apart)
 agents: activation is a persona / tool-filter / model swap, not a subagent
   dispatch — the ` Agents ` panel is never asserted for it
 tool-block focus: every block is expandable by keyboard as of this tree
   (Story 19.9 A3); the Write opened here is the 3rd tool call and the Read the
   1st, each reached by ]] to its turn and Tab to its invocation
+  accepted limit: keyboard focus follows a block's FIRST line (start-anchored
+  visibility), so a block expanded taller than the 30-row pane releases focus
+  once its ┌─ header scrolls above the viewport top, and Enter cannot collapse
+  it until its start scrolls back into view
+fixture content: the scripted fix (`unwrap_or(0)`) was chosen for its diff
+  shape and A16's <=60-character line limit; it silently defaults invalid
+  input to 0 and is NOT a recommended remediation for the unchecked unwrap
+  the audit reports
 live-LLM variant: not recorded
 LIMITS
 printf 'input line: '

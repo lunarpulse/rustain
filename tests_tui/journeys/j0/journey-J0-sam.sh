@@ -172,6 +172,10 @@ vim j/k/i: recorded, not asserted
 tool-block focus: every block is expandable by keyboard as of this tree
   (Story 19.9 A3); the Write opened here is the 4th tool call, reached by
   ]] to its turn and Tab to its invocation
+  accepted limit: keyboard focus follows a block's FIRST line (start-anchored
+  visibility), so a block expanded taller than the 30-row pane releases focus
+  once its ┌─ header scrolls above the viewport top, and Enter cannot collapse
+  it until its start scrolls back into view
 live-LLM variant: not recorded
 LIMITS
 printf 'input line: '

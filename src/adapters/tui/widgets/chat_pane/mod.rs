@@ -1599,15 +1599,18 @@ fn render_with_search_impl(
                                 };
                                 if probe.height != l.height
                                     || probe.block_offsets != l.block_offsets
+                                    || probe.tool_block_offsets != l.tool_block_offsets
                                 {
                                     tracing::warn!(
-                                        "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}), computed=({}, {:?})",
+                                        "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}, {:?}), computed=({}, {:?}, {:?})",
                                         turn.id.0,
                                         !collapsed,
                                         l.height,
                                         l.block_offsets,
+                                        l.tool_block_offsets,
                                         probe.height,
-                                        probe.block_offsets
+                                        probe.block_offsets,
+                                        probe.tool_block_offsets
                                     );
                                     tab_render_state.height_cache.invalidate_all();
                                 }
@@ -2290,14 +2293,32 @@ fn render_with_search_impl(
 ///    the currently focused turn (or no turn is focused), KEEP it. An explicit
 ///    selection — `Tab` inside the focused turn — is the user's, and a
 ///    recompute may not take it away while the block is on screen.
-/// 2. Otherwise, if a turn IS focused (`]]` / `[[` / `zz`), focus that turn's
-///    first visible tool block. Moving to a turn re-seats focus into it, which
-///    is what makes a single-invocation turn's block reachable at all: it may
-///    sit in the conversation's last viewport-height of lines, where no amount
-///    of scrolling can bring it to the top.
+/// 2. Otherwise, if a turn IS focused (`]]` / `[[` / `zz`) and that turn has a
+///    VISIBLE tool block, focus its nearest such block. Navigation does NOT
+///    scope focus to the turn: when the focused turn has no visible block —
+///    typically because it is scrolled out of view — this rule matches
+///    nothing, and rule 3 seats the nearest visible block of a DIFFERENT
+///    turn, so `Enter` acts outside the navigated turn. Rule 2 is still what
+///    makes a single-invocation turn's block reachable at all: it may sit in
+///    the conversation's last viewport-height of lines, where no amount of
+///    scrolling can bring it to the top.
 /// 3. Otherwise focus the visible tool block NEAREST to `visible_start` —
-///    plain scroll steering (`g`/`G`/`j`/`k`/`J`/`K`).
-/// 4. Otherwise `None`: no tool block is on screen and `Enter` is a no-op.
+///    plain scroll steering (`g`/`G`/`j`/`k`/`J`/`K`). This is a UNIVERSAL
+///    fallback over all turns, not scoped to the navigated turn: with a turn
+///    focused but none of its blocks visible, some other turn's block wins
+///    (owner ruling 2026-08-29: the fallback is the intended ergonomics; the
+///    defect was this doc overselling rule 2).
+/// 4. Otherwise `None` — which only holds when NO tool block at all is on
+///    screen; only then is `Enter` a no-op.
+///
+/// Visibility is decided on a block's START row only (`visible` below), so a
+/// block expanded taller than the viewport releases focus once its `┌─`
+/// header scrolls above the top and cannot be collapsed by `Enter` until its
+/// start scrolls back into view. Deliberate —
+/// `tests/chat_pane.rs::focus_is_released_when_its_block_scrolls_out_of_view`
+/// pins it; carrying `(start, end, id)` spans so focus could ride the whole
+/// block was considered and rejected as out of scope (story 19.9 review
+/// ruling).
 ///
 /// `focused_turn_prefix` is `"tc_<turn_id>_"`. Ids are minted by
 /// `tool_call_id_for` as `tc_{turn_id}_{part_id}`, so turn membership is a

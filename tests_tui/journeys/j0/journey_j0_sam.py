@@ -48,7 +48,7 @@ RUSTAIN_SRC = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve().parents[2]
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui"))
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui" / "journeys"))
 
-from _lib import focus_block, log, pane, quit_ctrl_q, require  # noqa: E402
+from _lib import focus_block, log, pane, quit_ctrl_q, require, sha256_of  # noqa: E402
 from harness import RustainTUI  # noqa: E402
 from keys import ENTER, ESC  # noqa: E402
 
@@ -155,20 +155,27 @@ def main() -> int:
     require(tui, "Rewrote the error handling", 60, "turn-2 reply")
     require(tui, TITLE, 60, "auto-title on the status bar (second exchange)")
 
-    # The file bytes, product-written. Both hashes are printed by THIS script,
-    # so the pair is a positive control; the product-side half of the claim is
-    # the follow-up request row (`tool_results:1`, `last_user` starting
-    # `Successfully wrote`), which the gate reads from the request log.
-    written = (workspace / "src" / "main.rs").read_text()
-    print(
-        f"[witness] src/main.rs sha256: {hashlib.sha256(written.encode()).hexdigest()}",
-        flush=True,
-    )
-    print(
-        f"[witness] scripted content sha256: {hashlib.sha256(MAIN_RS_AFTER.encode()).hexdigest()}",
-        flush=True,
-    )
+    # The file bytes, product-written. Both hashes are printed by THIS script
+    # AND compared (review finding 2026-08-29): the expanded diff row proves
+    # the change was RENDERED, this pair proves the scripted bytes actually
+    # LANDED — the request log only ever saw `Successfully wrote N bytes` come
+    # back, never which bytes they were. The gate consumes this script's exit
+    # code, so a mismatch fails the run after the pane below records what the
+    # screen still claimed.
+    on_disk = sha256_of(workspace / "src" / "main.rs")
+    scripted = hashlib.sha256(MAIN_RS_AFTER.encode()).hexdigest()
+    print(f"[witness] src/main.rs sha256: {on_disk}", flush=True)
+    print(f"[witness] scripted content sha256: {scripted}", flush=True)
     print(f"[witness] bytes written: {len(MAIN_RS_AFTER.encode())}", flush=True)
+    if on_disk != scripted:
+        pane(tui, "FAILED-witness-sha256")
+        print(
+            "FAIL: product wrote different bytes than the script served — "
+            f"on-disk {on_disk} != scripted {scripted}",
+            flush=True,
+        )
+        sys.exit(1)
+    print(f"[witness] on-disk bytes == scripted content ({on_disk})", flush=True)
 
     tui.send(ESC)
     time.sleep(0.5)

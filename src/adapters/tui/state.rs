@@ -2389,6 +2389,17 @@ pub struct TuiState {
     /// Currently focused tool block id (set by chat pane render when a tool block
     /// is at the top of the viewport after J/K navigation).
     pub focused_tool_id: Option<String>,
+    /// Explicitly selected tool block id — set ONLY by user intent (the `Tab`
+    /// cycle inside a focused turn, `Enter` toggling a block, `'p'` peeking
+    /// one), never by the render pass. Story 19.9 review finding (FR116
+    /// regression): the render pass rewrites `focused_tool_id` every frame
+    /// from `find_focused_tool_id`, whose nearest-visible fallback seats SOME
+    /// block whenever any is on screen, so keying copy/peek on that field
+    /// silently widened `c` from the last assistant message to a tool block's
+    /// raw output. `resolve_copy_content` and the peek handler read THIS
+    /// field; `focused_tool_id` stays the render-derived signal that drives
+    /// `Enter`.
+    pub selected_tool_id: Option<String>,
     /// Pending permission request awaiting user y/n/a/s/f response.
     pub pending_permission: Option<PendingPermission>,
     /// Queue for additional permission requests that arrive while one is displayed.
@@ -2895,6 +2906,7 @@ impl TuiState {
             pending_anchor: None,
             tool_block_states: HashMap::new(),
             focused_tool_id: None,
+            selected_tool_id: None,
             pending_permission: None,
             permission_queue: PermissionQueue::default(),
             pending_feedback_input: None,
@@ -3068,6 +3080,61 @@ impl TuiState {
     /// Public setter for auto_snapshot. For test setup only.
     pub fn set_auto_scroll(&mut self, auto: bool) {
         self.auto_snapshot = auto;
+    }
+
+    /// Record an explicit user pick of a tool block (story 19.9 review patch:
+    /// copy/peek decoupled from render-derived focus). An explicit pick is
+    /// also the focus, so both signals move together.
+    pub fn select_tool_explicitly(&mut self, id: String) {
+        self.selected_tool_id = Some(id.clone());
+        self.focused_tool_id = Some(id);
+    }
+
+    /// Clear BOTH tool-block signals. Used wherever the render-derived focus
+    /// was already discarded (conversation reset, tab switch) so a stale
+    /// explicit selection cannot leak across a conversation or tab boundary.
+    pub fn clear_tool_selection(&mut self) {
+        self.selected_tool_id = None;
+        self.focused_tool_id = None;
+    }
+
+    /// Resolve what content `c` (copy) should place on the clipboard.
+    /// Priority: explicitly selected tool block output > last assistant
+    /// message > empty. Reads `selected_tool_id`, NOT the render-derived
+    /// `focused_tool_id`: the latter is rewritten every frame by
+    /// `find_focused_tool_id`, whose nearest-visible fallback seats some block
+    /// whenever any is on screen, which after any tool-using turn would copy
+    /// the tool block's raw output where the FR116 AC9 path (last assistant
+    /// message) used to be the common case. Moved here from `event_loop.rs`
+    /// (story 19.9 review patch) so the priority stays unit-testable outside
+    /// the line-budgeted event loop.
+    // Covers: FR116 (AC6, AC8, AC9)
+    pub fn resolve_copy_content(
+        &self,
+        conversation: &crate::domain::models::Conversation,
+    ) -> String {
+        // AC8: If a tool block is explicitly selected, copy its output
+        if let Some(tool_id) = &self.selected_tool_id {
+            // Find the tool result in conversation messages
+            for cm in conversation.messages.iter().rev() {
+                for tc in &cm.tool_calls {
+                    if tc.id == *tool_id {
+                        if let Some(result) = &tc.result {
+                            return result.content.clone();
+                        }
+                    }
+                }
+            }
+        }
+
+        // AC9: Copy the last assistant message
+        for cm in conversation.messages.iter().rev() {
+            if cm.role == crate::domain::models::MessageRole::Assistant && !cm.content.is_empty() {
+                return cm.content.clone();
+            }
+        }
+
+        String::new()
     }
 }
 

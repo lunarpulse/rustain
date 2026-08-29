@@ -1357,6 +1357,12 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 // p = peek preview on focused collapsed tool block
                 'p' => {
                     if let Some(ref tool_id) = state.focused_tool_id {
+                        // Peeking a block is choosing it — record the
+                        // explicit selection so `c` copies THIS block (story
+                        // 19.9 review patch: copy decoupled from
+                        // render-derived focus, which the render pass
+                        // overwrites every frame).
+                        state.selected_tool_id = Some(tool_id.clone());
                         let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
                         if entry.collapsed {
                             entry.peek_active = !entry.peek_active;
@@ -2449,6 +2455,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         DomainKey::Enter if state.focus == FocusState::Chat => {
             // Toggle collapse/expand on focused tool block
             if let Some(ref tool_id) = state.focused_tool_id {
+                // Acting on a block is choosing it — record the explicit
+                // selection so `c` copies THIS block (story 19.9 review
+                // patch: copy decoupled from render-derived focus).
+                state.selected_tool_id = Some(tool_id.clone());
                 let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
                 entry.collapsed = !entry.collapsed;
                 entry.peek_active = false;

@@ -2269,7 +2269,7 @@ pub async fn run(
                                         state.tab_render_state(state.active_tab_id).height_cache.invalidate_all();
                                         state.tab_render_state(state.active_tab_id).tool_block_states_version = 0;
                                         state.tool_block_states.clear();
-                                        state.focused_tool_id = None;
+                                        state.clear_tool_selection();
                                         state.feedback_blocks.clear();
                                         state.active_feedback_id = None;
                                         state.autocomplete.dismiss();
@@ -2502,7 +2502,7 @@ pub async fn run(
                                     // Resolve content if empty (Chat focus copy)
                                     // Covers: FR116 (AC6, AC8, AC9)
                                     if content.is_empty() {
-                                        content = resolve_copy_content(&state, &conversation);
+                                        content = state.resolve_copy_content(&conversation);
                                     }
                                     if content.is_empty() {
                                         state.status_before_flash = Some(state.status.clone());
@@ -5178,7 +5178,7 @@ pub async fn run(
                                             None => 0, // first Tab press focuses first invocation
                                         };
                                         if let Some(crate::domain::models::TurnPart::ToolInvocation { id, .. }) = invocations.get(next_idx) {
-                                            state.focused_tool_id = Some(crate::domain::models::turn::tool_call_id_for(&ft, *id));
+                                            state.select_tool_explicitly(crate::domain::models::turn::tool_call_id_for(&ft, *id));
                                         }
                                         state.needs_redraw = true;
                                     } else if state.sidebar_visible {
@@ -8738,6 +8738,9 @@ fn load_active_tab(
     state.message_boundaries = tab.message_boundaries.clone();
     state.user_message_boundaries = tab.user_message_boundaries.clone();
     state.focused_tool_id = tab.focused_tool_id.clone();
+    // Selection is user intent, never persisted per tab — drop it so it cannot
+    // leak across a tab boundary (story 19.9 review patch).
+    state.selected_tool_id = None;
     state.feedback_blocks = tab.feedback_blocks.clone();
     state.active_feedback_id = tab.active_feedback_id.clone();
     state.total_content_height = tab.total_content_height;
@@ -10508,34 +10511,6 @@ struct FileContextError {
     #[allow(dead_code)]
     path: String,
     reason: String,
-}
-
-/// Resolve what content to copy based on current focus state.
-/// Priority: focused tool block output > last assistant message > empty.
-// Covers: FR116 (AC6, AC8, AC9)
-fn resolve_copy_content(state: &TuiState, conversation: &Conversation) -> String {
-    // AC8: If a tool block is focused, copy its output
-    if let Some(ref tool_id) = state.focused_tool_id {
-        // Find the tool result in conversation messages
-        for cm in conversation.messages.iter().rev() {
-            for tc in &cm.tool_calls {
-                if tc.id == *tool_id {
-                    if let Some(ref result) = tc.result {
-                        return result.content.clone();
-                    }
-                }
-            }
-        }
-    }
-
-    // AC9: Copy the last assistant message
-    for cm in conversation.messages.iter().rev() {
-        if cm.role == MessageRole::Assistant && !cm.content.is_empty() {
-            return cm.content.clone();
-        }
-    }
-
-    String::new()
 }
 
 fn resolve_file_context(

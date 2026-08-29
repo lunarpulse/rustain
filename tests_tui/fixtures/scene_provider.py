@@ -35,13 +35,18 @@ Endpoints answered (nothing else — any other verb or path is logged
   (``title_trigger = conversation.turns.len() == 2``, `event_loop.rs`), answered with
   a fixed title and **never consuming a scene turn**. It bypasses ``run_turn``, so it
   writes no ledger row — the ledger stays one row per user turn.
-* ``GET /v1/models``  → ``200 {"data":[]}`` (the connectivity probe; `doctor`/`auth`
-  use it, and a 404 there fills a receipt with WARNs).
+* ``GET /v1/models`` (also ``/models``)  → ``200 {"data":[]}`` — the connectivity
+  probe (`doctor`/`auth` use it, and a 404 there fills a receipt with WARNs).
+  The alias mirrors ``OPENAI_PATHS`` below: the OpenAI adapter's health check is
+  ``GET {base_url}/models`` (``openai/mod.rs``), so a ``base_url`` without the
+  ``/v1`` suffix probes instead of 404ing into ``kind:"unknown"`` + exit 1.
 * ``GET /api.json``   → ``200 {}`` (models.dev; point ``RUSTAIN_MODELS_DEV_URL`` here
   or the default ``models-dev`` feature reaches the real host on a stale cache).
 * ``POST /v1/chat/completions`` (also ``/chat/completions``) with ``"stream": true``
   → a scene turn served on the **OpenAI wire** (Story 19.9 A11), for a persona keyed
-  by the presented **Bearer** value. This is the wire the OpenRouter / OpenAI-compat
+  by the presented **Bearer** value — and the scheme is policed: a credential
+  presented any other way on this endpoint (``x-api-key``, none) is a loud 400 +
+  desync row, never a served turn. This is the wire the OpenRouter / OpenAI-compat
   adapter speaks (``POST {base_url}/chat/completions``, ``openai/mod.rs``), and its
   health check is the same ``GET {base_url}/models`` below — so a config-path
   ``[provider.openrouter] base_url = "<stub>/v1"`` boots and streams against this
@@ -642,7 +647,7 @@ class SceneHandler(BaseHTTPRequestHandler):
 
     # ── verbs ────────────────────────────────────────────────────────────
     def do_GET(self) -> None:  # noqa: N802 - stdlib hook
-        if self.path == "/v1/models":
+        if self.path in self.PROBE_PATHS:
             self.log.write({"method": "GET", "path": self.path, "kind": "probe"})
             self._respond(200, "application/json", b'{"data":[]}')
         elif self.path == "/api.json":
@@ -652,6 +657,11 @@ class SceneHandler(BaseHTTPRequestHandler):
             self._unknown()
 
     OPENAI_PATHS = ("/v1/chat/completions", "/chat/completions")
+    # Mirrors OPENAI_PATHS: the adapter's health check is `GET {base_url}/models`
+    # (openai/mod.rs), so a config `base_url` without the `/v1` suffix — exactly
+    # the shape the `/chat/completions` alias invites — probes instead of 404ing
+    # into `kind:"unknown"` + stub exit 1 (review finding 2026-08-29).
+    PROBE_PATHS = ("/v1/models", "/models")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib hook
         if self.path in self.OPENAI_PATHS:
@@ -776,9 +786,12 @@ class SceneHandler(BaseHTTPRequestHandler):
         """``POST /v1/chat/completions`` — one scene turn on the OpenAI wire.
 
         Persona is keyed by the presented **Bearer** value, exactly as the
-        Anthropic arm keys on the presented `x-api-key`: `_auth` already returns
-        `("bearer", token)`, and an undeclared value resolves to `<unknown>`,
-        desyncs, and is never written to the log.
+        Anthropic arm keys on the presented `x-api-key` — and the SCHEME is
+        policed: the adapter presents `Authorization: Bearer` and nothing else
+        (pinned by the committed J2 receipt row and the AC8 wire-arm control),
+        so a credential in any other header, or none, is contract drift. An
+        undeclared value still resolves to `<unknown>`, desyncs, and is never
+        written to the log.
         """
         body = self._read_body()
         if body is None:
@@ -787,6 +800,47 @@ class SceneHandler(BaseHTTPRequestHandler):
             self._respond(400, "application/json", b'{"error":"unparseable body"}')
             return
         scheme, presented = _auth(self.headers)
+
+        if scheme != "bearer":
+            # Wrong SCHEME on the right endpoint (review finding 2026-08-29):
+            # `x-api-key` is the Anthropic arm's credential shape, so serving
+            # it here would let one wire's key impersonate the other's. The
+            # row records the scheme only — never the presented value, which
+            # may be a real credential.
+            self.log.write(
+                {
+                    "method": "POST",
+                    "path": self.path,
+                    "auth": scheme,
+                    "wire": WIRE_OPENAI,
+                    "stream": bool(body.get("stream")),
+                    "model": str(body.get("model", "")),
+                    "turn": 0,
+                    "last_user": "",
+                    "tools": len(body.get("tools") or []),
+                    "tool_results": 0,
+                    "desync": True,
+                }
+            )
+            self.state.mark_failure()
+            self._respond(
+                400,
+                "application/json",
+                json.dumps(
+                    {
+                        "error": {
+                            "type": "scene_auth_scheme",
+                            "message": (
+                                f"{self.path} keys the persona on a Bearer "
+                                f"credential; this request presented the "
+                                f"{scheme!r} scheme instead"
+                            ),
+                        }
+                    },
+                    separators=(",", ":"),
+                ).encode(),
+            )
+            return
 
         if not body.get("stream"):
             # The adapter always streams (`OpenAiRequest::from` sets `stream:

@@ -19,8 +19,10 @@ that *is* J0's claim.
 Evidence discipline (19.7 A4 / 18-4e A16 / A2): the screen is a witness, with
 the one deliberate exception the diff row is (a string THIS SCRIPT wrote to
 disk, snapshotted and rendered by the binary). Agent activation is asserted from
-the `tools` count that reached the wire, never from the status bar. No model name
-is a screen needle.
+the `tools` count that reached the wire, never from the status bar. The model
+switches are proved from the request log's `model`/`path` fields (gate J2); the
+on-screen flashes are only switch-specific witnesses, named precisely because
+they ACCUMULATE — a bare `Switched to` is satisfied by the first flash forever.
 
 Usage (normally invoked by journey-J2-jordan.sh):
     RUSTAIN_TUI_BINARY=<bin> python3 journey_j2_jordan.py <workspace> <stub-url> <scratch-home>
@@ -40,10 +42,18 @@ RUSTAIN_SRC = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve().parents[2]
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui"))
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui" / "journeys"))
 
-from _lib import focus_block, log, pane, quit_ctrl_q, require, require_gone  # noqa: E402
+from _lib import (  # noqa: E402
+    focus_block,
+    log,
+    pane,
+    quit_ctrl_q,
+    require,
+    require_gone,
+    sha256_of,
+)
 from fixtures.agents import write_custom_agent  # noqa: E402
 from harness import RustainTUI  # noqa: E402
-from keys import CTRL_X, DOWN, ENTER, ESC, RIGHT, TAB  # noqa: E402
+from keys import CTRL_X, DOWN, ENTER, ESC, RIGHT, TAB, UP  # noqa: E402
 
 PERSONA = "scene-jordan"
 OR_PERSONA = "scene-jordan-or"
@@ -246,16 +256,27 @@ def main() -> int:
     tui.send("y")
     require(tui, "Fix applied", 60, "write reply")
 
-    written = (workspace / "src" / "auth" / "parse.rs").read_text()
-    print(
-        f"[witness] src/auth/parse.rs sha256: {hashlib.sha256(written.encode()).hexdigest()}",
-        flush=True,
-    )
-    print(
-        f"[witness] scripted content sha256: {hashlib.sha256(PARSE_RS_AFTER.encode()).hexdigest()}",
-        flush=True,
-    )
+    # The file bytes, product-written. Both hashes are printed by THIS script
+    # AND compared (review finding 2026-08-29): the expanded diff row proves
+    # the change was RENDERED, this pair proves the scripted bytes actually
+    # LANDED — the request log only ever saw `Successfully wrote N bytes` come
+    # back, never which bytes they were. The gate consumes this script's exit
+    # code, so a mismatch fails the run after the pane below records what the
+    # screen still claimed.
+    on_disk = sha256_of(workspace / "src" / "auth" / "parse.rs")
+    scripted = hashlib.sha256(PARSE_RS_AFTER.encode()).hexdigest()
+    print(f"[witness] src/auth/parse.rs sha256: {on_disk}", flush=True)
+    print(f"[witness] scripted content sha256: {scripted}", flush=True)
     print(f"[witness] bytes written: {len(PARSE_RS_AFTER.encode())}", flush=True)
+    if on_disk != scripted:
+        pane(tui, "FAILED-witness-sha256")
+        print(
+            "FAIL: product wrote different bytes than the script served — "
+            f"on-disk {on_disk} != scripted {scripted}",
+            flush=True,
+        )
+        sys.exit(1)
+    print(f"[witness] on-disk bytes == scripted content ({on_disk})", flush=True)
 
     tui.send(ESC)
     time.sleep(0.5)
@@ -279,16 +300,21 @@ def main() -> int:
     tui.send(DOWN)
     time.sleep(0.4)
     tui.send(ENTER)
-    require(tui, "Switched to", 20, "model switch flash")
+    # ⚑ The flashes ACCUMULATE on screen (receipt J2: all three visible at
+    # once), so a bare `Switched to` is satisfied by the FIRST switch even
+    # when a later one silently no-ops — each wait names the
+    # switch-DISTINGUISHING substring instead. Witnesses only: the switch
+    # proof stays in the request log's per-row `model`/`path` (gate J2).
+    require(tui, "Switched to anthropic/Claude Haiku", 20, "model switch flash")
     pane(tui, "model-switched")
     tui.send_message("quick check: is the fix complete?")
     require(tui, "Complete.", 60, "haiku-side reply")
 
     open_model_overlay(tui)
-    tui.send("\x1b[A")  # Up — back to the row the overlay opened on
+    tui.send(UP)  # Up — back to the row the overlay opened on
     time.sleep(0.4)
     tui.send(ENTER)
-    require(tui, "Switched to", 20, "model switch back flash")
+    require(tui, "Switched to anthropic/Claude Sonnet", 20, "model switch back flash")
     tui.send_message("explain the reasoning in detail")
     require(tui, "Detailed reasoning follows", 60, "sonnet-side reply")
 
@@ -298,7 +324,7 @@ def main() -> int:
     time.sleep(0.5)
     pane(tui, "model-switcher-openrouter")
     tui.send(ENTER)
-    require(tui, "Switched to", 25, "provider switch flash")
+    require(tui, "Switched to openrouter/", 25, "provider switch flash")
     pane(tui, "provider-switched")
     tui.send_message("same question, different provider")
     require(tui, "Same answer, other wire", 60, "openai-wire reply")

@@ -105,12 +105,27 @@ def focus_block(tui, *, turn_index: int, invocation_index: int = 0, label: str) 
 
 
 def quit_ctrl_q(tui, timeout: float = 10.0) -> None:
-    """`Ctrl+Q` (Story 19.3) with a liveness deadline.
+    """`Ctrl+Q` (Story 19.3) with a liveness deadline — and a checked STATUS.
 
     ⚠ Not honoured with an overlay or a Confirmation open (19.3 A4): close or
     answer first. Sent as the raw byte because `keys.py` has no constant for it
     and this module may not add one.
+
+    The status is read, not assumed (review finding 2026-08-29): a screen wait
+    polls a frozen pyte screen and stays green, so a binary that had already
+    crashed before the byte — or that dies *on* it by signal — must fail HERE,
+    not ride into a committed receipt as a clean quit. pexpect 4.9 populates
+    `exitstatus`/`signalstatus` inside `isalive()` itself when it returns
+    False (`pty_spawn.isalive` copies them from `ptyproc`), so reading them
+    after the loop needs no `close()` — and none is sent, which leaves the
+    harness's `stop()` (it closes a live child only) free to act unchanged.
     """
+    if not tui.child.isalive():
+        print(
+            "FAIL: TUI was already dead before Ctrl+Q — the quit did not cause the exit",
+            flush=True,
+        )
+        sys.exit(1)
     tui.send("\x11")
     deadline = time.monotonic() + timeout
     while tui.child.isalive() and time.monotonic() < deadline:
@@ -119,7 +134,15 @@ def quit_ctrl_q(tui, timeout: float = 10.0) -> None:
         tui.stop()
         print("FAIL: Ctrl+Q did not quit the TUI", flush=True)
         sys.exit(1)
-    log("TUI quit via Ctrl+Q")
+    if tui.child.signalstatus is not None:
+        print(
+            f"FAIL: TUI died on Ctrl+Q by signal {tui.child.signalstatus}", flush=True
+        )
+        sys.exit(1)
+    if tui.child.exitstatus != 0:
+        print(f"FAIL: TUI exited {tui.child.exitstatus} on Ctrl+Q, not 0", flush=True)
+        sys.exit(1)
+    log(f"TUI quit via Ctrl+Q (exit status {tui.child.exitstatus})")
 
 
 def sha256_of(path: Path) -> str:
