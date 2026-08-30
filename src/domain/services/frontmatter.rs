@@ -53,6 +53,28 @@ fn strip_quotes(s: &str) -> &str {
     }
 }
 
+/// If `value` opens with a quote that closes later on the line, returns the
+/// quoted scalar's INNER text with any trailing YAML comment discarded.
+/// Returns `None` when the value is not a quoted scalar, leaving the caller on
+/// the unquoted path.
+///
+/// Story 19.2 code review: `"Read # Grep"` must keep its `#` — a comment marker
+/// inside quotes is content — while `"Read Grep"  # note` must still drop the
+/// note. A naive `find(" #")` did neither.
+fn split_scalar_comment(value: &str) -> Option<&str> {
+    let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let rest = &value[quote.len_utf8()..];
+    let close = rest.find(quote)?;
+    let inner = &rest[..close];
+    let after = rest[close + quote.len_utf8()..].trim();
+    // Anything after the closing quote may only be a comment.
+    if after.is_empty() || after.starts_with('#') {
+        Some(inner)
+    } else {
+        None
+    }
+}
+
 pub fn extract_list_field(frontmatter: &str, field: &str) -> Option<Vec<String>> {
     let field_lower_hyphen = field.replace('_', "-");
     let field_lower_underscore = field.replace('-', "_");
@@ -86,7 +108,53 @@ pub fn extract_list_field(frontmatter: &str, field: &str) -> Option<Vec<String>>
                     }
                     return Some(parsed);
                 }
-                continue;
+                // Scalar form (Agent Skills spec, story 19.2 A2): the value is a
+                // whitespace-separated list, e.g. `allowed-tools: Bash(kubectl:*) Bash(helm:*) Read`.
+                // Parentheses stay intact within an item; commas are NOT separators.
+                // Like the bracket branch, a scalar returns immediately — block
+                // items after it are never consumed.
+                //
+                // ⚑ Code review (19.2): a value that is ONLY a YAML comment is an
+                // empty value, not a scalar. `allowed-tools: # deployment tools`
+                // followed by `- Read` block items parsed correctly before the
+                // scalar branch existed; treating the comment as content both
+                // invented a junk allowlist and swallowed the block list.
+                if value.starts_with('#') {
+                    continue;
+                }
+                // ⚑ Code review (19.2): the comment scan is quote-aware. A ` #`
+                // INSIDE a quoted scalar is content, not a comment, and cutting
+                // there used to leave an unbalanced quote in the parsed name.
+                let (scalar, already_unquoted) = match split_scalar_comment(value) {
+                    Some(quoted) => (quoted, true),
+                    None => (
+                        match value.find(" #") {
+                            Some(idx) => value[..idx].trim(),
+                            None => value,
+                        },
+                        false,
+                    ),
+                };
+                if scalar.is_empty() {
+                    continue;
+                }
+                // A genuine quoted scalar is unquoted exactly once, as a whole:
+                // its inner spaces separate items and its inner quotes are part
+                // of the tool name. An unquoted scalar is split first, then each
+                // item is unquoted (so `Read "Grep"` still works).
+                let parsed: Vec<String> = if already_unquoted {
+                    scalar.split_whitespace().map(str::to_string).collect()
+                } else {
+                    scalar
+                        .split_whitespace()
+                        .map(|s| strip_quotes(s).to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                };
+                if parsed.is_empty() {
+                    return Some(vec![]);
+                }
+                return Some(parsed);
             } else if in_target_field {
                 break;
             }
@@ -244,6 +312,109 @@ mod tests {
         let fm = "allowed-tools:\n  - Read\n  - \n  - Grep";
         let result = extract_list_field(fm, "allowed-tools").unwrap();
         assert_eq!(result, vec!["Read", "Grep"]);
+    }
+
+    // Story 19.2 AC1 — the Agent Skills spec's scalar form. All six are RED
+    // until the scalar branch lands (A2 parsing, A8 comment truncation).
+    #[test]
+    fn extract_list_field_scalar_prd_journey3_form() {
+        // The exact `allowed-tools` line from prd.md § Journey 3.
+        let fm = "name: safe-deploy\ndescription: Deploy services following team safety protocols. Use when deploying any service to staging or production.\nallowed-tools: Bash(kubectl:*) Bash(helm:*) Read";
+        let result = extract_list_field(fm, "allowed-tools").unwrap();
+        assert_eq!(result, vec!["Bash(kubectl:*)", "Bash(helm:*)", "Read"]);
+    }
+
+    #[test]
+    fn extract_list_field_scalar_quoted() {
+        let fm = "allowed-tools: \"Read Grep\"";
+        let result = extract_list_field(fm, "allowed-tools").unwrap();
+        assert_eq!(result, vec!["Read", "Grep"]);
+    }
+
+    #[test]
+    fn extract_list_field_scalar_truncates_yaml_comment() {
+        // A8: ` #` opens a comment in a scalar; truncate before splitting.
+        let fm = "allowed-tools: Read Grep  # only these two";
+        let result = extract_list_field(fm, "allowed-tools").unwrap();
+        assert_eq!(result, vec!["Read", "Grep"]);
+    }
+
+    #[test]
+    fn extract_list_field_scalar_hash_without_leading_space_is_a_token() {
+        // A8: a `#` with no preceding space is a legal token position, not a comment.
+        let fm = "allowed-tools: Bash(grep:#tag) Read";
+        let result = extract_list_field(fm, "allowed-tools").unwrap();
+        assert_eq!(result, vec!["Bash(grep:#tag)", "Read"]);
+    }
+
+    #[test]
+    fn extract_list_field_scalar_returns_immediately_and_ignores_block_items() {
+        // A2: a scalar returns immediately, exactly as the bracket branch does —
+        // a following `- item` line is never consumed as part of the field.
+        let fm = "allowed-tools: Read\n  - Grep";
+        let result = extract_list_field(fm, "allowed-tools").unwrap();
+        assert_eq!(result, vec!["Read"]);
+    }
+
+    #[test]
+    fn extract_list_field_scalar_commas_are_not_separators() {
+        // A2: the spec's scalar is whitespace-delimited; commas are token content.
+        let fm = "allowed-tools: Read,Grep";
+        let result = extract_list_field(fm, "allowed-tools").unwrap();
+        assert_eq!(result, vec!["Read,Grep"]);
+    }
+
+    // ── Story 19.2 code-review regressions ──────────────────────────────────
+
+    /// The review's headline parser defect: a comment on the key line made the
+    /// scalar branch invent a junk allowlist AND swallow the block list that
+    /// parsed correctly before the branch existed (verified against `f7a002e`).
+    #[test]
+    fn commented_key_line_still_parses_the_block_list_beneath_it() {
+        let fm = "allowed-tools: # deployment tools\n  - Read\n  - Grep";
+        let result = extract_list_field(fm, "allowed-tools").unwrap();
+        assert_eq!(result, vec!["Read", "Grep"]);
+    }
+
+    /// A value that is only a comment is an EMPTY value, never a restriction.
+    /// Returning items here would silently restrict a user who declared nothing.
+    #[test]
+    fn comment_only_value_is_not_a_restriction() {
+        assert_eq!(
+            extract_list_field("allowed-tools: # nothing yet", "allowed-tools"),
+            None
+        );
+    }
+
+    /// A `#` inside a quoted scalar is content; cutting there used to leave an
+    /// unbalanced quote inside the parsed tool name.
+    #[test]
+    fn hash_inside_a_quoted_scalar_is_content_not_a_comment() {
+        let fm = "allowed-tools: \"Read # Grep\"";
+        let result = extract_list_field(fm, "allowed-tools").unwrap();
+        assert!(
+            result.iter().all(|item| !item.contains('"')),
+            "no item may carry an unbalanced quote: {result:?}"
+        );
+        assert!(result.contains(&"Read".to_string()));
+        assert!(result.contains(&"Grep".to_string()));
+    }
+
+    /// A quoted scalar with a trailing comment still drops the comment.
+    #[test]
+    fn quoted_scalar_drops_a_trailing_comment() {
+        let fm = "allowed-tools: \"Read Grep\"  # only these two";
+        let result = extract_list_field(fm, "allowed-tools").unwrap();
+        assert_eq!(result, vec!["Read", "Grep"]);
+    }
+
+    /// Per-item quoting must not be mangled by unquoting the whole value first.
+    #[test]
+    fn per_item_quoted_scalar_items_are_unquoted_cleanly() {
+        let result = extract_list_field("allowed-tools: 'Read' 'Grep'", "allowed-tools").unwrap();
+        assert_eq!(result, vec!["Read", "Grep"]);
+        let mixed = extract_list_field("allowed-tools: Read \"Grep\"", "allowed-tools").unwrap();
+        assert_eq!(mixed, vec!["Read", "Grep"]);
     }
 
     #[test]

@@ -6170,8 +6170,10 @@ pub async fn run(
                                 }
                             }
 
-                            // Only reset streaming state for Error/Warning notices.
-                            if !matches!(level, crate::domain::models::NoticeLevel::Info) {
+                            // Only turn-fatal notices reset streaming and abort the
+                            // turn. `Advisory` is warning-class but NOT fatal (story 19.2
+                            // review): a disclosure must never cancel the turn it describes.
+                            if level.is_turn_fatal() {
                                 streaming.is_streaming = false;
                                 streaming.phase = crate::domain::models::StreamingPhase::Idle;
                                 streaming.current_blocks.clear();
@@ -6209,7 +6211,8 @@ pub async fn run(
                                     state.focus = FocusState::Chat;
                                     handlers::notice::auto_switch_to_monitor_on_error(&mut state, &app_state.event_bus);
                                 }
-                                crate::domain::models::NoticeLevel::Warning => {
+                                crate::domain::models::NoticeLevel::Warning
+                                | crate::domain::models::NoticeLevel::Advisory => {
                                     handlers::notice::apply_warning_notice(&mut state, msg);
                                 }
                                 _ => {
@@ -6228,7 +6231,7 @@ pub async fn run(
                         } else if let Some(id) = notice_conv_id {
                             // Background tab error — apply to its stored state in TabManager
                             if let Some(tab) = tab_manager.find_by_conversation_mut(&id) {
-                                if !matches!(level, crate::domain::models::NoticeLevel::Info) {
+                                if level.is_turn_fatal() {
                                     tab.streaming.is_streaming = false;
                                     tab.streaming.phase = crate::domain::models::StreamingPhase::Idle;
                                     tab.streaming.current_blocks.clear();

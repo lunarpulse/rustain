@@ -75,6 +75,7 @@ Run these tests before marking an epic as done. Estimated time: under 5 minutes.
 | 6.2 | During streaming response | Press Ctrl+C | Streaming aborts, partial response preserved |
 | 6.3 | During streaming response | Resize terminal window | Layout adjusts, no crash or rendering glitch |
 | 6.4 | Input focused | Type a very long message (500+ chars) | Input scrolls, message sends correctly |
+| 6.5 | A skill's `allowed-tools` (any of the four forms, e.g. scalar `Bash(kubectl:*) Bash(helm:*) Read`) declares an item this build cannot match — a pattern, a typo, or an MCP tool whose server is down | Send any turn that activates the skill | Exactly ONE warning on that turn naming the unmatched items (sorted) as unavailable *for this turn*; honoured items (e.g. `Read`) still offered; `Bash` itself stays filtered out (patterns never widen to the bare tool); the warning does NOT say the skill failed to load or validate; the disjoint warning does not fire unless the filters truly share no tool; **the turn keeps running and answers** — the disclosure is advisory, never turn-fatal (a plain `Warning` cancelled the turn it described; caught at code review) — Story 19.2 / FR42-a, see `docs/skills.md` |
 
 ---
 

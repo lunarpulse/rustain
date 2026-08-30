@@ -399,6 +399,42 @@ mod tests {
         assert_eq!(reg.warnings_count(), 1);
     }
 
+    // Story 19.2 AC5 — agents benefit from the scalar form, and a scalar
+    // `exclude-tools` is a chosen consequence (A7: widening of denial).
+    #[test]
+    fn discover_parses_scalar_allowed_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_file(
+            tmp.path(),
+            "deployer",
+            "name: deployer\ndescription: Deploys things\nallowed-tools: Read Grep\n",
+            "You deploy things.\n",
+        );
+        let reg = AgentRegistry::discover(tmp.path());
+        assert_eq!(reg.agents().len(), 1);
+        assert_eq!(
+            reg.agents()[0].allowed_tools,
+            Some(vec!["Read".to_string(), "Grep".to_string()])
+        );
+    }
+
+    #[test]
+    fn discover_parses_scalar_exclude_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_file(
+            tmp.path(),
+            "deployer",
+            "name: deployer\ndescription: Deploys things\nexclude-tools: Bash Write\n",
+            "You deploy things.\n",
+        );
+        let reg = AgentRegistry::discover(tmp.path());
+        assert_eq!(reg.agents().len(), 1);
+        assert_eq!(
+            reg.agents()[0].exclude_tools,
+            Some(vec!["Bash".to_string(), "Write".to_string()])
+        );
+    }
+
     #[test]
     fn discover_skips_file_too_large() {
         let tmp = tempfile::tempdir().unwrap();

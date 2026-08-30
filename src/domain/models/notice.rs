@@ -5,8 +5,33 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoticeLevel {
     Info,
+    /// Warning-class AND turn-fatal: the consumer clears streaming state and
+    /// aborts the active turn. Use when the turn cannot usefully continue.
     Warning,
+    /// Warning-class but **NOT** turn-fatal: rendered exactly like `Warning`
+    /// (a persistent warning row, not a transient flash) while the turn keeps
+    /// running. Use to DISCLOSE something about a turn that is still valid —
+    /// e.g. a declared tool restriction this build cannot honour (FR42-a).
+    ///
+    /// ⚠ Story 19.2 code review: routing a disclosure through `Warning` made
+    /// the notice cancel the very turn it described, because the consumer
+    /// (`event_loop.rs`) aborts `_active_turn` for every non-`Info` notice.
+    /// Any new notice that is informative-but-not-fatal belongs here.
+    Advisory,
     Error,
+}
+
+impl NoticeLevel {
+    /// Whether a notice of this level ENDS the turn in progress: the TUI
+    /// consumer clears streaming state and aborts the active turn handle.
+    ///
+    /// Story 19.2 code review made this a named predicate instead of an inline
+    /// `matches!` duplicated at two consumer sites — a disclosure that fired
+    /// mid-turn was cancelling the turn it described, and nothing tested the
+    /// rule.
+    pub fn is_turn_fatal(self) -> bool {
+        matches!(self, NoticeLevel::Warning | NoticeLevel::Error)
+    }
 }
 
 /// State for tracking retry attempts with exponential backoff.
@@ -216,5 +241,26 @@ mod tests {
         assert!(FeedbackAction::dispatch_key('a').is_none());
         // Story 7.5: `y`, `s`, `p` are now MAPPED (not unknown).
         assert!(FeedbackAction::dispatch_key('q').is_none());
+    }
+
+    /// Story 19.2 code review — the structural ratchet for the defect that the
+    /// review found: a disclosure notice emitted mid-turn was aborting the very
+    /// turn it described, because the consumer treated EVERY non-`Info` notice
+    /// as terminal. These pin which levels may end a turn.
+    #[test]
+    fn advisory_notices_never_end_the_turn() {
+        assert!(
+            !NoticeLevel::Advisory.is_turn_fatal(),
+            "an Advisory disclosure must leave the turn running"
+        );
+        assert!(!NoticeLevel::Info.is_turn_fatal());
+    }
+
+    #[test]
+    fn warning_and_error_notices_end_the_turn() {
+        // The pre-existing "filters are disjoint" notice relies on this, and so
+        // does the model-fallback path that re-submits after aborting.
+        assert!(NoticeLevel::Warning.is_turn_fatal());
+        assert!(NoticeLevel::Error.is_turn_fatal());
     }
 }

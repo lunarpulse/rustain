@@ -441,13 +441,86 @@ impl LocalTurnDriver {
             (None, Some(s)) => Some(s),
             (Some(a), Some(s)) => Some(a.intersection(&s).cloned().collect()),
         };
-        if let Some(ref allowed) = combined {
+        if let Some(allowed) = &combined {
             if allowed.is_empty() {
                 domain_tx.send(AppEvent::SystemNotice {
                     conversation_id: Some(conversation.id.clone()),
                     level: crate::domain::models::NoticeLevel::Warning,
                     message: "Active agent and skill tool filters are disjoint — no tools available for this turn".to_string(),
                 }).ok();
+            } else {
+                // Story 19.2 (FR42-a): a tool restriction this build cannot
+                // honour is disclosed on the turn it bites — never dropped
+                // silently. An item that matches no tool in THIS turn's
+                // catalogue (a pattern this build does not expand, a typo, an
+                // MCP tool whose server is down) is named.
+                //
+                // ⚑ Code review (19.2): computed over the DECLARED items, not
+                // over `combined`. An agent that declares only `exclude-tools`
+                // yields a catalogue-derived filter, so intersecting it with a
+                // skill's pattern item DROPPED that item before it could be
+                // disclosed — FR42-a's silence, one layer down. `BTreeSet`
+                // gives dedup + deterministic order in one step.
+                // ⚑ `activate_skill` is excluded: the driver force-adds it
+                // below when the catalogue omits it, so naming it "unavailable"
+                // would contradict the same turn's own offer.
+                let mut declared: std::collections::BTreeSet<&str> = activation
+                    .active_skills()
+                    .iter()
+                    .filter_map(|s| s.allowed_tools.as_ref())
+                    .flatten()
+                    .map(String::as_str)
+                    .collect();
+                if let Some(agent_allowed) = agent_snapshot
+                    .as_ref()
+                    .and_then(|a| a.allowed_tools.as_ref())
+                {
+                    declared.extend(agent_allowed.iter().map(String::as_str));
+                }
+                let unmatched: Vec<&str> = declared
+                    .into_iter()
+                    .filter(|name| *name != "activate_skill")
+                    .filter(|name| !all_tool_names.iter().any(|t| t == name))
+                    .collect();
+                if !unmatched.is_empty() {
+                    let constrained_skill_names: Vec<&str> = activation
+                        .active_skills()
+                        .iter()
+                        .filter(|s| s.allowed_tools.is_some())
+                        .map(|s| s.name.as_str())
+                        .collect();
+                    let verb = if unmatched.len() == 1 { "is" } else { "are" };
+                    let message = if constrained_skill_names.is_empty() {
+                        format!(
+                            "Active tool restriction cannot be honoured in full: [{}] {} unavailable for this turn.",
+                            unmatched.join(", "),
+                            verb
+                        )
+                    } else {
+                        let noun = if constrained_skill_names.len() == 1 {
+                            "skill"
+                        } else {
+                            "skills"
+                        };
+                        format!(
+                            "Tool restriction from {} '{}' cannot be honoured in full: [{}] {} unavailable for this turn.",
+                            noun,
+                            constrained_skill_names.join(", "),
+                            unmatched.join(", "),
+                            verb
+                        )
+                    };
+                    // `Advisory`, NOT `Warning`: this discloses something about a
+                    // turn that is still valid. A `Warning` would make the TUI
+                    // consumer abort the very turn being described.
+                    domain_tx
+                        .send(AppEvent::SystemNotice {
+                            conversation_id: Some(conversation.id.clone()),
+                            level: crate::domain::models::NoticeLevel::Advisory,
+                            message,
+                        })
+                        .ok();
+                }
             }
         }
         let tool_defs = match combined {
@@ -666,6 +739,31 @@ mod turn_driver_allowlist_tests {
     fn explicitly_allowed_tool_survives() {
         let allowed = set(&["Read", "Bash"]);
         assert!(tool_survives_allowlist("Bash", &allowed));
+    }
+
+    /// Story 19.2 AC2(a): a scalar `allowed-tools: Read Grep` restricts the
+    /// offer-time set to the honoured items plus BOTH carve-outs
+    /// (`activate_skill`, `task` — A6); `Bash` is filtered out. The allowed
+    /// set is derived through the real parser, so reverting the scalar branch
+    /// (A2) turns this RED too, not only the parse tests.
+    #[test]
+    fn scalar_allowlist_filters_offer_time_exactly() {
+        let parsed = crate::domain::services::frontmatter::extract_list_field(
+            "allowed-tools: Read Grep",
+            "allowed-tools",
+        )
+        .expect("scalar form must parse");
+        let allowed: HashSet<String> = parsed.into_iter().collect();
+        for offered in ["Read", "Grep", "activate_skill", "task"] {
+            assert!(
+                tool_survives_allowlist(offered, &allowed),
+                "{offered} must survive a scalar Read Grep allowlist"
+            );
+        }
+        assert!(
+            !tool_survives_allowlist("Bash", &allowed),
+            "Bash must be filtered out at offer time"
+        );
     }
 
     #[test]
