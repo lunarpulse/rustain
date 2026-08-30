@@ -1,8 +1,8 @@
 # A2A AgentCard discovery
 
-Rustain can discover allowlisted A2A peers and register their AgentCard skills in the internal capability inventory. Story 17.4a is discovery-only: A2A skills do not appear in the LLM-facing `@` dropdown, and invocation refuses until Story 17.4b adds task lifecycle translation.
+Rustain discovers allowlisted A2A peers and registers their AgentCard skills in the internal capability inventory (Story 17.4a), and serves its own signed card plus a task lifecycle to allowlisted callers (`--serve-a2a`, and the daemon's inbound path). A2A skills still do not appear in the LLM-facing `@` dropdown; § Task lifecycle below is the authority on what a caller can invoke.
 
-A2A support is off by default. Build with:
+A2A is off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain it** — it is on in every release built after Story 19.5; source builds need `--features a2a`:
 
 ```bash
 cargo build --features a2a
@@ -59,7 +59,7 @@ Trust comes only from configuration; an AgentCard cannot promote itself.
 | Ed25519 `pinnedKey` | `Verified` | Require a valid EdDSA JWS over the raw card before caching or registration |
 | Unsupported or unusable pin | none | Fail startup; never silently degrade to `Unverified` |
 
-An unverified card can surface in the internal inventory because the operator explicitly allowlisted its origin. It still cannot enter the `@` dropdown or be invoked in 17.4a. A pinned peer with a missing, forged, tampered, wrong-key, wrong-algorithm, or wrong-`kid` signature never surfaces: removing `signatures` is treated as a downgrade attempt.
+An unverified card can surface in the internal inventory because the operator explicitly allowlisted its origin. It still cannot enter the `@` dropdown. A pinned peer with a missing, forged, tampered, wrong-key, wrong-algorithm, or wrong-`kid` signature never surfaces: removing `signatures` is treated as a downgrade attempt.
 
 Revocation is removal of the peer from `.rustain/a2a.json` or the active profile. The A2A specification supplies no implementable key-expiry or revocation mechanism for this flow.
 

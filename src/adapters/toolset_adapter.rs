@@ -496,10 +496,11 @@ impl ToolSetAdapter {
         let read_fut = tokio::fs::read(&path);
 
         let bytes = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
             res = read_fut => res.map_err(|e| {
                 ToolError::ExecutionFailed(format!("Failed to read '{}': {}", file_path, e))
             })?,
-            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
         };
         let content = String::from_utf8_lossy(&bytes).into_owned();
 
@@ -668,20 +669,22 @@ impl ToolSetAdapter {
         if let Some(parent) = path.parent() {
             let mkdir_fut = tokio::fs::create_dir_all(parent);
             tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(ToolError::Cancelled),
                 res = mkdir_fut => res.map_err(|e| {
                     ToolError::ExecutionFailed(format!("Failed to create directories: {}", e))
                 })?,
-                _ = cancel.cancelled() => return Err(ToolError::Cancelled),
             }
         }
 
         // Write file
         let write_fut = tokio::fs::write(&path, new_content.as_bytes());
         tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
             res = write_fut => res.map_err(|e| {
                 ToolError::ExecutionFailed(format!("Failed to write '{}': {}", file_path, e))
             })?,
-            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
         }
 
         // DF-111 (AC5, schema v3): record post-write hash so revert can distinguish
@@ -748,10 +751,11 @@ impl ToolSetAdapter {
 
         let read_fut = tokio::fs::read(&path);
         let bytes = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
             res = read_fut => res.map_err(|e| {
                 ToolError::ExecutionFailed(format!("Failed to read '{}': {}", file_path, e))
             })?,
-            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
         };
         let content = String::from_utf8(bytes).map_err(|_| {
             ToolError::ExecutionFailed(format!(
@@ -877,10 +881,11 @@ impl ToolSetAdapter {
                         let resolved = resolve_workspace_path(&self.workspace_path, &path)?;
                         let read_fut = tokio::fs::read(&resolved);
                         let bytes = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
                             res = read_fut => res.map_err(|e| {
                                 ToolError::ExecutionFailed(format!("Failed to read '{}': {}", path, e))
                             })?,
-                            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
                         };
                         content = String::from_utf8(bytes).map_err(|_| {
                             ToolError::ExecutionFailed(format!(
@@ -939,8 +944,9 @@ impl ToolSetAdapter {
                 }
                 FilePlan::Remove => {
                     let res = tokio::select! {
-                        r = tokio::fs::remove_file(&resolved) => r,
+                        biased;
                         _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+                        r = tokio::fs::remove_file(&resolved) => r,
                     };
                     if let Err(e) = res {
                         // NotFound is acceptable for an add-then-delete (net

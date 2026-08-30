@@ -89,6 +89,13 @@ jobs:
           # target whose stem omits `p2p`, so it belongs to this job's explicit
           # enumeration rather than the `--features p2p` lane.
           cargo test --test conformance_18_4d_reach_and_ping
+          # Story 19.5. Same reasoning again: a default-feature target whose stem
+          # matches none of the a2a/p2p/mcp wiring guards, so nothing forces it into
+          # a feature lane and `cargo test --no-run --tests` above only COMPILES it.
+          # Unwired, the release-workflow ratchet is the very false green it exists
+          # to prevent — release.yml could lose `a2a,p2p` with every lane green
+          # (Story 19.5 A11, code review D2). Text assertions, microseconds.
+          cargo test --test conformance_release_workflow
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest

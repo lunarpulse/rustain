@@ -324,6 +324,10 @@ fn build_runtime(
         tool_scheduler,
         persona: Arc::new(NoOpPersona),
         context_assembler: Arc::new(ArcSwap::from_pointee(None)),
+        context: Arc::new(ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::noop::NoOpContext)
+                as Arc<dyn rustain::domain::ports::ContextPort>,
+        )),
         storage: storage.clone(),
         fs_storage: Arc::new(FileSystemStorage::with_workspace_root(
             rustain::infrastructure::paths::sessions_dir(workspace),
@@ -465,6 +469,7 @@ async fn harness_full_mode(
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
             Box::new(move || Ok(build_runtime(provider.clone(), storage.clone(), &ws))),
         ))
     };
@@ -2683,6 +2688,7 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(build_runtime(
                     Arc::new(ScriptedProvider {
@@ -2860,6 +2866,7 @@ async fn a_non_loopback_listener_serves_only_over_tls_and_only_with_the_key() {
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(build_runtime(
                     Arc::new(ScriptedProvider {
@@ -3124,6 +3131,7 @@ async fn peer_runtime_fixture() -> (
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(build_runtime(
                     Arc::new(ScriptedProvider {

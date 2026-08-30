@@ -51,7 +51,7 @@ jobs:
 
       - name: Build release binary
         # `--features self-update` is REQUIRED: self-update is NOT a default feature
-        # (Cargo.toml default = anthropic/openai/ollama/clipboard/mcp/meta-search).
+        # (Cargo.toml default = anthropic/openai/ollama/clipboard/mcp/meta-search/models-dev).
         # Without it the published binary hits the feature-absent bail and `rustain
         # update` does not exist — the feature would ship dead (Story 13-3a B0).
         #
@@ -61,10 +61,13 @@ jobs:
         # so FR159's "blessed subcommand" would not be one. Measured 2026-08-17 on
         # x86_64-linux: default release 21,832,840 B → with relay-server
         # 24,935,304 B, a delta of 3,102,464 B (2.96 MiB) — inside NFR53's 5 MB
-        # per-feature bound, which is what decided it. ⚠ It also consumes ~32% of
-        # the 9.2 MB that was left under NFR9's 30 MB guard below, so the guard is
-        # now the thing that catches the next such addition.
-        run: cargo build --release --target ${{ matrix.target }} --features self-update,relay-server
+        # per-feature bound, which is what decided it.
+        #
+        # Story 19.5 adds `a2a,p2p` so published assets contain the federation
+        # features proved by gates 18 and 19. Measured 2026-08-30 on x86_64-linux:
+        # all four release-only features produce 34,263,656 B (32.68 MiB), within
+        # NFR9's amended 35 MiB / 36,700,160-byte guard below.
+        run: cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p
 
       - name: Stage asset
         shell: bash
@@ -75,14 +78,19 @@ jobs:
           ls -lh "${ASSET}"
           echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
 
-      - name: Size guard (< 30 MB)
+      - name: Smoke required release features
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: .github/scripts/release-smoke.sh "${ASSET}"
+
+      - name: Size guard (≤ 35 MiB)
         shell: bash
         run: |
           SIZE=$(stat -c%s "${ASSET}" 2>/dev/null || stat -f%z "${ASSET}")
-          SIZE_MB=$((SIZE / 1024 / 1024))
-          echo "Binary size: ${SIZE_MB} MB (${SIZE} bytes)"
-          if [ "$SIZE" -gt "$((30 * 1024 * 1024))" ]; then
-            echo "ERROR: Binary exceeds 30 MB limit (NFR9)"
+          SIZE_MIB=$((SIZE / 1024 / 1024))
+          echo "Binary size: ${SIZE_MIB} MiB (${SIZE} bytes)"
+          if [ "$SIZE" -gt "36700160" ]; then
+            echo "ERROR: ${{ matrix.target }} binary exceeds 35 MiB limit (NFR9)"
             exit 1
           fi
 
@@ -123,6 +131,44 @@ jobs:
           mkdir -p release
           find artifacts -type f -exec cp {} release/ \;
           ls -la release/
+
+      - name: Compute expected-minus-present release targets
+        id: release-target-delta
+        shell: bash
+        run: |
+          # The expected set IS the build matrix above (:25-39) — three targets.
+          # ⛔ Never list a triple no leg builds: an always-missing entry makes the
+          # disclosure fire on every release and a real macOS loss becomes
+          # indistinguishable from the baseline (Story 19.5 code review).
+          # Windows x86_64 is P2 and excluded from both matrix and assets
+          # (RELEASING.md § Platform Support Matrix), so it is not expected here.
+          expected_targets=(
+            x86_64-unknown-linux-gnu
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+          )
+          missing_targets=()
+          for target in "${expected_targets[@]}"; do
+            if ! compgen -G "release/rustain-*-${target}" >/dev/null; then
+              missing_targets+=("${target}")
+            fi
+          done
+
+          {
+            echo 'body<<EOF'
+            echo '## Release asset coverage'
+            echo
+            if [ "${#missing_targets[@]}" -eq 0 ]; then
+              echo 'All expected release targets are present.'
+            else
+              printf 'Missing targets (expected minus present):'
+              printf ' `%s`' "${missing_targets[@]}"
+              echo '.'
+              echo
+              echo 'Linux is P0; this release still publishes when only P1 macOS assets are missing.'
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify P0 Linux artifact exists (AC1 required)
         run: |
@@ -178,6 +224,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
+          body: ${{ steps.release-target-delta.outputs.body }}
           generate_release_notes: true
           fail_on_unmatched_files: true
         env:

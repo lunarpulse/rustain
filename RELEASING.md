@@ -27,7 +27,13 @@ P1/P2 targets may be added incrementally, but the frozen target-triple artifact-
 
 **Note on Windows (P2):** The rustain codebase currently uses Unix-specific APIs (`tokio::signal::unix`, `std::os::unix::fs`, `tokio::net::UnixListener`/`UnixStream`, `libc` for PID files and daemon lifecycle) without `#[cfg(unix)]` gates in all paths. Windows builds will fail at compile time. Windows is future support and is currently excluded from both the release matrix and published assets. Full Windows support requires a dedicated Epic (not currently scheduled).
 
-The release pipeline asserts each published binary is **< 30 MB** (PRD aspirational: < 20 MB). The size check lives in CI, not runtime. The existing release profile (`Cargo.toml` `[profile.release]`) already uses `lto = true`, `strip = true`, `codegen-units = 1`, `panic = "abort"` to minimize size.
+## Federation Features in Published Assets
+
+A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them** — verify with `git show v0.1.3:.github/workflows/release.yml` — and they are on in every release built after Story 19.5; source builds need `--features a2a,p2p`. Automated and manual release builds must also include `self-update` and `relay-server`; the authoritative release feature set is `self-update,relay-server,a2a,p2p`.
+
+⛔ **After cutting a tag:** name the actual version at the four federation-feature doc sites — this file, `README.md`, `docs/a2a.md`, `docs/p2p.md`. They state the boundary they can prove (`v0.1.3` and earlier do not carry the features) because the next tag is not derivable from the tree; the tagger is the first person who knows it.
+
+The release pipeline asserts each published binary is **≤ 35 MiB (36,700,160 bytes)**. The size check lives in CI, not runtime. The existing release profile (`Cargo.toml` `[profile.release]`) already uses `lto = true`, `strip = true`, `codegen-units = 1`, `panic = "abort"` to minimize size.
 
 ## Signing Scheme: minisign
 
@@ -36,7 +42,7 @@ We use [minisign](https://jedisct1.github.io/minisign/) (Ed25519, prehashed `ED`
 **Why minisign over cosign/Sigstore/GPG:**
 - Pure-Rust verify-only client (`minisign-verify`) — tiny, no network at verify time
 - Ed25519, trivial in GitHub Actions
-- Fits NFR9 (small binary) and NFR53 (minimal dependencies)
+- Keeps signing overhead small. The four-feature release fits NFR9's 35 MiB bound; NFR53's < 5 MB per-feature aspiration is currently exceeded by `p2p` and remains owned by Story 18.7.
 - Trade-off accepted: long-lived secret key managed via protected-environment custody + rotation ladder, rather than PKI complexity
 
 ### Trust Model
@@ -120,7 +126,7 @@ When rotating the signing key:
 3. Push a tag: `git tag v0.2.0 && git push origin v0.2.0`
 4. The `release.yml` workflow triggers automatically:
    - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded)
-   - Size-guard asserts < 30 MB
+   - Size guard asserts ≤ 35 MiB / 36,700,160 bytes
    - Generates `SHA256SUMS`
    - Signs manifest in the protected `release` environment
    - Verifies signature fail-closed before publishing
@@ -139,7 +145,7 @@ VERSION="0.2.0"
 TARGET="x86_64-unknown-linux-gnu"
 
 # 3. Build release binary
-cargo build --release --target "$TARGET"
+cargo build --release --target "$TARGET" --features self-update,relay-server,a2a,p2p
 
 # 4. Stage asset
 ASSET="rustain-${VERSION}-${TARGET}"
@@ -147,8 +153,8 @@ cp "target/${TARGET}/release/rustain" "$ASSET"
 
 # 5. Size check
 SIZE=$(stat -c%s "$ASSET")
-if [ "$SIZE" -gt "$((30 * 1024 * 1024))" ]; then
-    echo "ERROR: Binary exceeds 30 MB limit"
+if [ "$SIZE" -gt "36700160" ]; then
+    echo "ERROR: ${TARGET} binary exceeds 35 MiB limit (NFR9)"
     exit 1
 fi
 

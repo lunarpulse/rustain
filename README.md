@@ -211,7 +211,7 @@ For full semantics, guards, exit codes, and bulk-delete behavior see
 ```sh
 cargo build                # debug build
 cargo check                # type check (fastest feedback)
-cargo test                 # run the test suite (~180 test files)
+cargo test                 # run the test suite (~255 test files)
 cargo clippy               # lint
 cargo fmt                  # format
 
@@ -219,15 +219,19 @@ cargo fmt                  # format
 cargo build --no-default-features --features anthropic     # minimal
 cargo build --features telegram                            # with Telegram channel
 cargo build --features vector-search                       # with local embeddings
+cargo build --features a2a,p2p                             # federation from source
 ```
 
-**Default features:** `anthropic`, `openai`, `ollama`, `clipboard`, `mcp`,
-`meta-search`.
+A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them** — they are on in every release built after this change; source builds need `--features a2a,p2p`. See [`docs/a2a.md`](docs/a2a.md) and [`docs/p2p.md`](docs/p2p.md).
 
-The test suite includes 47 conformance tests that enforce architectural
+**Default features:** `anthropic`, `openai`, `ollama`, `clipboard`, `mcp`,
+`meta-search`, `models-dev`.
+
+The test suite includes 96 conformance tests that enforce architectural
 invariants (dependency rules, lock policies, namespace conventions, port
-contracts). These run on every change and are the primary guard against
-architectural drift.
+contracts). The `ci.yml` lanes name the targets they run, so a conformance
+file is only a guard once a lane lists it — see the Check job's explicit
+enumeration. They are the primary guard against architectural drift.
 
 **Tracing:** logs route to `~/.rustain/rustain.log` (10MB rolling rotation)
 because stdout is owned by the ratatui terminal. Set `RUST_LOG=debug` for
@@ -283,7 +287,7 @@ rustain/
 │       ├── startup.rs          # ordered startup (< 20ms to first frame)
 │       ├── config.rs           # layered configuration loader
 │       └── signals.rs          # panic hook + signal handlers
-├── tests/                      # 180 test files inc. 47 conformance tests
+├── tests/                      # 255 test files inc. 96 conformance tests
 ├── profiles/                   # built-in profile definitions (TOML)
 │   ├── base.toml
 │   ├── coding.toml
@@ -399,8 +403,8 @@ sub-agents, context assembly, and daemon supervision.
 | **v0.5** | Agent Skills, MCP, sub-agents, plan mode, multi-provider | Shipped (Epics 5–10) |
 | **v0.75** | Memory tiers, context assembly, windowing, vector search | Shipped (Epic 11) |
 | **v1.0** | Daemon mode, Telegram channel, cron scheduler, multi-client attach | In progress (Epic 12) |
-| **v1.5** | A2A client, multi-agent orchestration | Planned (Epic 14) |
-| **v2.0** | A2A server, dynamic adapter loading, community hub | Planned |
+| **v1.5** | A2A client, P2P peer transport, multi-agent orchestration | Shipped (Epics 17–18) |
+| **v2.0** | A2A server, dynamic adapter loading, community hub | A2A server shipped; dynamic loading and hub planned |
 
 Detailed sprint tracking in
 [`sprint-status.yaml`](../_bmad-output/implementation-artifacts/sprint-status.yaml).
