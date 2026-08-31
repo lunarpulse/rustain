@@ -191,7 +191,45 @@ croner = { version = "3.0.1", optional = true }
 # llm-provider = { path = "../rustycode/llm-provider", features = ["config"] }
 
 # ── MCP SDK (Epic 9) ─────────────────────────────────────────────
-rmcp = { version = "1.0", default-features = false, features = ["client", "transport-child-process"], optional = true }
+# Story 9.9 (ruling A3 → Option A, resolved at the 2026-08-31 preflight):
+# `transport-streamable-http-client-reqwest` brings the Streamable HTTP client
+# transport; `reqwest` is the TLS backend and is ⛔ NOT optional. The transport
+# feature alone expands to `["transport-streamable-http-client", "__reqwest"]`
+# and `__reqwest = ["dep:reqwest"]` — which selects NO TLS provider, so every
+# `https://` MCP URL would fail to build a client. TLS lives in rmcp's separate
+# `reqwest = ["__reqwest", "reqwest?/rustls"]` key. BOTH STRINGS OR NEITHER.
+#
+# ⚠ rmcp resolves its own reqwest 0.13 (semver-incompatible with rustain's 0.12
+# at :77 — no feature unification, both are in the lock). Measured against the
+# SHIPPED feature set (`release.yml:70` = self-update,relay-server,a2a,p2p +
+# defaults) this adds exactly ONE crate, `sse-stream`: `reqwest 0.13`,
+# `aws-lc-rs`, `rustls-platform-verifier` and `rustls-native-certs` are already
+# at release baseline via `iroh → hickory-resolver → hickory-net → rustls`.
+rmcp = { version = "1.0", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "reqwest",
+], optional = true }
+
+# Story 9.9 (AC6) — rmcp's Streamable HTTP transport is generic over its HTTP
+# client and surfaces failures as `StreamableHttpError<reqwest::Error>` boxed
+# behind `DynamicTransportError`. AC6 requires THREE DISTINCT operator-facing
+# strings (unreachable / 401 + WWW-Authenticate / 5xx), and recovering the typed
+# error means NAMING rmcp's reqwest — which is 0.13, a different crate from
+# rustain's own 0.12 at :77. This alias binds rmcp's ALREADY-PRESENT 0.13 under
+# a second name so `adapters/mcp/http.rs` can downcast to the real error type.
+#
+# ⚑ MEASURED, not assumed: `cargo tree -e normal` over the shipped feature set
+# (`release.yml:70`) is byte-identical with and without this line — cargo
+# unifies it with rmcp's own 0.13 requirement, so it adds ZERO crates. ⛔ Keep
+# `default-features = false` and add no features: the tree must stay the union
+# rmcp already asked for.
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, optional = true }
+# Story 9.9 review: name rmcp's already-selected SSE stream types so the
+# guarded HTTP client can delegate GET streams while inspecting raw POST JSON.
+# This is the same unified 0.2 crate rmcp brings; it adds zero packages.
+sse-stream = { version = "0.2", optional = true }
 
 tempfile = "3.0"
 
@@ -244,7 +282,10 @@ ollama = ["dep:reqwest"]
 # models.dev live pricing catalog fetch. reqwest is the HTTP client; the
 # resolver + disk-cache logic compile unconditionally (pure serde/fs).
 models-dev = ["dep:reqwest"]
-mcp = ["dep:rmcp"]
+# Story 9.9: `reqwest13` is rmcp's own reqwest 0.13 under a second name, needed
+# to name `StreamableHttpError<reqwest::Error>` when classifying HTTP failures
+# (AC6). Adds zero crates — see the dependency comment.
+mcp = ["dep:rmcp", "dep:reqwest13", "dep:sse-stream"]
 test-fake-mcp = ["mcp", "rmcp/server"]
 # DF-17-4a-6: composite_toolset_adapter remains MCP-gated across its lifecycle surface.
 a2a = [

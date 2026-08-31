@@ -5513,6 +5513,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::ConfirmProfileSwitch(target_name) => {
+                                    let mut mcp_config_notices = Vec::new();
                                     let outcome = handlers::profile_switch::handle_profile_switch_requested(
                                         &mut state,
                                         &app_state.agent_core,
@@ -5520,8 +5521,16 @@ pub async fn run(
                                         &app_state.app_config,
                                         &app_state.profile_resolver,
                                         target_name.clone(),
+                                        &mut mcp_config_notices,
                                     )
                                     .await;
+                                    for message in mcp_config_notices {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: None,
+                                            level: NoticeLevel::Warning,
+                                            message,
+                                        });
+                                    }
                                     match outcome {
                                         HandlerOutcome::Notify(event) => {
                                             let _ = app_state.event_bus.emit_domain(event);
@@ -7867,6 +7876,7 @@ pub async fn run(
                     }
                     // Story 8.1 AC-10, Story 8.2 AC-15.2 — Config reload via handler.
                     AppEvent::ConfigReload => {
+                        let mut mcp_config_notices = Vec::new();
                         let ctx = crate::adapters::tui::handlers::config::ReloadContext {
                             cli: &app_state.cli_snapshot,
                             config_store: app_state.config_store.as_ref(),
@@ -7875,8 +7885,16 @@ pub async fn run(
                             // Story 8.3 AC-8 — pass AgentCore + ComposeContext for reload re-composition
                             agent_core: &app_state.agent_core,
                             compose_snapshot: &app_state.compose_snapshot,
+                            mcp_config_notices: &mut mcp_config_notices,
                         };
                         let outcome = crate::adapters::tui::handlers::config::handle_config_reload_with_two_pass(ctx);
+                        for message in mcp_config_notices {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: NoticeLevel::Warning,
+                                message,
+                            });
+                        }
                         let notice_level = match &outcome {
                             crate::adapters::tui::handlers::HandlerOutcome::Notify(
                                 AppEvent::ConfigReloaded { success: true, .. },

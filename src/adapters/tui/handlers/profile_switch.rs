@@ -65,6 +65,7 @@ pub async fn handle_profile_switch_requested(
     app_config: &Arc<ArcSwap<crate::domain::models::AppConfig>>,
     profile_resolver: &Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
     target_name: String,
+    mcp_config_notices: &mut Vec<String>,
 ) -> HandlerOutcome {
     let _guard = match SwitchGuard::acquire() {
         Some(g) => g,
@@ -114,7 +115,7 @@ pub async fn handle_profile_switch_requested(
         }
     };
 
-    let target_resolver =
+    let mut target_resolver =
         match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
             &target_name,
             profiles_dir.clone(),
@@ -128,6 +129,7 @@ pub async fn handle_profile_switch_requested(
                 });
             }
         };
+    mcp_config_notices.extend(target_resolver.take_mcp_config_notices());
 
     let target_resolved = match target_resolver.resolve_active() {
         Some(r) => r,

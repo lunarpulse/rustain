@@ -254,12 +254,14 @@ jobs:
         run: |
           cargo test --lib --features mcp
           cargo test --features test-fake-mcp \
+            --test doctor_health \
             --test conformance_acp_mcp \
             --test conformance_mcp_config \
             --test conformance_mcp_lifecycle \
             --test conformance_mcp_profile_swap \
             --test conformance_mcp_status_panel \
             --test conformance_mcp_tool_invocation \
+            --test integration_mcp_http \
             --test integration_mcp_approval_persistence \
             --test integration_mcp_env_expansion \
             --test integration_mcp_resilience \

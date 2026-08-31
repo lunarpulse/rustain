@@ -77,6 +77,7 @@ pub(crate) struct SessionCore {
     registry: Arc<crate::adapters::provider::ProviderRegistry>,
     router: Arc<crate::adapters::provider::ProviderRouter>,
     skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
+    mcp_event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AppEvent>>>,
 }
 
 impl From<AcpCore> for SessionCore {
@@ -88,6 +89,7 @@ impl From<AcpCore> for SessionCore {
             tool_scheduler,
             approval,
             storage,
+            event_rx,
             ledger,
             registry,
             router,
@@ -104,6 +106,7 @@ impl From<AcpCore> for SessionCore {
             ledger,
             registry,
             router,
+            mcp_event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
             skill_activator,
         }
     }
@@ -559,6 +562,7 @@ impl RustainAcpAgent {
             storage,
             ledger,
             selected_model,
+            mcp_event_rx,
             skill_activator,
         ) = {
             let sessions = self.sessions.borrow();
@@ -577,6 +581,7 @@ impl RustainAcpAgent {
                 state.core.storage.clone(),
                 state.core.ledger.clone(),
                 state.selected.clone().map(|(_, model_id)| model_id),
+                state.core.mcp_event_rx.clone(),
                 state.core.skill_activator.clone(),
             )
         };
@@ -630,6 +635,8 @@ impl RustainAcpAgent {
         }
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let mut mcp_event_rx = mcp_event_rx.lock().await;
+        let mut mcp_events_open = true;
         let now = now_unix();
         let mut conversation = match storage.load_conversation(&conversation_id).await {
             Ok(Some(conv)) => conv,
@@ -753,7 +760,58 @@ impl RustainAcpAgent {
         let mut assistant_messages: Vec<ChatMessage> = Vec::new();
         let mut assistant_stop_reason = DomainStopReason::EndTurn;
         loop {
+            match mcp_event_rx.try_recv() {
+                Ok(AppEvent::SystemNotice {
+                    level: crate::domain::models::NoticeLevel::Warning,
+                    message,
+                    ..
+                }) => {
+                    let rendered = format!("Warning: {message}");
+                    self.send_session_update(
+                        session_id.clone(),
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::from(rendered.clone()),
+                        )),
+                    )
+                    .await?;
+                    if !assistant_text.is_empty() {
+                        assistant_text.push('\n');
+                    }
+                    assistant_text.push_str(&rendered);
+                }
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    mcp_events_open = false;
+                    break;
+                }
+            }
+        }
+        loop {
             tokio::select! {
+                mcp_event = mcp_event_rx.recv(), if mcp_events_open => {
+                    match mcp_event {
+                        Some(AppEvent::SystemNotice {
+                            level: crate::domain::models::NoticeLevel::Warning,
+                            message,
+                            ..
+                        }) => {
+                            let rendered = format!("Warning: {message}");
+                            self.send_session_update(
+                                session_id.clone(),
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    acp::ContentBlock::from(rendered.clone()),
+                                )),
+                            ).await?;
+                            if !assistant_text.is_empty() {
+                                assistant_text.push('\n');
+                            }
+                            assistant_text.push_str(&rendered);
+                        }
+                        Some(_) => {}
+                        None => mcp_events_open = false,
+                    }
+                }
                 event = event_rx.recv() => {
                     let Some(event) = event else { break; };
                     match event {
@@ -1204,7 +1262,12 @@ impl acp::Agent for RustainAcpAgent {
                     .resume(Some(acp::SessionResumeCapabilities::default()))
                     .close(Some(acp::SessionCloseCapabilities::default())),
             )
-            .prompt_capabilities(acp::PromptCapabilities::new().image(true));
+            .prompt_capabilities(acp::PromptCapabilities::new().image(true))
+            // Story 9.9: an ACP client only offers `McpServer::Http` when the
+            // agent advertises it, so forwarding HTTP in `mcp_servers_from_acp`
+            // without this line would be a mechanism no client can trigger.
+            // ⛔ `sse` stays false — permanently rejected (ADR-06-08).
+            .mcp_capabilities(acp::McpCapabilities::new().http(true).sse(false));
         Ok(acp::InitializeResponse::new(version)
             .agent_info(acp::Implementation::new(
                 "rustain",

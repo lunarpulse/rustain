@@ -65,6 +65,16 @@ pub fn extract_profile_mcp_servers(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // Story 9.9 (AC2): the `url` key an `http` entry needs. The profile path
+        // fails DIFFERENTLY from the workspace path — `command` was already
+        // `Option` here, so an http table yielded
+        // `{transport: Http, command: None, url: None}` and died later at
+        // connect. Same fix, third failure shape.
+        let url = table
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Expand env vars
         let command = command.map(|c| {
             let (expanded, warnings) = expand_env_vars(&c);
@@ -93,6 +103,13 @@ pub fn extract_profile_mcp_servers(
                 (k, expanded)
             })
             .collect();
+        let url = url.map(|raw| {
+            let (expanded, warnings) = expand_env_vars(&raw);
+            for w in &warnings {
+                tracing::warn!("MCP server '{server_name}': {w}");
+            }
+            crate::domain::models::redacted_url::RedactedUrl::new(expanded)
+        });
 
         let spec = McpServerSpec {
             id: server_name.clone(),
@@ -100,7 +117,7 @@ pub fn extract_profile_mcp_servers(
             command,
             args,
             env,
-            url: None,
+            url,
             persistent,
             source: McpServerSource::Profile {
                 profile_name: profile_name.to_string(),
@@ -109,6 +126,11 @@ pub fn extract_profile_mcp_servers(
         if let Err(e) = spec.validate_id() {
             tracing::error!("{e} — skipping server");
             continue;
+        }
+        // 9.9 AC2: degrade PER ENTRY — the spec survives so the fault surfaces
+        // at connect as `ConnectionFailed`, never by deleting the row.
+        if let Err(e) = spec.validate_transport_fields() {
+            tracing::warn!("{e}");
         }
         specs.push(spec);
     }

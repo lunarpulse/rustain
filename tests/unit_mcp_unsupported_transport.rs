@@ -10,11 +10,13 @@
 //! Risk closed:
 //!   * R14 — SSE transport surfaces `Unsupported` state without subprocess spawn
 //!
-//! Http is included as a sibling case because both Http and Sse currently land
-//! in the same Unsupported branch (Story 9.1 deferred Streamable HTTP).
-//! When Http support lands, this test should split into:
-//!   * SSE → Unsupported (forever)
-//!   * Http → Connected (post-Story-9.X)
+//! ⚑ Story 9.9 deleted the `Http` sibling case rather than retrofitting it, per
+//! that test's own instruction (*"When Streamable HTTP lands, this test should
+//! be deleted (not retrofitted) — the new behaviour is a successful connect,
+//! which is a different contract that deserves its own dedicated test"*). The
+//! new contract lives in `tests/integration_mcp_http.rs`, driven against an
+//! in-process Streamable HTTP server. **SSE stays `Unsupported` forever**
+//! (ADR-06-08); Streamable HTTP's SSE *response stream* is not that transport.
 
 #![cfg(feature = "mcp")]
 
@@ -85,30 +87,5 @@ async fn r14_sse_transport_returns_unsupported_and_does_not_spawn() {
     assert!(
         !pgrep_alive("/nonexistent/binary-must-not-spawn"),
         "SSE connect must not invoke the spawn path — no child should exist"
-    );
-}
-
-#[tokio::test]
-async fn r14_http_transport_also_currently_unsupported() {
-    // This test documents the *current* state of Story 9.1. When Streamable
-    // HTTP lands, this test should be deleted (not retrofitted) — the new
-    // behaviour is a successful connect, which is a different contract that
-    // deserves its own dedicated test.
-    let spec = spec_with_transport("r14-http", McpTransport::Http);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let client = McpClientAdapter::new(spec, Some(tx));
-
-    let err = client
-        .connect()
-        .await
-        .expect_err("Http connect must currently error per Story 9.1 deferral");
-    assert!(
-        matches!(err, McpError::Unsupported(_)),
-        "expected McpError::Unsupported for Http (pre-Streamable-HTTP), got {:?}",
-        err
-    );
-    assert!(
-        matches!(client.state(), McpConnectionState::Unsupported { .. }),
-        "expected Unsupported state for Http"
     );
 }

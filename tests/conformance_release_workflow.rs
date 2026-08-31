@@ -7,8 +7,17 @@
 
 const WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
 const RELEASE_BUILD: &str = "run: cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p";
-const NFR9_BOUND_BYTES: &str = "36700160";
-const SIZE_GUARD: &str = "if [ \"$SIZE\" -gt \"36700160\" ]; then";
+/// NFR9's byte bound. ⚑ AMENDED 2026-08-31 by Story 9.9 (owner ruling,
+/// measurement-driven): 36,700,160 → 39,845,888. The Streamable HTTP client
+/// transport measured 38,154,880 B on the shipped feature set — the transport
+/// itself is 1,152,296 B and would have fit; the TLS backend that makes
+/// `https://` MCP URLs work is the other 2,740,848 B. ⛔ This constant is the
+/// ratchet: move it only with a fresh BYTE measurement recorded in `prd.md`
+/// NFR9 — never with a crate count, which is precisely the inference Story
+/// 9.9's own ruling A3 got wrong (the crates were in the tree but LTO-stripped
+/// until something called them).
+const NFR9_BOUND_BYTES: &str = "39845888";
+const SIZE_GUARD: &str = "if [ \"$SIZE\" -gt \"39845888\" ]; then";
 const SMOKE_STEP: &str = "      - name: Smoke required release features\n        if: matrix.target == 'x86_64-unknown-linux-gnu'\n        shell: bash\n        run: .github/scripts/release-smoke.sh \"${ASSET}\"\n";
 const SMOKE_SCRIPT: &str = ".github/scripts/release-smoke.sh";
 

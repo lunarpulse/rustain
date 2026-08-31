@@ -35,6 +35,9 @@ pub struct ReloadContext<'a> {
     pub agent_core: &'a Arc<crate::infrastructure::runtime::agent_core::AgentCore>,
     /// Story 8.3 AC-8 — ComposeContext snapshot for reload-time re-composition.
     pub compose_snapshot: &'a Arc<crate::infrastructure::composition::ComposeContext>,
+    /// Non-fatal workspace MCP parse notices collected for dispatch through the
+    /// event bus after this pure handler returns.
+    pub mcp_config_notices: &'a mut Vec<String>,
 }
 
 pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutcome {
@@ -70,7 +73,11 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
             &effective_name,
             profiles_dir.clone(),
         ) {
-            Ok(r) => Some(Arc::new(r) as Arc<dyn ProfileResolver>),
+            Ok(mut resolver) => {
+                ctx.mcp_config_notices
+                    .extend(resolver.take_mcp_config_notices());
+                Some(Arc::new(resolver) as Arc<dyn ProfileResolver>)
+            }
             Err(crate::domain::errors::ProfileError::ProfileNotFound { name, .. }) => {
                 tracing::warn!(
                     "Profile '{}' not found on reload; falling back to 'coding'",
@@ -80,7 +87,11 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
                     "coding",
                     profiles_dir,
                 ) {
-                    Ok(fallback) => Some(Arc::new(fallback) as Arc<dyn ProfileResolver>),
+                    Ok(mut fallback) => {
+                        ctx.mcp_config_notices
+                            .extend(fallback.take_mcp_config_notices());
+                        Some(Arc::new(fallback) as Arc<dyn ProfileResolver>)
+                    }
                     Err(e) => {
                         tracing::error!("Coding fallback failed on reload: {}", e);
                         None
@@ -288,6 +299,7 @@ mod tests {
             cli_config_overrides: None,
             agent_core: &agent_core_arc,
             compose_snapshot: &compose_snapshot_arc,
+            mcp_config_notices: &mut Vec::new(),
         };
         let outcome = handle_config_reload_with_two_pass(ctx);
         match outcome {

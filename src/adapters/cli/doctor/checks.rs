@@ -1327,7 +1327,7 @@ impl HealthCheck for SkillsCheck {
 mod mcp_check {
     use super::*;
 
-    use crate::adapters::mcp::error::McpError;
+    use crate::adapters::mcp::error::{HttpFailureKind, McpError};
     use crate::domain::models::McpServerSpec;
 
     /// Doctor-side budget for each MCP server probe.
@@ -1355,6 +1355,32 @@ mod mcp_check {
             Err(McpError::HandshakeFailed(_)) => (CheckStatus::Fail, CheckTier::ExitAffecting),
             Err(McpError::ToolsListFailed(_)) => (CheckStatus::Fail, CheckTier::ExitAffecting),
             Err(McpError::ChildExited(_)) => (CheckStatus::Fail, CheckTier::ExitAffecting),
+            // Story 9.9 (AC2): a config fault is the operator's own file.
+            Err(McpError::InvalidConfig(_)) => (CheckStatus::Fail, CheckTier::ExitAffecting),
+            // 🔴 Story 9.9 (ruling A7) — TIER ON WHOSE BOX IT IS, not on the
+            // error class. For a REMOTE server that is merely down, a non-zero
+            // `rustain doctor` teaches the operator to ignore red — and then
+            // red is ignored on the day their config really is broken. `local`
+            // is the SAME loopback answer `connect` computed for the D2 notice
+            // and carried here in the error; ⛔ this mapper must never compute a
+            // second one that can disagree with it.
+            Err(McpError::Http { kind, local, .. }) => match kind {
+                // A typo in the config, and a credential the operator owns.
+                HttpFailureKind::DnsFailure | HttpFailureKind::AuthRequired => {
+                    (CheckStatus::Fail, CheckTier::ExitAffecting)
+                }
+                // Your box, your server. ⛔ The message says the server is not
+                // running, never that it is misconfigured — someone runs a
+                // loopback server on demand, and telling them they configured
+                // it wrongly sends them to the wrong place.
+                HttpFailureKind::Unreachable | HttpFailureKind::ServerError if *local => {
+                    (CheckStatus::Fail, CheckTier::ExitAffecting)
+                }
+                // Not your box; nothing here for you to fix.
+                HttpFailureKind::Unreachable | HttpFailureKind::ServerError => {
+                    (CheckStatus::Warning, CheckTier::Info)
+                }
+            },
             Err(McpError::TransportClosed(_)) => (CheckStatus::Warning, CheckTier::Info),
             Err(McpError::Timeout(_)) => (CheckStatus::Warning, CheckTier::Info),
             Err(McpError::Cancelled) => (CheckStatus::Warning, CheckTier::Info),
@@ -1362,6 +1388,79 @@ mod mcp_check {
             Err(McpError::CallToolFailed(_)) => (CheckStatus::Warning, CheckTier::Info),
             Err(McpError::TaskProtocol(_)) => (CheckStatus::Warning, CheckTier::Info),
             Err(McpError::TaskFailed(_)) => (CheckStatus::Warning, CheckTier::Info),
+        }
+    }
+
+    fn fix_hint(server_id: &str, error: &McpError) -> String {
+        let action = match error {
+            McpError::InvalidConfig(_) => "fix this server's MCP config entry".to_string(),
+            McpError::Http {
+                kind: HttpFailureKind::DnsFailure,
+                ..
+            } => "fix the host name in the configured URL".to_string(),
+            McpError::Http {
+                kind: HttpFailureKind::AuthRequired,
+                ..
+            } => format!(
+                "set {} (or the shared {})",
+                crate::adapters::mcp::http::auth_token_env_for(server_id),
+                crate::adapters::mcp::http::AUTH_TOKEN_ENV
+            ),
+            McpError::Http {
+                kind: HttpFailureKind::Unreachable,
+                local: true,
+                ..
+            } => "start the loopback MCP server or correct its URL".to_string(),
+            McpError::Http {
+                kind: HttpFailureKind::ServerError,
+                local: true,
+                ..
+            } => "check the loopback MCP server logs".to_string(),
+            McpError::Http {
+                kind: HttpFailureKind::Unreachable,
+                local: false,
+                ..
+            } => "verify remote MCP server availability and network reachability".to_string(),
+            McpError::Http {
+                kind: HttpFailureKind::ServerError,
+                local: false,
+                ..
+            } => "check the remote MCP server health and logs".to_string(),
+            _ => "check command/path, ensure binary exists and is executable".to_string(),
+        };
+        format!("{server_id}: {action}")
+    }
+
+    #[cfg(test)]
+    mod remediation_tests {
+        use super::*;
+
+        fn http(kind: HttpFailureKind, local: bool) -> McpError {
+            McpError::Http {
+                kind,
+                local,
+                detail: "fixture".to_string(),
+            }
+        }
+
+        #[test]
+        fn remediation_is_specific_to_failure_class_and_locality() {
+            assert!(
+                fix_hint("remote", &http(HttpFailureKind::DnsFailure, false)).contains("host name")
+            );
+            assert!(
+                fix_hint("remote", &http(HttpFailureKind::AuthRequired, false))
+                    .contains(crate::adapters::mcp::http::AUTH_TOKEN_ENV)
+            );
+            assert!(fix_hint("local", &http(HttpFailureKind::Unreachable, true)).contains("start"));
+            assert!(fix_hint("local", &http(HttpFailureKind::ServerError, true)).contains("logs"));
+            assert!(
+                fix_hint("remote", &http(HttpFailureKind::Unreachable, false))
+                    .contains("availability")
+            );
+            assert!(
+                fix_hint("remote", &http(HttpFailureKind::ServerError, false)).contains("health")
+            );
         }
     }
 
@@ -1423,11 +1522,11 @@ mod mcp_check {
                             (inner, tc)
                         }
                         Err(_elapsed) => {
-                            // Outer timeout fired — Info/Warning (not Fail).
-                            // McpError::Timeout carries whole seconds (matches client.rs call sites).
-                            // Ceiling so sub-second budgets report 1s, not 0s.
+                            // Preserve the adapter's parse-once loopback verdict.
+                            // A hanging local HTTP server is exit-affecting even
+                            // though doctor's budget expires before connect's.
                             let secs = (per_budget.as_millis() as u64).div_ceil(1000).max(1);
-                            (Err(McpError::Timeout(secs)), 0)
+                            (Err(adapter.timeout_error(secs)), 0)
                         }
                     };
                     let (status, tier) = map_connect_result(&connect_result, tool_count);
@@ -1513,9 +1612,7 @@ mod mcp_check {
                             .err()
                             .map(|e| e.to_string())
                             .unwrap_or_default();
-                        fix_hints.push(format!(
-                            "{server_id}: check command/path, ensure binary exists and is executable"
-                        ));
+                        fix_hints.push(fix_hint(server_id, connect_result.as_ref().unwrap_err()));
                         format!("{server_id}: FAILED — {reason}")
                     }
                     CheckStatus::Skipped(reason) => format!("{server_id}: skipped — {reason}"),

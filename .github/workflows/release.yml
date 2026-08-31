@@ -83,14 +83,19 @@ jobs:
         shell: bash
         run: .github/scripts/release-smoke.sh "${ASSET}"
 
-      - name: Size guard (≤ 35 MiB)
+      # NFR9 bound AMENDED 2026-08-31 by Story 9.9 (owner ruling,
+      # measurement-driven): 36,700,160 → 39,845,888. The Streamable HTTP
+      # client transport measured 38,154,880 B on the shipped feature set, of
+      # which the TLS backend alone is 2,740,848 B. See prd.md NFR9 for the
+      # four measured rows and why the ceiling moved instead of the capability.
+      - name: Size guard (≤ 38 MiB)
         shell: bash
         run: |
           SIZE=$(stat -c%s "${ASSET}" 2>/dev/null || stat -f%z "${ASSET}")
           SIZE_MIB=$((SIZE / 1024 / 1024))
           echo "Binary size: ${SIZE_MIB} MiB (${SIZE} bytes)"
-          if [ "$SIZE" -gt "36700160" ]; then
-            echo "ERROR: ${{ matrix.target }} binary exceeds 35 MiB limit (NFR9)"
+          if [ "$SIZE" -gt "39845888" ]; then
+            echo "ERROR: ${{ matrix.target }} binary exceeds 38 MiB limit (NFR9)"
             exit 1
           fi
 

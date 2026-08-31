@@ -377,22 +377,27 @@ async fn acp_session_new_with_empty_mcp_list_invokes_factory_with_empty_slice() 
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Section 3 — AC2: Http/Sse are dropped, never forwarded
+// Section 3 — Story 9.9: Http IS forwarded over the real ACP wire; Sse is not
 // ─────────────────────────────────────────────────────────────────────
 
-/// `McpServer::Http` / `McpServer::Sse` are DROPPED, never forwarded —
-/// rustain's `McpClientAdapter` connects stdio only, so forwarding them would
-/// advertise a dead-end. A mixed list (http + sse + stdio) must reach the seam
-/// as the SINGLE stdio spec.
+/// ⚑ Story 9.9 INVERTED the `Http` half of this test. It asserted that
+/// `McpServer::Http` was dropped because *"rustain's `McpClientAdapter` connects
+/// stdio only, so forwarding them would advertise a dead-end"* — true when
+/// written, false now: Streamable HTTP connects, and `initialize` advertises
+/// `mcpCapabilities.http = true` so a compliant client will actually send one.
+/// ⛔ `McpServer::Sse` is still dropped — permanently, per ADR-06-08.
 ///
-/// Non-vacuity: THREE servers go in, only the stdio one may come out. A mutant
-/// that forwards all transports reddens `len == 1` (it would be 3); a mutant
-/// that forwards nothing reddens `len == 1` (it would be 0). The distinctive
-/// stdio name `stdio-keeper` makes the survivor assertion unambiguous.
+/// This drives the **real ACP wire**, not just the pure translator: the JSON
+/// above is what a client sends, and the assertion is on the specs the session
+/// factory received.
+///
+/// Non-vacuity: THREE servers go in, exactly TWO may come out. A mutant that
+/// drops HTTP again reddens `len == 2` (it would be 1); a mutant that forwards
+/// SSE too reddens it (it would be 3).
 #[tokio::test(flavor = "current_thread")]
-async fn acp_session_new_drops_http_and_sse_servers_forwarding_only_stdio() {
+async fn acp_session_new_forwards_http_and_stdio_but_drops_sse() {
     let mcp_servers = serde_json::json!([
-        { "type": "http", "name": "dropped-http", "url": "https://example.invalid/mcp", "headers": [] },
+        { "type": "http", "name": "remote-http", "url": "https://example.invalid/mcp", "headers": [] },
         { "type": "sse",  "name": "dropped-sse",  "url": "https://example.invalid/sse", "headers": [] },
         { "name": "stdio-keeper", "command": "echo", "args": [], "env": [] }
     ]);
@@ -401,14 +406,22 @@ async fn acp_session_new_drops_http_and_sse_servers_forwarding_only_stdio() {
     let specs = recorded.expect("factory must be invoked");
     assert_eq!(
         specs.len(),
-        1,
-        "only the stdio server may be forwarded; http/sse must be dropped, got {specs:?}"
+        2,
+        "http and stdio must be forwarded; sse must be dropped, got {specs:?}"
     );
+    assert_eq!(specs[0].id, "remote-http");
+    assert_eq!(specs[0].transport, McpTransport::Http);
     assert_eq!(
-        specs[0].id, "stdio-keeper",
-        "the survivor must be the stdio server"
+        specs[0].url.as_ref().map(|u| u.expose_url()),
+        Some("https://example.invalid/mcp"),
+        "the url must survive the ACP wire — without it the spec cannot dial"
     );
-    assert_eq!(specs[0].transport, McpTransport::Stdio);
+    assert!(
+        specs[0].command.is_none(),
+        "an ACP http server has no command to invent"
+    );
+    assert_eq!(specs[1].id, "stdio-keeper");
+    assert_eq!(specs[1].transport, McpTransport::Stdio);
 }
 
 // ─────────────────────────────────────────────────────────────────────

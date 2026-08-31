@@ -6,6 +6,8 @@ pub mod eval_partition;
 pub mod eval_report_writer;
 #[cfg(feature = "meta-search")]
 pub mod eval_types;
+#[cfg(feature = "test-fake-mcp")]
+pub mod fake_mcp_http_server;
 pub mod stub_subagent;
 #[cfg(feature = "test-fake-mcp")]
 #[allow(dead_code)] // used only by targets that spawn the fake-mcp-server

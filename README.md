@@ -373,7 +373,7 @@ line. To enable delegation in any profile, set `[tools] adapter = "composite"`.
 Layer -1: Ports          What the agent IS (27 port traits, composed by profiles)
 Layer  0: Built-in tools What the agent ships with (bash, read, write, edit, glob, grep, web fetch)
 Layer  1: Agent Skills   Markdown-based procedural knowledge (agentskills.io standard, 30+ tools)
-Layer  2: MCP            Tool-level interop via external servers (stdio/SSE/HTTP)
+Layer  2: MCP            Tool-level interop via external servers (stdio/Streamable HTTP)
 Layer  3: A2A            Agent-to-agent delegation (localhost/LAN/internet)
 ```
 
@@ -381,8 +381,10 @@ Layer  3: A2A            Agent-to-agent delegation (localhost/LAN/internet)
   Claude Code, Codex, Gemini CLI, or Cursor works in Rustain without
   modification. Discovery paths: `.agents/skills/`, `.rustain/skills/`,
   `.claude/skills/`, `~/.agents/skills/`.
-- **MCP** extends the tool set via sandboxed server processes. Supports stdio,
-  SSE, and HTTP transports.
+- **MCP** extends the tool set via sandboxed server processes and remote
+  servers. Supports **stdio** and **Streamable HTTP**; legacy SSE is rejected
+  per ADR-06-08 (the MCP spec deprecated it on 2025-03-26) — use a proxy such as
+  `mcp-proxy`, or a server that speaks Streamable HTTP.
 - **A2A** enables agent-to-agent delegation. Rustain acts as both client (discover
   and delegate to remote agents) and server (accept tasks from external agents).
 

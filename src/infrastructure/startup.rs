@@ -284,7 +284,7 @@ pub async fn run() -> Result<()> {
         crate::infrastructure::profile_resolution::effective_profile_name(&cli, &bootstrap_config);
 
     // Pass 2: construct TomlProfileResolver, load full config with profile overrides at layer 6
-    let (toml_resolver, startup_notices): (
+    let (mut toml_resolver, startup_notices): (
         crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver,
         Vec<String>,
     ) = match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
@@ -365,6 +365,13 @@ pub async fn run() -> Result<()> {
 
     // Accumulate any profile-related notices for post-EventBus flush
     let mut accumulated_notices: Vec<String> = startup_notices;
+
+    // Story 9.9 (AC2 / A17): a whole-file MCP config failure is LOUD and
+    // NON-FATAL. `accumulated_notices` is emitted below through
+    // `event_bus.emit_domain(AppEvent::SystemNotice { level: Warning, .. })`,
+    // which reaches a `FeedbackBlock` in the TUI — unlike the `tracing::warn!`
+    // this replaced, which only ever reached `~/.rustain/rustain.log`.
+    accumulated_notices.extend(toml_resolver.take_mcp_config_notices());
 
     // AC-10: preview warning notice (once per process lifetime)
     if let Some(preview_name) = toml_resolver.take_preview_warning() {

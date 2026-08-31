@@ -193,6 +193,13 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
 
     let expected: BTreeSet<String> = [
         "adapters/a2a/client.rs",
+        // Story 9.9 (ruling A8): the MCP Streamable HTTP connect call. ONE call
+        // site in the file, in the `connect()` transport-preparation block —
+        // every operator-facing string interpolates `RedactedUrl`'s redacting
+        // `Display` form instead, and `conformance_mcp_http_no_credential_leak`
+        // (in `tests/integration_mcp_http.rs`) drives a `user:pass@` URL through
+        // a failed connect and greps every surfaced string for the password.
+        "adapters/mcp/client.rs",
         "infrastructure/provider_factory.rs",
     ]
     .iter()
@@ -209,8 +216,8 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         "expose_url() count is 0 — the matcher is broken"
     );
     assert_eq!(
-        count, 7,
-        "expose_url() pinned count changed: got {count}, expected 7. \
+        count, 8,
+        "expose_url() pinned count changed: got {count}, expected 8. \
          If you added a legitimate call site, update the allowlist AND this count."
     );
 }

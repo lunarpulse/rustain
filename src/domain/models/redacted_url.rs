@@ -23,6 +23,17 @@ impl RedactedUrl {
         self.0.as_str()
     }
 
+    /// Parse the wrapped value as a URL.
+    ///
+    /// ⚑ Story 9.9: construction is **infallible** (`new`/`From<String>`/
+    /// `From<&str>`, no `FromStr`, no `TryFrom`) and validates nothing, so a
+    /// garbage string is accepted silently. Any caller that needs the value to
+    /// BE a URL must ask, and this is where it asks — co-located with the type
+    /// so the raw value never has to leave it just to be checked.
+    pub fn parse_url(&self) -> Result<url::Url, url::ParseError> {
+        url::Url::parse(&self.0)
+    }
+
     /// Strip userinfo from the URL for safe display.
     fn stripped(&self) -> std::borrow::Cow<'_, str> {
         match url::Url::parse(&self.0) {
