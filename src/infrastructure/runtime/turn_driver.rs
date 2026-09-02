@@ -141,6 +141,7 @@ pub struct LocalTurnDriver {
     security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
     tool_scheduler: Arc<ToolScheduler>,
+    skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
     persona: Arc<dyn PersonaPort>,
     context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
     context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
@@ -164,6 +165,7 @@ impl LocalTurnDriver {
         security: Arc<dyn SecurityPort>,
         tools: Arc<dyn ToolSetPort>,
         tool_scheduler: Arc<ToolScheduler>,
+        skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
         persona: Arc<dyn PersonaPort>,
         context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
         context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
@@ -181,6 +183,7 @@ impl LocalTurnDriver {
             security,
             tools,
             tool_scheduler,
+            skill_activator,
             persona,
             context,
             context_assembler,
@@ -228,6 +231,7 @@ impl LocalTurnDriver {
         let security = &self.security;
         let tools = &self.tools;
         let tool_scheduler = &self.tool_scheduler;
+        let skill_activator = &self.skill_activator;
         let persona = &self.persona;
         let context = &self.context;
         let context_assembler = &self.context_assembler;
@@ -657,6 +661,7 @@ impl LocalTurnDriver {
             session_id,
             TurnOrigin::Interactive,
             context_tainted,
+            Some(skill_activator.clone()),
         ));
         *active_turn = Some(handle);
 

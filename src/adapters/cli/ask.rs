@@ -880,6 +880,7 @@ pub async fn run_ask_core(
         // `ContextBundle` exists here and no peer-origin entry can be present.
         // ⛔ Not a suppressed taint — the absence is structural.
         false,
+        None,
     ));
     // Drop local Arc clones of tools/tool_scheduler so any event senders
     // held inside ToolSetPort adaptors are released. The spawned run_turn

@@ -1817,6 +1817,7 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         "direct-test".into(),
         rustain::domain::models::TurnOrigin::Interactive,
         false,
+        None,
     ));
     // `tools`/`tool_scheduler` were moved (or cloned) into run_turn above; the
     // turn owns the only live ToolSetPort senders now, so event_tx closes when

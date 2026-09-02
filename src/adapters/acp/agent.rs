@@ -745,6 +745,7 @@ impl RustainAcpAgent {
             // injects on the local operator's interactive turn and nowhere
             // else, which is what FR151 asks for.
             false,
+            Some(skill_activator),
         ));
         drop(tools);
         drop(tool_scheduler);

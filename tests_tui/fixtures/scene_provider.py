@@ -96,12 +96,22 @@ the product and fed back to the stub.
 
     {"n":1,"method":"POST","path":"/v1/messages","persona":"scene-sam",
      "auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":1,
-     "last_user":"<≤120 chars>","tools":12,"tool_results":0,"desync":false}
+     "last_user":"<≤120 chars>","skills":[],"tool_names":["Read"],"tools":1,
+     "tool_results":0,"desync":false}
 
 An OpenAI-wire row carries ``"path":"/v1/chat/completions"``, ``"auth":"bearer"``
 and ``"wire":"openai"`` alongside the same ``stream``/``model``/``turn``/
-``last_user``/``tools``/``tool_results``/``desync`` fields. Anthropic-wire rows are
-byte-identical to 19.7's and carry no ``wire`` field.
+``last_user``/``tools``/``tool_results``/``desync`` fields. It carries no
+``skills`` or ``tool_names`` field: that arm serves text turns and composes no
+skill blocks.
+
+``skills`` (Story 19.10 A7) is the Anthropic scene-turn row's view of tier 2 —
+the ``name=`` values of the canonical trailing ``<skill name=…>`` blocks the
+BINARY put in the system prompt (``skill_context::render_skill_block``), ``[]``
+when none is active. ⛔ **Names, never bodies, never the system prompt** — see
+``_skill_names``. ``tool_names`` records only the names from the Anthropic
+request's tool definitions, sorted for deterministic identity checks; ``tools``
+retains the existing cardinality.
 
 Boot calls log ``"kind":"health_check"`` (``stream`` absent, ``max_tokens`` 1),
 ``"kind":"probe"`` (``GET /v1/models``), ``"kind":"models_dev"`` (``GET /api.json``)
@@ -109,8 +119,9 @@ and ``"kind":"title"`` (the product's title call); any other path logs
 ``"kind":"unknown"`` + 404. A scene-turn row carries ``turn`` and no ``kind``, which
 is how a consumer selects the rows that are user turns.
 
-⛔ No header values, no request bodies beyond ``last_user``, no timestamps claimed as
-product-minted (the stub's clock is the shell's, not the binary's).
+⛔ No header values, no request bodies beyond ``last_user`` and the skill/tool
+names, no timestamps claimed as product-minted (the stub's clock is the shell's,
+not the binary's).
 """
 
 from __future__ import annotations
@@ -118,6 +129,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -577,6 +589,62 @@ def _last_user(body: dict) -> tuple[str, int]:
     return "", 0
 
 
+SKILL_BLOCK = re.compile(
+    r'^<skill name="([^"]+)" '
+    r'source="(?:WorkspaceAgents|WorkspaceRustain|WorkspaceClaude|GlobalAgents)">\n'
+    r"<instructions>\n.*?\n</instructions>\n"
+    r"<skill_directory>.*?</skill_directory>\n"
+    r"<workspace_root>.*?</workspace_root>\n"
+    r"(?:<referenced_files>\n.*?\n</referenced_files>\n)?"
+    r"(?:<arguments>.*?</arguments>\n)?"
+    r"</skill>",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _skill_names(body: dict) -> list[str]:
+    """Names from canonical skill blocks appended at the END of the prompt.
+
+    Story 19.10 A7 — tier 2 of FR41 ("instructions on activation") is a claim
+    about the MODEL's prompt, and an `Inspect` overlay screenshot is a claim
+    about the OPERATOR's screen. `skill_context::render_skill_block` appends
+    canonical, source-qualified blocks; mere `<skill name=…>` prose in a persona
+    or agent body is not activation evidence.
+
+    ⛔ **Names, never bodies, never the system prompt.** The neighbouring field
+    is `last_user`, which writes 120 characters of operator text — that is a
+    request-shape fact, not a licence. A skill BODY is Marco's runbook and the
+    system prompt is the persona: neither belongs in a committed receipt.
+    """
+    system = body.get("system")
+    if not isinstance(system, str):
+        return []
+    matches = list(SKILL_BLOCK.finditer(system))
+    if not matches or matches[-1].end() != len(system):
+        return []
+
+    trailing = [matches[-1]]
+    cursor = matches[-1].start()
+    for match in reversed(matches[:-1]):
+        if system[match.end() : cursor] != "\n\n":
+            break
+        trailing.append(match)
+        cursor = match.start()
+    return [match.group(1) for match in reversed(trailing)]
+
+
+def _tool_names(body: dict) -> list[str]:
+    """Sorted tool-definition names only; never schemas or descriptions."""
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return []
+    return sorted(
+        tool["name"]
+        for tool in tools
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+    )
+
+
 # ── Server ───────────────────────────────────────────────────────────────────
 
 
@@ -769,6 +837,9 @@ class SceneHandler(BaseHTTPRequestHandler):
                 "model": body.get("model", ""),
                 "turn": number,
                 "last_user": _clip(haystack, LAST_USER_MAX),
+                # Story 19.10 A7/review — names only; see both helpers.
+                "skills": _skill_names(body),
+                "tool_names": _tool_names(body),
                 "tools": len(body.get("tools") or []),
                 "tool_results": tool_results,
                 "desync": turn is None,

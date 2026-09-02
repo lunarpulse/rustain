@@ -185,6 +185,7 @@ async fn drive_turn_with_agent(
         security,
         tools,
         scheduler,
+        Arc::new(SkillActivator::new()),
         Arc::new(NoOpPersona),
         Arc::new(ArcSwap::from_pointee(
             Arc::new(NoOpContext) as Arc<dyn rustain::domain::ports::ContextPort>

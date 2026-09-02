@@ -776,6 +776,7 @@ data: {\"type\":\"message_stop\"}\n\
             "sess-test".into(),
             rustain::domain::models::TurnOrigin::Interactive,
             false,
+            None,
         )
         .await;
 

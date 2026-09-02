@@ -7,7 +7,8 @@ available while it is active via the `allowed-tools` frontmatter field, using
 the Agent Skills specification syntax.
 
 This page documents the accepted forms of `allowed-tools`, what this build can
-and cannot honour, and what the turn-time warning means.
+and cannot honour, what the turn-time warning means, and the **trust prompt**
+the first activation of a workspace skill always raises.
 
 ## The four accepted forms
 
@@ -91,3 +92,58 @@ This means exactly what it says:
 If the active agent and skill tool filters share no tool at all, a separate,
 louder warning fires instead: *"Active agent and skill tool filters are
 disjoint — no tools available for this turn."*
+
+## Before any of that: the trust prompt
+
+The first time a **workspace** skill is activated, rustain stops and asks
+before it loads anything:
+
+```text
+┃ New project skill detected: "safe-deploy"                ┃
+┃ Trust and enable this skill for this session?            ┃
+┃ [y] Yes  [n] No  [i] Inspect                             ┃
+```
+
+- **`y`** — trust it and activate. The skill's instructions go into the system
+  prompt and its `allowed-tools` starts filtering from the **next** message you
+  send (see the note below).
+- **`n`** (or `Esc`) — decline. The model is told
+  `Skill '<name>' not trusted — activation declined.` and carries on without
+  it; nothing about the skill reaches the prompt.
+- **`i`** — inspect. The SKILL.md file is shown verbatim, up to 20 lines, so
+  you can read the `allowed-tools` line and the body before you answer. `Esc`
+  returns to the prompt; it does **not** decline for you.
+
+Skills under `~/.agents/skills/` are treated as yours and are **not** prompted.
+Only the three workspace directories are — a skill that arrived with a `git
+clone` is a file someone else wrote that is about to steer your agent.
+
+### ⚠ The prompt says "session"; the decision is per **conversation**
+
+The answer is remembered in memory, keyed on the **conversation**, for as long
+as the process lives. In practice that means:
+
+- open a second tab, or start a new conversation, and you are asked again about
+  the same skill — even though you already said yes in this session;
+- restart rustain and every answer is gone;
+- nothing is written to disk, so a "yes" can never be inherited by a later run
+  or by another workspace.
+
+The wording is wrong in the safe direction — you are asked too often, never too
+rarely — but it is wrong. Tracked as `DF-19-10-TRUST-PROMPT-SAYS-SESSION`.
+
+### Execution restriction is immediate; catalogue composition is per message
+
+When a model activates a skill during a turn, rustain refreshes the live
+activation set before scheduling the next tool call. A tool excluded by the
+new skill is denied even if the provider emitted it beside `activate_skill` in
+the same response. The provider-facing catalogue and `<skill>` prompt are
+composed when the message is submitted, so their filtered form appears on the
+next message; that presentation boundary does not weaken execution policy.
+
+### ⚠ You may not see the unmatched-items warning
+
+That warning is an **advisory** notification, and in the default `Focus`
+density mode advisories are queued rather than displayed. Switch density
+(`Ctrl+X` then `w` for Monitor) to drain the queue and read them. Tracked as
+`DF-19-10-ADVISORY-QUEUED-IN-FOCUS`.

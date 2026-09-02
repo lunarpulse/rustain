@@ -140,7 +140,7 @@ pub async fn run_turn(
     conversation_id: String,
     storage: Arc<dyn StoragePort>,
     conversation_snapshot: crate::domain::models::Conversation,
-    activation_set: Option<crate::domain::models::SkillActivationSet>,
+    mut activation_set: Option<crate::domain::models::SkillActivationSet>,
     turn_cancel: CancellationToken,
     ledger: Arc<dyn UsageLedgerPort>,
     resolved: ResolvedModel,
@@ -163,6 +163,10 @@ pub async fn run_turn(
     // recomputes from each entry's `ContextSource`. There is no field a peer
     // can set to clear it (17.1b's Vex rule).
     context_tainted: bool,
+    // Live activation state is needed only when a model activates a skill
+    // during this turn. The initial snapshot still owns prompt composition;
+    // this handle refreshes scheduler enforcement between tool calls.
+    skill_activator: Option<Arc<crate::adapters::skill_activation::SkillActivator>>,
 ) {
     #[cfg(any(test, feature = "test-instrumentation"))]
     RUN_TURN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -492,7 +496,6 @@ pub async fn run_turn(
                                 })
                                 .collect();
                             let source = turn_origin.approval_source(&conversation_id);
-                            let active_skills = activation_set.as_ref().map(|s| s.active_skills());
                             let requests: Vec<crate::domain::models::ToolCallRequest> =
                                 batch_with_idx.iter().map(|(_, req)| req.clone()).collect();
                             let provenance = if context_tainted {
@@ -500,16 +503,65 @@ pub async fn run_turn(
                             } else {
                                 ProvenanceTag::UserOriginated
                             };
-                            let terminal = tool_scheduler
-                                .clone()
-                                .schedule_with_provenance(
-                                    source,
-                                    requests,
-                                    turn_cancel.clone(),
-                                    active_skills,
-                                    provenance,
-                                )
-                                .await;
+                            // Activation changes policy immediately. A provider may emit
+                            // `activate_skill` beside another call in one response, so run
+                            // that batch in wire order and refresh the enforcement snapshot
+                            // after each successful activation. Ordinary batches retain the
+                            // scheduler's parallel-safe fast path.
+                            let terminal = if requests
+                                .iter()
+                                .any(|request| request.tool_name == "activate_skill")
+                            {
+                                let mut terminal = Vec::with_capacity(requests.len());
+                                for request in requests {
+                                    let mut one = {
+                                        let active_skills =
+                                            activation_set.as_ref().map(|s| s.active_skills());
+                                        tool_scheduler
+                                            .clone()
+                                            .schedule_with_provenance(
+                                                source.clone(),
+                                                vec![request],
+                                                turn_cancel.clone(),
+                                                active_skills,
+                                                provenance,
+                                            )
+                                            .await
+                                    };
+                                    let activated = one.iter().any(|call| {
+                                        matches!(
+                                            call,
+                                            ToolCall::Success {
+                                                request,
+                                                result,
+                                                ..
+                                            } if request.tool_name == "activate_skill"
+                                                && !result.is_error
+                                        )
+                                    });
+                                    terminal.append(&mut one);
+                                    if activated {
+                                        if let Some(activator) = &skill_activator {
+                                            activation_set =
+                                                activator.snapshot_for_turn(&conversation_id).await;
+                                        }
+                                    }
+                                }
+                                terminal
+                            } else {
+                                let active_skills =
+                                    activation_set.as_ref().map(|s| s.active_skills());
+                                tool_scheduler
+                                    .clone()
+                                    .schedule_with_provenance(
+                                        source,
+                                        requests,
+                                        turn_cancel.clone(),
+                                        active_skills,
+                                        provenance,
+                                    )
+                                    .await
+                            };
                             if terminal.iter().any(|call| {
                                 matches!(
                                     call,

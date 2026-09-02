@@ -701,6 +701,7 @@ pub async fn run(
         security.clone(),
         tools.clone(),
         tool_scheduler.clone(),
+        skill_activator.clone(),
         persona.clone(),
         app_state.agent_core.context.clone(),
         app_state.agent_core.context_assembler.clone(),
