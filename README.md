@@ -225,10 +225,13 @@ cargo build --features a2a,p2p                             # federation from sou
 A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them** — they are on in every release built after this change; source builds need `--features a2a,p2p`. See [`docs/a2a.md`](docs/a2a.md) and [`docs/p2p.md`](docs/p2p.md).
 
 ### TUI peer-send quick start
+
+`rustain team send` (the CLI twin) is not in this cut — it is tracked as `18-9b-cli-team-send`; use the TUI verb below.
+
 1. Build the feature: `cargo build --features a2a`.
-2. Configure a roster ID and URL in `.rustain/a2a.json`, for example `"reviewer": {"url": "https://agent.example"}`.
+2. Configure a roster ID and URL in `.rustain/a2a.json`, for example `"reviewer": {"url": "http://127.0.0.1:8080"}` (the recipient started in the next step).
 3. Start the recipient first; if it is rustain, use `rustain --serve-a2a=127.0.0.1:8080 daemon start`.
-4. Start rustain in the configured workspace; peers are discovered at startup.
+4. Start rustain in the configured workspace; peers are discovered at startup. ⚠ Discovery runs once at boot — a peer that is down when you start may be refused until you restart with it up (on-demand refresh is deferred; see `docs/a2a.md`).
 5. In the TUI, run `/team send reviewer review this patch`; inspect delivery with `/team log`.
 
 **Default features:** `anthropic`, `openai`, `ollama`, `clipboard`, `mcp`,

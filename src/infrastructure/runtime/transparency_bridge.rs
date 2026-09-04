@@ -407,7 +407,9 @@ fn team_send_event(
         ),
         Err(error) => crate::domain::events::AppEvent::SystemNotice {
             conversation_id: Some(conversation_id.to_owned()),
-            level: crate::domain::models::NoticeLevel::Warning,
+            // Advisory, not Warning: refusals arrive from a background task
+            // and must not abort an unrelated streaming turn (turn-fatal).
+            level: crate::domain::models::NoticeLevel::Advisory,
             message: error.to_string(),
         },
     }
@@ -726,7 +728,9 @@ mod tests {
         let crate::domain::events::AppEvent::SystemNotice { level, message, .. } = success else {
             panic!("send completion must use the feedback event path");
         };
-        assert!(matches!(level, crate::domain::models::NoticeLevel::Warning));
+        // Advisory: a late peer reply must not abort an unrelated turn.
+        assert!(matches!(level, crate::domain::models::NoticeLevel::Advisory));
+        assert!(!level.is_turn_fatal());
         assert_eq!(
             message,
             "[peer: moon] task peer-task-42 — completed\npeer answer"

@@ -266,14 +266,19 @@ impl A2aDelegationRuntime {
 
         // The submit fact is durable before the POST. A first-hop transport
         // failure has no node yet, so journal the existing rejection vocabulary
-        // directly rather than losing the attempt through `reject()`.
+        // directly rather than losing the attempt through `reject()`. The
+        // detail carries remote-influenced content (AC8): sanitize exactly as
+        // `reject()` does for the post-node arms.
         let first_value = match transport.message_send(message).await {
             Ok(value) => value,
             Err(error) => {
                 self.emit_room(RoomEvent::RemoteEnvelopeRejected {
                     peer,
                     reason: RejectReason::Policy {
-                        detail: format!("A2A transport failure: {error}"),
+                        detail: sanitize_disclosable(
+                            &format!("A2A transport failure: {error}"),
+                            MAX_SUMMARY_BYTES,
+                        ),
                     },
                     direction: Direction::Outbound,
                     task: submitted_task,
@@ -288,7 +293,10 @@ impl A2aDelegationRuntime {
                 self.emit_room(RoomEvent::RemoteEnvelopeRejected {
                     peer,
                     reason: RejectReason::Policy {
-                        detail: format!("A2A transport failure: {error}"),
+                        detail: sanitize_disclosable(
+                            &format!("A2A transport failure: {error}"),
+                            MAX_SUMMARY_BYTES,
+                        ),
                     },
                     direction: Direction::Outbound,
                     task: submitted_task,
@@ -498,9 +506,51 @@ impl A2aDelegationRuntime {
                     self.node_tree.mark_tainted(node_id).await;
                     Ok(task.result)
                 }
-                RapTaskState::Canceled => Err(DelegationError::Cancelled),
+                RapTaskState::Canceled => {
+                    // A cancellation is a terminal outcome: journal it like
+                    // every other terminal state so the outbound `dispatched`
+                    // row is never orphaned (AC2 — attempt AND outcome). The
+                    // node is already `Cancelled` (the projector's own
+                    // terminal for this state — owner-kill and peer-report
+                    // both land here), so unlike `reject()` we must not force
+                    // `Failed`: `Cancelled -> Failed` is an illegal FSM hop.
+                    let task_correlation = disclosable_task_id(&task.id);
+                    self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+                        peer: peer.clone(),
+                        reason: RejectReason::Policy {
+                            detail: sanitize_disclosable(
+                                "peer reported terminal state canceled",
+                                MAX_SUMMARY_BYTES,
+                            ),
+                        },
+                        direction: Direction::Outbound,
+                        task: Some(task_correlation.clone()),
+                    })
+                    .await?;
+                    self.emit_refused(
+                        node_id,
+                        parent_tool_call_id,
+                        &task_correlation,
+                        RefuseReason::Policy,
+                    );
+                    Err(DelegationError::Cancelled)
+                }
                 _ => {
-                    let reason = format!("peer reported terminal state {}", state.as_str());
+                    let peer_reason = task
+                        .result
+                        .pointer("/status/message/parts")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|parts| {
+                            parts.iter().find_map(|part| {
+                                part.get("text").and_then(serde_json::Value::as_str)
+                            })
+                        });
+                    let reason = match peer_reason {
+                        Some(detail) => {
+                            format!("peer reported terminal state {}: {detail}", state.as_str())
+                        }
+                        None => format!("peer reported terminal state {}", state.as_str()),
+                    };
                     self.reject(node_id, peer, parent_tool_call_id, &task.id, &reason)
                         .await?;
                     Err(DelegationError::Refused { reason })
@@ -689,7 +739,7 @@ fn mint_node_id(peer: &str, task_id: &str) -> AgentId {
 /// refusal receipt. The unmodified id remains in [`TaskSnapshot`] for wire
 /// polling and cancellation. Reserve the truncation marker inside the bound
 /// when rejecting an oversized remote id.
-fn disclosable_task_id(task_id: &str) -> String {
+pub(crate) fn disclosable_task_id(task_id: &str) -> String {
     let limit = if task_id.len() > MAX_PEER_ID_BYTES {
         MAX_PEER_ID_BYTES.saturating_sub(TRUNCATION_MARKER.len())
     } else {
@@ -771,6 +821,7 @@ pub fn build_message(input: &serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use parking_lot::Mutex;
@@ -888,6 +939,75 @@ mod tests {
             Err(RoomJournalError::Append("disk full".to_owned()))
         }
     }
+    /// A journal that counts `RemoteEnvelopeDispatched` appends so a mock
+    /// transport can prove the submit fact was durable **before** the POST —
+    /// the ordering a final-events assertion cannot distinguish (AC2(a)'s
+    /// named mutant moves the append after `message_send` and keeps the
+    /// final order).
+    struct CountingJournal {
+        inner: Arc<dyn RoomJournal>,
+        dispatched: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RoomJournal for CountingJournal {
+        async fn record_event(&self, event: RoomEvent) -> Result<(), RoomJournalError> {
+            if matches!(event, RoomEvent::RemoteEnvelopeDispatched { .. }) {
+                self.dispatched.fetch_add(1, Ordering::Relaxed);
+            }
+            self.inner.record_event(event).await
+        }
+    }
+
+    /// Transport that asserts, at `message_send` entry, that the dispatch
+    /// fact is already journaled.
+    struct JournalObservingTransport {
+        script: Scripted,
+        dispatched: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl A2aTaskTransport for JournalObservingTransport {
+        async fn message_send(
+            &self,
+            message: serde_json::Value,
+        ) -> Result<serde_json::Value, A2aError> {
+            assert!(
+                self.dispatched.load(Ordering::Relaxed) >= 1,
+                "the submit fact must be journaled BEFORE the POST leaves"
+            );
+            self.script.message_send(message).await
+        }
+        async fn tasks_get(&self, task_id: &str) -> Result<serde_json::Value, A2aError> {
+            self.script.tasks_get(task_id).await
+        }
+        async fn tasks_cancel(&self, task_id: &str) -> Result<serde_json::Value, A2aError> {
+            self.script.tasks_cancel(task_id).await
+        }
+    }
+
+    fn counting_runtime() -> (
+        A2aDelegationRuntime,
+        NodeTree,
+        mpsc::UnboundedReceiver<AppEvent>,
+        Arc<AtomicUsize>,
+    ) {
+        let tree = NodeTree::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let room: Arc<dyn RoomJournal> = Arc::new(CountingJournal {
+            inner: Arc::new(TestRoomJournal {
+                event_tx: tx.clone(),
+            }),
+            dispatched: dispatched.clone(),
+        });
+        (
+            A2aDelegationRuntime::new(tree.clone(), room, tx),
+            tree,
+            rx,
+            dispatched,
+        )
+    }
 
     fn runtime() -> (
         A2aDelegationRuntime,
@@ -977,6 +1097,190 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_fact_is_durable_before_the_post_leaves() {
+        // AC2(a)'s named mutant moves the dispatch append to after
+        // `message_send`; final-order assertions stay green under it. Only a
+        // transport that inspects the journal at POST entry catches it.
+        let (rt, _tree, mut rx, dispatched) = counting_runtime();
+        let transport = Arc::new(JournalObservingTransport {
+            script: Scripted::new(&["completed"]),
+            dispatched: dispatched.clone(),
+        });
+        let result = rt
+            .delegate(
+                &spec("observed", false),
+                TrustTier::Unverified,
+                "call-obs",
+                transport,
+                serde_json::json!({
+                    "message": {
+                        "messageId": "sender-observed-1",
+                        "parts": [{ "kind": "text", "text": "ping" }]
+                    }
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("journal-observing transport completes");
+        assert_eq!(result["status"]["state"], "completed");
+        assert_eq!(dispatched.load(Ordering::Relaxed), 1);
+
+        // The bus still carries the ordered pair.
+        let mut kinds = 0;
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::DomainEvent(DomainEventPayload::Room(event)) = event {
+                if matches!(
+                    (kinds, &event),
+                    (
+                        0,
+                        RoomEvent::RemoteEnvelopeDispatched {
+                            task: Some(task),
+                            ..
+                        }
+                    ) if task == "sender-observed-1"
+                ) || matches!(
+                    (kinds, &event),
+                    (
+                        1,
+                        RoomEvent::RemoteEnvelopeAccepted {
+                            direction: Direction::Outbound,
+                            ..
+                        }
+                    )
+                ) {
+                    kinds += 1;
+                }
+            }
+        }
+        assert_eq!(kinds, 2, "dispatched then accepted, in order");
+    }
+
+    #[tokio::test]
+    async fn peer_cancellation_is_journaled_as_a_terminal_refusal() {
+        // AC2: the attempt AND the outcome are journaled — a canceled task
+        // must not leave the dispatched row orphaned.
+        let (rt, tree, mut rx) = runtime();
+        let error = rt
+            .delegate(
+                &spec("canceller", false),
+                TrustTier::Unverified,
+                "call-cancel",
+                Arc::new(Scripted::new(&["canceled"])),
+                serde_json::json!({
+                    "message": {
+                        "messageId": "sender-cancel-1",
+                        "parts": [{ "kind": "text", "text": "ping" }]
+                    }
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("canceled task must fail");
+        assert!(matches!(error, DelegationError::Cancelled));
+
+        let node = wait_for_peer_node(&tree).await;
+        let entry = tree
+            .list()
+            .await
+            .into_iter()
+            .find(|e| e.agent_id == node)
+            .expect("peer node exists");
+        assert_eq!(entry.current_status, NodeState::Cancelled);
+
+        let room_events = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| {
+                let AppEvent::DomainEvent(DomainEventPayload::Room(event)) = event else {
+                    return None;
+                };
+                Some(event)
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            room_events.first(),
+            Some(RoomEvent::RemoteEnvelopeDispatched { .. })
+        ));
+        assert!(matches!(
+            room_events.last(),
+            Some(RoomEvent::RemoteEnvelopeRejected {
+                direction: Direction::Outbound,
+                ..
+            })
+        ));
+        assert_eq!(room_events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn peer_refusal_reason_is_carried_into_the_rejection() {
+        // docs/a2a.md: "a remote refusal renders the peer's reason" — the
+        // terminal arm must read status.message, not discard it.
+        let (rt, _tree, mut rx) = runtime();
+        struct RefusingTransport;
+        #[async_trait]
+        impl A2aTaskTransport for RefusingTransport {
+            async fn message_send(
+                &self,
+                _message: serde_json::Value,
+            ) -> Result<serde_json::Value, A2aError> {
+                // The peer answers the POST itself with a terminal rejection
+                // carrying its own human-readable reason.
+                Ok(serde_json::json!({
+                    "kind": "task",
+                    "id": "task-r",
+                    "status": {
+                        "state": "rejected",
+                        "message": {
+                            "parts": [{ "kind": "text", "text": "quota exceeded on peer" }]
+                        }
+                    }
+                }))
+            }
+            async fn tasks_get(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
+                unreachable!("terminal first snapshot must not poll")
+            }
+            async fn tasks_cancel(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
+                Ok(serde_json::json!({}))
+            }
+        }
+        let error = rt
+            .delegate_inner(
+                spec("refuser", false),
+                TrustTier::Unverified,
+                "call-refuse".to_owned(),
+                Arc::new(RefusingTransport),
+                serde_json::json!({
+                    "message": {
+                        "messageId": "sender-refuse-1",
+                        "parts": [{ "kind": "text", "text": "ping" }]
+                    }
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("rejected task must fail");
+        let DelegationError::Refused { reason } = &error else {
+            panic!("expected a refusal, got {error:?}");
+        };
+        assert!(reason.contains("quota exceeded on peer"), "{reason}");
+        assert!(reason.contains("rejected"), "{reason}");
+
+        let room_events = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| {
+                let AppEvent::DomainEvent(DomainEventPayload::Room(event)) = event else {
+                    return None;
+                };
+                Some(event)
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            room_events.last(),
+            Some(RoomEvent::RemoteEnvelopeRejected {
+                reason: RejectReason::Policy { detail },
+                ..
+            }) if detail.contains("quota exceeded on peer")
+        ));
+    }
+
+    #[tokio::test]
     async fn first_transport_failure_is_journaled_as_one_outbound_refusal_without_a_node() {
         let (rt, tree, mut rx) = runtime();
         let error = rt
@@ -1009,6 +1313,13 @@ mod tests {
                 Some(event)
             })
             .collect::<Vec<_>>();
+        assert!(matches!(
+            room_events.first(),
+            Some(RoomEvent::RemoteEnvelopeDispatched {
+                task: Some(task),
+                ..
+            }) if task == "sender-dead-1"
+        ));
         assert_eq!(
             room_events
                 .iter()

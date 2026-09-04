@@ -244,8 +244,9 @@ fn test_e2e_help_overlay_shows_tmux_warning() {
     // Height bumped 60→85 (S4.4), 85→100 (S6.0d), 100→120 (S16.8 SCROLL & MOUSE category),
     // 120→126 (Story 18.3a: `/room` viewer + 3 role sub-verbs + Ctrl+X, R),
     // 126→131 (Story 18.3a-c: `/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E),
-    // 131→136 (Story 18.4b: 5 `/peer` sub-verbs, COMMANDS category only).
-    let mut h = TestHarness::with_size(100, 136);
+    // 131→136 (Story 18.4b: 5 `/peer` sub-verbs, COMMANDS category only),
+    // 136→137 (Story 18.9 review: `/team send` binding, COMMANDS category).
+    let mut h = TestHarness::with_size(100, 137);
     h.press_key(DomainKey::Esc);
     h.type_char('?');
 

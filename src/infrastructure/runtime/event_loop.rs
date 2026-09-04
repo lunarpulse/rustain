@@ -6247,19 +6247,12 @@ pub async fn run(
                                     tab.streaming.current_blocks.clear();
                                     tab.streaming.active_tool_calls.clear();
                                 }
-                                if matches!(level, crate::domain::models::NoticeLevel::Error) {
-                                    static BG_FB_COUNTER: AtomicUsize = AtomicUsize::new(0);
-                                    let fb_id = format!("bgfb-{}", BG_FB_COUNTER.fetch_add(1, Ordering::Relaxed));
-                                    let fb = FeedbackBlock {
-                                        id: fb_id.clone(),
-                                        level: FeedbackLevel::Error,
-                                        message: msg,
-                                        actions: vec![FeedbackAction::Retry],
-                                    };
-                                    tab.feedback_blocks.insert(fb_id.clone(), fb);
-                                    tab.active_feedback_id = Some(fb_id);
-                                    tab.streaming.is_streaming = false;
-                                }
+                            // Errors were always stored; a Warning/Advisory
+                            // notice addressed here (e.g. a late `/team
+                            // send` reply) must survive the switch too.
+                            crate::adapters::tui::handlers::notice::store_background_notice(
+                                tab, level, msg,
+                            );
                                 // Redraw so tab bar can reflect the state change
                                 state.needs_redraw = true;
                             }

@@ -61,7 +61,7 @@ In the TUI, send one message with the roster ID followed by the message text:
 
 The command resolves `security-peer` from the startup roster, reuses its cached AgentCard and transport, records the outbound attempt before the HTTP POST, then polls the remote task to a terminal state. It does not inject peer output into the conversation. A successful reply appears only as a tainted feedback block such as `[peer: security-peer] task … — completed …`.
 
-Use `/team log` for the durable local record. Outbound rows use `→`; the attempt and terminal result carry the same task ID. A successful send also materializes an `a2a-peer` node in the Agents panel.
+Use `/team log` for the durable local record. Outbound rows use `→`. For rustain↔rustain peers the attempt and the terminal result carry the same task ID (the receiving rustain reuses the sender's `messageId` as its task id); a third-party agent may assign its own id, in which case the two outbound rows are correlated only by order — that equality is a rustain behaviour, not an A2A protocol guarantee. A successful send also materializes an `a2a-peer` node in the Agents panel.
 
 Failures are explicit and terminal:
 

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use super::driver::{A2aDelegationRuntime, DelegationError, TaskClient, build_message};
+use super::driver::{
+    A2aDelegationRuntime, DelegationError, TaskClient, build_message, disclosable_task_id,
+};
 use super::endpoint::resolve_jsonrpc_endpoint;
 use super::error::A2aError;
 
@@ -51,14 +53,17 @@ impl std::fmt::Display for SendError {
                 };
                 write!(
                     f,
-                    "no A2A peer `{peer}` in .rustain/a2a.json (known: {known})"
+                    "no A2A peer `{peer}` in the configured A2A roster \
+                     (`.rustain/a2a.json` or the active profile) (known: {known})"
                 )
             }
             Self::CardNotCached { peer } => write!(
                 f,
-                "peer `{peer}` is in `.rustain/a2a.json` but its AgentCard was never fetched \
-                 (it was unreachable when this session started). Restart the daemon with the peer \
-                 up; on-demand discovery is `DF-18-9-CARD-REFRESH`."
+                "peer `{peer}` is configured but its AgentCard is not cached — discovery \
+                 runs once at startup and may still be in flight, or the peer was \
+                 unreachable when this session started. If it stays refused, restart \
+                 the daemon with the peer up; on-demand discovery is \
+                 `DF-18-9-CARD-REFRESH`."
             ),
             Self::Endpoint { peer, source } => {
                 write!(f, "peer `{peer}` has no usable A2A endpoint: {source}")
@@ -110,7 +115,10 @@ pub async fn send_text(
         .map_err(|source| match source {
             DelegationError::InputRequired { task_id, .. } => SendError::InputRequired {
                 peer: peer_id.to_owned(),
-                task_id,
+                // The remote agent chose this id; it reaches the TUI, so it
+                // gets the same bounded, control-stripped form the journal
+                // uses (AC8) rather than the raw wire value.
+                task_id: disclosable_task_id(&task_id),
             },
             source => SendError::Delegation {
                 peer: peer_id.to_owned(),
@@ -126,21 +134,37 @@ fn outcome_from_result(
     submitted_id: &str,
     result: &serde_json::Value,
 ) -> SendOutcome {
-    let task_id = result
-        .get("id")
-        .and_then(serde_json::Value::as_str)
+    // Mirror `TaskSnapshot::from_result`'s correlation precedence (`id` →
+    // `taskId` → `messageId`) so the TUI shows the same id the journal's
+    // terminal row records; `submitted_id` is the last resort only.
+    let task_id = ["id", "taskId", "messageId"]
+        .iter()
+        .find_map(|key| {
+            result
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+        })
         .unwrap_or(submitted_id)
         .to_owned();
+    let task_id = disclosable_task_id(&task_id);
     let state = result
         .pointer("/status/state")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("completed")
         .to_owned();
-    let reply_text = result
-        .pointer("/status/message/parts/0/text")
-        .or_else(|| result.pointer("/parts/0/text"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
+    let reply_text = first_text_part(result.pointer("/status/message/parts"))
+        .or_else(|| first_text_part(result.pointer("/parts")))
+        .or_else(|| {
+            result
+                .pointer("/artifacts")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|artifacts| {
+                    artifacts
+                        .iter()
+                        .find_map(|a| first_text_part(a.get("parts")))
+                })
+        });
 
     SendOutcome {
         peer: peer_id.to_owned(),
@@ -148,6 +172,16 @@ fn outcome_from_result(
         state,
         reply_text,
     }
+}
+
+/// First `text` part in an A2A parts array, wherever it sits — a conforming
+/// peer may lead with a non-text part or answer entirely via artifacts.
+fn first_text_part(parts: Option<&serde_json::Value>) -> Option<String> {
+    parts?.as_array()?.iter().find_map(|part| {
+        part.get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    })
 }
 
 fn outbound_message(text: &str) -> serde_json::Value {
@@ -215,7 +249,8 @@ mod tests {
         ));
         assert_eq!(
             error.to_string(),
-            "no A2A peer `missing` in .rustain/a2a.json (known: alpha)"
+            "no A2A peer `missing` in the configured A2A roster \
+             (`.rustain/a2a.json` or the active profile) (known: alpha)"
         );
     }
 
@@ -236,12 +271,15 @@ mod tests {
             error,
             SendError::CardNotCached { ref peer } if peer == "known"
         ));
-        assert_eq!(
-            error.to_string(),
-            "peer `known` is in `.rustain/a2a.json` but its AgentCard was never fetched \
-(it was unreachable when this session started). Restart the daemon with the peer up; \
-on-demand discovery is `DF-18-9-CARD-REFRESH`."
+        let text = error.to_string();
+        assert!(
+            text.starts_with("peer `known` is configured but its AgentCard is not cached"),
+            "{text}"
         );
+        // The refusal must not assert a definite boot-time failure while the
+        // startup fetch can still be in flight.
+        assert!(text.contains("may still be in flight"), "{text}");
+        assert!(text.contains("DF-18-9-CARD-REFRESH"), "{text}");
     }
 
     #[test]
@@ -277,5 +315,79 @@ on-demand discovery is `DF-18-9-CARD-REFRESH`."
         assert_eq!(outcome.task_id, "peer-task-42");
         assert_eq!(outcome.state, "completed");
         assert_eq!(outcome.reply_text.as_deref(), Some("peer answer"));
+    }
+
+    #[test]
+    fn outcome_correlates_message_shaped_replies_by_their_own_id() {
+        // `TaskSnapshot::from_result` correlates message-shaped responses by
+        // `taskId`/`messageId`; the TUI must show the same id the journal's
+        // terminal row records, not the locally submitted one.
+        let result = serde_json::json!({
+            "kind": "message",
+            "messageId": "peer-message-1",
+            "parts": [{ "kind": "text", "text": "fast reply" }]
+        });
+
+        let outcome = outcome_from_result("moon", "submitted-local-id", &result);
+
+        assert_eq!(outcome.task_id, "peer-message-1");
+        assert_eq!(outcome.state, "completed");
+        assert_eq!(outcome.reply_text.as_deref(), Some("fast reply"));
+    }
+
+    #[test]
+    fn outcome_extracts_text_from_later_parts_and_artifacts() {
+        // A conforming peer may lead with a non-text part, or answer through
+        // task artifacts instead of status.message.
+        let leading_data_part = serde_json::json!({
+            "kind": "task",
+            "id": "t-1",
+            "status": {
+                "state": "completed",
+                "message": {
+                    "parts": [
+                        { "kind": "data", "data": { "a": 1 } },
+                        { "kind": "text", "text": "after a data part" }
+                    ]
+                }
+            }
+        });
+        assert_eq!(
+            outcome_from_result("moon", "s", &leading_data_part)
+                .reply_text
+                .as_deref(),
+            Some("after a data part")
+        );
+
+        let artifact_answer = serde_json::json!({
+            "kind": "task",
+            "id": "t-2",
+            "status": { "state": "completed" },
+            "artifacts": [
+                { "parts": [{ "kind": "text", "text": "answer in an artifact" }] }
+            ]
+        });
+        assert_eq!(
+            outcome_from_result("moon", "s", &artifact_answer)
+                .reply_text
+                .as_deref(),
+            Some("answer in an artifact")
+        );
+    }
+
+    #[test]
+    fn outcome_task_id_is_sanitized_before_it_reaches_the_tui() {
+        // The remote agent controls this id; control characters must not
+        // reach terminal-facing sinks (AC8 — same bound as the journal).
+        let result = serde_json::json!({
+            "kind": "task",
+            "id": "evil\u{0007}\u{000a}forged-header",
+            "status": { "state": "completed" }
+        });
+
+        let task_id = outcome_from_result("moon", "s", &result).task_id;
+
+        assert!(!task_id.contains('\u{0007}'), "{task_id:?}");
+        assert!(!task_id.contains('\n'), "{task_id:?}");
     }
 }

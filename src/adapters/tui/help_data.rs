@@ -252,6 +252,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
+                    key: "/team send <peer-id> <text…>",
+                    description: "Send one message to an A2A peer (a2a feature)",
+                    available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
                     key: "/team trust",
                     description: "List effective peer-consent grants (journaled vs TOML-implied)",
                     available: true,

@@ -62,12 +62,12 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
             let peer = tokens
                 .next()
                 .ok_or_else(|| format!("Missing peer id after '/team send'. Use: {USAGE}"))?;
-            let text = tokens.collect::<Vec<_>>().join(" ");
-            if text.is_empty() {
-                return Err(format!(
-                    "Missing message text after peer `{peer}`. Use: {USAGE}"
-                ));
-            }
+            // FR54-a: exactly the text the operator typed leaves the host.
+            // Only the verb and the peer token are delimiters — the remainder
+            // keeps its internal whitespace verbatim (indentation, repeated
+            // spaces, tabs), so pasted snippets are not rewritten on the wire.
+            let text = raw_remainder_after_peer(arg, peer)
+                .ok_or_else(|| format!("Missing message text after peer `{peer}`. Use: {USAGE}"))?;
             Ok(TeamCommandArgs::Send {
                 peer: peer.to_owned(),
                 text,
@@ -130,11 +130,29 @@ pub(crate) fn team_send(
         message.push('\n');
         message.push_str(reply_text);
     }
+    // Advisory, not Warning: a peer reply can land minutes after dispatch,
+    // and Warning is turn-fatal (`NoticeLevel::is_turn_fatal`) — it would
+    // abort whatever unrelated model turn is streaming when the peer answers.
+    // Advisory renders through the same Warning→FeedbackBlock path.
     AppEvent::SystemNotice {
         conversation_id: Some(conversation_id.to_owned()),
-        level: NoticeLevel::Warning,
+        level: NoticeLevel::Advisory,
         message,
     }
+}
+
+/// The message body: the raw argument text after the `send` verb and peer
+/// token, with only the delimiter whitespace between peer and body skipped.
+/// Internal whitespace is preserved verbatim (FR54-a).
+fn raw_remainder_after_peer(arg: &str, peer: &str) -> Option<String> {
+    let peer_start = arg.find(peer)?;
+    let after_peer = peer_start + peer.len();
+    let body_start = arg[after_peer..]
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(idx, _)| after_peer + idx)?;
+    let text = &arg[body_start..];
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 #[cfg(not(feature = "a2a"))]
@@ -378,16 +396,21 @@ mod tests {
     }
 
     #[test]
-    fn send_parses_one_peer_and_joins_the_remaining_text() {
+    fn send_parses_one_peer_and_preserves_the_body_verbatim() {
+        // FR54-a: exactly what the operator typed leaves the host. Internal
+        // whitespace — the repeated spaces and the tab here — must survive;
+        // only the verb/peer delimiters and the delimiter run after the peer
+        // are consumed.
         assert_eq!(
-            parse_team_command(Some("send moon   Καλημέρα 🌕  second line")),
+            parse_team_command(Some("send moon   Καλημέρα 🌕\tsecond  line")),
             Ok(TeamCommandArgs::Send {
                 peer: "moon".to_owned(),
-                text: "Καλημέρα 🌕 second line".to_owned(),
+                text: "Καλημέρα 🌕\tsecond  line".to_owned(),
             })
         );
         assert!(parse_team_command(Some("send")).is_err());
         assert!(parse_team_command(Some("send moon")).is_err());
+        assert!(parse_team_command(Some("send moon   ")).is_err());
         assert!(USAGE.contains("/team send <peer-id> <text…>"));
         assert!(USAGE.contains(
             "`rustain team send` (the CLI twin) is not in this cut — \
@@ -414,7 +437,9 @@ mod tests {
             panic!("peer send result must use the existing feedback event path");
         };
         assert_eq!(conversation_id.as_deref(), Some("conv"));
-        assert!(matches!(level, NoticeLevel::Warning));
+        // A late peer reply must never abort an unrelated streaming turn.
+        assert!(matches!(level, NoticeLevel::Advisory));
+        assert!(!level.is_turn_fatal());
         assert_eq!(
             message,
             "[peer: moon] task peer-task-42 — completed\npeer answer"
