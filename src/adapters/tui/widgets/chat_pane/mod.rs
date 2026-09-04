@@ -616,7 +616,7 @@ fn default_collapse_predicate(turn: &Turn) -> bool {
 /// Adapt a `TurnPart` into a legacy `ToolCallInfo` for reuse of
 /// `tool_block_height` and `render_tool_block_lines`.
 ///
-/// Field mapping follows `rebuild_messages_mirror`'s convention.
+/// Field mapping follows the conversation message-mirror convention.
 /// Uses `tool_call_id_for` (P1-1) so the id format cannot drift.
 fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -> ToolCallInfo {
     let (tool, args, status_chip, started_at_ms, ended_at_ms, tool_result, _pid) = match invocation

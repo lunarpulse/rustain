@@ -49,6 +49,30 @@ kid = "ci-key-2026"
 
 If peers are configured but the binary was built without `a2a`, startup fails loudly instead of silently omitting them.
 
+## Sending to a configured peer from the TUI
+
+Peer entries are loaded once when rustain starts. After adding, removing, or changing an entry in `.rustain/a2a.json` or the active profile, restart rustain; `/team send` does not re-read configuration or discover a second source of truth.
+
+In the TUI, send one message with the roster ID followed by the message text:
+
+```text
+/team send security-peer review the authentication changes
+```
+
+The command resolves `security-peer` from the startup roster, reuses its cached AgentCard and transport, records the outbound attempt before the HTTP POST, then polls the remote task to a terminal state. It does not inject peer output into the conversation. A successful reply appears only as a tainted feedback block such as `[peer: security-peer] task … — completed …`.
+
+Use `/team log` for the durable local record. Outbound rows use `→`; the attempt and terminal result carry the same task ID. A successful send also materializes an `a2a-peer` node in the Agents panel.
+
+Failures are explicit and terminal:
+
+- an unknown roster ID is refused locally, names the configured IDs, performs no network request, and writes no journal row;
+- a configured peer whose AgentCard was unavailable at startup is refused without an on-demand discovery request;
+- a transport failure after dispatch records `dispatched` followed by `refused` and renders the transport error;
+- a remote refusal renders the peer's reason;
+- `input-required` renders a cancellation message because this command is single-turn; multi-turn peer input is not supported here.
+
+`/team send` exists only in the interactive TUI in this release. There is no headless `rustain team send` command. Client authentication for non-loopback servers is not configured by this surface yet; see the server security requirements below rather than assuming that a roster URL supplies credentials.
+
 ## Trust tiers
 
 Trust comes only from configuration; an AgentCard cannot promote itself.

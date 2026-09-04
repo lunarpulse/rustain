@@ -34,6 +34,8 @@ pub mod projection;
 #[cfg(feature = "a2a")]
 pub mod provider;
 #[cfg(feature = "a2a")]
+pub mod send;
+#[cfg(feature = "a2a")]
 pub mod server;
 #[cfg(feature = "a2a")]
 pub mod task;

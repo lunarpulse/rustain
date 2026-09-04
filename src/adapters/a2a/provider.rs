@@ -14,16 +14,20 @@ use crate::domain::ports::CapabilityProvider;
 use super::client::A2aClientAdapter;
 
 pub struct A2aProvider {
-    peers: Vec<(A2aPeerSpec, Arc<A2aClientAdapter>)>,
+    peers: super::driver::A2aPeerBindings,
     delegation: std::sync::OnceLock<Arc<super::driver::A2aDelegationRuntime>>,
 }
 
 impl A2aProvider {
     pub fn new(peers: Vec<(A2aPeerSpec, Arc<A2aClientAdapter>)>) -> Self {
         Self {
-            peers,
+            peers: peers.into(),
             delegation: std::sync::OnceLock::new(),
         }
+    }
+
+    pub(crate) fn peer_bindings(&self) -> super::driver::A2aPeerBindings {
+        self.peers.clone()
     }
 
     /// Inject the delegation runtime (node tree + journal + event sink) after
@@ -52,7 +56,7 @@ impl CapabilityProvider for A2aProvider {
 
     async fn discover(&self) -> Result<Vec<Capability>, CapabilityError> {
         let mut capabilities = Vec::new();
-        for (peer, client) in &self.peers {
+        for (peer, client) in self.peers.iter() {
             let Some((card, trust)) = client.cached_card().await else {
                 continue;
             };

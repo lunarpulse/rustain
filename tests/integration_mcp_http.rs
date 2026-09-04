@@ -511,7 +511,7 @@ async fn ac5_http_shutdown_enters_no_child_reap_path() {
         .expect("an http spec must never reach the stdio spawn path, command or no command");
 
     let started = Instant::now();
-    shutdown_all_clients(&[client.clone()]).await;
+    shutdown_all_clients(std::slice::from_ref(&client)).await;
     let elapsed = started.elapsed();
 
     assert_eq!(client.state(), McpConnectionState::NotConnected);
@@ -547,7 +547,7 @@ async fn ac5_a_server_that_never_answers_the_close_stays_inside_the_budget() {
     client.connect().await.expect("http connect");
 
     let started = Instant::now();
-    shutdown_all_clients(&[client.clone()]).await;
+    shutdown_all_clients(std::slice::from_ref(&client)).await;
     let elapsed = started.elapsed();
 
     assert!(

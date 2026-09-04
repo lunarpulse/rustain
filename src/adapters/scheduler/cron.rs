@@ -558,14 +558,16 @@ mod tests {
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::{
-        NoOpApprovalPersistence, NoOpMemory, NoOpPersona, NoOpSecurity, NoOpToolSet,
+        NoOpApprovalPersistence, NoOpContext, NoOpMemory, NoOpPersona, NoOpSecurity, NoOpToolSet,
         NoOpUsageLedger,
     };
     use crate::adapters::toolset_adapter::ToolSetAdapter;
     use crate::domain::errors::ProviderError;
     use crate::domain::models::provider::ModelDescriptor;
     use crate::domain::models::{AppConfig, CompletionOptions, MemoryFact, Message, StreamChunk};
-    use crate::domain::ports::{SecurityPort, StoragePort, StreamingProvider, ToolSetPort};
+    use crate::domain::ports::{
+        ContextPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
+    };
     use crate::domain::services::approval_runtime::ApprovalRuntime;
     use crate::domain::services::tool_scheduler::ToolScheduler;
     use arc_swap::ArcSwap;
@@ -933,6 +935,9 @@ mod tests {
             tool_scheduler,
             persona: Arc::new(NoOpPersona),
             context_assembler: Arc::new(ArcSwap::from_pointee(None)),
+            context: Arc::new(ArcSwap::from_pointee(
+                Arc::new(NoOpContext) as Arc<dyn ContextPort>
+            )),
             storage: storage.clone(),
             fs_storage: Arc::new(FileSystemStorage::with_workspace_root(
                 crate::infrastructure::paths::sessions_dir(workspace),
@@ -968,6 +973,7 @@ mod tests {
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(scripted_runtime(
                     provider_for_factory.clone(),
@@ -1011,6 +1017,9 @@ mod tests {
             tool_scheduler,
             persona: Arc::new(NoOpPersona),
             context_assembler: Arc::new(ArcSwap::from_pointee(None)),
+            context: Arc::new(ArcSwap::from_pointee(
+                Arc::new(NoOpContext) as Arc<dyn ContextPort>
+            )),
             storage: storage.clone(),
             fs_storage: Arc::new(FileSystemStorage::with_workspace_root(
                 crate::infrastructure::paths::sessions_dir(workspace),
@@ -1051,6 +1060,7 @@ mod tests {
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(scripted_runtime_with_memory_tools(
                     provider_for_factory.clone(),

@@ -87,6 +87,8 @@ pub enum TransparencyKind {
     Accepted,
     /// A task was refused, or a delegation came back refused.
     Rejected,
+    /// This host durably recorded an outbound A2A task before submitting it.
+    Dispatched,
     /// Admitted but parked on a human decision.
     AwaitingApproval,
     /// The peer asked for a task's status (first observation only).
@@ -159,6 +161,7 @@ impl TransparencyKind {
             Self::Accepted => "✓",
             Self::Rejected => "✗",
             Self::AwaitingApproval => "⏸",
+            Self::Dispatched => "↑",
             Self::StatusQueried => "?",
             Self::Disclosed => "⇢",
             Self::ConsentGranted => "+",
@@ -185,6 +188,7 @@ impl TransparencyKind {
             Self::Accepted => "accepted",
             Self::Rejected => "refused",
             Self::AwaitingApproval => "awaiting-approval",
+            Self::Dispatched => "dispatched",
             Self::StatusQueried => "status-query",
             Self::Disclosed => "disclosed",
             Self::ConsentGranted => "consent-granted",
@@ -316,6 +320,13 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         _ => None,
     };
     let (kind, direction, peer, task, summary) = match event {
+        RoomEvent::RemoteEnvelopeDispatched { peer, task, bytes } => (
+            TransparencyKind::Dispatched,
+            Direction::Outbound,
+            peer.as_str().to_owned(),
+            task.clone(),
+            format!("task dispatched to peer ({bytes} bytes)"),
+        ),
         RoomEvent::RemoteEnvelopeAccepted {
             peer,
             node,
@@ -697,7 +708,7 @@ pub fn fold_transparency<'a>(
 /// Row filter shared by every transparency renderer.
 ///
 /// Grammar: `direction=inbound|outbound|unknown`,
-/// `kind=accepted|refused|awaiting-approval|status-query|disclosed|room-role-granted|room-role-revoked|unknown`,
+/// `kind=accepted|refused|dispatched|awaiting-approval|status-query|disclosed|room-role-granted|room-role-revoked|unknown`,
 /// `peer=<substring>`, or a bare substring matched against the whole row.
 /// `direction` and `kind` may appear once; repeated peer and bare-text terms
 /// are ANDed.
@@ -756,6 +767,7 @@ impl TransparencyFilter {
                     terms.push(TransparencyFilterTerm::Kind(match value {
                         "accepted" => TransparencyKind::Accepted,
                         "refused" => TransparencyKind::Rejected,
+                        "dispatched" => TransparencyKind::Dispatched,
                         "awaiting-approval" => TransparencyKind::AwaitingApproval,
                         "status-query" => TransparencyKind::StatusQueried,
                         "disclosed" => TransparencyKind::Disclosed,
@@ -767,7 +779,7 @@ impl TransparencyFilter {
                         "unknown" => TransparencyKind::Unknown,
                         _ => {
                             return Err(format!(
-                                "unknown kind `{value}` — valid: accepted, refused, \
+                                "unknown kind `{value}` — valid: accepted, refused, dispatched, \
                                  awaiting-approval, status-query, disclosed, room-role-granted, \
                                  room-role-revoked, transport-admission, peer-frame, \
                                  peer-equivocated, unknown"
@@ -1126,6 +1138,38 @@ mod tests {
         let row = transparency_row(&entry).expect("unknown records still render");
         assert_eq!(row.kind, TransparencyKind::Unknown);
         assert!(row.summary.contains("unrecognised"));
+    }
+
+    #[test]
+    fn dispatched_event_projects_filters_exports_and_names_its_valid_kind() {
+        let entry = room_entry(
+            7,
+            1_700_000_000_123,
+            RoomEvent::RemoteEnvelopeDispatched {
+                peer: peer(),
+                task: Some("sender-message-1".to_owned()),
+                bytes: "Καλημέρα 🌕".len(),
+            },
+        );
+        let row = transparency_row(&entry).expect("dispatch projects");
+
+        assert_eq!(row.kind, TransparencyKind::Dispatched);
+        assert_eq!(row.kind.glyph(), "↑");
+        assert_eq!(row.kind.label(), "dispatched");
+        assert_eq!(row.direction, Direction::Outbound);
+        assert_eq!(row.task.as_deref(), Some("sender-message-1"));
+        assert_eq!(row.recorded_at_ms, Some(1_700_000_000_123));
+        assert!(row.summary.contains("21 bytes"), "{}", row.summary);
+        assert!(!row.summary.contains("Καλημέρα"));
+        assert!(
+            TransparencyFilter::parse("kind=dispatched")
+                .expect("dispatched filter parses")
+                .matches(&row)
+        );
+        assert!(render_export(std::slice::from_ref(&row)).contains(r#""kind":"dispatched""#));
+
+        let error = TransparencyFilter::parse("kind=not-a-kind").unwrap_err();
+        assert!(error.contains("dispatched"), "{error}");
     }
 
     #[test]

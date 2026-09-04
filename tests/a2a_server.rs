@@ -215,10 +215,14 @@ impl VerifiedPeerConsumer for PeerDecliningConsumer {
 }
 
 fn peer_delivery_envelope(correlation_id: &str) -> AgentEnvelope<serde_json::Value> {
+    let signer = PeerIdentity::from_public_key(vec![7; 32]).expect("peer identity");
+    let recipient =
+        AgentId::from_peer_path(&format!("{}/local-peer-session", signer.peer_id.as_str()))
+            .expect("peer-rooted recipient");
     AgentEnvelope::new(
         AgentEnvelopeHeader {
             sender: AgentId::parse("peer-agent").expect("valid sender"),
-            recipient: AgentId::parse("local-peer-session").expect("valid recipient"),
+            recipient,
             correlation_id: CorrelationId::new(correlation_id),
             kind: MessageKind::PeerMessage,
             sequence: 1,
@@ -228,7 +232,7 @@ fn peer_delivery_envelope(correlation_id: &str) -> AgentEnvelope<serde_json::Val
             prev_hash: vec![2],
         },
         serde_json::json!("hello"),
-        PeerIdentity::from_public_key(vec![7; 32]).expect("peer identity"),
+        signer,
         Ed25519Sig(vec![]),
     )
 }

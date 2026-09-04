@@ -146,6 +146,7 @@ impl std::fmt::Display for DelegationError {
         }
     }
 }
+pub(crate) type A2aPeerBindings = Arc<[(A2aPeerSpec, Arc<A2aClientAdapter>)]>;
 
 /// Shared A2A delegation runtime. Injected by the composition root with the
 /// live node tree, the durable journal, and the domain event sink.
@@ -154,6 +155,7 @@ pub struct A2aDelegationRuntime {
     node_tree: NodeTree,
     journal: Arc<dyn RoomJournal>,
     event_tx: mpsc::UnboundedSender<AppEvent>,
+    peer_bindings: A2aPeerBindings,
     journal_failure_latch: Arc<JournalFailureLatch>,
 }
 
@@ -184,8 +186,33 @@ impl A2aDelegationRuntime {
             node_tree,
             journal,
             event_tx,
+            peer_bindings: Arc::from([]),
             journal_failure_latch: Arc::new(JournalFailureLatch::new()),
         }
+    }
+    pub(crate) fn with_peer_bindings(mut self, peer_bindings: A2aPeerBindings) -> Self {
+        self.peer_bindings = peer_bindings;
+        self
+    }
+
+    pub(crate) fn peer_binding(
+        &self,
+        peer_id: &str,
+    ) -> Option<(A2aPeerSpec, Arc<A2aClientAdapter>)> {
+        self.peer_bindings
+            .iter()
+            .find(|(spec, _)| spec.id == peer_id)
+            .cloned()
+    }
+
+    pub(crate) fn known_peer_ids(&self) -> Vec<String> {
+        let mut ids = self
+            .peer_bindings
+            .iter()
+            .map(|(spec, _)| spec.id.clone())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     /// Delegate one task to a discovered peer and drive it to terminal.
@@ -229,16 +256,47 @@ impl A2aDelegationRuntime {
         // branch on content (R-D).
         tracing::info!(peer = %spec.id, ?trust, "dispatching A2A delegation");
 
-        // The owned driver task sends first so cancellation of the calling turn
-        // cannot drop an in-flight response before its peer-assigned task id is
-        // available for remote cleanup and durable node materialization.
-        let first = TaskSnapshot::from_result(
-            transport
-                .message_send(message)
-                .await
-                .map_err(DelegationError::Transport)?,
-        )
-        .map_err(DelegationError::Transport)?;
+        let (submitted_task, submitted_bytes) = outbound_message_fact(&message);
+        self.emit_room(RoomEvent::RemoteEnvelopeDispatched {
+            peer: peer.clone(),
+            task: submitted_task.clone(),
+            bytes: submitted_bytes,
+        })
+        .await?;
+
+        // The submit fact is durable before the POST. A first-hop transport
+        // failure has no node yet, so journal the existing rejection vocabulary
+        // directly rather than losing the attempt through `reject()`.
+        let first_value = match transport.message_send(message).await {
+            Ok(value) => value,
+            Err(error) => {
+                self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+                    peer,
+                    reason: RejectReason::Policy {
+                        detail: format!("A2A transport failure: {error}"),
+                    },
+                    direction: Direction::Outbound,
+                    task: submitted_task,
+                })
+                .await?;
+                return Err(DelegationError::Transport(error));
+            }
+        };
+        let first = match TaskSnapshot::from_result(first_value) {
+            Ok(first) => first,
+            Err(error) => {
+                self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+                    peer,
+                    reason: RejectReason::Policy {
+                        detail: format!("A2A transport failure: {error}"),
+                    },
+                    direction: Direction::Outbound,
+                    task: submitted_task,
+                })
+                .await?;
+                return Err(DelegationError::Transport(error));
+            }
+        };
         let raw_task_id = first.id.clone();
         if raw_task_id.len() > MAX_PEER_ID_BYTES {
             let reason = "remote task id exceeds the supported size".to_owned();
@@ -676,6 +734,18 @@ fn content_hash(value: &serde_json::Value) -> ContentHash {
     ContentHash::from_bytes(Sha256::digest(&bytes).into())
 }
 
+fn outbound_message_fact(message: &serde_json::Value) -> (Option<String>, usize) {
+    let task = message
+        .pointer("/message/messageId")
+        .and_then(serde_json::Value::as_str)
+        .map(disclosable_task_id);
+    let bytes = message
+        .pointer("/message/parts/0/text")
+        .and_then(serde_json::Value::as_str)
+        .map_or(0, str::len);
+    (task, bytes)
+}
+
 /// Build an A2A `message/send` params object from the tool input. The JSON-RPC
 /// binding uses `kind`-tagged parts.
 pub fn build_message(input: &serde_json::Value) -> serde_json::Value {
@@ -773,6 +843,26 @@ mod tests {
         }
     }
 
+    struct DeadTransport;
+
+    #[async_trait]
+    impl A2aTaskTransport for DeadTransport {
+        async fn message_send(
+            &self,
+            _message: serde_json::Value,
+        ) -> Result<serde_json::Value, A2aError> {
+            Err(A2aError::Request("connection refused".to_owned()))
+        }
+
+        async fn tasks_get(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
+            panic!("transport failure must not poll")
+        }
+
+        async fn tasks_cancel(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
+            panic!("transport failure must not cancel")
+        }
+    }
+
     /// In-memory room-journal port for driver tests that need the same
     /// durable-first bus contract without a filesystem fixture.
     struct TestRoomJournal {
@@ -839,7 +929,12 @@ mod tests {
                 TrustTier::Unverified,
                 "call-1",
                 transport.clone(),
-                serde_json::json!({}),
+                serde_json::json!({
+                    "message": {
+                        "messageId": "sender-message-1",
+                        "parts": [{ "kind": "text", "text": "ping" }]
+                    }
+                }),
                 CancellationToken::new(),
             )
             .await
@@ -855,18 +950,84 @@ mod tests {
         assert_eq!(entry.current_status, NodeState::Completed);
         assert_eq!(entry.ownership, crate::domain::models::OwnershipKind::Peer);
 
-        // The production event carries the original (bounded) remote task id,
-        // rather than forcing projection to reverse an internal node id.
-        let accepted_task = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| {
-            let AppEvent::DomainEvent(DomainEventPayload::Room(
-                RoomEvent::RemoteEnvelopeAccepted { task, .. },
-            )) = event
-            else {
-                return None;
-            };
-            task
-        });
-        assert_eq!(accepted_task.as_deref(), Some("task-1"));
+        let room_events = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| {
+                let AppEvent::DomainEvent(DomainEventPayload::Room(event)) = event else {
+                    return None;
+                };
+                Some(event)
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            room_events.first(),
+            Some(RoomEvent::RemoteEnvelopeDispatched {
+                task: Some(task),
+                bytes: 4,
+                ..
+            }) if task == "sender-message-1"
+        ));
+        assert!(matches!(
+            room_events.get(1),
+            Some(RoomEvent::RemoteEnvelopeAccepted {
+                task: Some(task),
+                direction: Direction::Outbound,
+                ..
+            }) if task == "task-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn first_transport_failure_is_journaled_as_one_outbound_refusal_without_a_node() {
+        let (rt, tree, mut rx) = runtime();
+        let error = rt
+            .delegate_inner(
+                spec("dead", false),
+                TrustTier::Unverified,
+                "call-dead".to_owned(),
+                Arc::new(DeadTransport),
+                serde_json::json!({
+                    "message": {
+                        "messageId": "sender-dead-1",
+                        "parts": [{ "kind": "text", "text": "private text" }]
+                    }
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("dead transport must fail");
+        assert!(matches!(error, DelegationError::Transport(_)));
+        assert!(
+            tree.list().await.is_empty(),
+            "no peer node exists before POST"
+        );
+
+        let room_events = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| {
+                let AppEvent::DomainEvent(DomainEventPayload::Room(event)) = event else {
+                    return None;
+                };
+                Some(event)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            room_events
+                .iter()
+                .filter(|event| matches!(event, RoomEvent::RemoteEnvelopeRejected { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            room_events.last(),
+            Some(RoomEvent::RemoteEnvelopeRejected {
+                direction: Direction::Outbound,
+                task: Some(task),
+                ..
+            }) if task == "sender-dead-1"
+        ));
+        assert!(
+            !format!("{room_events:?}").contains("private text"),
+            "journal events must never contain sent text"
+        );
     }
 
     #[tokio::test]

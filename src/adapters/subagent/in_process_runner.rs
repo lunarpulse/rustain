@@ -7691,6 +7691,11 @@ mod tests {
                         "journal PatchReviewed artifact={a} reviewer={r} verdict={verdict:?}"
                     ));
                 }
+                RoomEvent::RemoteEnvelopeDispatched { peer, task, bytes } => {
+                    lines.push(format!(
+                        "journal RemoteEnvelopeDispatched peer={peer:?} task={task:?} bytes={bytes}"
+                    ));
+                }
                 RoomEvent::RemoteEnvelopeAccepted {
                     peer,
                     node,

@@ -974,6 +974,7 @@ async fn drive_turn_through_submit(
         security,
         tools.clone() as Arc<dyn ToolSetPort>,
         scheduler,
+        Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         Arc::new(rustain::adapters::noop::NoOpPersona),
         context,
         Arc::new(ArcSwap::from_pointee(

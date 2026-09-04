@@ -1754,6 +1754,9 @@ pub async fn run() -> Result<()> {
     // cases must contend for the SAME in-process guard and the SAME workspace
     // file lock, and two instances would serialize against nothing.
     let mut patch_apply_resolver: Option<Arc<dyn crate::domain::ports::PatchApplyResolver>> = None;
+    #[cfg(feature = "a2a")]
+    let mut a2a_send_runtime: Option<Arc<crate::adapters::a2a::driver::A2aDelegationRuntime>> =
+        None;
     // Story 10.2 — wire subagent provider into CompositeToolsetAdapter
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
@@ -1924,7 +1927,7 @@ pub async fn run() -> Result<()> {
             // materialize peer nodes and journal room events (durable-first).
             #[cfg(feature = "a2a")]
             if let Some(provider) = a2a_provider_concrete.as_ref() {
-                provider.set_delegation_runtime(Arc::new(
+                let runtime = Arc::new(
                     crate::adapters::a2a::driver::A2aDelegationRuntime::new(
                         subagent_registry.as_ref().clone(),
                         Arc::new(
@@ -1934,8 +1937,11 @@ pub async fn run() -> Result<()> {
                             ),
                         ),
                         domain_tx.clone(),
-                    ),
-                ));
+                    )
+                    .with_peer_bindings(provider.peer_bindings()),
+                );
+                provider.set_delegation_runtime(runtime.clone());
+                a2a_send_runtime = Some(runtime);
             }
             // Story 17.5a — inject the MCP Tasks runtime into every MCP
             // client now that the node tree, journal, and clock all exist.
@@ -2369,6 +2375,10 @@ pub async fn run() -> Result<()> {
     app_state.patch_review = patch_review_recorder;
     app_state.patch_apply = patch_apply_executor;
     app_state.patch_resolve = patch_apply_resolver;
+    #[cfg(feature = "a2a")]
+    {
+        app_state.a2a_send = a2a_send_runtime;
+    }
 
     // 5d. Use the same storage adapter constructed above for session management.
     // Both tools and the event loop share one FileSystemStorage instance pointing

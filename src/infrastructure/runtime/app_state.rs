@@ -115,6 +115,11 @@ pub struct AppState {
     /// **sibling** of `patch_apply`, bound to the same service at the root;
     /// ⛔ not a second mode of the apply port.
     pub patch_resolve: Option<std::sync::Arc<dyn crate::domain::ports::PatchApplyResolver>>,
+    /// Story 18.9 (FR54-a) — the operator's outbound-send seam. Bound once at
+    /// the composition root beside `patch_apply`/`patch_resolve`; `None` when
+    /// the build lacks `a2a` or the workspace configured no peers.
+    #[cfg(feature = "a2a")]
+    pub a2a_send: Option<std::sync::Arc<crate::adapters::a2a::driver::A2aDelegationRuntime>>,
 }
 
 impl AppState {
@@ -175,6 +180,8 @@ impl AppState {
                 patch_review: None,
                 patch_apply: None,
                 patch_resolve: None,
+                #[cfg(feature = "a2a")]
+                a2a_send: None,
             },
             domain_rx,
         )

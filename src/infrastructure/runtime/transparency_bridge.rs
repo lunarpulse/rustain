@@ -336,6 +336,39 @@ pub(crate) async fn team_command(
         }
     };
     match command {
+        TeamCommandArgs::Send { peer, text } => {
+            #[cfg(feature = "a2a")]
+            {
+                let Some(runtime) = app_state.a2a_send.clone() else {
+                    emit_team_warning(
+                        state,
+                        conversation_id,
+                        app_state,
+                        "A2A send runtime is not configured for this session.".to_owned(),
+                    );
+                    return;
+                };
+                let event_bus = app_state.event_bus.clone();
+                let conversation_id = conversation_id.to_owned();
+                let cancel = app_state.session_cancel.child_token();
+                tokio::spawn(async move {
+                    let result =
+                        crate::adapters::a2a::send::send_text(&runtime, &peer, &text, cancel).await;
+                    let event = team_send_event(&conversation_id, result);
+                    let _ = event_bus.emit_domain(event);
+                });
+            }
+            #[cfg(not(feature = "a2a"))]
+            {
+                let _ = (peer, text);
+                emit_team_warning(
+                    state,
+                    conversation_id,
+                    app_state,
+                    handler::team_send_unavailable().to_owned(),
+                );
+            }
+        }
         TeamCommandArgs::Log(args) => {
             let input = team_log_input(app_state, &args).await;
             for event in handler::team_command(state, conversation_id, &args, input) {
@@ -355,6 +388,27 @@ pub(crate) async fn team_command(
         TeamCommandArgs::Status => match load_team_status(app_state).await {
             Ok(message) => handler::show_team_status(state, message),
             Err(message) => emit_team_warning(state, conversation_id, app_state, message),
+        },
+    }
+}
+
+#[cfg(feature = "a2a")]
+fn team_send_event(
+    conversation_id: &str,
+    result: Result<crate::adapters::a2a::send::SendOutcome, crate::adapters::a2a::send::SendError>,
+) -> crate::domain::events::AppEvent {
+    match result {
+        Ok(outcome) => crate::adapters::tui::handlers::team_command::team_send(
+            conversation_id,
+            &outcome.peer,
+            &outcome.task_id,
+            &outcome.state,
+            outcome.reply_text.as_deref(),
+        ),
+        Err(error) => crate::domain::events::AppEvent::SystemNotice {
+            conversation_id: Some(conversation_id.to_owned()),
+            level: crate::domain::models::NoticeLevel::Warning,
+            message: error.to_string(),
         },
     }
 }
@@ -656,5 +710,42 @@ mod tests {
         assert!(event.is_none());
         assert!(message.contains("nothing changed"));
         assert!(!workspace.path().join(".rustain").exists());
+    }
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn send_completion_and_input_required_use_tainted_feedback_events() {
+        let success = team_send_event(
+            "conv",
+            Ok(crate::adapters::a2a::send::SendOutcome {
+                peer: "moon".to_owned(),
+                task_id: "peer-task-42".to_owned(),
+                state: "completed".to_owned(),
+                reply_text: Some("peer answer".to_owned()),
+            }),
+        );
+        let crate::domain::events::AppEvent::SystemNotice { level, message, .. } = success else {
+            panic!("send completion must use the feedback event path");
+        };
+        assert!(matches!(level, crate::domain::models::NoticeLevel::Warning));
+        assert_eq!(
+            message,
+            "[peer: moon] task peer-task-42 — completed\npeer answer"
+        );
+
+        let input_required = team_send_event(
+            "conv",
+            Err(crate::adapters::a2a::send::SendError::InputRequired {
+                peer: "moon".to_owned(),
+                task_id: "peer-task-43".to_owned(),
+            }),
+        );
+        let crate::domain::events::AppEvent::SystemNotice { message, .. } = input_required else {
+            panic!("input-required must use the feedback event path");
+        };
+        assert_eq!(
+            message,
+            "peer `moon` asked a question this verb cannot answer (task `peer-task-43` \
+             cancelled) — multi-turn arrives with 19.18"
+        );
     }
 }

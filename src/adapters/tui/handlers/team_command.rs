@@ -22,7 +22,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team trust | /team untrust <alias-or-peer-id>";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team send <peer-id> <text…> | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
 
 /// What the dispatch arm already did on the caller's behalf.
 pub struct TeamLogInput {
@@ -46,6 +46,7 @@ pub struct TeamLogArgs {
 #[derive(Debug, PartialEq, Eq)]
 pub enum TeamCommandArgs {
     Log(TeamLogArgs),
+    Send { peer: String, text: String },
     Trust,
     Untrust(String),
     Status,
@@ -57,6 +58,21 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
     let mut tokens = arg.split_whitespace();
     let verb = tokens.next().unwrap_or("log");
     match verb {
+        "send" => {
+            let peer = tokens
+                .next()
+                .ok_or_else(|| format!("Missing peer id after '/team send'. Use: {USAGE}"))?;
+            let text = tokens.collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                return Err(format!(
+                    "Missing message text after peer `{peer}`. Use: {USAGE}"
+                ));
+            }
+            Ok(TeamCommandArgs::Send {
+                peer: peer.to_owned(),
+                text,
+            })
+        }
         "trust" => {
             if tokens.next().is_some() {
                 return Err(format!(
@@ -100,6 +116,30 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
         }
         _ => Err(format!("Unknown /team subcommand '{verb}'. Use: {USAGE}")),
     }
+}
+
+pub(crate) fn team_send(
+    conversation_id: &str,
+    peer: &str,
+    task_id: &str,
+    state: &str,
+    reply_text: Option<&str>,
+) -> AppEvent {
+    let mut message = format!("[peer: {peer}] task {task_id} — {state}");
+    if let Some(reply_text) = reply_text {
+        message.push('\n');
+        message.push_str(reply_text);
+    }
+    AppEvent::SystemNotice {
+        conversation_id: Some(conversation_id.to_owned()),
+        level: NoticeLevel::Warning,
+        message,
+    }
+}
+
+#[cfg(not(feature = "a2a"))]
+pub(crate) const fn team_send_unavailable() -> &'static str {
+    "`/team send` needs the `a2a` feature; this build was compiled without it."
 }
 
 /// Stable id for the in-chat rows. `/team log` is a **view**, not an event
@@ -334,6 +374,59 @@ mod tests {
                 json: true,
                 export: true,
             }))
+        );
+    }
+
+    #[test]
+    fn send_parses_one_peer_and_joins_the_remaining_text() {
+        assert_eq!(
+            parse_team_command(Some("send moon   Καλημέρα 🌕  second line")),
+            Ok(TeamCommandArgs::Send {
+                peer: "moon".to_owned(),
+                text: "Καλημέρα 🌕 second line".to_owned(),
+            })
+        );
+        assert!(parse_team_command(Some("send")).is_err());
+        assert!(parse_team_command(Some("send moon")).is_err());
+        assert!(USAGE.contains("/team send <peer-id> <text…>"));
+        assert!(USAGE.contains(
+            "`rustain team send` (the CLI twin) is not in this cut — \
+             `18-9b-cli-team-send`"
+        ));
+    }
+
+    #[test]
+    fn send_result_routes_peer_task_state_and_optional_reply_as_tainted_feedback() {
+        let event = team_send(
+            "conv",
+            "moon",
+            "peer-task-42",
+            "completed",
+            Some("peer answer"),
+        );
+
+        let AppEvent::SystemNotice {
+            conversation_id,
+            level,
+            message,
+        } = event
+        else {
+            panic!("peer send result must use the existing feedback event path");
+        };
+        assert_eq!(conversation_id.as_deref(), Some("conv"));
+        assert!(matches!(level, NoticeLevel::Warning));
+        assert_eq!(
+            message,
+            "[peer: moon] task peer-task-42 — completed\npeer answer"
+        );
+    }
+
+    #[cfg(not(feature = "a2a"))]
+    #[test]
+    fn send_has_a_named_refusal_when_the_a2a_feature_is_absent() {
+        assert_eq!(
+            team_send_unavailable(),
+            "`/team send` needs the `a2a` feature; this build was compiled without it."
         );
     }
 

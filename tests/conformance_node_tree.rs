@@ -586,10 +586,13 @@ fn test_import_site_count_pinned() {
     // has never seen. That sentence is the reason a future author does not
     // re-derive the blocker, so it stays and the pin moves. The domain model
     // holds no `NodeTree`, imports none, and could not — it is `infrastructure`.
+    // 27 -> 28 (Story 18.9): `adapters/a2a/send.rs` builds the real shared
+    // A2A delegation runtime in refusal tests. Production still receives that
+    // runtime from the composition root; the new concrete tree use is test-only.
     //
     // Not covered by `ratchet-signoff-guard.yml`, which gates only the seven named
     // constants in `tests/conformance.rs`.
-    const EXPECTED: usize = 27;
+    const EXPECTED: usize = 28;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

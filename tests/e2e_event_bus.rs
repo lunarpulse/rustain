@@ -178,6 +178,11 @@ fn test_app_state_honors_raw_capacity() {
         #[cfg(feature = "meta-search")]
         None,
     );
+    #[cfg(feature = "a2a")]
+    assert!(
+        app_state.a2a_send.is_none(),
+        "the composition root, not AppState::new, must bind the outbound A2A runtime"
+    );
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
     let _raw_rx = app_state.event_bus.subscribe_raw();

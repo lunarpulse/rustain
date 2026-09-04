@@ -444,6 +444,13 @@ pub enum RoomEvent {
         reviewer: AgentId,
         verdict: ReviewVerdict,
     },
+    /// This host submitted one A2A task to a configured peer. Durable before
+    /// the POST; carries volume and correlation only, never message content.
+    RemoteEnvelopeDispatched {
+        peer: PeerId,
+        task: Option<String>,
+        bytes: usize,
+    },
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.
     RemoteEnvelopeAccepted {
@@ -1232,6 +1239,9 @@ impl OrchestrationRoom {
             // (`TransparencyKind::TransportAdmission`), so this is absence of a
             // fold target rather than a silent loss.
             | RoomEvent::PeerAdmissionRecorded { .. }
+            // A send dispatch has no node yet: the peer assigns the task id
+            // needed to mint one only after this durable-before-POST record.
+            | RoomEvent::RemoteEnvelopeDispatched { .. }
             // An outbound frame attempt is a fact about one peer and one
             // correlation, not about a room node: this cut's `peer ping` sends
             // from a CLI process that owns no node at all. It renders through
