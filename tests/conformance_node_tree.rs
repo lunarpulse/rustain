@@ -590,9 +590,14 @@ fn test_import_site_count_pinned() {
     // A2A delegation runtime in refusal tests. Production still receives that
     // runtime from the composition root; the new concrete tree use is test-only.
     //
+    // 28 -> 29 (Story 18.9b-a): `adapters/a2a/egress.rs` receives the daemon's
+    // already-composed tree and constructs the shared outbound delegation runtime.
+    // This is the one egress-composition boundary called by both roots; it is not
+    // a new daemon-owned tree or a domain/executor coupling.
+    //
     // Not covered by `ratchet-signoff-guard.yml`, which gates only the seven named
     // constants in `tests/conformance.rs`.
-    const EXPECTED: usize = 28;
+    const EXPECTED: usize = 29;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

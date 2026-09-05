@@ -18,6 +18,8 @@ pub mod client;
 #[cfg(feature = "a2a")]
 pub mod driver;
 #[cfg(feature = "a2a")]
+pub mod egress;
+#[cfg(feature = "a2a")]
 pub mod endpoint;
 #[cfg(feature = "a2a")]
 pub mod error;

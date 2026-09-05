@@ -139,19 +139,18 @@ fn only_config_parsing_compiles_without_the_a2a_feature() {
 }
 
 #[test]
-fn concrete_a2a_client_and_provider_are_named_only_at_the_startup_boundary() {
+fn concrete_a2a_client_and_provider_are_constructed_only_at_the_egress_composition_boundary() {
     let src = root().join("src");
     let mut references = BTreeSet::new();
     visit_rs(&src, &mut |path, text| {
-        if text.contains("adapters::a2a::client::A2aClientAdapter")
-            || text.contains("adapters::a2a::provider::A2aProvider")
-        {
+        let production = text.split("#[cfg(test)]").next().unwrap_or(text);
+        if production.contains("A2aClientAdapter::new") || production.contains("A2aProvider::new") {
             references.insert(path.strip_prefix(&src).unwrap().to_path_buf());
         }
     });
     assert_eq!(
         references,
-        BTreeSet::from([PathBuf::from("infrastructure/startup.rs")])
+        BTreeSet::from([PathBuf::from("adapters/a2a/egress.rs")])
     );
 }
 

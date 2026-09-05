@@ -1010,6 +1010,7 @@ pub async fn run() -> Result<()> {
             .as_ref()
             .map(|profile| profile.a2a_peers.clone())
             .unwrap_or_default();
+        ensure_a2a_feature_enabled(&a2a_peers, false)?;
         return crate::adapters::daemon::run_daemon(
             action,
             workspace,
@@ -1761,60 +1762,6 @@ pub async fn run() -> Result<()> {
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
         if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
-            #[cfg(feature = "a2a")]
-            let a2a_provider_concrete: Option<
-                Arc<crate::adapters::a2a::provider::A2aProvider>,
-            > = {
-                let mut bindings = Vec::with_capacity(resolved.a2a_peers.len());
-                for spec in resolved.a2a_peers.iter().cloned() {
-                    let client = Arc::new(
-                        crate::adapters::a2a::client::A2aClientAdapter::new(&spec, None).map_err(
-                            |error| {
-                                anyhow::anyhow!(
-                                    "A2A peer {:?} configuration failed: {error}",
-                                    spec.id
-                                )
-                            },
-                        )?,
-                    );
-                    bindings.push((spec, client));
-                }
-
-                let refresh_bindings = bindings.clone();
-                let a2a_provider =
-                    Arc::new(crate::adapters::a2a::provider::A2aProvider::new(bindings));
-                composite.set_a2a_provider(
-                    a2a_provider.clone() as Arc<dyn crate::domain::ports::CapabilityProvider>
-                );
-
-                for (spec, client) in refresh_bindings {
-                    let event_tx = domain_tx.clone();
-                    tokio::spawn(async move {
-                        match client.refresh_agent_card(&spec).await {
-                            Ok(()) => {
-                                let skill_count = client
-                                    .cached_card()
-                                    .await
-                                    .map(|(card, _)| card.skills.len())
-                                    .unwrap_or(0);
-                                let _ = event_tx.send(AppEvent::A2aCatalogChanged {
-                                    peer_id: spec.id,
-                                    skill_count,
-                                });
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    peer_id = %spec.id,
-                                    %error,
-                                    "A2A AgentCard refresh failed"
-                                );
-                            }
-                        }
-                    });
-                }
-                Some(a2a_provider)
-            };
-
             // Eager agent discovery (needed for SubagentProvider::discover)
             let agent_registry = Arc::new(tokio::sync::RwLock::new(
                 crate::adapters::agent_registry::AgentRegistry::discover(&workspace_path),
@@ -1922,26 +1869,24 @@ pub async fn run() -> Result<()> {
                         None
                     }
                 };
-            // Story 17.4b: now that the node tree and durable journal exist,
-            // inject the A2A delegation runtime so `A2aProvider::invoke` can
-            // materialize peer nodes and journal room events (durable-first).
+            // Story 18.9b-a: compose outbound A2A only after the durable node
+            // tree and room journal exist, then install that single provider on
+            // the standalone capability composite.
             #[cfg(feature = "a2a")]
-            if let Some(provider) = a2a_provider_concrete.as_ref() {
-                let runtime = Arc::new(
-                    crate::adapters::a2a::driver::A2aDelegationRuntime::new(
-                        subagent_registry.as_ref().clone(),
-                        Arc::new(
-                            crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
-                                node_journal.clone(),
-                                Some(domain_tx.clone()),
-                            ),
+            {
+                let egress = Arc::new(crate::adapters::a2a::egress::A2aEgress::compose(
+                    resolved.a2a_peers.clone(),
+                    subagent_registry.as_ref().clone(),
+                    Arc::new(
+                        crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
+                            node_journal.clone(),
+                            Some(domain_tx.clone()),
                         ),
-                        domain_tx.clone(),
-                    )
-                    .with_peer_bindings(provider.peer_bindings()),
-                );
-                provider.set_delegation_runtime(runtime.clone());
-                a2a_send_runtime = Some(runtime);
+                    ),
+                    domain_tx.clone(),
+                )?);
+                egress.install(composite);
+                a2a_send_runtime = Some(egress.runtime().clone());
             }
             // Story 17.5a — inject the MCP Tasks runtime into every MCP
             // client now that the node tree, journal, and clock all exist.

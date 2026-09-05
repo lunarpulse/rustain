@@ -36,6 +36,10 @@ impl A2aProvider {
     pub fn set_delegation_runtime(&self, runtime: Arc<super::driver::A2aDelegationRuntime>) {
         let _ = self.delegation.set(runtime);
     }
+
+    pub fn delegation_runtime(&self) -> Option<&Arc<super::driver::A2aDelegationRuntime>> {
+        self.delegation.get()
+    }
 }
 
 #[async_trait]

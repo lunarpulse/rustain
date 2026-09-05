@@ -419,6 +419,22 @@ async fn run_daemon_foreground(
             }
         });
     }
+    #[cfg(feature = "a2a")]
+    let a2a_egress = std::sync::Arc::new(
+        crate::adapters::a2a::egress::A2aEgress::compose(
+            a2a_peers.clone(),
+            node_tree.clone(),
+            std::sync::Arc::new(
+                crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
+                    node_journal.clone(),
+                    Some(domain_tx.clone()),
+                ),
+            ),
+            domain_tx.clone(),
+        )
+        .map_err(|error| anyhow::anyhow!("composing daemon A2A egress: {error}"))?,
+    );
+
     let core = std::sync::Arc::new(
         crate::infrastructure::composition::build_daemon_core(
             &workspace,
@@ -429,6 +445,8 @@ async fn run_daemon_foreground(
             Some(channel_turn_tx.clone()),
             node_tree.clone(),
             node_journal.clone(),
+            #[cfg(feature = "a2a")]
+            a2a_egress,
         )
         .map_err(|e| anyhow::anyhow!("composing daemon core: {e}"))?,
     );

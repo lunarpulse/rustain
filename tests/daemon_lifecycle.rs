@@ -15,6 +15,11 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use predicates::str::contains;
 
+#[cfg(feature = "a2a")]
+use wiremock::matchers::{method, path};
+#[cfg(feature = "a2a")]
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
 /// Build a `rustain` invocation pinned to the given isolated dirs.
 fn daemon_cmd(workspace: &Path, data: &Path, config: &Path) -> Command {
     let mut c = Command::cargo_bin("rustain").expect("cargo bin rustain");
@@ -47,6 +52,70 @@ impl Dirs {
     }
 }
 
+#[cfg(not(feature = "a2a"))]
+#[test]
+fn configured_a2a_peer_refuses_daemon_start_with_the_existing_feature_message() {
+    let d = dirs();
+    let config_dir = d.ws.path().join(".rustain");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("a2a.json"),
+        r#"{"agents":{"peer":{"url":"https://peer.example"}}}"#,
+    )
+    .unwrap();
+
+    d.cmd()
+        .args(["daemon", "start", "--foreground"])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "A2A peers or serving are configured, but this build has the `a2a` feature disabled",
+        ));
+}
+
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn daemon_composition_starts_a2a_agent_card_discovery_for_configured_peers() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/agent-card.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"name":"Daemon Peer","skills":[{"id":"inspect","name":"Inspect"}]}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let d = dirs();
+    let workspace_config = d.ws.path().join(".rustain");
+    std::fs::create_dir_all(&workspace_config).unwrap();
+    std::fs::write(
+        workspace_config.join("a2a.json"),
+        format!(
+            r#"{{"agents":{{"daemon-peer":{{"url":"{}"}}}}}}"#,
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("rustain"))
+        .current_dir(d.ws.path())
+        .env("RUSTAIN_DATA_DIR", d.data.path())
+        .env("RUSTAIN_CONFIG_DIR", d.cfg.path())
+        .args(["daemon", "start", "--foreground"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the configured-peer daemon must remain running through boot discovery"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
 #[test]
 fn start_status_stop_full_lifecycle() {
     let d = dirs();

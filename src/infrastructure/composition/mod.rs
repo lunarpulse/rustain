@@ -1262,6 +1262,7 @@ pub fn build_daemon_core(
     >,
     _node_tree: crate::infrastructure::subagent::NodeTree,
     _node_journal: Arc<crate::infrastructure::subagent::NodeJournal>,
+    #[cfg(feature = "a2a")] a2a_egress: Arc<crate::adapters::a2a::egress::A2aEgress>,
 ) -> Result<crate::adapters::daemon::runtime::DaemonCore, AdapterCompositionError> {
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
     use crate::adapters::filesystem::FileSystemStorage;
@@ -1322,6 +1323,8 @@ pub fn build_daemon_core(
         let domain_tx = domain_tx.clone();
         let channel_turn_tx = channel_turn_tx.clone();
         let factory_topic_store = Arc::clone(&peer_topic_store);
+        #[cfg(feature = "a2a")]
+        let a2a_egress = a2a_egress.clone();
         #[cfg(feature = "mcp")]
         let task_node_tree = _node_tree;
         #[cfg(feature = "mcp")]
@@ -1342,6 +1345,12 @@ pub fn build_daemon_core(
                     layer.router as Arc<dyn StreamingProvider>
                 };
                 let tools = build_tools(&tools_name, None, &ctx)?;
+                #[cfg(feature = "a2a")]
+                if let Some(composite) = tools.as_any().downcast_ref::<
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
+                >() {
+                    a2a_egress.install(composite);
+                }
                 // Story 17.5a — deferred MCP Tasks injection preserves the
                 // daemon's lazy provider/tool construction while connecting
                 // every live MCP client to the shared durable node tree.

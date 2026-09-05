@@ -49,7 +49,7 @@ pub struct CompositeToolsetAdapter {
     /// repopulations (fixes review finding: temporary Arc invalidated Weak refs).
     capability_registry: Arc<CapabilityRegistry>,
     /// Handles keeping discovered capabilities alive.
-    subscription_handles: TokioMutex<Vec<RegisterHandle>>,
+    subscription_handles: Arc<TokioMutex<Vec<RegisterHandle>>>,
     /// Supervisor-owned connect + reconnect tasks. `Arc` so the spawned lazy
     /// connector can retain its reconnect handles here too; session teardown
     /// aborts and awaits every retained handle. Tokio mutex keeps the std
@@ -113,7 +113,7 @@ impl CompositeToolsetAdapter {
             server_specs,
             include_builtin,
             capability_registry,
-            subscription_handles: TokioMutex::new(Vec::new()),
+            subscription_handles: Arc::new(TokioMutex::new(Vec::new())),
             mcp_connection_tasks: Arc::new(TokioMutex::new(Vec::new())),
             mcp_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             skill_activator,
@@ -160,7 +160,26 @@ impl CompositeToolsetAdapter {
     /// Story 17.4a — wire the discovery-only A2A provider after composition.
     #[cfg(feature = "a2a")]
     pub fn set_a2a_provider(&self, provider: Arc<dyn CapabilityProvider>) {
-        let _ = self.a2a_provider.set(provider);
+        if self.a2a_provider.set(provider.clone()).is_err() {
+            return;
+        }
+        let registry = Arc::clone(&self.capability_registry);
+        let subscription_handles = Arc::clone(&self.subscription_handles);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                match registry
+                    .discover_and_register_all(provider.as_ref(), "a2a")
+                    .await
+                {
+                    Ok(handles) => subscription_handles.lock().await.extend(handles),
+                    Err(error) => {
+                        tracing::warn!(%error, "A2A capability registry population failed")
+                    }
+                }
+            });
+        } else {
+            tracing::warn!("A2A capability registry population requires an async runtime");
+        }
     }
 
     /// Story 9.3b — read the current catalog version (for tests).
