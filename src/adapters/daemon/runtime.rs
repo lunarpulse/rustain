@@ -129,6 +129,13 @@ impl DaemonCore {
         self.runtime.get().is_some()
     }
 
+    /// 18.9b-a review patch — peek at the already-built runtime WITHOUT
+    /// building: the daemon forwarder's `A2aCatalogChanged` arm must not
+    /// itself trigger first activity (`ensure_runtime` would).
+    pub fn built_runtime(&self) -> Option<Arc<DaemonTurnRuntime>> {
+        self.runtime.get().cloned()
+    }
+
     /// AC1b fast gate: the build counter (`0` idle, `1` after first activity,
     /// stays `1` — build-once).
     pub fn build_count(&self) -> usize {

@@ -49,7 +49,13 @@ pub struct CompositeToolsetAdapter {
     /// repopulations (fixes review finding: temporary Arc invalidated Weak refs).
     capability_registry: Arc<CapabilityRegistry>,
     /// Handles keeping discovered capabilities alive.
-    subscription_handles: Arc<TokioMutex<Vec<RegisterHandle>>>,
+    subscription_handles: TokioMutex<Vec<RegisterHandle>>,
+    /// 18.9b-a review patch — handles from the a2a eager-registration spawn
+    /// (`set_a2a_provider`) live in their own never-replaced slot:
+    /// `populate_registry` *replaces* `subscription_handles`, and a dropped
+    /// `RegisterHandle` async-deregisters its capability, so a shared vec let
+    /// a populate race erase freshly-registered a2a capabilities.
+    a2a_subscription_handles: Arc<TokioMutex<Vec<RegisterHandle>>>,
     /// Supervisor-owned connect + reconnect tasks. `Arc` so the spawned lazy
     /// connector can retain its reconnect handles here too; session teardown
     /// aborts and awaits every retained handle. Tokio mutex keeps the std
@@ -113,7 +119,8 @@ impl CompositeToolsetAdapter {
             server_specs,
             include_builtin,
             capability_registry,
-            subscription_handles: Arc::new(TokioMutex::new(Vec::new())),
+            subscription_handles: TokioMutex::new(Vec::new()),
+            a2a_subscription_handles: Arc::new(TokioMutex::new(Vec::new())),
             mcp_connection_tasks: Arc::new(TokioMutex::new(Vec::new())),
             mcp_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             skill_activator,
@@ -164,7 +171,7 @@ impl CompositeToolsetAdapter {
             return;
         }
         let registry = Arc::clone(&self.capability_registry);
-        let subscription_handles = Arc::clone(&self.subscription_handles);
+        let subscription_handles = Arc::clone(&self.a2a_subscription_handles);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 match registry

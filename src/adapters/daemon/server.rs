@@ -809,6 +809,43 @@ impl AttachServer {
                 _ => {}
             }
         }
+        // 18.9b-a review patch (owner ruling 2026-09-06) — daemon-side
+        // self-heal mirroring the TUI handler (tui/handlers/a2a_catalog.rs):
+        // a peer whose AgentCard lands AFTER first activity would otherwise
+        // stay invisible for the process lifetime, because the one-shot eager
+        // registration in `set_a2a_provider` ran before the card was cached
+        // and nothing daemon-side repopulated on the catalog signal.
+        #[cfg(feature = "a2a")]
+        if let AppEvent::A2aCatalogChanged {
+            peer_id,
+            skill_count,
+        } = event
+        {
+            if let Some(runtime) = self.core.built_runtime() {
+                if let Some(composite) = runtime.tools.as_any().downcast_ref::<
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
+                >() {
+                    if let Err(error) = composite.populate_registry().await {
+                        tracing::debug!(
+                            %error,
+                            "populate_registry failed on A2aCatalogChanged (daemon)"
+                        );
+                    }
+                } else {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        skill_count,
+                        "A2aCatalogChanged: daemon toolset is not the composite; a2a catalogue unchanged"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    skill_count,
+                    "A2aCatalogChanged before the daemon runtime is built; catalogue unchanged"
+                );
+            }
+        }
         // Project → fan out (reusing the single `from_app_event` mapping).
         if let Some(raw) = RawEvent::from_app_event(event) {
             self.fanout(DaemonFrame::Event(raw)).await;

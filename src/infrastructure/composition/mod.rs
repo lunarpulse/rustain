@@ -1235,6 +1235,31 @@ pub(crate) fn daemon_compose_context(
     }
 }
 
+/// 18.9b-a D1 (code review, party-mode ruling 2026-09-06, owner-approved):
+/// a daemon whose resolved tools adapter is not the composite cannot host the
+/// a2a provider install — the install below the toolset build is
+/// downcast-guarded, so configured peers silently never surfaced. FR46 holds
+/// in the daemon on every configuration that names peers, so the adapter
+/// upgrades to `"composite"` (the daemon compose ctx carries zero MCP
+/// servers, making the upgraded shape the exact one `coding`-profile daemons
+/// already run) and the substrate widening is disclosed in the returned line.
+/// Impossible configurations (non-`a2a` builds with peers) are refused before
+/// composition by the AC3(a) feature guard in `startup.rs`.
+#[cfg(all(unix, feature = "a2a"))]
+fn resolve_daemon_tools_adapter(tools_name: &str, a2a_peers: usize) -> (String, Option<String>) {
+    if a2a_peers > 0 && tools_name != "composite" {
+        (
+            "composite".to_string(),
+            Some(format!(
+                "tools adapter '{tools_name}' cannot host {a2a_peers} configured A2A peer(s); \
+                 composed the composite toolset instead (builtin-full substrate, no MCP servers)"
+            )),
+        )
+    } else {
+        (tools_name.to_string(), None)
+    }
+}
+
 /// Compose the daemon's runtime FACTORY, not an eager live core (Story 12.2b
 /// AC1/AC1b — Q7-SETTLED).
 ///
@@ -1280,7 +1305,20 @@ pub fn build_daemon_core(
             .unwrap_or_else(|| default.to_string())
     };
     let persona_name = pick(PortDimension::Persona, "coding");
-    let tools_name = pick(PortDimension::Tools, "builtin-only");
+    // 18.9b-a D1 — see `resolve_daemon_tools_adapter`. Resolved once per boot,
+    // outside the first-activity factory below, so the disclosure fires once.
+    let picked_tools_name = pick(PortDimension::Tools, "builtin-only");
+    #[cfg(feature = "a2a")]
+    let (tools_name, daemon_tools_upgrade_notice) = resolve_daemon_tools_adapter(
+        &picked_tools_name,
+        a2a_egress.provider().peer_bindings().len(),
+    );
+    #[cfg(not(feature = "a2a"))]
+    let tools_name = picked_tools_name;
+    #[cfg(feature = "a2a")]
+    if let Some(notice) = daemon_tools_upgrade_notice {
+        tracing::warn!("daemon toolset upgraded to host A2A peers: {notice}");
+    }
     let (context_name, context_config) = profile_selection
         .dimensions
         .get(&PortDimension::Context)
@@ -2167,6 +2205,76 @@ mod tests {
             source: crate::domain::models::McpServerSource::Workspace,
         }];
         assert!(build_tools("composite", None, &ctx).is_ok());
+    }
+
+    // ── 18.9b-a D1: daemon toolset upgrade predicate ──
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a"))]
+    fn d1_composite_with_peers_is_unchanged_and_silent() {
+        let (name, notice) = resolve_daemon_tools_adapter("composite", 3);
+        assert_eq!(name, "composite");
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a"))]
+    fn d1_non_composite_with_zero_peers_is_unchanged_and_silent() {
+        let (name, notice) = resolve_daemon_tools_adapter("builtin-only", 0);
+        assert_eq!(name, "builtin-only");
+        assert!(
+            notice.is_none(),
+            "zero peers asked for nothing; silence is correct"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a"))]
+    fn d1_builtin_only_with_peers_upgrades_with_disclosure() {
+        let (name, notice) = resolve_daemon_tools_adapter("builtin-only", 2);
+        assert_eq!(name, "composite");
+        let notice = notice.expect("the upgrade must disclose the widening");
+        assert!(
+            notice.contains("builtin-only"),
+            "names the adapter it upgraded from: {notice}"
+        );
+        assert!(
+            notice.contains("composite"),
+            "names what it composed instead: {notice}"
+        );
+        assert!(
+            notice.contains("2"),
+            "names the peer count that forced the upgrade: {notice}"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a"))]
+    fn d1_builtin_full_with_peers_also_upgrades() {
+        let (name, notice) = resolve_daemon_tools_adapter("builtin-full", 1);
+        assert_eq!(name, "composite");
+        assert!(notice.is_some());
+    }
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a", feature = "mcp"))]
+    fn d1_upgraded_name_builds_the_installable_composite() {
+        // Winston's identity row: the upgraded name, fed through the same
+        // `build_tools` arm the daemon factory uses, yields the composite —
+        // the exact construction `coding`-profile daemons run (ADR-10-5 S1
+        // pins the zero-MPC compose; this pins the
+        // decision → construction → installable chain the upgrade relies on).
+        let (name, _notice) = resolve_daemon_tools_adapter("builtin-only", 1);
+        assert_eq!(name, "composite");
+        let ctx = test_compose_ctx();
+        let tools = build_tools(&name, None, &ctx).expect("composite builds");
+        assert!(
+            tools
+                .as_any()
+                .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()
+                .is_some(),
+            "the upgraded toolset must be the composite that hosts the a2a install"
+        );
     }
 
     // ── Channels tests ──

@@ -1010,7 +1010,13 @@ pub async fn run() -> Result<()> {
             .as_ref()
             .map(|profile| profile.a2a_peers.clone())
             .unwrap_or_default();
-        ensure_a2a_feature_enabled(&a2a_peers, false)?;
+        // 18.9b-a review patch — refuse only the actions that BOOT a daemon
+        // (AC3(a) demands refusing start). Gating every DaemonAction left a
+        // feature-off binary unable to stop/status/attach to a daemon an
+        // a2a-enabled build had started.
+        if matches!(action, DaemonAction::Start { .. } | DaemonAction::Run) {
+            ensure_a2a_feature_enabled(&a2a_peers, false)?;
+        }
         return crate::adapters::daemon::run_daemon(
             action,
             workspace,
