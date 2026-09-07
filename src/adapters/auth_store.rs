@@ -28,7 +28,7 @@ struct AuthFile {
     providers: HashMap<String, AuthEntry>,
 }
 
-/// Per-provider entry. Tagged enum for forward-compat (Epic 19 OAuth).
+/// Per-provider entry. Tagged enum for forward-compat — Epic 20 (OAuth; numbered 19 until 2026-08-23).
 ///
 /// `api_key` field is `SecretString` — `Debug` derive is safe (redacts automatically).
 /// The `serialize_with` chokepoint is the ONLY cleartext-to-disk egress (AC3/D2).
@@ -42,7 +42,7 @@ enum AuthEntry {
         /// RFC 3339 timestamp of last validation, if known.
         last_validated: Option<String>,
     },
-    // Epic 19 will add:
+    // Epic 20 will add:
     // #[serde(rename = "oauth")]
     // OAuth { access: String, refresh: String, expires: String },
 }

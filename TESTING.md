@@ -15,6 +15,16 @@ Run these tests before marking an epic as done. Estimated time: under 5 minutes.
 
 ---
 
+## What CI runs vs. what you run locally
+
+- **Local (the gate above) is stricter than CI, and that asymmetry is deliberate.** `cargo test --all-targets --no-fail-fast` runs every target; CI's test steps are enumerations — allow-lists that silently omit any target nobody names, which is exactly why the local gate is the whole suite. The ⚠ receipt on the gate line above (four stories green in story-records while CI was red) is the paid-for evidence.
+- **The CI `check` job's Test step (`ci.yml:68-98`)** runs three kinds of test invocation:
+  - `cargo test --no-run --tests` (`:70`) — **compiles** every `tests/` target and **runs none**;
+  - `cargo test --lib` (`:71`) — the lib tests only;
+  - a **hand-written enumeration of named targets** (`:72-98`; 13 today) — a new `tests/` file joins this subset only if someone adds it by hand. A ratchet parked in an unlisted `tests/` target compiles green in CI forever; guards that must run in CI live in the lib (see `src/domain/ports/capability_provider.rs:113-118` for the precedent and its reasoning).
+- **Feature lanes, same enumeration pattern:** `cargo test --lib --features skills-validation` (`ci.yml:107-108`); the `a2a` lane (`:141-166`, lib + every A2A integration target); further feature lanes (p2p, mcp, vector-search, macOS unit, Python TUI) follow the same shape.
+- **Clippy is advisory in CI and strict locally.** All four CI clippy lanes (`ci.yml:44,48,52,56` — default, telegram+cron, a2a, p2p) carry **`continue-on-error: true`** (`:43,47,51,55`), so clippy failures do not fail the pipeline. The local standard (`TESTING.md:12`) is unchanged and stricter: **strict, not advisory** — a story's own files must be warning-free. CI declines to enforce this so toolchain version-drift cannot block the pipeline (`ci.yml:33-39`); it does not license warnings.
+
 ## 1. Core User Journey
 
 | # | Precondition | Action | Expected Outcome |

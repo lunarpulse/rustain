@@ -10,7 +10,7 @@ use super::secret::SecretString;
 
 /// A stored authentication credential.
 ///
-/// Forward-compat scaffold: Epic 19 adds an OAuth variant.
+/// Forward-compat scaffold: Epic 20 (OAuth; numbered 19 until 2026-08-23) adds an OAuth variant.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Credential {
@@ -125,7 +125,7 @@ pub enum AuthSource {
 #[derive(Debug, Clone)]
 pub enum AuthMethod {
     ApiKey,
-    // Epic 19 will add: OAuth { ... }
+    // Epic 20 will add: OAuth { ... }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ pub enum AuthMethod {
 #[derive(Debug, Clone)]
 pub enum ResolvedAuth {
     ApiKey(SecretString),
-    // Epic 19 will add: OAuth { access_token, ... }
+    // Epic 20 will add: OAuth { access_token, ... }
 }
 
 impl ResolvedAuth {

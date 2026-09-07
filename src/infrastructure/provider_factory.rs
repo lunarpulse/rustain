@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// `auth.json` has a stored credential for `provider_id`.  Env var always wins
 /// (backward compatible).  Returns `None` only when neither source has a key.
 ///
-/// Forward-compat scaffold: returns `ResolvedAuth` (today only `ApiKey`; Epic 19
+/// Forward-compat scaffold: returns `ResolvedAuth` (today only `ApiKey`;
+/// Epic 20 (OAuth; numbered 19 until 2026-08-23)
 /// adds `OAuth` which selects `Authorization: Bearer` + provider betas).
 pub fn resolve_auth(
     api_key_env: &str,
