@@ -32,9 +32,18 @@ pub async fn run_profile_create(
     _cli: &Cli,
     _bootstrap_config: &AppConfig,
 ) -> Result<()> {
-    // TTY guard FIRST
+    // TTY guard FIRST.
+    //
+    // ⚠ Story 19.12 A18 — named behaviour change: the EXIT CODE MOVES 1 -> 2.
+    // This was `anyhow::bail!`, which `startup.rs:834-837` routes to
+    // `tracing::error!` — no stream, so the precise refusal below reached NOBODY
+    // and a non-TTY `profile create` failed with zero bytes on stdout AND stderr
+    // (measured, twice). `eprintln!` + `exit(2)` is this directory's house
+    // pattern (`install.rs`, `import.rs`) and 2 is what every other profile verb
+    // returns for a user-facing refusal. No test asserted the old value.
     if !std::io::stdin().is_terminal() {
-        anyhow::bail!("rustain profile create requires an interactive terminal.");
+        eprintln!("rustain profile create requires an interactive terminal.");
+        std::process::exit(2);
     }
 
     let config_dir = paths::config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));

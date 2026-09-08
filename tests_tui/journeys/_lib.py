@@ -1,10 +1,15 @@
-"""Shared pexpect helpers for the Epic 19 journey drivers (Story 19.9).
+"""Shared pexpect helpers for the journey drivers (Stories 19.9 and 19.12).
 
 `journey_j0_sam.py` and `journey_j2_jordan.py` both need the same four things:
 a failing wait (`wait_for_idle` cannot fail and is forbidden — 19.8 A3), a
 labelled pane dump, a `Ctrl+Q` with a liveness deadline, and a deterministic way
 to put keyboard focus on a NAMED tool block rather than on whichever one the
 renderer happens to pick.
+
+`journey_j8_ravi.py` (Story 19.12) added a fifth: the CLI. It is the first
+driver in the tree that drives `rustain` as a command rather than as a TUI, so
+`cli_pane` and `cli_wizard_pane` live here too — see the block above them for
+why they emit the TUI's pane fence around child output.
 
 ⛔ Nothing here asserts. A gate assertion reads the stub's request log, the
 session files, the usage ledger, or a labelled pane slice out of the receipt —
@@ -16,6 +21,8 @@ needs a helper writes it here (story Scope boundary).
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -35,6 +42,161 @@ def pane(tui, label: str) -> None:
     print(f"--- pane: {label} ---", flush=True)
     print(tui.get_screen_text(), flush=True)
     print("--- end pane ---", flush=True)
+
+
+# ── The CLI half (Story 19.12, rulings A11 + A12) ───────────────────────────
+#
+# J8 is the FIRST journey driver in the tree that drives the CLI rather than the
+# TUI. `RustainTUI` is unusable for a CLI beat — it blocks on a TUI `Ready` wait,
+# builds a pyte screen, copies `rustain/.env` and scaffolds a permissions file —
+# and `harness.py` is off-limits, so the CLI spawn lives here (`_lib.py:13-15`
+# sanctions exactly this).
+#
+# ⚠ A CLI capture has no pane, and these helpers emit the pane fence anyway.
+# That is deliberate (ruling A11): `pane_slice` is the checker's ONE extractor
+# and `pane_expect`/`pane_refute`/`pane_grep` all consume it, so emitting the
+# same fence bytes around raw child output costs the checker zero helper edits.
+# ⛔ No second extractor and no rename. The word "pane" is therefore a lie of
+# convenience for J8, and this comment is where it is written down instead of
+# shipped silently: for J8, a "pane" is a captured CLI output block.
+#
+# ⚠ `pane_slice` returns 42 on a DUPLICATE label, so every J8 label is unique.
+
+
+def _fence(label: str, body: str) -> None:
+    print(f"--- pane: {label} ---", flush=True)
+    print(body, flush=True)
+    print("--- end pane ---", flush=True)
+
+
+def cli_pane(
+    binary: Path,
+    args: list[str],
+    *,
+    label: str,
+    config_dir: Path,
+    cwd: Path,
+    env_extra: dict[str, str] | None = None,
+    timeout: float = 60.0,
+    expect_exit: int | None = None,
+) -> tuple[int, str]:
+    """Run one NON-INTERACTIVE `rustain` invocation and fence its output.
+
+    stdin is `/dev/null` on purpose: it is what makes the `profile create`
+    negative control a real non-TTY run, and every other CLI beat here is
+    non-interactive by design (the driver installs `devops` exactly ONCE, so
+    `import`'s un-TTY-guarded overwrite prompt is never reached — A22).
+
+    Both streams are captured and fenced together. `export <n> -o <file>` prints
+    its success line on stdout while `export <n>` prints it on stderr, and a
+    fence carrying only one of them would lose a product-minted sentence.
+
+    ⛔ The timeout is a FAILED RUN, never a skip: a wait that cannot fail is the
+    trap this whole directory exists to avoid.
+    """
+    env = dict(os.environ)
+    env["RUSTAIN_CONFIG_DIR"] = str(config_dir)
+    env["NO_COLOR"] = "1"
+    if env_extra:
+        env.update(env_extra)
+    try:
+        proc = subprocess.run(
+            [str(binary), *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(cwd),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        _fence(label, f"(TIMED OUT after {timeout}s)")
+        print(f"FAIL: `rustain {' '.join(args)}` did not finish — {label}", flush=True)
+        sys.exit(1)
+    body = (
+        f"$ rustain {' '.join(args)}\n"
+        f"{proc.stdout}{proc.stderr}"
+        f"exit={proc.returncode}"
+    )
+    _fence(label, body)
+    if expect_exit is not None and proc.returncode != expect_exit:
+        print(
+            f"FAIL: `rustain {' '.join(args)}` exited {proc.returncode}, "
+            f"expected {expect_exit} — {label}",
+            flush=True,
+        )
+        sys.exit(1)
+    log(f"{label}: exit {proc.returncode}")
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def cli_wizard_pane(
+    binary: Path,
+    args: list[str],
+    script: list[tuple[str, str]],
+    *,
+    label: str,
+    config_dir: Path,
+    cwd: Path,
+    timeout: float = 60.0,
+) -> tuple[int, str]:
+    """Drive an INTERACTIVE `rustain` invocation under a real PTY and fence it.
+
+    `script` is an ordered list of `(prompt, answer)` pairs. Prompts are matched
+    with `expect_exact`, because `cli/profile/prompt.rs` writes them with
+    `print!` + flush + `read_line` — no pyte needed, and no screen to poll.
+
+    ⚠ pexpect defaults to `echo=True`, so every answer typed here is echoed by
+    the PTY back into THIS pane. A marker that greps for one of those answers
+    would be reading the driver's own keystrokes, not the product's output —
+    which is why marker 2's needles live in the `profile show` pane and assert
+    the padded `{label:<12}` column format a typed answer cannot produce (A23d).
+
+    ⛔ Every wait can time out, and a timeout exits non-zero.
+    """
+    import io
+
+    import pexpect
+
+    env = dict(os.environ)
+    env["RUSTAIN_CONFIG_DIR"] = str(config_dir)
+    env["NO_COLOR"] = "1"
+    captured = io.StringIO()
+    child = pexpect.spawn(
+        str(binary),
+        args=args,
+        env=env,
+        cwd=str(cwd),
+        encoding="utf-8",
+        timeout=timeout,
+        dimensions=(30, 130),
+    )
+    child.logfile_read = captured
+    failure = ""
+    try:
+        for prompt, answer in script:
+            child.expect_exact(prompt)
+            child.sendline(answer)
+        child.expect(pexpect.EOF)
+    except pexpect.TIMEOUT:
+        failure = f"timed out waiting for {prompt!r}"
+    except pexpect.EOF:
+        failure = f"the process exited before {prompt!r}"
+    child.close()
+    body = f"$ rustain {' '.join(args)}\n{captured.getvalue()}exit={child.exitstatus}"
+    _fence(label, body)
+    if failure:
+        print(f"FAIL: {failure} — {label}", flush=True)
+        sys.exit(1)
+    if child.exitstatus != 0:
+        print(
+            f"FAIL: the wizard exited {child.exitstatus} (signal "
+            f"{child.signalstatus}) — {label}",
+            flush=True,
+        )
+        sys.exit(1)
+    log(f"{label}: wizard completed, exit {child.exitstatus}")
+    return child.exitstatus, captured.getvalue()
 
 
 def require(tui, needle: str, timeout: float, label: str) -> None:

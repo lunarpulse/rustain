@@ -694,9 +694,23 @@ pub fn build_scheduler(
 ) -> Result<Arc<dyn SchedulerPort>, AdapterCompositionError> {
     match name {
         "none" => Ok(Arc::new(NoOpScheduler)),
-        #[cfg(feature = "cron")]
-        "cron" => Ok(Arc::new(NoOpScheduler)),
-        #[cfg(not(feature = "cron"))]
+        // ⚠ Story 19.12 A19 — this used to be a `#[cfg(feature = "cron")]` /
+        // `#[cfg(not(...))]` pair whose two arms were BYTE-IDENTICAL
+        // `NoOpScheduler`. A `#[cfg]` split whose branches are the same code is
+        // either dead or a lie; here it was a lie, and it hid the real state:
+        // a profile-composed `cron` scheduler is UNWIRED in every build.
+        //
+        // In a DEFAULT build the profile never reaches here — `profile_loader`
+        // refuses to load it with a remediation command and exit 2
+        // (`profile_loader.rs:249-258`), and the wizard warns at selection time.
+        // With `--features cron` compiled the loader passes and composition
+        // substitutes nothing, silently. The real `CronSchedulerAdapter` (one
+        // production caller: `daemon/mod.rs:506`) runs only under the daemon.
+        //
+        // ⛔ Making the loader refuse `cron` regardless of the compiled feature
+        // was considered and NOT taken: it breaks `--features cron` builds and
+        // asserts a product judgement that belongs to whoever owns the scheduler
+        // port. Recorded as DF-19-12-PROFILE-CRON-UNWIRED.
         "cron" => Ok(Arc::new(NoOpScheduler)),
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Scheduler,

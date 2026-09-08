@@ -896,6 +896,12 @@ pub async fn run() -> Result<()> {
             path.clone(),
             name.clone(),
             *force,
+            // Story 19.12 A21 — `import` keeps its shipped behaviour: it does NOT
+            // refuse a built-in collision. Only the `install` local-path arm does.
+            false,
+            // Direct `import` remains strict about unavailable adapter features.
+            // `install` forwards its CLI flag through the same shared pipeline.
+            true,
             &profile_resolver_arc,
             &cli,
             &bootstrap_config,

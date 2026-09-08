@@ -1,0 +1,50 @@
+# The shared artifact of PRD Journey 8 — HAND-AUTHORED AND PARTIAL, on purpose.
+#
+# ⛔ This is NOT wizard output. The wizard writes all seven ports, always
+# (`create.rs:134-212` re-prompts forever on a blank with no `--from`;
+# `build_profile_toml` emits every one) — measured at Task 0: `grep -c '^\['`
+# on real wizard output is 7. A seven-port file cannot witness inheritance,
+# because nothing is left to inherit.
+#
+# ⚑ The story's ORIGINALLY STATED REASON FOR THIS FILE WAS WRONG, and it is
+# recorded here rather than quietly dropped (ruling A7). The draft concluded
+# that flipping `extends` "changes nothing that `profile show` prints — a
+# mutant that cannot turn RED." Measured, both ways: it changes plenty.
+# `coding.toml` carries `[overrides] default_plan_mode = false` and
+# `base.toml` carries none, so the `Overrides (figment):` block appears and
+# disappears with the parent. The draft was written with both files on screen.
+#
+# The ruling stands on a better reason:
+#   (a) this is the file `profile install <local path>` actually installs, so
+#       the inheritance proof and the install proof are the SAME artifact;
+#   (b) it yields a PORT-LEVEL mutant — `extends = "coding"` -> `"base"` makes
+#       `memory:` read `noop` instead of `project-scoped` — which is a stronger
+#       discriminator than an overrides block anyone could add to `base.toml`;
+#   (c) FR63's second clause sanctions it verbatim: "or by writing TOML
+#       configuration files directly" (`prd.md:2214`).
+#
+# ⚠ `[scheduler] adapter = "none"`, ⛔ NEVER "cron": in a default build a cron
+# profile REFUSES TO LOAD, loudly, with a remediation command and exit 2
+# (`profile_loader.rs:249-258`) — measured. Ravi's PRD cron beat has no
+# mechanism; see the receipt's honesty block and DF-19-12-PROFILE-CRON-UNWIRED.
+#
+# ⚠ `[tools] adapter = "builtin-only"` is the WIRE DISCRIMINATOR (T0.3(9)).
+# It is what makes "the installed profile drove the turn" falsifiable: the
+# scene-turn request row carries `"tools":12` under this profile and `"tools":15`
+# under the default `coding`. ⛔ `[overrides] model` was tried FIRST and does not
+# work — `turn_driver.rs` resolves an unknown model id away before the turn, so
+# the fixture's value never reaches a `"turn":` row.
+#
+# ⛔ The name here is `devops`. The WIZARD's profile is `devops-wizard` (A23a):
+# if both were `devops`, beat 5's install would hit `check_name_collision`'s
+# user-profile arm, `import`'s un-TTY-guarded overwrite prompt would answer
+# itself, and `profile show devops` would go green off the WRONG file.
+name = "devops"
+description = "Ravi's DevOps specialisation — shared as one portable TOML"
+extends = "coding"
+
+[scheduler]
+adapter = "none"
+
+[tools]
+adapter = "builtin-only"

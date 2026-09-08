@@ -1,0 +1,17 @@
+{
+  "scene": "j8-ravi",
+  "personas": {
+    "scene-ravi": {
+      "turns": [
+        {
+          "expect": "Investigate the OOM kills in the billing service",
+          "content": [
+            {"type": "text", "text": "Checked the billing service memory profile.\nThe container limit is the binding constraint, not a leak."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 388, "output_tokens": 27}
+        }
+      ]
+    }
+  }
+}

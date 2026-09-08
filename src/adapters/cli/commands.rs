@@ -456,9 +456,16 @@ pub enum ProfileAction {
         #[arg(long)]
         force: bool,
     },
-    /// Install a profile from a public git repository (gh:user/repo) (Story 8.6b)
+    /// Install a profile from a public git repository (gh:user/repo) or a local path
+    ///
+    /// A `gh:` spec is fetched over HTTPS into `profiles/community/`; anything else is
+    /// treated as a local file and delegated to `import`, landing in `profiles/`.
+    /// Unlike `import`, `install` REFUSES a name that shadows a built-in profile:
+    /// `import` means "load my file", `install` means "take someone else's", and
+    /// silently replacing the default profile with a stranger's TOML is the mistake
+    /// the guard exists to stop.
     Install {
-        /// Source spec (e.g., gh:user/profile-name; optionally with /path/to/profile.toml suffix)
+        /// Source spec: gh:user/profile-name (optionally with a /path/to/profile.toml suffix), or a local file path
         spec: String,
         /// Override the installed profile's name (rewrites name = field)
         #[arg(long)]
