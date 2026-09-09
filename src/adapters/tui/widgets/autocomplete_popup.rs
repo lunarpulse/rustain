@@ -20,6 +20,7 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
         AutocompleteKind::FileMention => " Files ",
         AutocompleteKind::AgentMention => " Agents @ ",
         AutocompleteKind::McpMention => " MCP Tools @ ",
+        AutocompleteKind::A2aMention => " A2A Agents @ ",
     };
 
     if state.suggestions.is_empty() {
@@ -176,6 +177,25 @@ fn format_suggestion<'a>(suggestion: &AutocompleteSuggestion, theme: &Theme) -> 
             let line = Line::from(vec![
                 Span::styled(
                     format!("[{}] {}", server, name),
+                    Style::default()
+                        .fg(theme.colors.fg_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}", description),
+                    Style::default().fg(theme.colors.fg_secondary),
+                ),
+            ]);
+            ListItem::new(line)
+        }
+        AutocompleteSuggestion::A2aAgent {
+            peer,
+            name,
+            description,
+        } => {
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("[{}] {}", peer, name),
                     Style::default()
                         .fg(theme.colors.fg_primary)
                         .add_modifier(Modifier::BOLD),

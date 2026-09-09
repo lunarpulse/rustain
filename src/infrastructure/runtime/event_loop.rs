@@ -8019,6 +8019,16 @@ pub async fn run(
                             skill_count,
                         )
                         .await;
+                        if state.autocomplete.active
+                            && state.autocomplete.kind == crate::domain::models::autocomplete::AutocompleteKind::A2aMention
+                        {
+                            populate_autocomplete_suggestions(
+                                &mut state,
+                                &mut command_registry,
+                                &workspace_path,
+                                &tools,
+                            ).await;
+                        }
                     }
                     AppEvent::CapabilityEvent(ref ev) => {
                         let protocol = match ev {
@@ -10334,6 +10344,39 @@ pub(crate) async fn populate_autocomplete_suggestions(
                 } else {
                     Vec::new()
                 };
+            state.autocomplete.suggestions = suggestions;
+            if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
+                state.autocomplete.selected_index = 0;
+                state.autocomplete.scroll_offset = 0;
+            }
+        }
+        AutocompleteKind::A2aMention => {
+            #[cfg(feature = "a2a")]
+            let suggestions = {
+                use crate::adapters::a2a::provider::collect_a2a_autocomplete;
+                use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+
+                if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+                    let filter = if state.autocomplete.filter_text.is_empty() {
+                        None
+                    } else {
+                        Some(state.autocomplete.filter_text.as_str())
+                    };
+                    collect_a2a_autocomplete(&composite.capability_registry().snapshot(), filter)
+                        .into_iter()
+                        .map(|info| AutocompleteSuggestion::A2aAgent {
+                            peer: info.peer,
+                            name: info.name,
+                            description: info.description,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            };
+            #[cfg(not(feature = "a2a"))]
+            let suggestions = Vec::new();
+
             state.autocomplete.suggestions = suggestions;
             if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
                 state.autocomplete.selected_index = 0;

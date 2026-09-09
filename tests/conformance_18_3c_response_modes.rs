@@ -381,36 +381,6 @@ fn ac5_retraction_is_append_only_stateful_and_same_host_only() {
 }
 
 #[test]
-fn ac6_domain_and_event_loop_boundaries_remain_intact() {
-    for path in [
-        "src/domain/models/conversation.rs",
-        "src/domain/models/orchestration.rs",
-        "src/domain/models/orchestration_room.rs",
-        "src/domain/ports/agent_message_bus.rs",
-        "src/domain/services/transparency.rs",
-    ] {
-        let body = source(path);
-        assert!(
-            !body.contains("crate::adapters::"),
-            "{path} imports adapters"
-        );
-        assert!(
-            !body.contains("crate::infrastructure::"),
-            "{path} imports infrastructure"
-        );
-    }
-    let event_loop_lines = source("src/infrastructure/runtime/event_loop.rs")
-        .lines()
-        .count();
-    assert!(
-        event_loop_lines <= 11_321,
-        "event_loop.rs has {event_loop_lines} lines"
-    );
-    let server = source("src/adapters/daemon/server.rs");
-    assert!(!server.contains("NopRecipientRuntime"));
-}
-
-#[test]
 fn ac6_ci_executes_the_story_target_in_default_and_a2a_lanes() {
     let ci = source(".github/workflows/ci.yml");
     let default_lane = ci

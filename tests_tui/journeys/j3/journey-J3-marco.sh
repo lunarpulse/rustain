@@ -64,6 +64,7 @@ set -uo pipefail
 BIN="${1:?usage: journey-J3-marco.sh <path-to-rustain> [transcript-path]}"
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 STAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+RECORDED_AT="$(printf '%s' "$STAMP" | sed 's/T\(..\)-\(..\)-\(..\)Z/T\1:\2:\3Z/')"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TRANSCRIPT="${2:-$HERE/receipts/journey-J3-${STAMP}.transcript.txt}"
 CAPTURED=""
@@ -72,7 +73,7 @@ PENDING="$TRANSCRIPT"
 
 SCENE="$HERE/scenes/j3-marco.json"
 SKILL="$HERE/skills/safe-deploy/SKILL.md"
-RUSTAIN_ROOT="$(cd "$(dirname "$BIN")/../.." && pwd)"
+RUSTAIN_ROOT="${RUSTAIN_ROOT:-$(cd "$(dirname "$BIN")/../.." && pwd)}"
 SCENE_PROVIDER="$RUSTAIN_ROOT/tests_tui/fixtures/scene_provider.py"
 RUN="$(mktemp -d)"
 WS="$RUN/workspace"
@@ -159,7 +160,7 @@ if [ -n "$(git -C "$RUSTAIN_ROOT" status --porcelain -- src/ Cargo.toml Cargo.lo
   TREE="${TREE}-dirty"
 fi
 printf 'journey J3 — Marco'"'"'s runbook-as-skill, enforced by the real binary (Story 19.10, gate J3)\n'
-printf 'recorded-at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'recorded-at: %s\n' "$RECORDED_AT"
 printf 'binary:      %s\n' "$BIN"
 printf 'version:     %s\n' "$("$BIN" --version 2>&1 | head -1)"
 printf 'tree:        rustain@%s\n' "$TREE"

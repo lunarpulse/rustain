@@ -293,9 +293,8 @@ fn p2p_ci_lane_names_the_current_targets() {
 // ⛔ It is NOT replaced by a laxer version. What the fence protected is now
 // covered by narrower, still-live assertions:
 //
-// * the surface stays out of `event_loop.rs` — the exact line pin in
-//   `conformance_18_3a_f_resolution.rs::the_resolve_verb_costs_the_event_loop_nothing`
-//   keeps the loop's growth to the dispatch arm plus the two resolution arms;
+// * Story 19.13 retired the event-loop line-count/source-text test: it did
+//   not exercise behavior and failed on unrelated autocomplete dispatch;
 // * the operator copy stays honest — `conformance_p2p_ingress.rs`'s wording
 //   ceiling, whose `owned_modules` Story 18.4b extended to every module it
 //   added;

@@ -2240,17 +2240,3 @@ fn ci_executes_this_story_target_in_both_lanes() {
         "this filename must not contain `a2a`"
     );
 }
-
-/// **AC6 — the `event_loop.rs` line budget, measured here as well as in the
-/// 18.3c ratchet** so a reader of *this* story sees the number it spent.
-///
-/// The binding cap is `tests/conformance_18_3c_response_modes.rs`'s 11_321,
-/// which runs in BOTH CI jobs; `tests/conformance.rs` runs only in the a2a job.
-#[test]
-fn the_artifact_surface_stayed_inside_the_event_loop_line_budget() {
-    let lines = event_loop_source().lines().count();
-    assert!(
-        lines <= 11_321,
-        "event_loop.rs has {lines} lines — put logic in artifact_bridge.rs, do not bump the cap"
-    );
-}

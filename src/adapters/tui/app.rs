@@ -1019,6 +1019,11 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                         state.autocomplete.kind = AutocompleteKind::McpMention;
                         String::new()
                     } else if state.autocomplete.kind == AutocompleteKind::FileMention
+                        && filter.eq_ignore_ascii_case("a2a/")
+                    {
+                        state.autocomplete.kind = AutocompleteKind::A2aMention;
+                        String::new()
+                    } else if state.autocomplete.kind == AutocompleteKind::FileMention
                         && filter == "Agents/"
                     {
                         state.autocomplete.kind = AutocompleteKind::AgentMention;
@@ -1030,6 +1035,11 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                         let filter_lower = filter.to_lowercase();
                         let after_slash =
                             filter_lower.strip_prefix("mcp/").unwrap_or(&filter_lower);
+                        after_slash.to_string()
+                    } else if state.autocomplete.kind == AutocompleteKind::A2aMention {
+                        // Namespace token is case-insensitive; the suffix keeps
+                        // the user's casing (peer/skill IDs are case-sensitive).
+                        let after_slash = strip_a2a_namespace(&filter);
                         after_slash.to_string()
                     } else {
                         filter
@@ -2889,6 +2899,16 @@ fn ensure_cursor_visible(state: &mut TuiState) {
     }
 }
 
+/// Strip a case-insensitive `a2a/` namespace prefix from an A2A mention
+/// filter, preserving the suffix verbatim (peer/skill IDs are case-sensitive).
+/// Mirrors the `mcp/` namespace stripping in the filter/backspace paths.
+fn strip_a2a_namespace(filter: &str) -> &str {
+    match filter.get(..4) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("a2a/") => &filter[4..],
+        _ => filter,
+    }
+}
+
 /// Handle keys while autocomplete popup is active.
 // Covers: UX-DR75
 fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction {
@@ -2962,6 +2982,11 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
                     {
                         state.autocomplete.kind = AutocompleteKind::FileMention;
                     }
+                    if state.autocomplete.kind == AutocompleteKind::A2aMention
+                        && !filter.to_lowercase().starts_with("a2a/")
+                    {
+                        state.autocomplete.kind = AutocompleteKind::FileMention;
+                    }
                     let filter_text = if state.autocomplete.kind == AutocompleteKind::AgentMention {
                         filter
                             .strip_prefix("Agents/")
@@ -2973,6 +2998,8 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
                             .or_else(|| filter.strip_prefix("mcp/"))
                             .unwrap_or(&filter)
                             .to_string()
+                    } else if state.autocomplete.kind == AutocompleteKind::A2aMention {
+                        strip_a2a_namespace(&filter).to_string()
                     } else {
                         filter
                     };
@@ -3057,6 +3084,27 @@ fn apply_autocomplete_selection(
         AutocompleteSuggestion::McpTool { server, name, .. } => {
             // Insert canonical mcp__<server>__<tool> form per DG 2.4
             let canonical = format!("mcp__{}__{}", server, name);
+            let before: String = state.input_buffer.chars().take(trigger).collect();
+            let after: String = state
+                .input_buffer
+                .chars()
+                .skip(state.cursor_position)
+                .collect();
+            state.input_buffer = format!("{}{}{}", before, canonical, after);
+            state.cursor_position = trigger + canonical.chars().count();
+            None
+        }
+        AutocompleteSuggestion::A2aAgent { peer, name, .. } => {
+            // Story 19.13: insert the canonical `a2a__<peer>__<skill>` wire
+            // name built through the CapabilityId bridge — never the raw peer
+            // skill ID (a hostile peer exposing a skill named like a built-in
+            // tool must not become a bare local-tool reference in the prompt).
+            let id = crate::domain::models::CapabilityId {
+                protocol: "a2a".to_string(),
+                server: peer.clone(),
+                tool: name.clone(),
+            };
+            let canonical = id.to_a2a_wire_name()?;
             let before: String = state.input_buffer.chars().take(trigger).collect();
             let after: String = state
                 .input_buffer
@@ -4980,6 +5028,91 @@ mod tests {
             &DomainInputEvent::SpecialKey(DomainKey::Backspace),
         );
         assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+    }
+
+    // Story 19.13: `@a2a/` namespace entry is case-insensitive — any casing of
+    // the namespace token switches the popup to A2aMention and consumes the
+    // namespace, while the suffix filter keeps the user's casing verbatim.
+    #[test]
+    fn test_typing_at_a2a_slash_switches_autocomplete_kind() {
+        let mut state = make_state();
+        for c in "@a2A/".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::A2aMention);
+        assert_eq!(state.autocomplete.filter_text, "");
+        for c in "MyPeer".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.filter_text, "MyPeer");
+        let _ = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(state.autocomplete.filter_text, "MyPee");
+    }
+
+    // Story 19.13: deleting the '/' of a mixed-case `@A2a/` namespace falls
+    // back to FileMention (the A2A guard lowercases before matching) and keeps
+    // the typed text in the buffer as a plain file filter.
+    #[test]
+    fn test_backspace_past_a2a_slash_returns_to_file_mention() {
+        let mut state = make_state();
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
+        for c in "A2a/".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::A2aMention);
+        let _ = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+        assert_eq!(state.input_buffer, "@A2a");
+        assert_eq!(state.autocomplete.filter_text, "A2a");
+    }
+
+    // Story 19.13: selecting an A2A suggestion (Tab through handle_input)
+    // inserts the canonical `a2a__<peer>__<skill>` wire name — never the raw
+    // peer skill ID. A hostile peer exposing a skill named "Read" must not
+    // produce a bare local-tool reference, the multi-byte Unicode text around
+    // the trigger must survive, and the cursor must rest after the insertion.
+    #[test]
+    fn test_a2a_selection_inserts_wire_name_not_raw_hostile_read() {
+        let mut state = make_state();
+        for c in "héllo 🌍  終".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        for _ in " 終".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Left));
+        }
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+        for c in "a2a/".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::A2aMention);
+        state.autocomplete.suggestions.push(
+            crate::domain::models::autocomplete::AutocompleteSuggestion::A2aAgent {
+                peer: "evil-peer".to_string(),
+                name: "Read".to_string(),
+                description: "hostile skill".to_string(),
+            },
+        );
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
+        assert!(
+            !state.autocomplete.active,
+            "popup dismissed after selection"
+        );
+        assert_eq!(
+            state.input_buffer, "héllo 🌍 a2a__evil-peer__Read 終",
+            "canonical wire name replaces '@' trigger; Unicode prefix and suffix preserved"
+        );
+        assert_eq!(
+            state.cursor_position,
+            "héllo 🌍 a2a__evil-peer__Read".chars().count(),
+            "cursor directly after the inserted wire name"
+        );
     }
 
     // ── Story 16.5.5: Feedback Action Dispatch Arbiter ────────────────────────

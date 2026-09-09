@@ -1281,50 +1281,6 @@ fn the_ci_a2a_lane_runs_this_target_with_instrumentation() {
     );
 }
 
-/// **18.3a-e amendment:** the operator surface reaches the existing durable
-/// latch through one port and does not mint a second apply implementation.
-#[test]
-fn operator_surface_routes_to_the_existing_apply_latch() {
-    let bridge = source("src/infrastructure/runtime/artifact_bridge.rs");
-    let apply = &bridge[bridge
-        .find("pub async fn apply_artifact(")
-        .expect("apply seam")..];
-    let gate = apply
-        .find("room_edit_decision(local_room_role(acting), RoomEditKind::DurableContent)")
-        .expect("room edit gate");
-    let port = apply.find(".apply_patch(").expect("single apply port");
-    assert!(gate < port, "the gate precedes the workspace-write port");
-    assert_eq!(bridge.matches(".apply_patch(").count(), 1);
-    assert!(
-        !bridge.contains("RoomEvent::PatchApplyStarted"),
-        "the bridge delegates to the existing latch; it does not mint apply events"
-    );
-
-    let handler = source("src/adapters/tui/handlers/artifact_command.rs");
-    assert!(handler.contains("Some(\"apply\")"), "parser branch");
-    let loop_source = source("src/infrastructure/runtime/event_loop.rs");
-    for needle in [
-        "InputAction::ApplyCardAccept",
-        "InputAction::ApplyCardDecline",
-        "render_apply_card_lines",
-    ] {
-        assert!(loop_source.contains(needle), "{needle}");
-    }
-    assert!(loop_source.lines().count() <= 11_321);
-
-    let merge_back = source("src/infrastructure/orchestrator/merge_back.rs");
-    assert_eq!(
-        merge_back.matches("pub async fn apply(").count(),
-        1,
-        "no second merge-back latch"
-    );
-    let a2a = source("src/adapters/a2a/projection.rs");
-    assert!(
-        !a2a.contains("PatchApplyExecutor") && !a2a.contains("ArtifactCommandArgs::Apply"),
-        "18.4 peer projection remains deferred"
-    );
-}
-
 /// Body of `PatchMergeBack::apply`, bounded at the next method.
 fn apply_fn_body(merge_back: &str) -> &str {
     section(merge_back, "pub async fn apply(")

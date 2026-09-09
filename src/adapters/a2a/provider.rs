@@ -159,3 +159,154 @@ impl CapabilityProvider for A2aProvider {
         }
     }
 }
+
+/// Collect A2A mention entries from the callable capability registry.
+///
+/// Story 19.13 backs the `@A2A/` namespace from the same snapshot that
+/// `CompositeToolsetAdapter::available_tools` projects into model-visible
+/// tools. A cached AgentCard is not enough: a suggestion is shown only while
+/// its registration is alive and therefore callable.
+///
+/// `filter` is a case-insensitive substring match on the raw skill id or
+/// description. Registry snapshot order is preserved.
+pub fn collect_a2a_autocomplete(
+    capabilities: &[crate::domain::models::RegisteredCapability],
+    filter: Option<&str>,
+) -> Vec<crate::domain::models::autocomplete::A2aAgentInfo> {
+    let filter_lower = filter.map(str::to_lowercase);
+
+    capabilities
+        .iter()
+        .filter(|capability| capability.protocol == "a2a")
+        .filter(|capability| {
+            filter_lower.as_ref().is_none_or(|filter| {
+                capability.id.tool.to_lowercase().contains(filter)
+                    || capability.description.to_lowercase().contains(filter)
+            })
+        })
+        .map(
+            |capability| crate::domain::models::autocomplete::A2aAgentInfo {
+                peer: capability.id.server.clone(),
+                name: capability.id.tool.clone(),
+                description: capability.description.clone(),
+            },
+        )
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::a2a::client::A2aClientAdapter;
+    use crate::domain::models::{A2aPeerSource, RedactedUrl};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn spec(url: String) -> A2aPeerSpec {
+        A2aPeerSpec {
+            id: "security-peer".to_owned(),
+            url: RedactedUrl::from(url),
+            pinned_key: None,
+            source: A2aPeerSource::Workspace,
+        }
+    }
+
+    const MULTI_SKILL_CARD: &str = r#"{
+      "name":"Multi Skill Peer",
+      "skills":[
+        {"id":"scan","name":"Security Scan","description":"Scans a repository","tags":["security"]},
+        {"id":"deploy","name":"Ship It","description":"Deploys the service","tags":["ops"]},
+        {"id":"bad::id","name":"Separator","description":"reserved separator","tags":[]}
+      ]
+    }"#;
+
+    /// Prime the cache through a loopback mock server, then drop it: any
+    /// on-demand fetch inside `collect_a2a_autocomplete` would fail loudly.
+    async fn primed_provider() -> (A2aProvider, A2aPeerSpec) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/agent-card.json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(MULTI_SKILL_CARD, "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let peer = spec(server.uri());
+        let client = Arc::new(A2aClientAdapter::new(&peer, None).expect("client"));
+        client.refresh_agent_card(&peer).await.expect("prime cache");
+        drop(server);
+        (A2aProvider::new(vec![(peer.clone(), client)]), peer)
+    }
+
+    #[tokio::test]
+    async fn collect_on_a_cold_cache_is_ok_and_empty() {
+        let peer = spec("http://127.0.0.1:9".to_owned());
+        let client = Arc::new(A2aClientAdapter::new(&peer, None).expect("loopback client"));
+        let provider = A2aProvider::new(vec![(peer, client)]);
+
+        let registry = Arc::new(crate::domain::models::CapabilityRegistry::new(None));
+        let _handles = registry
+            .discover_and_register_all(&provider, "a2a")
+            .await
+            .expect("empty cache is not an error");
+        let infos = collect_a2a_autocomplete(&registry.snapshot_consistent().await, None);
+        assert!(infos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_projects_configured_peer_and_raw_skill_id_skipping_reserved_ids() {
+        let (provider, peer) = primed_provider().await;
+
+        let registry = Arc::new(crate::domain::models::CapabilityRegistry::new(None));
+        let _handles = registry
+            .discover_and_register_all(&provider, "a2a")
+            .await
+            .expect("cached collect");
+        let infos = collect_a2a_autocomplete(&registry.snapshot_consistent().await, None);
+        assert_eq!(infos.len(), 2, "the `::` skill id must be excluded");
+        let scan = infos
+            .iter()
+            .find(|info| info.name == "scan")
+            .expect("scan skill");
+        assert_eq!(
+            scan,
+            &crate::domain::models::autocomplete::A2aAgentInfo {
+                peer: peer.id.clone(),
+                name: "scan".to_owned(),
+                description: "Scans a repository".to_owned(),
+            },
+            "name must be the raw skill id, not the `Security Scan` title"
+        );
+        let deploy = infos
+            .iter()
+            .find(|info| info.name == "deploy")
+            .expect("deploy skill");
+        assert_eq!(deploy.peer, peer.id);
+    }
+
+    #[tokio::test]
+    async fn collect_filters_case_insensitively_on_raw_id_and_description_only() {
+        let (provider, _) = primed_provider().await;
+
+        let registry = Arc::new(crate::domain::models::CapabilityRegistry::new(None));
+        let _handles = registry
+            .discover_and_register_all(&provider, "a2a")
+            .await
+            .expect("cached collect");
+        let capabilities = registry.snapshot_consistent().await;
+        let hits = collect_a2a_autocomplete(&capabilities, Some("REPOSITORY"));
+        assert_eq!(
+            hits.len(),
+            1,
+            "uppercase filter matches the description case-insensitively"
+        );
+        assert_eq!(hits[0].name, "scan");
+
+        let title_hits = collect_a2a_autocomplete(&capabilities, Some("Security Scan"));
+        assert!(
+            title_hits.is_empty(),
+            "the human skill title is not a filter key — only the raw id and description are"
+        );
+    }
+}

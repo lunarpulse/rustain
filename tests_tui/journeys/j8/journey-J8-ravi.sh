@@ -77,7 +77,7 @@ PENDING="$TRANSCRIPT"
 
 SCENE="$HERE/scenes/j8-ravi.json"
 PROFILE_FIXTURE="$HERE/profiles/devops.toml"
-RUSTAIN_ROOT="$(cd "$(dirname "$BIN")/../.." && pwd)"
+RUSTAIN_ROOT="${RUSTAIN_ROOT:-$(cd "$(dirname "$BIN")/../.." && pwd)}"
 SCENE_PROVIDER="$RUSTAIN_ROOT/tests_tui/fixtures/scene_provider.py"
 RUN="$(mktemp -d)"
 WS="$RUN/workspace"

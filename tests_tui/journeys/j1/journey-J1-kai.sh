@@ -48,6 +48,7 @@ set -uo pipefail
 BIN="${1:?usage: journey-J1-kai.sh <path-to-rustain> [transcript-path]}"
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 STAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+RECORDED_AT="$(printf '%s' "$STAMP" | sed 's/T\(..\)-\(..\)-\(..\)Z/T\1:\2:\3Z/')"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TRANSCRIPT="${2:-$HERE/receipts/journey-J1-${STAMP}.transcript.txt}"
 CAPTURED=""
@@ -55,7 +56,8 @@ PENDING="$TRANSCRIPT"
 [ "$TRANSCRIPT" = "${TRANSCRIPT%.transcript.txt}" ] || PENDING="${TRANSCRIPT%.transcript.txt}.aborted.txt"
 
 SCENE="$HERE/scenes/j1-kai.json"
-SCENE_PROVIDER="$(cd "$(dirname "$BIN")/../.." && pwd)/tests_tui/fixtures/scene_provider.py"
+RUSTAIN_ROOT="${RUSTAIN_ROOT:-$(cd "$(dirname "$BIN")/../.." && pwd)}"
+SCENE_PROVIDER="$RUSTAIN_ROOT/tests_tui/fixtures/scene_provider.py"
 RUN="$(mktemp -d)"
 WS="$RUN/workspace"
 HOME_DIR="$RUN/home"
@@ -119,7 +121,7 @@ capture_complete() {
 
 # ── Receipt header ───────────────────────────────────────────────────────────
 printf 'journey J1 — Kai daily driver, one session of the real binary (Story 19.8, gate J1)\n'
-printf 'recorded-at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'recorded-at: %s\n' "$RECORDED_AT"
 printf 'binary:      %s\n' "$BIN"
 printf 'version:     %s\n' "$("$BIN" --version 2>&1 | head -1)"
 printf 'scene:       tests_tui/journeys/j1/scenes/j1-kai.json sha256:%s\n' "$SCENE_SHA"

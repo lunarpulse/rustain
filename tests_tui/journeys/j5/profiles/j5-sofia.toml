@@ -1,0 +1,6 @@
+name = "j5-sofia"
+description = "Sofia's MCP and A2A platform journey"
+extends = "coding"
+
+[tools]
+adapter = "composite"

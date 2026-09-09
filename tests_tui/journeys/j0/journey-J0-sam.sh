@@ -52,6 +52,7 @@ set -uo pipefail
 BIN="${1:?usage: journey-J0-sam.sh <path-to-rustain> [transcript-path]}"
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 STAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+RECORDED_AT="$(printf '%s' "$STAMP" | sed 's/T\(..\)-\(..\)-\(..\)Z/T\1:\2:\3Z/')"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TRANSCRIPT="${2:-$HERE/receipts/journey-J0-${STAMP}.transcript.txt}"
 CAPTURED=""
@@ -59,7 +60,7 @@ PENDING="$TRANSCRIPT"
 [ "$TRANSCRIPT" = "${TRANSCRIPT%.transcript.txt}" ] || PENDING="${TRANSCRIPT%.transcript.txt}.aborted.txt"
 
 SCENE="$HERE/scenes/j0-sam.json"
-RUSTAIN_ROOT="$(cd "$(dirname "$BIN")/../.." && pwd)"
+RUSTAIN_ROOT="${RUSTAIN_ROOT:-$(cd "$(dirname "$BIN")/../.." && pwd)}"
 SCENE_PROVIDER="$RUSTAIN_ROOT/tests_tui/fixtures/scene_provider.py"
 RUN="$(mktemp -d)"
 WS="$RUN/workspace"
@@ -132,7 +133,7 @@ if [ -n "$(git -C "$RUSTAIN_ROOT" status --porcelain -- src/ Cargo.toml Cargo.lo
   TREE="${TREE}-dirty"
 fi
 printf 'journey J0 — Sam'"'"'s first run of the real binary (Story 19.9, gate J0)\n'
-printf 'recorded-at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'recorded-at: %s\n' "$RECORDED_AT"
 printf 'binary:      %s\n' "$BIN"
 printf 'version:     %s\n' "$("$BIN" --version 2>&1 | head -1)"
 printf 'tree:        rustain@%s\n' "$TREE"
