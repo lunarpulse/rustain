@@ -7,13 +7,13 @@ wire:
 
     "skills":["safe-deploy"]
 
-The review also requires identity, not cardinality, for the offered catalogue:
+The review also requires identity, not cardinality, for the offered catalogue.
+Story 19.11 makes the enforced Bash pattern visible as the bare tool:
 
-    "tool_names":["Read","activate_skill","task"]
+    "tool_names":["Bash","Read","activate_skill","task"]
 
 Both fields contain names only—never skill bodies, the system prompt, tool
 schemas, or tool descriptions. Tests below reject tag-like persona prose,
-body leakage, and cross-wire schema drift.
 
 The committed J3 fixture is the PRD's own `SKILL.md`, byte for byte, copied by
 ``fixtures.skills.write_workspace_skill``, so this control and the capture agree
@@ -44,7 +44,7 @@ SKILL_SRC = (
 )
 PERSONA = "scene-ci-skills"
 SKILL_NAME = "safe-deploy"
-FILTERED_TOOL_NAMES = ["Read", "activate_skill", "task"]
+FILTERED_TOOL_NAMES = ["Bash", "Read", "activate_skill", "task"]
 
 pytestmark = pytest.mark.story_19_10
 

@@ -507,7 +507,7 @@ async fn test_deactivate_all_clears_state() {
     assert_eq!(deactivated.len(), 2);
     assert_eq!(activator.active_count("conv-1").await, 0);
     let snap = activator.snapshot_for_turn("conv-1").await.unwrap();
-    assert!(snap.effective_allowed_tools().is_none());
+    assert!(snap.effective_allowed_tools(&[]).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

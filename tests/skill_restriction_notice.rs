@@ -1,20 +1,17 @@
-//! Story 19.2 — a tool restriction this build cannot honour is disclosed on
-//! the turn it bites (FR42-a, AC3/AC4).
+//! Story 19.11 — skill command patterns are offered only when an execution
+//! gate can honour them, while genuinely unavailable declarations remain
+//! visible under FR42-a.
 //!
 //! # Front door
 //!
-//! Every keystone here drives `LocalTurnDriver::submit` — the production
-//! turn-origination door (`turn_driver.rs:202`, the relocated
-//! `start_turn_inner`) — with a real `SkillRegistry` parse of a SKILL.md
-//! written to disk and a real `SkillActivator` activation. ⛔ No keystone
-//! fabricates an `ActiveSkill` by hand or calls the notice branch directly:
-//! the notice must be reached through the same `submit` path the event loop
-//! uses, or it proves nothing about the turn.
+//! Every keystone here drives `LocalTurnDriver::submit` with a real
+//! `SkillRegistry` parse of a SKILL.md written to disk and a real
+//! `SkillActivator` activation. Tests of agent-only policy follow the existing
+//! `ActiveAgent` snapshot precedent because agent discovery is not their
+//! subject. No test calls the turn filter or disclosure branch directly.
 //!
-//! The needles asserted (`Bash(helm:*)`, `Bash(kubectl:*)`) come from the
-//! fixture frontmatter, and the discriminating assertion is an *absence*
-//! (`Read` must not be named) — never a full sentence the product composed
-//! about itself (the 18-4e rule).
+//! The observable contracts are the provider's offered tool names and the
+//! typed system notices emitted for that same turn.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -265,65 +262,27 @@ fn write_skill(ws: &std::path::Path, name: &str, content: &str) {
     std::fs::write(dir.join("SKILL.md"), content).unwrap();
 }
 
-// ── AC3 — Marco's file does not lose `Bash` in silence ─────────────────────
+// ── Story 19.11 — skill patterns are honourable at offer time ───────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ac3_prd_skill_unmatched_items_disclosed_not_silent() {
+async fn ac2_prd_skill_patterns_offer_bash_without_disclosure() {
     let tmp = tempfile::tempdir().unwrap();
     write_skill(tmp.path(), "safe-deploy", PRD_J3_SKILL_MD);
     let activation = activation_from_skill_md(tmp.path(), "safe-deploy").await;
 
-    // Catalogue contains Read and Bash but neither pattern item (AC3 given).
     let (notices, offered) = drive_turn(tmp.path(), vec!["Read", "Bash"], Some(activation)).await;
 
-    let warnings: Vec<&String> = notices
-        .iter()
-        .filter(|(level, _)| *level == NoticeLevel::Advisory)
-        .map(|(_, msg)| msg)
-        .collect();
-    assert_eq!(
-        warnings.len(),
-        1,
-        "exactly one Advisory disclosure for the turn; got {notices:?}"
-    );
-    let message = warnings[0];
     assert!(
-        message.contains("Bash(helm:*)") && message.contains("Bash(kubectl:*)"),
-        "the notice must name both pattern items: {message}"
+        !notices
+            .iter()
+            .any(|(level, _)| *level == NoticeLevel::Advisory),
+        "honourable skill patterns must not be reported unavailable: {notices:?}"
     );
-    assert!(
-        !message.contains("Read"),
-        "Read is honoured — it must not be named: {message}"
-    );
-    assert!(
-        !message.contains("failed validation")
-            && !message.contains("invalid")
-            && !message.contains("failed to load"),
-        "the notice must not claim the skill failed: {message}"
-    );
-    assert!(
-        !notices.iter().any(|(_, m)| m.contains("disjoint")),
-        "the disjoint notice must not fire — the declared set is non-empty: {notices:?}"
-    );
-    // Code review: the disclosure must NOT be turn-fatal. A `Warning` here made
-    // the TUI consumer abort the very turn this notice describes, so no notice
-    // emitted by this path may carry a turn-fatal level.
-    assert!(
-        notices.iter().all(|(level, _)| !level.is_turn_fatal()),
-        "a disclosure must never end the turn it describes: {notices:?}"
-    );
-
-    // Offer-time consequence: Read is honoured, Bash is filtered out, and the
-    // skill-chaining carve-out is force-added. Nothing else is offered.
-    let mut offered = offered;
-    offered.sort();
-    assert_eq!(offered, vec!["Read", "activate_skill"]);
+    assert_eq!(offered, vec!["Bash", "Read", "activate_skill"]);
 }
 
-// ── AC4 — a pattern-only restriction fails closed, loudly ──────────────────
-
 #[tokio::test(flavor = "multi_thread")]
-async fn ac4_pattern_only_restriction_offers_only_carveouts_and_warns() {
+async fn ac2_pattern_only_restriction_offers_bash_and_carveouts() {
     let tmp = tempfile::tempdir().unwrap();
     write_skill(
         tmp.path(),
@@ -335,24 +294,16 @@ async fn ac4_pattern_only_restriction_offers_only_carveouts_and_warns() {
     let (notices, offered) =
         drive_turn(tmp.path(), vec!["Read", "Bash", "task"], Some(activation)).await;
 
-    // (a) exactly the two carve-outs are offered — nothing else survives.
     assert_eq!(
         offered,
-        vec!["activate_skill", "task"],
-        "a pattern-only allowlist must offer exactly the carve-outs"
+        vec!["Bash", "activate_skill", "task"],
+        "the enforced Bash tool and both carve-outs must be offered"
     );
-
-    // (b) the unmatched-item notice fires, naming both items.
-    let warnings: Vec<&String> = notices
-        .iter()
-        .filter(|(level, _)| *level == NoticeLevel::Advisory)
-        .map(|(_, msg)| msg)
-        .collect();
-    assert_eq!(warnings.len(), 1, "exactly one Advisory; got {notices:?}");
     assert!(
-        warnings[0].contains("Bash(helm:*)") && warnings[0].contains("Bash(kubectl:*)"),
-        "both pattern items must be named: {}",
-        warnings[0]
+        !notices
+            .iter()
+            .any(|(level, _)| *level == NoticeLevel::Advisory),
+        "honourable skill patterns must not be disclosed: {notices:?}"
     );
 }
 
@@ -428,18 +379,17 @@ async fn review_declared_activate_skill_is_never_reported_unavailable() {
     );
 }
 
-/// Finding 8: computing the disclosure over the POST-INTERSECTION set let an
+/// Finding 8: computing the disclosure over the post-intersection set let an
 /// unmatchable item vanish. An agent that declares only `exclude-tools` yields
-/// a catalogue-derived filter, and intersecting it with the skill's pattern
-/// item dropped that item before it could be disclosed — FR42-a's silence,
-/// one layer down.
+/// a catalogue-derived filter; `Glob` must remain visible even though the
+/// intersection still contains the skill's honourable `Read` item.
 #[tokio::test(flavor = "multi_thread")]
 async fn review_exclude_only_agent_cannot_hide_an_unmatchable_skill_item() {
     let tmp = tempfile::tempdir().unwrap();
     write_skill(
         tmp.path(),
         "deployer",
-        "---\nname: deployer\ndescription: Test skill\nallowed-tools: Bash(kubectl:*) Read\n---\n# Body\n",
+        "---\nname: deployer\ndescription: Test skill\nallowed-tools: Glob Read\n---\n# Body\n",
     );
     let activation = activation_from_skill_md(tmp.path(), "deployer").await;
     let agent = rustain::domain::models::ActiveAgent {
@@ -451,7 +401,7 @@ async fn review_exclude_only_agent_cannot_hide_an_unmatchable_skill_item() {
         model: None,
     };
 
-    let (notices, _offered) = drive_turn_with_agent(
+    let (notices, offered) = drive_turn_with_agent(
         tmp.path(),
         vec!["Read", "Bash", "Write"],
         Some(activation),
@@ -462,16 +412,54 @@ async fn review_exclude_only_agent_cannot_hide_an_unmatchable_skill_item() {
     let disclosures: Vec<&String> = notices
         .iter()
         .filter(|(level, _)| *level == NoticeLevel::Advisory)
-        .map(|(_, msg)| msg)
+        .map(|(_, message)| message)
         .collect();
     assert_eq!(
         disclosures.len(),
         1,
         "the intersection must not swallow the disclosure: {notices:?}"
     );
+    let disclosure = disclosures[0];
     assert!(
-        disclosures[0].contains("Bash(kubectl:*)"),
-        "the unmatchable item must still be named: {}",
-        disclosures[0]
+        disclosure.contains("Glob") && !disclosure.contains("Read"),
+        "only the unavailable declaration must be named: {disclosure}"
     );
+    assert!(
+        !disclosure.contains("failed validation")
+            && !disclosure.contains("invalid")
+            && !disclosure.contains("failed to load"),
+        "the disclosure must not claim the skill failed: {disclosure}"
+    );
+    assert!(
+        !notices
+            .iter()
+            .any(|(_, message)| message.contains("disjoint"))
+    );
+    assert!(notices.iter().all(|(level, _)| !level.is_turn_fatal()));
+    assert_eq!(offered, vec!["Read", "activate_skill"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ac5_agent_pattern_stays_unoffered_and_disclosed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = rustain::domain::models::ActiveAgent {
+        name: "ops".to_string(),
+        file: tmp.path().join("ops.md"),
+        body: String::new(),
+        allowed_tools: Some(vec!["Bash(kubectl:*)".to_string()]),
+        exclude_tools: None,
+        model: None,
+    };
+
+    let (notices, offered) =
+        drive_turn_with_agent(tmp.path(), vec!["Read", "Bash", "task"], None, Some(agent)).await;
+
+    let disclosures: Vec<&String> = notices
+        .iter()
+        .filter(|(level, _)| *level == NoticeLevel::Advisory)
+        .map(|(_, message)| message)
+        .collect();
+    assert_eq!(disclosures.len(), 1, "agent pattern must stay visible");
+    assert!(disclosures[0].contains("Bash(kubectl:*)"));
+    assert_eq!(offered, vec!["activate_skill", "task"]);
 }

@@ -1,0 +1,754 @@
+journey J3 — Marco's runbook-as-skill, pattern-gated by the real binary (Story 19.11, gate J3)
+recorded-at: 2026-09-11T16:20:42Z
+binary:      /home/lunarpulse/dev_ws/rustain/target/release/rustain
+version:     rustain rustain 0.1.2 (x86_64-unknown-linux-gnu)
+tree:        rustain@a98e570-dirty
+scene:       tests_tui/journeys/j3/scenes/j3-marco.json sha256:22b5b420094c25dec5c2a122a5b1c332e6049cdaa92057660ed3c5a4e9720be1
+skill:       tests_tui/journeys/j3/skills/safe-deploy/SKILL.md sha256:a12d9bf49cfa431ee4e3a5b09e16300a535d064a8cfc0c411773ebfd6b8a77d5
+run dir:     /tmp/tmp.AlElvMM23s
+
+=== journey_j3_marco.py — the beats
+[witness] committed SKILL.md sha256: a12d9bf49cfa431ee4e3a5b09e16300a535d064a8cfc0c411773ebfd6b8a77d5
+[witness] workspace SKILL.md sha256: a12d9bf49cfa431ee4e3a5b09e16300a535d064a8cfc0c411773ebfd6b8a77d5
+[witness] the binary will load the PRD's own bytes (a12d9bf49cfa431ee4e3a5b09e16300a535d064a8cfc0c411773ebfd6b8a77d5)
+[witness] committed SKILL.md sha256: a12d9bf49cfa431ee4e3a5b09e16300a535d064a8cfc0c411773ebfd6b8a77d5
+[witness] workspace SKILL.md sha256: a12d9bf49cfa431ee4e3a5b09e16300a535d064a8cfc0c411773ebfd6b8a77d5
+[witness] the binary will load the PRD's own bytes (a12d9bf49cfa431ee4e3a5b09e16300a535d064a8cfc0c411773ebfd6b8a77d5)
+[beat] boot: saw 'Ready'
+[beat] the discovered skill is listed by the slash popup: saw '/safe-deploy'
+--- pane: boot-skills ---
+                                                                                                                                  
+                                                        Welcome to Rustain.                                                       
+                                                                                                                                  
+                                                     Type a message to start.                                                     
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+┌ Commands ────────────────────────────────────────────────┐                                                                      
+│/safe-deploy  Deploy services following team safety protoc│                                                                      
+└──────────────────────────────────────────────────────────┘                                                                      
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ctx: 0/1m (0%) │ Ready │ █ coding                                                     
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/safe                                                                                                                           │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] the first activation of a workspace skill is trust-gated: saw 'Trust and enable this skill for this session?'
+--- pane: trust-prompt ---
+You:                                                                                                                              
+deploy billing to production                                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ● Executing activate_skill "{"name":"safe-deploy"}" → running... (0.6s) ┄                                                     
+│ ⠸ activate_skill                                                                                                                
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+┃ New project skill detected: "safe-deploy" ┃                                                                                     
+┃ Trust and enable this skill for this session?  ┃                                                                                
+┃ [y] Yes  [n] No  [i] Inspect ┃                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ctx: 0/1m (0%) │ Executing tools... │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] the inspect overlay opened: saw 'Inspect skill:'
+--- pane: trust-inspect ---
+You:                                                                                                                              
+deploy billing to production                                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ● Executing activate_skill "{"name":"safe-deploy"}" → running... (1.6s) ┄                                                     
+│ ⠴ activate_skill                                                                                                                
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+┃ Inspect skill: "safe-deploy" ┃                                                                                                  
+┃ --- ┃                                                                                                                           
+┃ name: safe-deploy ┃                                                                                                             
+┃ description: Deploy services following team safety protocols. Use when depl... ┃                                                
+┃ allowed-tools: Bash(kubectl:*) Bash(helm:*) Read ┃                                                                              
+┃ --- ┃                                                                                                                           
+┃ ## Protocol ┃                                                                                                                   
+┃ 1. Read deploy.yaml for environment config ┃                                                                                    
+┃ 2. Run helm diff to preview changes — show diff to user ┃                                                                       
+┃ 3. Check migrations/ for pending changes — if breaking, STOP and warn ┃                                                         
+┃ 4. If staging: deploy and run smoke tests ┃                                                                                     
+┃ 5. If production: require explicit user confirmation BEFORE deploying ┃                                                         
+┃ 6. Run smoke tests post-deploy. If any fail, auto-rollback. ┃                                                                   
+┃ Never skip smoke tests. Never force-push to production. ┃                                                                       
+┃ [Esc] Back to trust prompt ┃                                                                                                    
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ctx: 0/1m (0%) │ Executing tools... │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] Esc returned to the trust prompt rather than declining: saw 'Trust and enable this skill for this session?'
+[beat] the trust prompt closed on `y`: 'Trust and enable' gone
+--- pane: midturn-bash ---
+You:                                                                                                                              
+deploy billing to production                                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success activate_skill "{"name":"safe-deploy"}" → ✓ (2.0s) ┄                                                                
+│ ┃ ✗ ✗ Error Bash "printf "Tool 'Bash' ran: J3-MARCO-%s\n" MIDTURN" (0.0s) ┃                                                     
+│ ┃ Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(kubectl:*), Read]                        
+│ ┄ ✓ Success Read "deploy.yaml" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "migrations/0042_drop_column.sql" → ✓ (0.0s) ┄                                                                 
+│                                                                                                                                 
+│ Breaking migration detected in migrations/0042_drop_column.sql . This will drop the legacy_id column. Are you sure?             
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ↑1.0k ↓46 │ ctx: 1k/1m (0%) │ Ready │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] no permission prompt for the mid-turn Bash — it never reached the risk gate
+[beat] the stop-and-warn reply: saw 'Breaking migration detected'
+--- pane: skill-active ---
+You:                                                                                                                              
+deploy billing to production                                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┌─ activate_skill ─────────────────────────────────────────────────────────────────────────────────────────────── ✓ (2.0s) ┐    
+│ │ {"name":"safe-deploy"}                                                                                                        
+│ │ Skill 'safe-deploy' activated.                                                                                                
+│ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+│ ┃ ✗ ✗ Error Bash "printf "Tool 'Bash' ran: J3-MARCO-%s\n" MIDTURN" (0.0s) ┃                                                     
+│ ┃ Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(kubectl:*), Read]                        
+│ ┄ ✓ Success Read "deploy.yaml" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "migrations/0042_drop_column.sql" → ✓ (0.0s) ┄                                                                 
+│                                                                                                                                 
+│ Breaking migration detected in migrations/0042_drop_column.sql . This will drop the legacy_id column. Are you sure?             
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ↑1.0k ↓46 │ ctx: 1k/1m (0%) │ Ready │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+--- pane: deploy-read ---
+You:                                                                                                                              
+deploy billing to production                                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success activate_skill "{"name":"safe-deploy"}" → ✓ (2.0s) ┄                                                                
+│ ┃ ✗ ✗ Error Bash "printf "Tool 'Bash' ran: J3-MARCO-%s\n" MIDTURN" (0.0s) ┃                                                     
+│ ┃ Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(kubectl:*), Read]                        
+│ ┄ ✓ Success Read "deploy.yaml" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "migrations/0042_drop_column.sql" → ✓ (0.0s) ┄                                                                 
+│                                                                                                                                 
+│ Breaking migration detected in migrations/0042_drop_column.sql . This will drop the legacy_id column. Are you sure?             
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ↑1.0k ↓46 │ ctx: 1k/1m (0%) │ Ready │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+--- pane: migration-read ---
+You:                                                                                                                              
+deploy billing to production                                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success activate_skill "{"name":"safe-deploy"}" → ✓ (2.0s) ┄                                                                
+│ ┃ ✗ ✗ Error Bash "printf "Tool 'Bash' ran: J3-MARCO-%s\n" MIDTURN" (0.0s) ┃                                                     
+│ ┃ Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(kubectl:*), Read]                        
+│ ┄ ✓ Success Read "deploy.yaml" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "migrations/0042_drop_column.sql" → ✓ (0.0s) ┄                                                                 
+│                                                                                                                                 
+│ Breaking migration detected in migrations/0042_drop_column.sql . This will drop the legacy_id column. Are you sure?             
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ↑1.0k ↓46 │ ctx: 1k/1m (0%) │ Ready │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] submission 2 switched to Monitor density: saw 'Density: Monitor'
+--- pane: sub2-sent ---
+You:                                                                                       ┌ Tasks ──────────────────────────────┐
+deploy billing to production                                                               │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+│ ┄ ✓ Success activate_skill "{"name":"safe-deploy"}" → ✓ (2.0s) ┄                         │                                     │
+│ ┃ ✗ ✗ Error Bash "printf "Tool 'Bash' ran: J3-MARCO-%s\n" MIDTURN" (0.0s) ┃              │                                     │
+│ ┃ Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(ku│                                     │
+│ ┄ ✓ Success Read "deploy.yaml" → ✓ (0.0s) ┄                                              │                                     │
+│ ┄ ✓ Success Read "migrations/0042_drop_column.sql" → ✓ (0.0s) ┄                          │                                     │
+│                                                                                          │                                     │
+│ Breaking migration detected in migrations/0042_drop_column.sql . This will drop the      │                                     │
+│ legacy_id column. Are you sure?                                                          │                                     │
+│                                                                                          │           No active plan.           │
+│                                                                                          │       Start one by asking for       │
+                                                                                           │           a complex task.           │
+                                                                                           │                                     │
+You:                                                                                       │                                     │
+preview the staging release                                                                │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+···                                                                                        │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+│ ℹ Mouse scroll enabled. Hold Shift to select text for copy.         [Ctrl+K x] Dismiss │ │                                     │
+ anthropic/claude-sonnet-4-6 [M] │ Normal │ ↑1.0k ↓46 │ ctx: 1k/1m (0%) │ Streaming... │ █ │                                     │
+┌ Message ────────────────────────────────────────────────────────────────────────────────┐│                                     │
+│                                                                                         ││                                     │
+└─────────────────────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
+--- end pane ---
+[beat] helm reached approval: saw 'helm diff release charts/billing'
+[beat] the helm command raised the permission prompt: saw '[y] Allow'
+--- pane: helm-permission ---
+                                                                                           ┌ Tasks ──────────────────────────────┐
+                                                                                           │                                     │
+│ ┄ ✓ Success activate_skill "{"name":"safe-deploy"}" → ✓ (2.0s) ┄                         │                                     │
+│ ┃ ✗ ✗ Error Bash "printf "Tool 'Bash' ran: J3-MARCO-%s\n" MIDTURN" (0.0s) ┃              │                                     │
+│ ┃ Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(ku│                                     │
+│ ┄ ✓ Success Read "deploy.yaml" → ✓ (0.0s) ┄                                              │                                     │
+│ ┄ ✓ Success Read "migrations/0042_drop_column.sql" → ✓ (0.0s) ┄                          │                                     │
+│                                                                                          │                                     │
+│ Breaking migration detected in migrations/0042_drop_column.sql . This will drop the      │                                     │
+│ legacy_id column. Are you sure?                                                          │                                     │
+│                                                                                          │                                     │
+│                                                                                          │                                     │
+                                                                                           │                                     │
+                                                                                           │           No active plan.           │
+You:                                                                                       │       Start one by asking for       │
+preview the staging release                                                                │           a complex task.           │
+                                                                                           │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+│ ┄ ● Executing Bash "helm diff release charts/billing" → running... (0.4s) ┄              │                                     │
+│ ⠋ Bash                                                                                   │                                     │
+│                                                                                          │                                     │
+                                                                                           │                                     │
+┃ Bash: {"command":"helm diff release charts/billing"} ┃                                   │                                     │
+┃ [y] Allow  [s] Session  [a] Always ┃                                                     │                                     │
+┃ [n] Deny   [f] Deny + feedback ┃                                                         │                                     │
+ anthropic/claude-sonnet-4-6 [M] │ Normal │ ↑1.0k ↓46 │ ctx: 1k/1m (0%) │ Executing tools..│                                     │
+┌ Message ────────────────────────────────────────────────────────────────────────────────┐│                                     │
+│                                                                                         ││                                     │
+└─────────────────────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
+--- end pane ---
+[beat] kubectl reached approval: saw 'kubectl get pods'
+[beat] the kubectl command raised a fresh permission prompt: saw '[y] Allow'
+--- pane: kubectl-permission ---
+                                                                                           ┌ Tasks ──────────────────────────────┐
+│ ┄ ✓ Success activate_skill "{"name":"safe-deploy"}" → ✓ (2.0s) ┄                         │                                     │
+│ ┃ ✗ ✗ Error Bash "printf "Tool 'Bash' ran: J3-MARCO-%s\n" MIDTURN" (0.0s) ┃              │                                     │
+│ ┃ Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(ku│                                     │
+│ ┄ ✓ Success Read "deploy.yaml" → ✓ (0.0s) ┄                                              │                                     │
+│ ┄ ✓ Success Read "migrations/0042_drop_column.sql" → ✓ (0.0s) ┄                          │                                     │
+│                                                                                          │                                     │
+│ Breaking migration detected in migrations/0042_drop_column.sql . This will drop the      │                                     │
+│ legacy_id column. Are you sure?                                                          │                                     │
+│                                                                                          │                                     │
+│                                                                                          │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+You:                                                                                       │           No active plan.           │
+preview the staging release                                                                │       Start one by asking for       │
+                                                                                           │           a complex task.           │
+                                                                                           │                                     │
+                                                                                           │                                     │
+│ ┄ ✓ Success Bash "helm diff release charts/billing" → ✓ (0.6s) ┄                         │                                     │
+│ ┄ ● Executing Bash "kubectl get pods" → running... (0.3s) ┄                              │                                     │
+│ ⠦ Bash                                                                                   │                                     │
+│                                                                                          │                                     │
+                                                                                           │                                     │
+┃ Bash: {"command":"kubectl get pods"} ┃                                                   │                                     │
+┃ [y] Allow  [s] Session  [a] Always ┃                                                     │                                     │
+┃ [n] Deny   [f] Deny + feedback ┃                                                         │                                     │
+ anthropic/claude-sonnet-4-6 [M] │ Normal │ ↑1.0k ↓46 │ ctx: 1k/1m (0%) │ Executing tools..│                                     │
+┌ Message ────────────────────────────────────────────────────────────────────────────────┐│                                     │
+│                                                                                         ││                                     │
+└─────────────────────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
+--- end pane ---
+[beat] the denied chain returned: saw 'Standing by on the preview step.'
+--- pane: post-pattern-execution ---
+│ ┄ ✓ Success Read "deploy.yaml" → ✓ (0.0s) ┄                                              ┌ Tasks ──────────────────────────────┐
+│ ┄ ✓ Success Read "migrations/0042_drop_column.sql" → ✓ (0.0s) ┄                          │                                     │
+│                                                                                          │                                     │
+│ Breaking migration detected in migrations/0042_drop_column.sql . This will drop the      │                                     │
+│ legacy_id column. Are you sure?                                                          │                                     │
+│                                                                                          │                                     │
+│                                                                                          │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+You:                                                                                       │                                     │
+preview the staging release                                                                │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+                                                                                           │           No active plan.           │
+│ ┄ ✓ Success Bash "helm diff release charts/billing" → ✓ (0.6s) ┄                         │       Start one by asking for       │
+│ ┄ ✓ Success Bash "kubectl get pods" → ✓ (0.5s) ┄                                         │           a complex task.           │
+│ ┃ ✗ ✗ Error Bash "kubectl get pods && printf "J3-MARCO-%s\n" CHAIN-SECOND-RAN" (0.0s) ┃  │                                     │
+│ ┃ Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(ku│                                     │
+│                                                                                          │                                     │
+│ Standing by on the preview step.                                                         │                                     │
+│                                                                                          │                                     │
+│                                                                                          │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+│ ℹ Mouse scroll enabled. Hold Shift to select text for copy.         [Ctrl+K x] Dismiss │ │                                     │
+│ ℹ Loaded 1 skills                                                   [Ctrl+K x] Dismiss │ │                                     │
+ anthropic/claude-sonnet-4-6 [M] │ Scene capture │ Normal │ ↑1.3k ↓12 │ ctx: 1k/1m (0%) │ R│                                     │
+┌ Message ────────────────────────────────────────────────────────────────────────────────┐│                                     │
+│                                                                                         ││                                     │
+└─────────────────────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
+--- end pane ---
+[beat] TUI quit via Ctrl+Q (exit status 0)
+[beat] launch 1 quit via Ctrl+Q
+
+=== the team clones Marco's runbooks (PRD J3 Resolution)
+[beat] cloned 5 team runbooks into .agents/skills: ['canary-watch', 'db-guard', 'oncall-drill', 'rollback', 'smoke-suite']
+[beat] boot after the clone: saw 'Ready'
+[beat] a new conversation re-asks for trust the operator already granted: saw 'Trust and enable this skill for this session?'
+--- pane: after-clone ---
+You:                                                                                                                              
+which runbooks are on this machine                                                                                                
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┃ ✗ ✗ Error activate_skill "{"name":"audit"}" (0.0s) ┃                                                                          
+│ ┃ Skill not found: audit. Discovered skills: [canary-watch, db-guard, oncall-drill, rollback, safe-deploy, smoke-suite]         
+│ ┄ ● Executing activate_skill "{"name":"safe-deploy"}" → running... (0.0s) ┄                                                     
+│ ⠙ activate_skill                                                                                                                
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+┃ New project skill detected: "safe-deploy" ┃                                                                                     
+┃ Trust and enable this skill for this session?  ┃                                                                                
+┃ [y] Yes  [n] No  [i] Inspect ┃                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ctx: 0/1m (0%) │ Executing tools... │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] the team control requested activation: saw 'canary-watch'
+[beat] the cloned control runbook raised its own trust prompt: saw 'Trust and enable this skill for this session?'
+--- pane: team-control-trust ---
+You:                                                                                                                              
+which runbooks are on this machine                                                                                                
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┃ ✗ ✗ Error activate_skill "{"name":"audit"}" (0.0s) ┃                                                                          
+│ ┃ Skill not found: audit. Discovered skills: [canary-watch, db-guard, oncall-drill, rollback, safe-deploy, smoke-suite]         
+│ ┄ ✓ Success activate_skill "{"name":"safe-deploy"}" → ✓ (0.3s) ┄                                                                
+│ ┄ ● Executing activate_skill "{"name":"canary-watch"}" → running... (0.2s) ┄                                                    
+│ ⠧ activate_skill                                                                                                                
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+┃ New project skill detected: "canary-watch" ┃                                                                                    
+┃ Trust and enable this skill for this session?  ┃                                                                                
+┃ [y] Yes  [n] No  [i] Inspect ┃                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ctx: 0/1m (0%) │ Executing tools... │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] both runbooks activated: saw 'The team runbooks are in place.'
+[beat] the control switched to Monitor density: saw 'Density: Monitor'
+[beat] the unavailable team-runbook tool was disclosed: saw 'Glob'
+--- pane: team-control-disclosure ---
+                                                                                           ┌ Tasks ──────────────────────────────┐
+│ ┃ ✗ ✗ Error activate_skill "{"name":"audit"}" (0.0s) ┃                                   │                                     │
+│ ┃ Skill not found: audit. Discovered skills: [canary-watch, db-guard, oncall-drill, rollb│                                     │
+│ ┄ ✓ Success activate_skill "{"name":"safe-deploy"}" → ✓ (0.3s) ┄                         │                                     │
+│ ┄ ✓ Success activate_skill "{"name":"canary-watch"}" → ✓ (0.4s) ┄                        │                                     │
+│                                                                                          │                                     │
+│ The team runbooks are in place.                                                          │                                     │
+│                                                                                          │                                     │
+│                                                                                          │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+You:                                                                                       │                                     │
+exercise the team runbook disclosure control                                               │                                     │
+                                                                                           │           No active plan.           │
+                                                                                           │       Start one by asking for       │
+                                                                                           │           a complex task.           │
+│ Team control complete.                                                                   │                                     │
+│                                                                                          │                                     │
+│                                                                                          │                                     │
+                                                                                           │                                     │
+                                                                                           │                                     │
+│ ℹ Mouse scroll enabled. Hold Shift to select text for copy.         [Ctrl+K x] Dismiss │ │                                     │
+│ ℹ Loaded 6 skills                                                   [Ctrl+K x] Dismiss │ │                                     │
+│ ⚠ 5 skills failed validation (see log)                              [Ctrl+K x] Dismiss │ │                                     │
+│ ⚠ Tool restriction from skills 'safe-deploy, canary-watch' cannot be│                    │                                     │
+│   honoured in full: [Glob] is unavailable for this turn.            [Ctrl+K x] Dismiss │ │                                     │
+ anthropic/claude-sonnet-4-6 [M] │ Scene capture │ Normal │ ↑977 ↓10 │ ctx: 977/1m (0%) │ R│                                     │
+┌ Message ────────────────────────────────────────────────────────────────────────────────┐│                                     │
+│                                                                                         ││                                     │
+└─────────────────────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
+--- end pane ---
+[beat] the control turn replied: saw 'Team control complete.'
+[beat] TUI quit via Ctrl+Q (exit status 0)
+[beat] launch 2 quit via Ctrl+Q
+
+=== the decline leg — the same skill, answered `n`
+[beat] boot (decline leg): saw 'Ready'
+[beat] the decline leg reached the same trust gate: saw 'Trust and enable this skill for this session?'
+--- pane: decline-prompt ---
+You:                                                                                                                              
+deploy billing to production                                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ● Executing activate_skill "{"name":"safe-deploy"}" → running... (0.7s) ┄                                                     
+│ ⠼ activate_skill                                                                                                                
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+┃ New project skill detected: "safe-deploy" ┃                                                                                     
+┃ Trust and enable this skill for this session?  ┃                                                                                
+┃ [y] Yes  [n] No  [i] Inspect ┃                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ctx: 0/1m (0%) │ Executing tools... │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] the trust prompt closed on `n`: 'Trust and enable' gone
+[beat] the decline leg's turn completed: saw 'Understood.'
+--- pane: decline-refused ---
+You:                                                                                                                              
+deploy billing to production                                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success activate_skill "{"name":"safe-deploy"}" → ✓ (0.9s) ┄                                                                
+│                                                                                                                                 
+│ Understood. I will not use that runbook.                                                                                        
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ↑851 ↓14 │ ctx: 851/1m (0%) │ Ready │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] TUI quit via Ctrl+Q (exit status 0)
+[beat] decline leg quit via Ctrl+Q
+[beats] complete
+
+=== --- ledger --- (product-minted milliseconds, one row per stream POST; the title call writes none)
+{"timestampMs":1789143646376,"sessionId":"XxOpKlnXDz2M9I_AORUZX","conversationId":"P2PTg82RRaOhgVANGo3Nm","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":812,"tokensOut":24,"parentCtx":7,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143648377,"sessionId":"XxOpKlnXDz2M9I_AORUZX","conversationId":"P2PTg82RRaOhgVANGo3Nm","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":848,"tokensOut":31,"parentCtx":7,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143648378,"sessionId":"XxOpKlnXDz2M9I_AORUZX","conversationId":"P2PTg82RRaOhgVANGo3Nm","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":881,"tokensOut":22,"parentCtx":7,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143648380,"sessionId":"XxOpKlnXDz2M9I_AORUZX","conversationId":"P2PTg82RRaOhgVANGo3Nm","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":934,"tokensOut":27,"parentCtx":7,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143648381,"sessionId":"XxOpKlnXDz2M9I_AORUZX","conversationId":"P2PTg82RRaOhgVANGo3Nm","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":1002,"tokensOut":46,"parentCtx":7,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143710302,"sessionId":"XxOpKlnXDz2M9I_AORUZX","conversationId":"P2PTg82RRaOhgVANGo3Nm","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":1188,"tokensOut":24,"parentCtx":42,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143710878,"sessionId":"XxOpKlnXDz2M9I_AORUZX","conversationId":"P2PTg82RRaOhgVANGo3Nm","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":1229,"tokensOut":23,"parentCtx":42,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143711378,"sessionId":"XxOpKlnXDz2M9I_AORUZX","conversationId":"P2PTg82RRaOhgVANGo3Nm","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":1271,"tokensOut":31,"parentCtx":42,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143711379,"sessionId":"XxOpKlnXDz2M9I_AORUZX","conversationId":"P2PTg82RRaOhgVANGo3Nm","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":1316,"tokensOut":12,"parentCtx":42,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143714555,"sessionId":"gFQ851ekF9FY5qALdmXll","conversationId":"rusSd_aYPFqC7oThLVdRk","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":794,"tokensOut":21,"parentCtx":8,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143714556,"sessionId":"gFQ851ekF9FY5qALdmXll","conversationId":"rusSd_aYPFqC7oThLVdRk","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":869,"tokensOut":23,"parentCtx":8,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143714851,"sessionId":"gFQ851ekF9FY5qALdmXll","conversationId":"rusSd_aYPFqC7oThLVdRk","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":903,"tokensOut":22,"parentCtx":8,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143715250,"sessionId":"gFQ851ekF9FY5qALdmXll","conversationId":"rusSd_aYPFqC7oThLVdRk","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":941,"tokensOut":11,"parentCtx":8,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1789143719447,"sessionId":"gFQ851ekF9FY5qALdmXll","conversationId":"rusSd_aYPFqC7oThLVdRk","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":977,"tokensOut":10,"parentCtx":26,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+
+=== --- sessions --- (ids, titles, is_default_resume — session list is cwd-bound)
+{
+  "schema_version": "1.1",
+  "sessions": [
+    {
+      "id": "rusSd_aYPFqC7oThLVdRk",
+      "index": 1,
+      "title": "Scene capture",
+      "message_count": 4,
+      "created_at": 1789143712,
+      "updated_at": 1789143720,
+      "has_fork_source": false,
+      "is_default_resume": true,
+      "workspace": "/tmp/tmp.AlElvMM23s/workspace"
+    },
+    {
+      "id": "P2PTg82RRaOhgVANGo3Nm",
+      "index": 2,
+      "title": "Scene capture",
+      "message_count": 4,
+      "created_at": 1789143642,
+      "updated_at": 1789143711,
+      "has_fork_source": false,
+      "is_default_resume": false,
+      "workspace": "/tmp/tmp.AlElvMM23s/workspace"
+    }
+  ]
+}
+
+=== --- requests --- (every request the binary made, in order)
+{"n":1,"method":"POST","path":"/v1/messages","kind":"health_check","persona":"scene-marco","auth":"x-api-key","model":"claude-sonnet-4-6"}
+{"n":2,"method":"GET","path":"/v1/models","kind":"probe"}
+{"n":3,"method":"GET","path":"/api.json","kind":"models_dev"}
+{"n":4,"method":"POST","path":"/v1/messages","persona":"scene-marco","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":1,"last_user":"deploy billing to production","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":0,"desync":false}
+{"n":5,"method":"POST","path":"/v1/messages","persona":"scene-marco","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":2,"last_user":"Skill 'safe-deploy' activated.","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":1,"desync":false}
+{"n":6,"method":"POST","path":"/v1/messages","persona":"scene-marco","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":3,"last_user":"Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(kubectl:*), Read]","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":1,"desync":false}
+{"n":7,"method":"POST","path":"/v1/messages","persona":"scene-marco","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":4,"last_user":"1\t# J3-MARCO-DEPLOY-NEEDLE billing prod\n2\tservice: billing\n3\tenvironment: production\n4\tchart: charts/billing\n5\treplicas:","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":1,"desync":false}
+{"n":8,"method":"POST","path":"/v1/messages","persona":"scene-marco","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":5,"last_user":"1\t-- J3-MARCO-MIGRATION-NEEDLE 0042\n2\tALTER TABLE billing DROP COLUMN legacy_id;\n3\t-- breaking: legacy_id is still read ","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":1,"desync":false}
+{"n":9,"method":"POST","path":"/v1/messages","persona":"scene-marco","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":6,"last_user":"Skill 'safe-deploy' activated.\nTool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(kube","skills":["safe-deploy"],"tool_names":["Bash","Read","activate_skill","task"],"tools":4,"tool_results":4,"desync":false}
+{"n":10,"method":"POST","path":"/v1/messages","persona":"scene-marco","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":7,"last_user":"J3-MARCO-HELM-EXECUTED\n","skills":["safe-deploy"],"tool_names":["Bash","Read","activate_skill","task"],"tools":4,"tool_results":1,"desync":false}
+{"n":11,"method":"POST","path":"/v1/messages","persona":"scene-marco","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":8,"last_user":"J3-MARCO-KUBECTL-EXECUTED\n","skills":["safe-deploy"],"tool_names":["Bash","Read","activate_skill","task"],"tools":4,"tool_results":1,"desync":false}
+{"n":12,"method":"POST","path":"/v1/messages","persona":"scene-marco","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":9,"last_user":"Tool 'Bash' command not allowed by skill 'safe-deploy'. Allowed: [Bash(helm:*), Bash(kubectl:*), Read]","skills":["safe-deploy"],"tool_names":["Bash","Read","activate_skill","task"],"tools":4,"tool_results":1,"desync":false}
+{"n":13,"method":"POST","path":"/v1/messages","kind":"title","persona":"scene-marco","auth":"x-api-key","model":"claude-sonnet-4-6"}
+{"n":14,"method":"POST","path":"/v1/messages","kind":"health_check","persona":"scene-marco-team","auth":"x-api-key","model":"claude-sonnet-4-6"}
+{"n":15,"method":"GET","path":"/v1/models","kind":"probe"}
+{"n":16,"method":"POST","path":"/v1/messages","persona":"scene-marco-team","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":1,"last_user":"which runbooks are on this machine","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":0,"desync":false}
+{"n":17,"method":"POST","path":"/v1/messages","persona":"scene-marco-team","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":2,"last_user":"Skill not found: audit. Discovered skills: [canary-watch, db-guard, oncall-drill, rollback, safe-deploy, smoke-suite]","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":1,"desync":false}
+{"n":18,"method":"POST","path":"/v1/messages","persona":"scene-marco-team","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":3,"last_user":"Skill 'safe-deploy' activated.","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":1,"desync":false}
+{"n":19,"method":"POST","path":"/v1/messages","persona":"scene-marco-team","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":4,"last_user":"Skill 'canary-watch' activated.","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":1,"desync":false}
+{"n":20,"method":"POST","path":"/v1/messages","persona":"scene-marco-team","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":5,"last_user":"Skill not found: audit. Discovered skills: [canary-watch, db-guard, oncall-drill, rollback, safe-deploy, smoke-suite]\nSk","skills":["safe-deploy","canary-watch"],"tool_names":["Read","activate_skill","task"],"tools":3,"tool_results":3,"desync":false}
+{"n":21,"method":"POST","path":"/v1/messages","kind":"title","persona":"scene-marco-team","auth":"x-api-key","model":"claude-sonnet-4-6"}
+{"n":22,"method":"POST","path":"/v1/messages","kind":"health_check","persona":"scene-marco-decline","auth":"x-api-key","model":"claude-sonnet-4-6"}
+{"n":23,"method":"GET","path":"/v1/models","kind":"probe"}
+{"n":24,"method":"GET","path":"/api.json","kind":"models_dev"}
+{"n":25,"method":"POST","path":"/v1/messages","persona":"scene-marco-decline","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":1,"last_user":"deploy billing to production","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":0,"desync":false}
+{"n":26,"method":"POST","path":"/v1/messages","persona":"scene-marco-decline","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":2,"last_user":"Skill 'safe-deploy' not trusted \u2014 activation declined.","skills":[],"tool_names":["Bash","Edit","Read","Write","activate_skill","apply_patch","exit_plan_mode","propose_plan","read_task_output","remember","remember_fact","search_skills","search_tools","skill_view","task"],"tools":15,"tool_results":1,"desync":false}
+
+=== --- what this run did not prove ---
+`helm` and `kubectl` are HERMETIC SHIMS on PATH. Each executable is created by
+  the driver and prints its driver-owned needle as its first output line so the
+  provider's 120-byte `last_user` clip cannot hide it. This proves rustain
+  admitted and executed each pattern-matching Bash command; it proves nothing
+  about Helm or Kubernetes. The shim remains executable because the current
+  Landlock policies grant read/execute beneath `/`; a future policy that
+  narrows that unconditional read grant would invalidate this apparatus.
+
+the chained denial is BLOCKLIST-CLEAN ON PURPOSE. Its second segment is
+  `printf`, not `rm -rf`, so the Bash blocklist cannot produce the verdict this
+  gate attributes to the quote-aware allowlist segmenter. Exactly two
+  command-policy denial rows — the same-turn probe and this chain — are the
+  chain's attributable dispatch control. `J3-MARCO-CHAIN-SECOND-RAN` stays
+  absent only after that count is proved.
+
+Protocol step 3 still does NOT perform a directory scan. There is no Glob,
+  Grep or LS tool in safe-deploy's offered catalogue; the scene names one
+  migration file and the binary reads that file. The two read needles prove
+  those reads, not full protocol execution.
+
+the STOP-and-warn text is STUB-SERVED. "Breaking migration detected … Are you
+  sure?" is Journey 3's emotional climax and prose this scene wrote. The
+  product rendered it; no model reasoned it. The gate asserts the migration
+  read, not the judgement.
+
+skill selection is SCRIPTED. The scene names `safe-deploy`; the model is shown
+  no skill catalogue. `SkillExposurePort::render` still has zero non-test call
+  sites (DF-19-10-L1-CATALOG-UNWIRED). This run proves activation by name and
+  its trust gate, not automatic selection from tier-1 descriptions.
+
+same-turn EXECUTION enforcement is immediate. After model-driven activation,
+  the original `printf` Bash probe receives the product's command-policy denial
+  before Elevated-risk approval, and `J3-MARCO-MIDTURN` never executes. The
+  offered catalogue and `<skill>` prompt still refresh only on the next user
+  submission; this receipt claims no mid-request prompt recomposition.
+
+permission prompts DO paint for admitted Bash. `helm diff` and `kubectl get`
+  each reach a real `[y] Allow` card, and the driver answers `y` twice because
+  `ApprovalOutcome::Once` does not authorize the next call. The harness keeps
+  `allowed_tools = []`; no Bash request is silently pre-approved.
+
+safe-deploy emits NO FR42-a disclosure now that both patterns are enforceable.
+  Launch 1 still switches from Focus to Monitor before submission 2, making
+  that absence observable rather than an artefact of Focus queueing. The live
+  positive control is the cloned `canary-watch` runbook with `Read Glob`; its
+  raw intersection with safe-deploy retains `Read`, avoiding the fatal disjoint
+  branch, and its unavailable `Glob` produces exactly one Advisory after its
+  own trust prompt. Launch 2 also switches to Monitor because
+  DF-19-10-ADVISORY-QUEUED-IN-FOCUS remains open.
+
+the old blocking wait on product text `cannot be honoured in` was REMOVED when
+  that safe-deploy disclosure became correctly absent. Its product-minted
+  replacement is the real Bash approval wait `[y] Allow`; the team-control
+  disclosure remains a separate positive FR42-a witness. This is the worked
+  example that fires DF-19-9-DRIVER-GATES-ON-SERVED-PROSE; the DF stays open
+  with the Epic 19 close.
+
+redirect targets are NOT workspace-checked for Bash. For example,
+  `kubectl config view --raw > /tmp/x` still reaches a shell redirect because
+  `extract_file_path` handles file tools, not Bash command text. The pattern
+  matcher restricts command prefixes; it is not a filesystem security boundary.
+
+invocation-form bypasses remain: `/bin/kubectl`, `bash -c '…'`, flag reordering
+  and variable indirection can evade argument-shaped prefix intent. The
+  matcher is deliberately a conservative command allowlist, not a shell or
+  program policy engine.
+
+`deploy-read` and `migration-read` are BLOCK HEADERS, not expanded bodies,
+  because a one-assistant-turn conversation cannot seat `focused_turn` through
+  `]]`/`[[`; therefore Tab cannot cycle its tool blocks
+  (DF-19-10-SINGLE-TURN-FOCUS-UNREACHABLE). The wire read-backs retain the
+  load-bearing evidence.
+
+trust is PER-CONVERSATION and MEMORY-ONLY. Launch 2 creates a new conversation
+  and asks for safe-deploy again, behaviour consistent with the current prompt.
+  The separate wording/persistence question remains
+  DF-19-10-TRUST-PROMPT-SAYS-SESSION.
+
+tier 3 is NOT captured. Model-driven activation does not call
+  `SecurityPort::add_active_skill_dir`; this fixture is harmless because it
+  lives under the workspace, but the gap remains load-bearing for global
+  skills.
+
+agent-side patterns and subagent skill enforcement are NOT captured. Agents
+  have no command-level permission-chain backstop, so their pattern items stay
+  unoffered and disclosed; subagents carry no active skills.
+
+cross-tool compatibility is NOT proved. This single-binary capture proves the
+  standard file loads unmodified in rustain, not that Claude Code, Codex and
+  Gemini CLI execute it.
+
+`task` is offered and then denied — the offer filter carves out `task`, while
+  the permission chain carves out only `activate_skill`
+  (DF-19-2-TASK-CARVEOUT-DIVERGENCE). It is intentionally not exercised here.
+
+waits on STUB-SERVED strings are: "Breaking migration detected",
+  "Standing by on the preview step.", "The team runbooks are in place.",
+  "Team control complete.", "Understood.", and the two Read block headers whose
+  paths are scene tool inputs. Product-minted waits include `Ready`,
+  `/safe-deploy`, both trust prompts, `Inspect skill:`, both Bash `[y] Allow`
+  cards, the `Glob` Advisory, `Discovered skills:`, and activation/decline
+  results.
+
+no live-LLM variant is recorded or gated.
+
+=== stopping the scene provider
+
+=== scene provider exit status: 0 (0 clean; 1 desync or unknown path)
+
+=== captured
+transcript: /home/lunarpulse/dev_ws/rustain/tests_tui/journeys/j3/receipts/journey-J3-2026-09-11T16-20-42Z.transcript.txt
+
+=== cleanup

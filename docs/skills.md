@@ -43,19 +43,31 @@ Agents (`.claude/agents/*.md`) use the same parser for their `allowed-tools`
 and `exclude-tools` fields; every form above applies to both. An agent's
 `exclude-tools` removes tools in addition to any allowlist restriction.
 
-## The pattern limitation (fail-closed)
+## Bash prefix patterns
 
-This build does **not** expand patterns. An item like `Bash(kubectl:*)`:
+A **skill** item such as `Bash(kubectl:*)` admits the bare `Bash` tool to the
+offered catalogue and gates each execution by command text. The current matcher:
 
-- **is parsed and enforced** — it does not widen to `Bash`, so the `Bash` tool
-  itself stays filtered out while the skill is active, and
-- **matches no tool** — until pattern matching lands, the patterned tool is
-  simply unavailable for the turn.
+- recognizes exactly `Tool(prefix*)`: one final `*`, a non-empty prefix, and no
+  trailing characters after `)`;
+- is case-sensitive and normalizes whitespace in both the declared prefix and
+  command before comparing;
+- splits `;`, `&&`, `||`, and newlines only outside single and double quotes;
+- honours backslash escapes while scanning separators; and
+- requires **every non-empty command segment** to match one declared prefix.
 
-A restriction is never silently dropped and never silently widened. If you
-need the patterned tool now, declare the bare tool name explicitly
-(`allowed-tools: Bash Read`) — with the understanding that this grants the
-whole tool, not just the patterned command.
+Matching is intentionally textual, not a shell policy engine. `Bash(ls*)`
+matches `lsof`; `/bin/kubectl`, `bash -c 'kubectl …'`, flag reordering, and
+variable indirection can evade argument-shaped intent. Redirect targets are not
+workspace-checked as file operations: for example,
+`kubectl config view --raw > /tmp/x` still reaches the shell. Use a dedicated
+tool or stronger sandbox when those boundaries matter.
+
+This expansion is skill-scoped. Agent `allowed-tools` accepts the same syntax
+but has no command-level execution backstop, so an agent pattern stays
+unoffered and is disclosed as unmatched rather than widened unsafely. A bare
+`Bash` item still grants all Bash commands, subject to the normal blocklist and
+approval mode.
 
 ## The two carve-outs
 
@@ -74,20 +86,21 @@ restriction through delegation — and both behaviours are pinned by tests.
 ## What the unmatched-items warning means
 
 On the turn it bites, if a declared `allowed-tools` item matches no tool in
-that turn's catalogue (a pattern like `Bash(helm:*)`, a typo, or an MCP tool
-whose server is down this turn), rustain emits **one warning** naming the
-unmatched items:
+that turn's catalogue (a typo, an unavailable MCP tool, a malformed pattern,
+or an agent-side pattern that cannot be execution-gated), rustain emits **one
+warning** naming the unmatched items. A valid skill-side Bash prefix pattern is
+matched and therefore is not named:
 
-> Tool restriction from skill 'safe-deploy' cannot be honoured in full:
-> [Bash(helm:*), Bash(kubectl:*)] are unavailable for this turn.
+> Tool restriction from skills 'safe-deploy, canary-watch' cannot be honoured
+> in full: [Glob] is unavailable for this turn.
 
 This means exactly what it says:
 
-- the skill **loaded and activated fine** — it did not fail validation;
-- the honourable part of its restriction **is being enforced** (honoured items
-  stay available, everything else stays filtered out);
-- the named items are unavailable **for this turn** — an MCP tool may match
-  again once its server is back.
+- both skills **loaded and activated fine** — neither failed validation;
+- the honourable intersection **is being enforced** (here, `Read`);
+- the named item is unavailable **for this turn** — an MCP tool may match
+  again once its server is back; and
+- matched Bash patterns remain command-gated at execution.
 
 If the active agent and skill tool filters share no tool at all, a separate,
 louder warning fires instead: *"Active agent and skill tool filters are

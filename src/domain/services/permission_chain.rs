@@ -185,7 +185,7 @@ pub async fn check_with_source_and_provenance(
     // Step 1: Tool restriction (active skill allowed_tools)
     // activate_skill is always allowed (carve-out for skill chaining)
     if tool_name != "activate_skill" {
-        if let Some(deny_reason) = check_allowed_tools(tool_name, active_skills) {
+        if let Some(deny_reason) = check_allowed_tools(tool_name, input, active_skills) {
             return PermissionDecision::Deny(deny_reason);
         }
     }
@@ -449,37 +449,61 @@ fn extract_file_path(
 
 /// Check if the tool is allowed by the active skills' `allowed_tools`.
 /// Returns `Some(deny_reason)` if denied, `None` if allowed or no constraints.
-fn check_allowed_tools(tool_name: &str, active_skills: Option<&[ActiveSkill]>) -> Option<String> {
+fn check_allowed_tools(
+    tool_name: &str,
+    input: &serde_json::Value,
+    active_skills: Option<&[ActiveSkill]>,
+) -> Option<String> {
     let skills = active_skills?;
-    let constrained: Vec<&Vec<String>> = skills
+    let mut constrained = skills
         .iter()
-        .filter_map(|s| s.allowed_tools.as_ref())
-        .collect();
-    if constrained.is_empty() {
-        return None;
-    }
-    let mut iter = constrained.iter();
-    let first = iter.next()?;
+        .filter_map(|skill| skill.allowed_tools.as_ref());
+    let first = constrained.next()?;
     let mut effective: HashSet<String> = first.iter().cloned().collect();
-    for set in iter {
-        let other: HashSet<String> = set.iter().cloned().collect();
-        effective = effective.intersection(&other).cloned().collect();
+    for set in constrained {
+        effective.retain(|item| set.contains(item));
     }
+
     if effective.contains(tool_name) {
         return None;
     }
+
     let mut names: Vec<String> = effective.into_iter().collect();
     names.sort();
     let constrained_skill_names: Vec<&str> = skills
         .iter()
-        .filter(|s| s.allowed_tools.is_some())
-        .map(|s| s.name.as_str())
+        .filter(|skill| skill.allowed_tools.is_some())
+        .map(|skill| skill.name.as_str())
         .collect();
     let noun = if constrained_skill_names.len() == 1 {
         "skill"
     } else {
         "skills"
     };
+
+    if tool_name == "Bash"
+        && names.iter().any(|item| {
+            crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
+        })
+    {
+        let command = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if crate::domain::services::skill_tool_pattern::command_matches_allowed_items(
+            &names, tool_name, command,
+        ) {
+            return None;
+        }
+        return Some(format!(
+            "Tool '{}' command not allowed by {} '{}'. Allowed: [{}]",
+            tool_name,
+            noun,
+            constrained_skill_names.join(", "),
+            names.join(", ")
+        ));
+    }
+
     Some(format!(
         "Tool '{}' not allowed by {} '{}'. Allowed: [{}]",
         tool_name,

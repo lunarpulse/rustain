@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 #
 # Epic 19 journey gate J3 — Marco's runbook-as-skill, enforced by the real binary
-# (Story 19.10): the PRD's own `.agents/skills/safe-deploy/SKILL.md`, byte for
+# (Story 19.11): the PRD's own `.agents/skills/safe-deploy/SKILL.md`, byte for
 # byte, discovered at boot, activated by a model-driven `activate_skill`,
-# TRUST-GATED with `[y]`/`[n]`/`[i]`, read to the model as a `<skill>` block, and
-# then — on a SECOND user submission — enforced: the offered catalogue shrinks,
-# the operator is told in the product's own words which restriction this build
-# cannot honour, and the turn survives being told. Asserted by
+# TRUST-GATED with `[y]`/`[n]`/`[i]`, read to the model as a `<skill>` block,
+# then command-gated: declared helm/kubectl commands execute through real
+# approval prompts while an undeclared chain is denied. Asserted by
 # `check-epic-close-gates.sh`'s `gate J3`.
 #
 # # Why the capture takes TWO user submissions
@@ -159,7 +158,7 @@ TREE="$(git -C "$RUSTAIN_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknow
 if [ -n "$(git -C "$RUSTAIN_ROOT" status --porcelain -- src/ Cargo.toml Cargo.lock 2>/dev/null)" ]; then
   TREE="${TREE}-dirty"
 fi
-printf 'journey J3 — Marco'"'"'s runbook-as-skill, enforced by the real binary (Story 19.10, gate J3)\n'
+printf 'journey J3 — Marco'"'"'s runbook-as-skill, pattern-gated by the real binary (Story 19.11, gate J3)\n'
 printf 'recorded-at: %s\n' "$RECORDED_AT"
 printf 'binary:      %s\n' "$BIN"
 printf 'version:     %s\n' "$("$BIN" --version 2>&1 | head -1)"
@@ -194,110 +193,110 @@ cat "$STUB_LOG"
 # ── What this run did not prove (AC6) — a reading aid; no gate greps it ─────
 say "--- what this run did not prove ---"
 cat <<'LIMITS'
-helm diff / kubectl: NOT CAPTURED. `Bash(kubectl:*)` and `Bash(helm:*)` are
-  pattern items this build does not expand — `tool_survives_allowlist` compares
-  exact tool names — so `Bash` is filtered OUT of submission 2's catalogue
-  rather than admitted for those two commands. Owner: row 19.11
-  (DF-19-2-BASH-PATTERN-ALLOWLIST). Two corrections to that entry's blast
-  radius, both found at this story's preflight: protocol step 1 ("Read
-  deploy.yaml") IS reachable and IS captured, and so is step 3's READ of a named
-  migration, because `Read` is the one honoured item. But step 3 is "check
-  migrations/ for pending changes" — a DIRECTORY SCAN — and there is no Glob,
-  Grep or LS tool in this catalogue at all. That is not an allowlist consequence
-  and row 19.11 will not fix it. What this receipt proves is a Read of a
-  scene-named file.
+`helm` and `kubectl` are HERMETIC SHIMS on PATH. Each executable is created by
+  the driver and prints its driver-owned needle as its first output line so the
+  provider's 120-byte `last_user` clip cannot hide it. This proves rustain
+  admitted and executed each pattern-matching Bash command; it proves nothing
+  about Helm or Kubernetes. The shim remains executable because the current
+  Landlock policies grant read/execute beneath `/`; a future policy that
+  narrows that unconditional read grant would invalidate this apparatus.
+
+the chained denial is BLOCKLIST-CLEAN ON PURPOSE. Its second segment is
+  `printf`, not `rm -rf`, so the Bash blocklist cannot produce the verdict this
+  gate attributes to the quote-aware allowlist segmenter. Exactly two
+  command-policy denial rows — the same-turn probe and this chain — are the
+  chain's attributable dispatch control. `J3-MARCO-CHAIN-SECOND-RAN` stays
+  absent only after that count is proved.
+
+Protocol step 3 still does NOT perform a directory scan. There is no Glob,
+  Grep or LS tool in safe-deploy's offered catalogue; the scene names one
+  migration file and the binary reads that file. The two read needles prove
+  those reads, not full protocol execution.
 
 the STOP-and-warn text is STUB-SERVED. "Breaking migration detected … Are you
-  sure?" is Journey 3's emotional climax and it is prose THIS STORY wrote into
-  `j3-marco.json`. The product rendered it; no model reasoned it. Nothing about
-  the JUDGEMENT is asserted anywhere. What is asserted is that the migration
-  file was READ — the driver-written needle round-tripped to the provider.
+  sure?" is Journey 3's emotional climax and prose this scene wrote. The
+  product rendered it; no model reasoned it. The gate asserts the migration
+  read, not the judgement.
 
-skill selection was SCRIPTED. The scene names `safe-deploy` because this story
-  wrote it there; the model was shown no skill catalogue. `SkillExposurePort::
-  render` — tier 1 of FR41 — is composed, bound, startup-validated,
-  CLI-overridable and telemetry-instrumented, and has ZERO non-test call sites,
-  so the PRD's 2026-08-23 amendment ("the model selects it from the L1
-  description") is untrue of this build. DF-19-10-L1-CATALOG-UNWIRED, registered
-  as a named decision item in the Epic 19 close shape. What this proves is that
-  activation BY NAME works and is trust-gated; it does not prove auto-selection.
+skill selection is SCRIPTED. The scene names `safe-deploy`; the model is shown
+  no skill catalogue. `SkillExposurePort::render` still has zero non-test call
+  sites (DF-19-10-L1-CATALOG-UNWIRED). This run proves activation by name and
+  its trust gate, not automatic selection from tier-1 descriptions.
 
 same-turn EXECUTION enforcement is immediate. After model-driven activation,
-  `run_turn` refreshes the live conversation activation set before scheduling
-  the next call. The probe therefore receives the product's skill-policy
-  denial before Elevated-risk approval, and `J3-MARCO-MIDTURN` never executes.
-  The offered catalogue and `<skill>` prompt still refresh on the next user
-  submission; this receipt does not claim mid-request prompt recomposition.
+  the original `printf` Bash probe receives the product's command-policy denial
+  before Elevated-risk approval, and `J3-MARCO-MIDTURN` never executes. The
+  offered catalogue and `<skill>` prompt still refresh only on the next user
+  submission; this receipt claims no mid-request prompt recomposition.
 
-no permission prompt paints, and that is the expected enforcement path. `Read`
-  is `ToolRisk::Safe`; the same-turn `Bash` probe is denied by skill policy
-  before the risk gate; and `Bash` is absent from submission 2's catalogue.
-  The `allowed_tools = []` config and deleted `.env` remove approval and
-  credential confounds rather than creating evidence.
+permission prompts DO paint for admitted Bash. `helm diff` and `kubectl get`
+  each reach a real `[y] Allow` card, and the driver answers `y` twice because
+  `ApprovalOutcome::Once` does not authorize the next call. The harness keeps
+  `allowed_tools = []`; no Bash request is silently pre-approved.
 
-the disclosure is SILENT in the default density mode, and this capture had to
-  change modes to photograph it. FR42-a's Advisory is routed through
-  `apply_warning_notice` -> `notify_or_queue`, and in `DensityMode::Focus` —
-  the DEFAULT (`visual.rs:25-29`) — that function ENQUEUES the notice instead
-  of rendering it (`handlers/notice.rs:25-35`). The only drain anywhere in the
-  tree is `apply_density_transition`'s `if leaving_focus`
-  (`handlers/notice.rs:104-142`). So on a default-mode rustain the sentence
-  FR42-a exists to say is minted, put in a bounded queue (cap 32, oldest
-  dropped) and never shown. Measured, not inferred: the first recording of this
-  capture carried `"tools":3` on the wire and nothing on screen. This receipt
-  therefore presses `Ctrl+X` `w` — a real operator action — before submission 2,
-  and the `Loaded 1 skills` notice you can see draining beside the Advisory is
-  the same queue emptying. DF-19-10-ADVISORY-QUEUED-IN-FOCUS remains open;
-  whether an FR42-a Advisory should bypass the density queue the way an Error
-  does is a separate product decision.
+safe-deploy emits NO FR42-a disclosure now that both patterns are enforceable.
+  Launch 1 still switches from Focus to Monitor before submission 2, making
+  that absence observable rather than an artefact of Focus queueing. The live
+  positive control is the cloned `canary-watch` runbook with `Read Glob`; its
+  raw intersection with safe-deploy retains `Read`, avoiding the fatal disjoint
+  branch, and its unavailable `Glob` produces exactly one Advisory after its
+  own trust prompt. Launch 2 also switches to Monitor because
+  DF-19-10-ADVISORY-QUEUED-IN-FOCUS remains open.
 
-`deploy-read` and `migration-read` are BLOCK HEADERS, not expanded bodies, and
-  the reason is a product gap. `Tab`
-  (`CycleInvocationInFocusedTurn`, `event_loop.rs:5153-5162`) only cycles tool
-  blocks when `view_state.focused_turn` is set, and the only thing that sets it
-  is `]]`/`[[`, whose `start_ref` is `focused.or(topmost_on_screen)`
-  (`event_loop.rs:4909`). A conversation with exactly ONE assistant turn makes
-  that turn its own `topmost_on_screen`, so `]]` searches strictly after it and
-  `[[` strictly before it, both find nothing, and focus is never seated. J0's
-  own honesty block says "every block is expandable by keyboard as of this
-  tree"; that claim has this hole. DF-19-10-SINGLE-TURN-FOCUS-UNREACHABLE.
-  Nothing is lost from the evidence: the read-backs are asserted on the wire.
+the old blocking wait on product text `cannot be honoured in` was REMOVED when
+  that safe-deploy disclosure became correctly absent. Its product-minted
+  replacement is the real Bash approval wait `[y] Allow`; the team-control
+  disclosure remains a separate positive FR42-a witness. This is the worked
+  example that fires DF-19-9-DRIVER-GATES-ON-SERVED-PROSE; the DF stays open
+  with the Epic 19 close.
 
-trust is PER-CONVERSATION and MEMORY-ONLY. Launch 2 uses `--new` after a
-  relaunch and creates a second persisted session, so it demonstrates only
-  that trust is not carried across that boundary — behaviour consistent with
-  the prompt's "for this session" wording. This receipt does NOT prove the
-  wording defect. The separate code-inspection finding is that a second tab in
-  one running app has a different `conversation_id` and re-prompts:
+redirect targets are NOT workspace-checked for Bash. For example,
+  `kubectl config view --raw > /tmp/x` still reaches a shell redirect because
+  `extract_file_path` handles file tools, not Bash command text. The pattern
+  matcher restricts command prefixes; it is not a filesystem security boundary.
+
+invocation-form bypasses remain: `/bin/kubectl`, `bash -c '…'`, flag reordering
+  and variable indirection can evade argument-shaped prefix intent. The
+  matcher is deliberately a conservative command allowlist, not a shell or
+  program policy engine.
+
+`deploy-read` and `migration-read` are BLOCK HEADERS, not expanded bodies,
+  because a one-assistant-turn conversation cannot seat `focused_turn` through
+  `]]`/`[[`; therefore Tab cannot cycle its tool blocks
+  (DF-19-10-SINGLE-TURN-FOCUS-UNREACHABLE). The wire read-backs retain the
+  load-bearing evidence.
+
+trust is PER-CONVERSATION and MEMORY-ONLY. Launch 2 creates a new conversation
+  and asks for safe-deploy again, behaviour consistent with the current prompt.
+  The separate wording/persistence question remains
   DF-19-10-TRUST-PROMPT-SAYS-SESSION.
 
-tier 3 is NOT captured. No bundled-resource read happens here, and a
-  MODEL-driven activation never calls `SecurityPort::add_active_skill_dir` — the
-  user-driven `/skill` route does (`event_loop.rs:7733`). Harmless in this
-  capture because the skill lives under the workspace; load-bearing for
-  `~/.agents/skills`.
+tier 3 is NOT captured. Model-driven activation does not call
+  `SecurityPort::add_active_skill_dir`; this fixture is harmless because it
+  lives under the workspace, but the gap remains load-bearing for global
+  skills.
 
-cross-tool compatibility is NOT proved and cannot be. "The skill works in Claude
-  Code, Codex, Gemini CLI AND rustain" is a claim about four binaries; this is a
-  single-binary capture. What it proves is that the standard's file format, as
-  the PRD writes it, loads here unmodified.
+agent-side patterns and subagent skill enforcement are NOT captured. Agents
+  have no command-level permission-chain backstop, so their pattern items stay
+  unoffered and disclosed; subagents carry no active skills.
 
-`task` is offered and then denied — `tool_survives_allowlist` carves out both
-  `activate_skill` and `task`, `permission_chain` carves out `activate_skill`
-  only (DF-19-2-TASK-CARVEOUT-DIVERGENCE). Not exercised here.
+cross-tool compatibility is NOT proved. This single-binary capture proves the
+  standard file loads unmodified in rustain, not that Claude Code, Codex and
+  Gemini CLI execute it.
 
-waits on STUB-SERVED strings, named because A12 requires it: "Breaking migration
-  detected" (the climax reply), "Standing by on the preview step." (submission
-  2's reply), "The team runbooks are in place." (launch 2's reply),
-  "Understood." (the decline leg's reply), and the two `Read` block headers
-  `deploy.yaml` / `0042_drop_column.sql`, which are the scene's tool INPUTS
-  rendered back. Every other wait in this driver is on a product-minted string:
-  `Ready`, `/safe-deploy` (the slash popup, from the registry's own discovery),
-  `Trust and enable this skill for this session?`, `Inspect skill:`,
-  `Skill 'safe-deploy' activated.`, `cannot be honoured in full`,
-  `Discovered skills:` and `not trusted — activation declined`.
+`task` is offered and then denied — the offer filter carves out `task`, while
+  the permission chain carves out only `activate_skill`
+  (DF-19-2-TASK-CARVEOUT-DIVERGENCE). It is intentionally not exercised here.
 
-no live-LLM variant is recorded by anyone, and none is gated.
+waits on STUB-SERVED strings are: "Breaking migration detected",
+  "Standing by on the preview step.", "The team runbooks are in place.",
+  "Team control complete.", "Understood.", and the two Read block headers whose
+  paths are scene tool inputs. Product-minted waits include `Ready`,
+  `/safe-deploy`, both trust prompts, `Inspect skill:`, both Bash `[y] Allow`
+  cards, the `Glob` Advisory, `Discovered skills:`, and activation/decline
+  results.
+
+no live-LLM variant is recorded or gated.
 LIMITS
 
 # ── Stub teardown, then the verdict is the checker's, not this file's ───────

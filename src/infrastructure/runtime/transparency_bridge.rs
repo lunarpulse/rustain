@@ -729,7 +729,10 @@ mod tests {
             panic!("send completion must use the feedback event path");
         };
         // Advisory: a late peer reply must not abort an unrelated turn.
-        assert!(matches!(level, crate::domain::models::NoticeLevel::Advisory));
+        assert!(matches!(
+            level,
+            crate::domain::models::NoticeLevel::Advisory
+        ));
         assert!(!level.is_turn_fatal());
         assert_eq!(
             message,

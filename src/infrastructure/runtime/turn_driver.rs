@@ -437,7 +437,7 @@ impl LocalTurnDriver {
         let agent_filter = agent_snapshot
             .as_ref()
             .and_then(|a| a.effective_tool_filter(&all_tool_names));
-        let skill_filter = activation.effective_allowed_tools();
+        let skill_filter = activation.effective_allowed_tools(&all_tool_names);
         let combined: Option<std::collections::HashSet<String>> = match (agent_filter, skill_filter)
         {
             (None, None) => None,
@@ -468,24 +468,38 @@ impl LocalTurnDriver {
                 // ⚑ `activate_skill` is excluded: the driver force-adds it
                 // below when the catalogue omits it, so naming it "unavailable"
                 // would contradict the same turn's own offer.
-                let mut declared: std::collections::BTreeSet<&str> = activation
+                let mut unmatched: std::collections::BTreeSet<&str> =
+                    std::collections::BTreeSet::new();
+                for item in activation
                     .active_skills()
                     .iter()
-                    .filter_map(|s| s.allowed_tools.as_ref())
+                    .filter_map(|skill| skill.allowed_tools.as_ref())
                     .flatten()
                     .map(String::as_str)
-                    .collect();
+                {
+                    if item != "activate_skill"
+                        && !all_tool_names.iter().any(|tool_name| {
+                            crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(
+                                item, tool_name,
+                            )
+                        })
+                    {
+                        unmatched.insert(item);
+                    }
+                }
                 if let Some(agent_allowed) = agent_snapshot
                     .as_ref()
-                    .and_then(|a| a.allowed_tools.as_ref())
+                    .and_then(|agent| agent.allowed_tools.as_ref())
                 {
-                    declared.extend(agent_allowed.iter().map(String::as_str));
+                    unmatched.extend(
+                        agent_allowed
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|item| *item != "activate_skill")
+                            .filter(|item| !all_tool_names.iter().any(|tool| tool == item)),
+                    );
                 }
-                let unmatched: Vec<&str> = declared
-                    .into_iter()
-                    .filter(|name| *name != "activate_skill")
-                    .filter(|name| !all_tool_names.iter().any(|t| t == name))
-                    .collect();
+                let unmatched: Vec<&str> = unmatched.into_iter().collect();
                 if !unmatched.is_empty() {
                     let constrained_skill_names: Vec<&str> = activation
                         .active_skills()

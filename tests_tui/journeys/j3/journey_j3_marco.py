@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Story 19.10 — Journey 3 (Marco, skill creator) capture driver, pexpect half.
+"""Story 19.11 — Journey 3 (Marco, skill creator) capture driver, pexpect half.
 
 Walks PRD Journey 3 through the REAL binary under a PTY against the 19.7 scene
 stub: Marco's own `.agents/skills/safe-deploy/SKILL.md` — the PRD's bytes, byte
 for byte — discovered at boot, activated by a model-driven `activate_skill`,
-**trust-gated** (`[y]`/`[n]`/`[i]`), read to the model as a `<skill>` block, and
-then, on a SECOND user submission, enforced: the offered catalogue shrinks, the
-operator is told in the product's own words which restriction this build cannot
-honour, and the turn survives being told.
+trust-gated, read to the model as a `<skill>` block, and enforced. On the second
+submission the pattern-restricted Bash tool is offered; hermetic `helm` and
+`kubectl` commands execute after real approval prompts, while a blocklist-clean
+undeclared chain is denied.
 
 The SHELL driver (`journey-J3-marco.sh`) owns the stub lifecycle, the receipt
 header and the three trailers; this script owns the keystrokes, the screen-state
@@ -125,9 +125,13 @@ TEAM_SKILLS = {
 # two scene fragments (`J3-MARCO-` and `MIDTURN`), so the joined literal is not a
 # byte of `j3-marco.json` and the gate's echo precondition is executable.
 MIDTURN_NEEDLE = "J3-MARCO-MIDTURN"
+HELM_NEEDLE = "J3-MARCO-HELM-EXECUTED"
+KUBECTL_NEEDLE = "J3-MARCO-KUBECTL-EXECUTED"
+CHAIN_NEEDLE = "J3-MARCO-CHAIN-SECOND-RAN"
+TEAM_CONTROL_SKILL = "canary-watch"
 
 
-def env_block(stub_url: str, home: Path, persona: str) -> dict[str, str]:
+def env_block(stub_url: str, home: Path, persona: str, shim_dir: Path) -> dict[str, str]:
     """The 19.7 A5 env block — J0's door, copied from `SceneStub.env` in effect.
 
     `ANTHROPIC_AUTH_TOKEN` empty is *unset*, and it must be: `harness.start()`
@@ -147,18 +151,25 @@ def env_block(stub_url: str, home: Path, persona: str) -> dict[str, str]:
         "OPENROUTER_API_KEY": "",
         "HOME": str(home),
         "NO_COLOR": "1",
+        "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}",
     }
 
 
 def launch(
-    workspace: Path, stub_url: str, home: Path, persona: str, *, fresh: bool
+    workspace: Path,
+    stub_url: str,
+    home: Path,
+    persona: str,
+    shim_dir: Path,
+    *,
+    fresh: bool,
 ) -> RustainTUI:
     tui = RustainTUI(
         fresh=fresh,
         build=False,
         workspace=workspace,
         allowed_tools=[],  # A8 — nothing pre-allowed
-        env_overrides=env_block(stub_url, home, persona),
+        env_overrides=env_block(stub_url, home, persona, shim_dir),
         timeout=60,
     ).start()
     # A8 / 19.9 preflight: the harness copied `rustain/.env` — a real credential
@@ -192,6 +203,16 @@ def install_skill(workspace: Path) -> str:
     print(f"[witness] the binary will load the PRD's own bytes ({src_sha})", flush=True)
     return src_sha
 
+def install_command_shims(scratch: Path) -> Path:
+    """Install hermetic executables; each needle is the first output line."""
+    shim_dir = scratch / "command-shims"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    for command, needle in [("helm", HELM_NEEDLE), ("kubectl", KUBECTL_NEEDLE)]:
+        shim = shim_dir / command
+        shim.write_text(f"#!/bin/sh\nprintf '%s\\n' '{needle}'\n")
+        shim.chmod(0o755)
+    return shim_dir
+
 
 def seed_team_repo(bare: Path, scratch: Path) -> None:
     """Build the team's shared skills repo — a real local bare git repository.
@@ -211,8 +232,12 @@ def seed_team_repo(bare: Path, scratch: Path) -> None:
     for name, description in TEAM_SKILLS.items():
         skill_dir = seed / name
         skill_dir.mkdir(parents=True, exist_ok=True)
+        allowed_tools = (
+            "allowed-tools: Read Glob\n" if name == TEAM_CONTROL_SKILL else ""
+        )
         (skill_dir / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: {description}\n---\n"
+            f"---\nname: {name}\ndescription: {description}\n"
+            f"{allowed_tools}---\n"
             f"## Protocol\n1. Follow the team runbook for {name}.\n"
         )
     _git(["add", "."], cwd=seed)
@@ -344,9 +369,10 @@ def main() -> int:
     (workspace / "migrations").mkdir(parents=True, exist_ok=True)
     (workspace / "migrations" / "0042_drop_column.sql").write_text(MIGRATION_SQL)
     seed_team_repo(scratch / "team-skills.git", scratch)
+    shim_dir = install_command_shims(scratch)
 
     # ── Launch 1 — the junior's rustain ──────────────────────────────────────
-    tui = launch(workspace, stub_url, home, PERSONA, fresh=True)
+    tui = launch(workspace, stub_url, home, PERSONA, shim_dir, fresh=True)
     require(tui, "Ready", 30, "boot")
     # The `Loaded N skills` notice is a StatusFlash and expires; the status bar's
     # `Skills: N active` counts ACTIVE skills, which is 0 here. The persistent
@@ -415,56 +441,39 @@ def main() -> int:
     tui.send("i")  # back to Input focus for submission 2
     time.sleep(0.5)
 
-    # ── SUBMISSION 2 — where the restriction actually bites (A14) ────────────
-    #
-    # ⚑ FOUND AT T0.3 AND FILED — `DF-19-10-ADVISORY-QUEUED-IN-FOCUS`. The
-    # FR42-a disclosure is a `NoticeLevel::Advisory`, which
-    # `event_loop.rs:6223-6225` routes through `apply_warning_notice` →
-    # `notify_or_queue`. In the DEFAULT density mode (`Focus` —
-    # `visual.rs:25-29`) that function ENQUEUES instead of rendering
-    # (`notice.rs:25-35`), and the only drain in the whole tree is
-    # `apply_density_transition`'s `if leaving_focus` (`notice.rs:104-142`). So
-    # on a default-mode rustain the sentence FR42-a exists to say is minted,
-    # bounded-queued (cap 32, oldest dropped) and never shown. The first probe
-    # run recorded exactly that: `"tools":3` on the wire and nothing on screen.
-    #
-    # This capture therefore switches density the way an operator would —
-    # `Ctrl+X` `w` (`state.rs:2231-2233`) — BEFORE the submission it wants to
-    # watch, so the product's own sentence is on screen when it is minted. The
-    # honesty block says so; nothing here pretends the default mode shows it.
+    # Keep the original Monitor workaround for a non-vacuous negative: if
+    # safe-deploy were still disclosed, its Advisory would render in the first
+    # permission pane instead of disappearing into Focus mode's queue.
     tui.send(CTRL_X)
     time.sleep(0.5)
     tui.send("w")
-    require(tui, "Density: Monitor", 20, "the operator switched to Monitor density")
-    tui.send(TAB)  # Monitor seats focus on the sidebar; Tab returns to Input
+    require(tui, "Density: Monitor", 20, "submission 2 switched to Monitor density")
+    tui.send(TAB)
     time.sleep(0.5)
+
+    # ── SUBMISSION 2 — the pattern restriction admits only declared commands ─
     tui.send_message("preview the staging release")
     pane(tui, "sub2-sent")
-    # Product-minted and the point of the whole capture: FR42-a says a
-    # restriction this build cannot honour is DISCLOSED, never dropped in
-    # silence. `BTreeSet` ordering (`turn_driver.rs:467`) puts `helm` before
-    # `kubectl` — the reverse of the SKILL.md's declaration order.
-    #
-    # ⚑ The literal WRAPS. `feedback_block.rs` folds the block to the chat
-    # pane's width, and Monitor density gives that pane the screen minus the
-    # sidebar, so the sentence lands as three rows (measured at T0.3):
-    #     Tool restriction from skill 'safe-deploy' cannot be honoured in
-    #     full: [Bash(helm:*), Bash(kubectl:*)] are unavailable for this
-    #     turn.
-    # A needle spanning the fold — `cannot be honoured in full` — matches
-    # nothing on screen, so this wait and `gate J3` both use ROWS.
-    require(
-        tui,
-        "cannot be honoured in",
-        60,
-        "the FR42-a disclosure named the restriction this build cannot honour",
-    )
-    pane(tui, "restriction-notice")
-    # …and the turn it describes still completes: `Advisory`, not `Warning`
-    # (`turn_driver.rs:519`; 19.2's review caught a `Warning` cancelling the very
-    # turn it disclosed).
-    require(tui, "Standing by on the preview step.", 60, "the disclosed turn replied")
-    pane(tui, "post-notice-reply")
+
+    # Bash remains Elevated in Normal mode. Nothing is pre-approved, so each
+    # admitted call reaches the product's real approval card and receives a
+    # one-shot `y`; the later call must ask again.
+    require(tui, "helm diff release charts/billing", 60, "helm reached approval")
+    require(tui, "[y] Allow", 20, "the helm command raised the permission prompt")
+    pane(tui, "helm-permission")
+    tui.send("y")
+
+    require(tui, "kubectl get pods", 60, "kubectl reached approval")
+    require(tui, "[y] Allow", 20, "the kubectl command raised a fresh permission prompt")
+    pane(tui, "kubectl-permission")
+    tui.send("y")
+
+    # The scene next dispatches `kubectl … && printf …`. Its first segment is
+    # declared and blocklist-clean; the second is not. The chain must be denied
+    # before either segment runs, then the scene serves the final reply only
+    # after receiving that product-minted denial.
+    require(tui, "Standing by on the preview step.", 60, "the denied chain returned")
+    pane(tui, "post-pattern-execution")
 
     quit_ctrl_q(tui)
     log("launch 1 quit via Ctrl+Q")
@@ -474,7 +483,7 @@ def main() -> int:
     clone_team_skills(scratch / "team-skills.git", workspace, scratch)
 
     # ── Launch 2 — a new conversation in a workspace that now has six ────────
-    tui = launch(workspace, stub_url, home, TEAM_PERSONA, fresh=True)
+    tui = launch(workspace, stub_url, home, TEAM_PERSONA, shim_dir, fresh=True)
     require(tui, "Ready", 30, "boot after the clone")
     tui.send_message("which runbooks are on this machine")
     # Two beats, one wait. The scene's first turn asks for a skill that does not
@@ -499,7 +508,34 @@ def main() -> int:
     )
     pane(tui, "after-clone")
     tui.send("y")
-    require(tui, "The team runbooks are in place.", 60, "the team-member turn replied")
+
+    # The team persona immediately activates the cloned control runbook. It has
+    # `Read Glob`, so its raw intersection with safe-deploy retains `Read` and
+    # reaches the Advisory branch rather than the turn-fatal disjoint branch.
+    require(tui, TEAM_CONTROL_SKILL, 60, "the team control requested activation")
+    require(
+        tui,
+        "Trust and enable this skill for this session?",
+        20,
+        "the cloned control runbook raised its own trust prompt",
+    )
+    pane(tui, "team-control-trust")
+    tui.send("y")
+    require(tui, "The team runbooks are in place.", 60, "both runbooks activated")
+
+    # DF-19-10-ADVISORY-QUEUED-IN-FOCUS: Monitor is still required to surface
+    # the positive FR42-a control. The unavailable name is driver-owned `Glob`,
+    # not one of the now-honourable Bash patterns.
+    tui.send(CTRL_X)
+    time.sleep(0.5)
+    tui.send("w")
+    require(tui, "Density: Monitor", 20, "the control switched to Monitor density")
+    tui.send(TAB)
+    time.sleep(0.5)
+    tui.send_message("exercise the team runbook disclosure control")
+    require(tui, "Glob", 60, "the unavailable team-runbook tool was disclosed")
+    pane(tui, "team-control-disclosure")
+    require(tui, "Team control complete.", 60, "the control turn replied")
     quit_ctrl_q(tui)
     log("launch 2 quit via Ctrl+Q")
 
@@ -509,7 +545,7 @@ def main() -> int:
     # the activation result" is green on a build with NO trust gate at all.
     # Answering `n` is what makes the gate's presence observable.
     print("\n=== the decline leg — the same skill, answered `n`", flush=True)
-    tui = launch(decline_workspace, stub_url, home, DECLINE_PERSONA, fresh=True)
+    tui = launch(decline_workspace, stub_url, home, DECLINE_PERSONA, shim_dir, fresh=True)
     require(tui, "Ready", 30, "boot (decline leg)")
     tui.send_message("deploy billing to production")
     require(

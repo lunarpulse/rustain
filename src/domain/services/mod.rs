@@ -48,6 +48,7 @@ pub mod search;
 pub mod secret_scan;
 pub mod session_index;
 pub mod skill_context;
+pub mod skill_tool_pattern;
 pub mod streaming_collect;
 pub mod summary_labeler;
 pub mod swap_tier;

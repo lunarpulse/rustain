@@ -89,25 +89,33 @@ impl SkillActivationSet {
         std::mem::take(&mut self.active)
     }
 
-    pub fn effective_allowed_tools(&self) -> Option<HashSet<String>> {
-        let constrained: Vec<&Vec<String>> = self
+    pub fn effective_allowed_tools(&self, all_tool_names: &[String]) -> Option<HashSet<String>> {
+        let mut constrained = self
             .active
             .iter()
-            .filter_map(|s| s.allowed_tools.as_ref())
-            .collect();
-        if constrained.is_empty() {
-            return None;
-        }
-        let mut iter = constrained.iter();
-        let Some(first) = iter.next() else {
-            return Some(HashSet::new());
-        };
+            .filter_map(|skill| skill.allowed_tools.as_ref());
+        let first = constrained.next()?;
         let mut result: HashSet<String> = first.iter().cloned().collect();
-        for set in iter {
-            let other: HashSet<String> = set.iter().cloned().collect();
-            result = result.intersection(&other).cloned().collect();
+        for set in constrained {
+            result.retain(|item| set.contains(item));
         }
-        Some(result)
+        Some(
+            result
+                .into_iter()
+                .filter_map(|item| {
+                    let pattern =
+                        crate::domain::services::skill_tool_pattern::parse_allowed_tool_pattern(
+                            &item,
+                        )?;
+                    if pattern.specifier == Some("")
+                        || !all_tool_names.iter().any(|name| name == pattern.tool_name)
+                    {
+                        return None;
+                    }
+                    Some(pattern.tool_name.to_string())
+                })
+                .collect(),
+        )
     }
 
     #[allow(dead_code)]
@@ -483,7 +491,26 @@ mod tests {
     #[test]
     fn effective_allowed_tools_none_plus_none() {
         let set = SkillActivationSet::new();
-        assert!(set.effective_allowed_tools().is_none());
+        assert!(set.effective_allowed_tools(&[]).is_none());
+    }
+
+    #[test]
+    fn effective_allowed_tools_expands_skill_patterns_after_raw_intersection() {
+        let mut set = SkillActivationSet::new();
+        set.push(ActiveSkill {
+            name: "a".to_string(),
+            directory: PathBuf::from("/tmp/a"),
+            allowed_tools: Some(vec![
+                "Bash(kubectl:*)".to_string(),
+                "Bash(helm:*)".to_string(),
+            ]),
+            body: String::new(),
+            arguments: String::new(),
+            activation_depth: 1,
+            source: SkillSource::GlobalAgents,
+        });
+        let effective = set.effective_allowed_tools(&["Bash".to_string()]).unwrap();
+        assert_eq!(effective, HashSet::from(["Bash".to_string()]));
     }
 
     #[test]
@@ -507,7 +534,7 @@ mod tests {
             activation_depth: 2,
             source: SkillSource::GlobalAgents,
         });
-        let effective = set.effective_allowed_tools().unwrap();
+        let effective = set.effective_allowed_tools(&["Read".to_string()]).unwrap();
         assert!(effective.contains("Read"));
     }
 
@@ -532,7 +559,9 @@ mod tests {
             activation_depth: 2,
             source: SkillSource::GlobalAgents,
         });
-        let effective = set.effective_allowed_tools().unwrap();
+        let effective = set
+            .effective_allowed_tools(&["Read".to_string(), "Grep".to_string(), "Write".to_string()])
+            .unwrap();
         assert!(effective.contains("Read"));
         assert!(!effective.contains("Grep"));
         assert!(!effective.contains("Write"));
@@ -559,7 +588,7 @@ mod tests {
             activation_depth: 2,
             source: SkillSource::GlobalAgents,
         });
-        let effective = set.effective_allowed_tools().unwrap();
+        let effective = set.effective_allowed_tools(&["Read".to_string()]).unwrap();
         assert!(effective.is_empty());
     }
 
@@ -584,7 +613,9 @@ mod tests {
             activation_depth: 2,
             source: SkillSource::GlobalAgents,
         });
-        let effective = set.effective_allowed_tools().unwrap();
+        let effective = set
+            .effective_allowed_tools(&["Read".to_string(), "Bash".to_string()])
+            .unwrap();
         assert!(effective.is_empty());
     }
 
