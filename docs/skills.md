@@ -33,7 +33,11 @@ allowed-tools: Bash(kubectl:*) Bash(helm:*) Read
 Scalar-form notes:
 
 - Items are separated by whitespace; an item's parentheses stay intact, so
-  `Bash(kubectl:*)` is one item, not three.
+  `Bash(kubectl:*)` is one item, not three. ⚠ That holds only for items
+  **without spaces inside the parentheses**: a space-bearing specifier such
+  as `Bash(git log *)` is **shredded** by the scalar form (`Bash(git` +
+  `log:*)`) — declare those with the block list or bracket form instead,
+  which is their only reachable door.
 - Commas are **not** separators in a scalar (`Read,Grep` is a single item).
 - A surrounding quoted scalar (`allowed-tools: "Read Grep"`) is unquoted first.
 - A ` #` (space-hash) starts a YAML comment and is stripped:
@@ -48,26 +52,65 @@ and `exclude-tools` fields; every form above applies to both. An agent's
 A **skill** item such as `Bash(kubectl:*)` admits the bare `Bash` tool to the
 offered catalogue and gates each execution by command text. The current matcher:
 
-- recognizes exactly `Tool(prefix*)`: one final `*`, a non-empty prefix, and no
-  trailing characters after `)`;
+- recognizes `Tool(prefix*)` (one final `*`, a non-empty prefix, no trailing
+  characters after `)`), `Tool(*)` (every command), `Tool(prefix:*)` (the
+  documented `:*` form, honoured only at the end — `Bash(git:* push)` keeps
+  its colon as a literal and matches only the exact command `git:* push`),
+  and star-free specifiers as exact literal commands. A junk specifier
+  (`Bash()`, `Bash(   )`, `Bash(**)`, `Bash( *)`) is **not** a grant: the
+  item stays unmatched and is disclosed below;
 - is case-sensitive and normalizes whitespace in both the declared prefix and
   command before comparing;
-- splits `;`, `&&`, `||`, and newlines only outside single and double quotes;
+- splits `;`, `&&`, `||`, `|`, `|&`, `&`, and newlines — but **only outside
+  single and double quotes** — so `Bash(kubectl:*)` admits
+  `kubectl get -o jsonpath='{.a && .b}'` as one command;
+- treats `&` adjacent to `>` or `<` (`2>&1`, `>&`, `<&`, `&>`) as a redirect
+  operator, never a separator — `kubectl get pods 2>&1` is one command;
 - honours backslash escapes while scanning separators; and
 - requires **every non-empty command segment** to match one declared prefix.
 
+**Denied on purpose, before anything runs** (fail-closed — these can never be
+expressed under a prefix pattern):
+
+- command substitution and subshells: `$(…)`, `` `…` ``, `<(`, `>)` — even
+  inside quotes, conservatively. ⚠ With no bare-`Bash` escape hatch, any
+  runbook needing a **dynamic value** inside a helm/kubectl call
+  (`helm upgrade --set tag=$(git rev-parse --short HEAD)`) is categorically
+  unable to express it. That is a real product limit, not an inconvenience;
+- heredocs (`<<`, `<<-`, `<<'W'`): every body line would otherwise be a
+  non-matching segment;
+- unbalanced quotes, and a dangling `&&`/`||` with nothing after it;
+- a leading `NAME=value` assignment (`KUBECONFIG=/tmp/x kubectl get pods`):
+  skipping it would admit `KUBECONFIG=/evil kubectl …`, where the assignment
+  controls what the command *does*;
+- quoted or decorated program names (`"kubectl" get`, `\kubectl get`,
+  `/usr/bin/kubectl get`, `time kubectl get`) — the deliberate cost of
+  literal-prefix matching without a shell parser.
+
 Matching is intentionally textual, not a shell policy engine. `Bash(ls*)`
 matches `lsof`; `/bin/kubectl`, `bash -c 'kubectl …'`, flag reordering, and
-variable indirection can evade argument-shaped intent. Redirect targets are not
-workspace-checked as file operations: for example,
-`kubectl config view --raw > /tmp/x` still reaches the shell. Use a dedicated
-tool or stronger sandbox when those boundaries matter.
+variable indirection can evade argument-shaped intent. Redirect targets are
+not workspace-checked as file operations: for example,
+`kubectl config view --raw > /tmp/x` still reaches the shell — including in
+auto-approval modes, where no human sees the card. Use a dedicated tool or
+stronger sandbox when those boundaries matter.
 
-This expansion is skill-scoped. Agent `allowed-tools` accepts the same syntax
-but has no command-level execution backstop, so an agent pattern stays
-unoffered and is disclosed as unmatched rather than widened unsafely. A bare
-`Bash` item still grants all Bash commands, subject to the normal blocklist and
-approval mode.
+This expansion is **`Bash`-only**: `Bash` is the one tool whose commands
+carry an execution-time gate. A pattern on any other tool (`Read(docs/*)`,
+`Write(/tmp/*)`, `mcp__db__query(SELECT:*)`) has no command gate, so it is
+**not** widened to the bare tool — the item stays unoffered and is disclosed
+as unmatched below. An agent's `Bash(kubectl:*)` is disclosed the same way:
+agent `allowed-tools` accepts the same syntax but has no command-level
+execution backstop, so an agent pattern stays unoffered rather than widened
+unsafely (`DF-19-11-AGENT-PATTERN-NO-EXEC-GATE`). A bare `Bash` item still
+grants all Bash commands, subject to the normal blocklist and approval mode.
+
+⚠ **Two active skills intersect their declarations as raw strings.** A skill
+declaring `Bash(kubectl:*)` co-active with one declaring `Bash(helm:*)`
+intersects to the empty set and fires the turn-fatal disjoint warning below —
+even though expanding each side first would share `Bash`. This is fail-closed
+and pre-existing; declare a common item (e.g. `Read`) in both if they must be
+co-active.
 
 ## The two carve-outs
 

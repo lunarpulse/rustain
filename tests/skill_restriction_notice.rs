@@ -463,3 +463,79 @@ async fn ac5_agent_pattern_stays_unoffered_and_disclosed() {
     assert!(disclosures[0].contains("Bash(kubectl:*)"));
     assert_eq!(offered, vec!["activate_skill", "task"]);
 }
+
+// ── Story 19.11 code review — the unruled axes stay honest ──────────────────
+
+/// Review patch (P3): a skill whose every declared item is unmatchable in
+/// this catalogue (e.g. `allowed-tools: Glob` with no Glob tool in the
+/// build) takes the FR42-a disclosure branch — as it did before pattern
+/// expansion — not the turn-fatal disjoint branch with its misleading
+/// "agent and skill filters are disjoint" message.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_all_unmatchable_skill_discloses_and_is_not_turn_fatal() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_skill(
+        tmp.path(),
+        "ghost-tools",
+        "---\nname: ghost-tools\ndescription: Declares a tool this build does not carry.\nallowed-tools: Glob\n---\n# Body\n",
+    );
+    let activation = activation_from_skill_md(tmp.path(), "ghost-tools").await;
+
+    let (notices, offered) =
+        drive_turn(tmp.path(), vec!["Read", "Bash", "task"], Some(activation)).await;
+
+    assert!(
+        !notices.iter().any(|(level, _)| level.is_turn_fatal()),
+        "a solo unmatchable skill must not kill the turn: {notices:?}"
+    );
+    assert!(
+        notices.iter().any(|(level, message)| {
+            *level == NoticeLevel::Advisory
+                && message.contains("[Glob]")
+                && message.contains("unavailable")
+                && !message.contains("disjoint")
+        }),
+        "the unmatchable item is disclosed on the turn it bites: {notices:?}"
+    );
+    assert_eq!(
+        offered,
+        vec!["activate_skill", "task"],
+        "nothing beyond the carve-outs is offered"
+    );
+}
+
+/// Review patch (P2): a non-Bash pattern has no execution-time command
+/// gate, so it must not be widened to the bare tool at offer time. The
+/// enforced Bash pattern still offers Bash; `Read(docs/*)` stays unoffered
+/// and is disclosed as unmatched — instead of offering a Read tool that
+/// every call would deny while the disclosure stays silent.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_non_bash_pattern_stays_unoffered_and_disclosed() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_skill(
+        tmp.path(),
+        "mixed-patterns",
+        "---\nname: mixed-patterns\ndescription: One enforced and one unenforceable pattern.\nallowed-tools: Bash(kubectl:*) Read(docs/*)\n---\n# Body\n",
+    );
+    let activation = activation_from_skill_md(tmp.path(), "mixed-patterns").await;
+
+    let (notices, offered) =
+        drive_turn(tmp.path(), vec!["Read", "Bash", "task"], Some(activation)).await;
+
+    assert_eq!(
+        offered,
+        vec!["Bash", "activate_skill", "task"],
+        "the enforced Bash pattern offers Bash; the ungated Read pattern must not offer Read"
+    );
+    let disclosures: Vec<&String> = notices
+        .iter()
+        .filter(|(level, _)| *level == NoticeLevel::Advisory)
+        .map(|(_, message)| message)
+        .collect();
+    assert_eq!(disclosures.len(), 1, "exactly one disclosure: {notices:?}");
+    assert!(
+        disclosures[0].contains("Read(docs/*)"),
+        "the ungated pattern is named: {disclosures:?}"
+    );
+    assert!(!disclosures[0].contains("Bash(kubectl:*)"));
+}

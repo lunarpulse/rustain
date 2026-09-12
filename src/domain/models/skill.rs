@@ -99,23 +99,48 @@ impl SkillActivationSet {
         for set in constrained {
             result.retain(|item| set.contains(item));
         }
-        Some(
-            result
-                .into_iter()
-                .filter_map(|item| {
-                    let pattern =
-                        crate::domain::services::skill_tool_pattern::parse_allowed_tool_pattern(
-                            &item,
-                        )?;
-                    if pattern.specifier == Some("")
-                        || !all_tool_names.iter().any(|name| name == pattern.tool_name)
-                    {
-                        return None;
-                    }
-                    Some(pattern.tool_name.to_string())
-                })
-                .collect(),
-        )
+        if result.is_empty() {
+            // A genuinely empty raw intersection (cross-skill disjoint, or an
+            // `allowed-tools: []` declaration) keeps its pre-expansion
+            // meaning: an empty filter, surfaced by the caller as the
+            // disjoint/empty warning.
+            return Some(result);
+        }
+        let expanded: HashSet<String> = result
+            .iter()
+            .filter_map(|item| {
+                let pattern =
+                    crate::domain::services::skill_tool_pattern::parse_allowed_tool_pattern(item)?;
+                // Story 19.11 review: expand only items this build actually
+                // enforces — Bash patterns with a well-formed specifier.
+                // A non-Bash pattern (e.g. `Read(docs/*)`) has no
+                // execution-time command gate; expanding it would offer a
+                // tool that is then denied on every call while the FR42-a
+                // disclosure names nothing. Such items stay out of the
+                // offered set and are disclosed as unmatched instead.
+                if !crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(
+                    item,
+                    pattern.tool_name,
+                ) {
+                    return None;
+                }
+                if !all_tool_names.iter().any(|name| name == pattern.tool_name) {
+                    return None;
+                }
+                Some(pattern.tool_name.to_string())
+            })
+            .collect();
+        if expanded.is_empty() {
+            // Story 19.11 review: a skill whose every declared item is
+            // unmatchable in this catalogue (e.g. `allowed-tools: Glob`)
+            // must take the FR42-a disclosure branch, as it did before
+            // pattern expansion — not the turn-fatal disjoint branch. The
+            // raw strings never equal a catalogue name, so the offered set
+            // is unchanged either way (carve-outs only); only the notice
+            // path differs.
+            return Some(result);
+        }
+        Some(expanded)
     }
 
     #[allow(dead_code)]

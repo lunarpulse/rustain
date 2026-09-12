@@ -87,7 +87,7 @@ DECLINE_PERSONA = "scene-marco-decline"
 # of <= 60 chars) with the needle on line 1, because `Read` returns
 # "<n>\t<line>" rows and the stub clips `last_user` at 120 characters — a needle
 # on line 4 would be invisible to the marker that proves the read round-tripped.
-# ⛔ Neither needle appears in `scenes/j3-marco.json`; `gate J3` checks that
+# ⛔ Neither needle appears in `scenes/j3-marco-v2.json`; `gate J3` checks that
 # precondition before it runs anything.
 DEPLOY_YAML = (
     "# J3-MARCO-DEPLOY-NEEDLE billing prod\n"
@@ -123,7 +123,7 @@ TEAM_SKILLS = {
 
 # The mid-turn probe's needle (A15). It is COMPOSED BY `printf` at run time from
 # two scene fragments (`J3-MARCO-` and `MIDTURN`), so the joined literal is not a
-# byte of `j3-marco.json` and the gate's echo precondition is executable.
+# byte of `j3-marco-v2.json` and the gate's echo precondition is executable.
 MIDTURN_NEEDLE = "J3-MARCO-MIDTURN"
 HELM_NEEDLE = "J3-MARCO-HELM-EXECUTED"
 KUBECTL_NEEDLE = "J3-MARCO-KUBECTL-EXECUTED"

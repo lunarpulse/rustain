@@ -14,6 +14,7 @@ Story 19.11 makes the enforced Bash pattern visible as the bare tool:
 
 Both fields contain names only—never skill bodies, the system prompt, tool
 schemas, or tool descriptions. Tests below reject tag-like persona prose,
+body leakage, and cross-wire schema drift.
 
 The committed J3 fixture is the PRD's own `SKILL.md`, byte for byte, copied by
 ``fixtures.skills.write_workspace_skill``, so this control and the capture agree
