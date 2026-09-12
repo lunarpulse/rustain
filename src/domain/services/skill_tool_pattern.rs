@@ -180,15 +180,12 @@ fn command_segments_match(command: &str, mut segment_matches: impl FnMut(&str) -
         let separator_len = if byte == b'\n' || byte == b';' {
             1
         } else if byte == b'&'
-            && bytes
+            && (bytes
                 .get(index.wrapping_sub(1))
                 .is_some_and(|b| matches!(b, b'<' | b'>'))
-        {
-            0
-        } else if byte == b'&'
-            && bytes
-                .get(index + 1)
-                .is_some_and(|b| matches!(b, b'<' | b'>'))
+                || bytes
+                    .get(index + 1)
+                    .is_some_and(|b| matches!(b, b'<' | b'>')))
         {
             0
         } else if bytes.get(index..index + 2) == Some(b"&&")
