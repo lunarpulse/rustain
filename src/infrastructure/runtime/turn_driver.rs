@@ -561,15 +561,86 @@ impl LocalTurnDriver {
                         })
                         .ok();
                 }
+                // Story 19.28 code review (P5) — ✅ owner-ruled 2026-09-13:
+                // FR42-a also covers a restriction this build honours only
+                // per-origin. When BOTH origins declare command specifiers for
+                // the same tool and share no declared item, the bare tool is
+                // still offered (each origin admits it on its own) but every
+                // command must satisfy BOTH specifier sets — so the conjunction
+                // admits nothing the operator can predict from either
+                // declaration. Before the agent axis honoured patterns, this
+                // configuration surfaced as the empty-`combined` Warning above;
+                // pattern-aware filters made `combined` non-empty and the
+                // conflict silent until the model tripped over a run of
+                // per-command denials.
+                //
+                // Equality is raw declared-item comparison — the same semantics
+                // `check_allowed_tools` and `SkillActivationSet::effective_allowed_tools`
+                // already use to compose multiple origins (A14: raw item
+                // intersection, fail-closed and precedented). It errs LOUD:
+                // `Bash(kube:*)` vs `Bash(kubectl:*)` is reported even though
+                // some commands satisfy both. That is the direction FR42-a's
+                // ⛔ "never treats an unmatchable restriction as no restriction"
+                // points, and it never suppresses a tool or a command.
+                if let Some(agent) = agent_snapshot.as_ref() {
+                    let agent_items: Vec<&str> = agent
+                        .allowed_tools
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(String::as_str)
+                        .collect();
+                    let skill_items: Vec<&str> = activation
+                        .active_skills()
+                        .iter()
+                        .filter_map(|skill| skill.allowed_tools.as_ref())
+                        .flatten()
+                        .map(String::as_str)
+                        .collect();
+                    let mut conflicts: Vec<String> = Vec::new();
+                    for tool_name in all_tool_names.iter().map(String::as_str) {
+                        let agent_specs = specifier_items_for(&agent_items, tool_name);
+                        let skill_specs = specifier_items_for(&skill_items, tool_name);
+                        if agent_specs.is_empty()
+                            || skill_specs.is_empty()
+                            || agent_specs.iter().any(|item| skill_specs.contains(item))
+                        {
+                            continue;
+                        }
+                        conflicts.push(format!(
+                            "{} (agent declares [{}], skill declares [{}])",
+                            tool_name,
+                            agent_specs.join(", "),
+                            skill_specs.join(", ")
+                        ));
+                    }
+                    if !conflicts.is_empty() {
+                        domain_tx
+                            .send(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation.id.clone()),
+                                level: crate::domain::models::NoticeLevel::Advisory,
+                                message: format!(
+                                    "Agent and skill command restrictions cannot both be honoured for {}. The tool stays offered, and every command must satisfy both restrictions — a command admitted by only one of them is denied.",
+                                    conflicts.join("; ")
+                                ),
+                            })
+                            .ok();
+                    }
+                }
             }
         }
         let tool_defs = match combined {
             Some(allowed) => {
                 let mut filtered: Vec<_> = all_tool_defs
                     .into_iter()
-                    .filter(|t| tool_survives_allowlist(&t.name, &allowed))
+                    .filter(|t| {
+                        tool_survives_allowlist(&t.name, &allowed)
+                            && !agent_excludes_by_name(agent_snapshot.as_ref(), &t.name)
+                    })
                     .collect();
-                if !filtered.iter().any(|t| t.name == "activate_skill") {
+                if !filtered.iter().any(|t| t.name == "activate_skill")
+                    && !agent_excludes_by_name(agent_snapshot.as_ref(), "activate_skill")
+                {
                     let act_tool = crate::domain::models::ToolDefinition {
                         name: "activate_skill".to_string(),
                         description: "Activate an Agent Skill to gain its procedural instructions and tool restrictions. Arg: name of the skill to activate (must match a discovered skill).".to_string(),
@@ -726,6 +797,45 @@ pub(crate) fn tool_survives_allowlist(
     allowed: &std::collections::HashSet<String>,
 ) -> bool {
     allowed.contains(name) || crate::domain::models::is_any_allowlist_carve_out(name)
+}
+
+/// Whether the active agent NAMES this tool in `exclude-tools`.
+///
+/// `tool_survives_allowlist`'s carve-out union exempts a tool from an allowlist
+/// it was never named in. ⛔ It must not resurrect a tool the operator
+/// explicitly excluded — `exclude-tools: [task]` offering `task` anyway was the
+/// offer-side half of the Story 19.28 code review's P2 fail-open, and the
+/// `activate_skill` back-fill below it was a second route to the same place.
+pub(crate) fn agent_excludes_by_name(
+    agent: Option<&crate::domain::models::ActiveAgent>,
+    tool_name: &str,
+) -> bool {
+    agent.is_some_and(|agent| {
+        agent.exclude_tools.as_ref().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| crate::domain::models::agent::excluded_item_names_tool(item, tool_name))
+        })
+    })
+}
+
+/// The specifier-bearing declared items in `items` that name `tool_name`.
+///
+/// Bare items (`Read`, `Bash`) are excluded: they carry no command specifier,
+/// so they cannot conflict with another origin's specifier — they simply admit
+/// the whole tool. Only `Tool(specifier)` items participate (Story 19.28 code
+/// review, P5).
+fn specifier_items_for<'a>(items: &[&'a str], tool_name: &str) -> Vec<&'a str> {
+    items
+        .iter()
+        .copied()
+        .filter(|item| {
+            crate::domain::services::skill_tool_pattern::parse_allowed_tool_pattern(item)
+                .is_some_and(|pattern| {
+                    pattern.tool_name == tool_name && pattern.specifier.is_some()
+                })
+        })
+        .collect()
 }
 
 /// Whether the context actually injected into this turn carries peer-origin

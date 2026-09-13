@@ -389,7 +389,15 @@ impl DaemonTurnRuntime {
             self.storage.clone(),
             conversation.clone(),
             None,
-            // Story 19.28 AC5: daemon turns have no custom-agent input or state; unrestricted is proven-correct.
+            // Story 19.28 AC5 / A16 item 1 — proven-correct `None`, stated
+            // rather than left silent. Measured at implementation and
+            // re-measured at the 2026-09-13 code review: `grep -n
+            // "ActiveAgent\|agent_snapshot\|active_agent"
+            // adapters/daemon/runtime.rs` returns ZERO hits — a daemon turn
+            // carries no custom-agent context and the wire protocol has no
+            // field to carry one, so there is no restriction to thread.
+            // ⛔ Not an oversight — the absence is structural.
+            // Load-bearing-ness is proved by mutant AC5(b), not by this comment.
             None,
             turn_cancel,
             self.usage_ledger.clone(),

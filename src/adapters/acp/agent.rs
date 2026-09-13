@@ -728,7 +728,16 @@ impl RustainAcpAgent {
             storage.clone(),
             conversation,
             activation_set,
-            // Story 19.28 AC5: ACP has no custom-agent input or state; unrestricted is proven-correct.
+            // Story 19.28 AC5 / A16 item 1 — proven-correct `None`, stated
+            // rather than left silent. Measured at implementation and
+            // re-measured at the 2026-09-13 code review: `grep -n
+            // "ActiveAgent\|agent_snapshot\|active_agent" adapters/acp/agent.rs`
+            // returns ZERO hits — this surface constructs no `ActiveAgent` and
+            // exposes no field through which a client could supply one, so
+            // there is no restriction to thread. ⛔ Not an oversight — the
+            // absence is structural. Load-bearing-ness is proved by mutant
+            // AC5(b), not by this comment: a fabricated `Some([Read])` here
+            // turns this surface's existing suite RED.
             None,
             turn_cancel.clone(),
             ledger,

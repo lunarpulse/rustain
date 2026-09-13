@@ -39,6 +39,19 @@ pub enum ToolRestrictionOrigin {
     Agent,
 }
 
+/// Per-origin allowlist carve-outs — the single source both enforcers read.
+///
+/// ⚠ These are **allowlist** carve-outs: they exempt a tool from an allowlist
+/// it was never named in. They do NOT override an explicit `exclude-tools`
+/// entry — see `permission_chain::restriction_excludes_by_name` (Story 19.28
+/// code review, P2).
+///
+/// ⚠ This table is not the whole set of tools that bypass the restriction
+/// gates. `exit_plan_mode` short-circuits ahead of BOTH gates in
+/// `permission_chain::check_with_source_and_provenance_and_restriction`
+/// (Story 19.28 A5: it is a mode control, not a workspace tool), and it
+/// deliberately lives outside this table because it is origin-independent.
+/// Adding an entry here will not affect it, and removing one will not reach it.
 const SKILL_CARVE_OUTS: &[&str] = &["activate_skill"];
 const AGENT_CARVE_OUTS: &[&str] = &["activate_skill", "task"];
 

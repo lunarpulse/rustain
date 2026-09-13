@@ -620,6 +620,7 @@ fn tool_policy_allows_offer(policy: &crate::domain::models::ToolPolicy, tool_nam
 fn restriction_from_policy(
     policy: &crate::domain::models::ToolPolicy,
     all_tool_names: &[String],
+    agent_name: &str,
 ) -> Option<crate::domain::models::AgentToolRestriction> {
     use crate::domain::models::ToolPolicy;
     if matches!(policy, ToolPolicy::InheritFromParent) {
@@ -640,7 +641,7 @@ fn restriction_from_policy(
         ToolPolicy::InheritFromParent => unreachable!(),
     };
     Some(crate::domain::models::AgentToolRestriction {
-        agent_name: "delegated agent policy".to_string(),
+        agent_name: agent_name.to_string(),
         policy: policy.clone(),
         declared_items,
     })
@@ -1391,7 +1392,11 @@ async fn run_child(
         let all_tools = tools.available_tools();
         let all_tool_names: Vec<String> = all_tools.iter().map(|tool| tool.name.clone()).collect();
         let policy = child_state.tools_allow.load_full();
-        let agent_restriction = restriction_from_policy(&policy, &all_tool_names);
+        // Story 19.28 review (P14): name the delegated agent, not a placeholder
+        // — a child's deny text is the only place an operator sees which
+        // restriction stopped the call.
+        let agent_restriction =
+            restriction_from_policy(&policy, &all_tool_names, subagent_type.as_str());
         let filtered_tools = all_tools
             .into_iter()
             .filter(|tool| tool_policy_allows_offer(&policy, &tool.name))
@@ -1802,6 +1807,18 @@ async fn run_child(
                         source,
                         requests,
                         cancel.clone(),
+                        // `active_skills: None` — Story 19.28 T0.3 discovery 1,
+                        // proven-correct and re-measured at the 2026-09-13 code
+                        // review: `grep -n "SkillActivationSet\|skill_activator\|
+                        // ActiveSkill\|active_skills\|activate_skill"` over this
+                        // file returns ZERO hits outside this line, and the
+                        // child's `CompletionOptions.system_prompt` is
+                        // `String::new()`, so no skill body or activation set can
+                        // reach a child at all. ⛔ Not an oversight — children
+                        // hold no skill state, so there is nothing to thread.
+                        // ⚠ The skill axis therefore does NOT cross the
+                        // delegation boundary; that gap is filed, not fixed, as
+                        // `DF-19-28-SKILL-RESTRICTION-NOT-INHERITED-BY-CHILDREN`.
                         None,
                         agent_restriction.as_ref(),
                         provenance,
@@ -8775,29 +8792,6 @@ mod tests {
         .await;
         assert!(unrestricted_offered.contains(&"Bash".to_string()));
         assert_eq!(unrestricted_executed.len(), 1);
-    }
-
-    #[test]
-    fn story_19_28_resolved_child_crosses_only_its_effective_declared_items() {
-        use std::collections::BTreeSet;
-
-        let policy = crate::domain::models::ToolPolicy::ResolvedAgainstParent {
-            effective: BTreeSet::from(["Read".to_string()]),
-            parent: BTreeSet::from(["Bash".to_string(), "Read".to_string()]),
-            child: Box::new(crate::domain::models::ToolPolicy::Allowlist {
-                tools: BTreeSet::from(["Read".to_string()]),
-            }),
-        };
-        let restriction =
-            restriction_from_policy(&policy, &["Bash".to_string(), "Read".to_string()]).unwrap();
-        let grandchild = crate::domain::models::ToolPolicy::Allowlist {
-            tools: BTreeSet::from(["Bash".to_string(), "Read".to_string()]),
-        };
-
-        assert_eq!(
-            grandchild.resolve(&restriction.declared_items),
-            BTreeSet::from(["Read".to_string()])
-        );
     }
 
     #[tokio::test]

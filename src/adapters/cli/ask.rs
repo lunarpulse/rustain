@@ -867,7 +867,15 @@ pub async fn run_ask_core(
         storage.clone(),
         conversation.clone(),
         None,
-        // Story 19.28 AC5: `rustain ask` has no custom-agent input or state; unrestricted is proven-correct.
+        // Story 19.28 AC5 / A16 item 1 — proven-correct `None`, stated rather
+        // than left silent. Measured at implementation and re-measured at the
+        // 2026-09-13 code review: `grep -n
+        // "ActiveAgent\|agent_snapshot\|active_agent" adapters/cli/ask.rs`
+        // returns ZERO hits — `rustain ask` has no agent-selection flag and
+        // constructs no `ActiveAgent`, so there is no restriction to thread.
+        // ⛔ Not an oversight — the absence is structural. Load-bearing-ness is
+        // proved by mutant AC5(b): a fabricated `Some([Read])` at this exact
+        // site turns the `ask` tests RED (receipted as MUTANT 20).
         None,
         turn_cancel,
         ledger.clone(),

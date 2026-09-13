@@ -165,6 +165,17 @@ pub async fn check_with_source_and_provenance_and_restriction(
     source: Option<&crate::domain::models::tool_call::ApprovalSource>,
     provenance: ProvenanceTag,
 ) -> PermissionDecision {
+    // Story 19.28 review (P1): canonicalize ONCE, here, so every step below
+    // agrees with the executor. `toolset_adapter::execute` dispatches four
+    // builtins in either casing (`"Bash" | "bash"`, `"Read" | "read"`,
+    // `"Write" | "write"`, `"Edit" | "edit"`), so a lowercase alias that this
+    // chain compared raw would skip whichever step used an exact match: the
+    // agent `exclude-tools` gate (`excluded_item_names_tool` is `==`), the
+    // Bash blocklist, and `extract_file_path`'s workspace check. Canonicalizing
+    // at entry — rather than per-step — is what makes "a lowercase call reaches
+    // the same gates" true for all of them at once (AC7, generalized).
+    let tool_name = canonical_tool_name(tool_name);
+
     // Step 0: exit_plan_mode short-circuit
     if tool_name == "exit_plan_mode" {
         return match security.current_mode() {
@@ -211,11 +222,12 @@ pub async fn check_with_source_and_provenance_and_restriction(
     };
 
     // Step 1: Declared tool restrictions. Carve-outs are per-origin: a skill
-    // may activate another skill, while an agent may also delegate.
-    if !is_allowlist_carve_out(ToolRestrictionOrigin::Agent, tool_name) {
-        if let Some(deny_reason) = check_agent_tools(tool_name, input, agent_restriction) {
-            return PermissionDecision::Deny(deny_reason);
-        }
+    // may activate another skill, while an agent may also delegate. The agent
+    // carve-out is applied INSIDE `check_agent_tools` because it is an
+    // allowlist carve-out — it must not override an explicit exclusion
+    // (Story 19.28 review, P2).
+    if let Some(deny_reason) = check_agent_tools(tool_name, input, agent_restriction) {
+        return PermissionDecision::Deny(deny_reason);
     }
     if !is_allowlist_carve_out(ToolRestrictionOrigin::Skill, tool_name) {
         if let Some(deny_reason) = check_allowed_tools(tool_name, input, active_skills) {
@@ -480,12 +492,18 @@ fn extract_file_path(
     Some((path.to_string(), op))
 }
 
+/// The builtin names `toolset_adapter::execute` accepts in either casing.
+/// Keep this in lockstep with that dispatch table: a name dual-cased there and
+/// absent here is a gate the lowercase spelling walks past.
+const DUAL_CASED_BUILTINS: &[&str] = &["Bash", "Read", "Write", "Edit"];
+
+/// Map a tool name to the canonical spelling the chain's exact-match steps use.
 fn canonical_tool_name(tool_name: &str) -> &str {
-    if tool_name.eq_ignore_ascii_case("Bash") {
-        "Bash"
-    } else {
-        tool_name
-    }
+    DUAL_CASED_BUILTINS
+        .iter()
+        .find(|canonical| tool_name.eq_ignore_ascii_case(canonical))
+        .copied()
+        .unwrap_or(tool_name)
 }
 
 fn allowlist_allows_execution(
@@ -530,12 +548,41 @@ fn policy_allows_execution(
     }
 }
 
+/// Whether the restriction NAMES `tool_name` as an exclusion.
+///
+/// `allowlist_carve_outs` exempts a tool from an allowlist it was never named
+/// in — ADR-10-5 S3's "an active agent with `allowed-tools` can still
+/// delegate". ⛔ It must never override a declaration that names the tool to be
+/// excluded: `exclude-tools: [task]` means *no delegation*, and silently
+/// delegating anyway was the fail-open the Story 19.28 code review found (P2).
+fn restriction_excludes_by_name(policy: &ToolPolicy, tool_name: &str) -> bool {
+    match policy {
+        ToolPolicy::Denylist { tools } => tools
+            .iter()
+            .any(|item| crate::domain::models::agent::excluded_item_names_tool(item, tool_name)),
+        // A resolved child keeps its own declaration; the exclusion it named
+        // survives the intersection with the parent's items.
+        ToolPolicy::ResolvedAgainstParent { child, .. } => {
+            restriction_excludes_by_name(child, tool_name)
+        }
+        ToolPolicy::Allowlist { .. } | ToolPolicy::InheritFromParent => false,
+    }
+}
+
 fn check_agent_tools(
     tool_name: &str,
     input: &serde_json::Value,
     restriction: Option<&AgentToolRestriction>,
 ) -> Option<String> {
     let restriction = restriction?;
+    // The agent-origin carve-out (`activate_skill` + `task`, ADR-10-5 S3)
+    // exempts a tool from an allowlist it was never named in — never from an
+    // exclusion that names it (Story 19.28 review, P2).
+    if is_allowlist_carve_out(ToolRestrictionOrigin::Agent, tool_name)
+        && !restriction_excludes_by_name(&restriction.policy, tool_name)
+    {
+        return None;
+    }
     if policy_allows_execution(&restriction.policy, tool_name, input) {
         return None;
     }

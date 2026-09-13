@@ -1047,3 +1047,334 @@ async fn ac2_exclude_pattern_is_disclosed_and_excludes_bare_tool() {
             .contains("agent 'no-kubectl'")
     );
 }
+
+// ── Story 19.28 code review (2026-09-13) — regressions for the review's fixes ─
+
+/// P1. `toolset_adapter::execute` dispatches `Read`/`Write`/`Edit`/`Bash` in
+/// EITHER casing, but the chain canonicalized only `Bash`, and
+/// `excluded_item_names_tool` compares raw. So `exclude-tools: [Write]` plus a
+/// model-emitted `write` passed the agent gate and executed — in Yolo,
+/// silently. The fix canonicalizes once at the chain's entry so every step
+/// (agent gate, skill gate, Bash blocklist, workspace check) sees one spelling.
+///
+/// Paired controls make this a casing test rather than an exclusion test: the
+/// canonical `Write` must be denied for the same agent, and an agent that does
+/// NOT exclude `Write` must still run the lowercase `write`.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_p1_lowercase_alias_cannot_escape_an_agent_exclusion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("out.txt");
+
+    let excluded = active_agent(tmp.path(), "no-write", None, Some(&["Write"]));
+    let (executed, results, _) = drive_agent_tool_calls(
+        tmp.path(),
+        None,
+        excluded.clone(),
+        PermissionMode::Yolo,
+        None,
+        vec![
+            (
+                "lower",
+                "write",
+                serde_json::json!({"file_path": target.to_string_lossy(), "content": "x"}),
+            ),
+            (
+                "canonical",
+                "Write",
+                serde_json::json!({"file_path": target.to_string_lossy(), "content": "x"}),
+            ),
+        ],
+    )
+    .await;
+
+    assert!(
+        executed.is_empty(),
+        "neither casing may execute under `exclude-tools: [Write]`, executed: {executed:?}"
+    );
+    for id in ["lower", "canonical"] {
+        assert!(
+            error_for(&results, id).content.contains("agent 'no-write'"),
+            "{id} must be denied by the agent gate, got: {}",
+            error_for(&results, id).content
+        );
+    }
+
+    // Positive control: the exclusion is what denies it, not the casing.
+    let unrestricted = active_agent(tmp.path(), "open", None, None);
+    let (executed, results, _) = drive_agent_tool_calls(
+        tmp.path(),
+        None,
+        unrestricted,
+        PermissionMode::Yolo,
+        None,
+        vec![(
+            "lower-ok",
+            "write",
+            serde_json::json!({"file_path": target.to_string_lossy(), "content": "x"}),
+        )],
+    )
+    .await;
+    assert_eq!(executed, vec!["write"]);
+    assert!(!error_for(&results, "lower-ok").is_error);
+}
+
+/// P2. `allowlist_carve_outs` is an ALLOWLIST carve-out: it exempts a tool from
+/// a list it was never named in (ADR-10-5 S3 — an active agent must still
+/// delegate). It was applied before the gate could see the policy shape, so
+/// `exclude-tools: [task]` was overridden and the agent delegated anyway — at
+/// the offer AND at execution, with no disclosure, because the exclusion was
+/// "matched". Delegation is the privilege-escalation channel A11 exists to
+/// close, so this is the carve-out inverting the operator's explicit denial.
+///
+/// Positive control lives in `ac3_agent_task_carve_out_survives_offer_and_execution`:
+/// an agent whose ALLOWLIST merely omits `task` still delegates.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_p2_excluded_task_is_not_resurrected_by_the_carve_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = active_agent(tmp.path(), "no-delegate", None, Some(&["task"]));
+
+    let (executed, results, offered) = drive_agent_tool_calls(
+        tmp.path(),
+        None,
+        agent,
+        PermissionMode::Yolo,
+        None,
+        vec![(
+            "task-denied",
+            "task",
+            serde_json::json!({"description": "delegate", "prompt": "go"}),
+        )],
+    )
+    .await;
+
+    assert!(
+        !offered.contains(&"task".to_string()),
+        "an explicitly excluded `task` must not be offered, offered: {offered:?}"
+    );
+    assert!(
+        executed.is_empty(),
+        "an explicitly excluded `task` must not execute, executed: {executed:?}"
+    );
+    assert!(
+        error_for(&results, "task-denied")
+            .content
+            .contains("agent 'no-delegate'"),
+        "the denial must name the agent, got: {}",
+        error_for(&results, "task-denied").content
+    );
+}
+
+/// P2, the other carved-out name: `exclude-tools: [activate_skill]`. The offer
+/// path had a second route to the same fail-open — the driver back-fills
+/// `activate_skill` into the catalogue whenever it is absent, which resurrected
+/// the excluded tool even after the allowlist filter dropped it.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_p2_excluded_activate_skill_is_not_back_filled_into_the_catalogue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = active_agent(tmp.path(), "no-skills", None, Some(&["activate_skill"]));
+
+    let (_notices, offered) = drive_turn_with_agent(
+        tmp.path(),
+        vec!["Read", "Bash", "activate_skill", "task"],
+        None,
+        Some(agent),
+    )
+    .await;
+
+    assert!(
+        !offered.contains(&"activate_skill".to_string()),
+        "an explicitly excluded `activate_skill` must not be back-filled, offered: {offered:?}"
+    );
+    assert!(
+        offered.contains(&"Read".to_string()),
+        "the rest of the catalogue must survive, offered: {offered:?}"
+    );
+}
+
+/// P5 (owner-ruled 2026-09-13). Both origins expand a pattern item to the bare
+/// tool at offer time, so an agent restricted to `Bash(kubectl:*)` beside a
+/// skill restricted to `Bash(helm:*)` yields a non-empty `combined` — `Bash` is
+/// offered, and then every command fails one of the two specifiers. Before the
+/// agent axis honoured patterns this configuration surfaced as the empty-filter
+/// Warning; pattern-aware filters made it silent. FR42-a covers it: the
+/// operator is told on the turn it bites.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_p5_cross_origin_specifier_conflict_is_disclosed() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_skill(
+        tmp.path(),
+        "helm-only",
+        "---\nname: helm-only\ndescription: helm only\nallowed-tools: Bash(helm:*)\n---\n# Body\n",
+    );
+    let activation = activation_from_skill_md(tmp.path(), "helm-only").await;
+    let agent = active_agent(tmp.path(), "kubectl-only", Some(&["Bash(kubectl:*)"]), None);
+
+    let (notices, offered) = drive_turn_with_agent(
+        tmp.path(),
+        vec!["Read", "Bash"],
+        Some(activation),
+        Some(agent),
+    )
+    .await;
+
+    assert!(
+        offered.contains(&"Bash".to_string()),
+        "the bare tool still gets offered — the disclosure must not suppress it: {offered:?}"
+    );
+    let conflict = notices
+        .iter()
+        .find(|(level, message)| {
+            *level == NoticeLevel::Advisory && message.contains("cannot both be honoured")
+        })
+        .map(|(_, message)| message.clone())
+        .unwrap_or_else(|| panic!("no conflict disclosure among {notices:?}"));
+    assert!(
+        conflict.contains("Bash(kubectl:*)") && conflict.contains("Bash(helm:*)"),
+        "the disclosure must name both declarations, got: {conflict}"
+    );
+}
+
+/// The control for P5: when both origins declare the SAME item there is no
+/// conflict, and inventing one would be a false alarm on the ordinary case
+/// where an agent and a skill agree.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_p5_identical_specifiers_are_not_reported_as_a_conflict() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_skill(
+        tmp.path(),
+        "kube-skill",
+        "---\nname: kube-skill\ndescription: kubectl only\nallowed-tools: Bash(kubectl:*)\n---\n# Body\n",
+    );
+    let activation = activation_from_skill_md(tmp.path(), "kube-skill").await;
+    let agent = active_agent(
+        tmp.path(),
+        "kubectl-agent",
+        Some(&["Bash(kubectl:*)"]),
+        None,
+    );
+
+    let (notices, offered) = drive_turn_with_agent(
+        tmp.path(),
+        vec!["Read", "Bash"],
+        Some(activation),
+        Some(agent),
+    )
+    .await;
+
+    assert!(offered.contains(&"Bash".to_string()));
+    assert!(
+        !notices
+            .iter()
+            .any(|(_, message)| message.contains("cannot both be honoured")),
+        "agreeing declarations must not be reported as conflicting: {notices:?}"
+    );
+}
+
+/// P12 / AC8 — the A22 specifier-edge class on the AGENT axis. AC8's invariant
+/// is that all three readers consume `skill_tool_pattern`; the edge that
+/// discriminates the real matcher from a re-implemented one is escape-aware
+/// segmentation, where `\>&` is an escaped redirect adjacent to `&` rather than
+/// a segment separator. A `starts_with`-style local matcher admits the whole
+/// string because it begins with `kubectl`; the real matcher segments it and
+/// fails closed on the `touch` segment.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_p12_agent_pattern_uses_the_shared_matcher_on_the_a22_escape_edge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = active_agent(tmp.path(), "ops", Some(&["Bash(kubectl:*)"]), None);
+
+    let (executed, results, _) = drive_agent_tool_calls(
+        tmp.path(),
+        None,
+        agent,
+        PermissionMode::Yolo,
+        None,
+        vec![
+            (
+                "escaped-chain",
+                "Bash",
+                serde_json::json!({"command": r"kubectl get pods \>& touch /tmp/x"}),
+            ),
+            (
+                "quoted-chain",
+                "Bash",
+                serde_json::json!({"command": r#"kubectl get "pods" && touch /tmp/x"#}),
+            ),
+            (
+                "plain-ok",
+                "Bash",
+                serde_json::json!({"command": r#"kubectl get "pods and more""#}),
+            ),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        executed,
+        vec!["Bash"],
+        "only the single quoted kubectl command may run, executed: {executed:?}"
+    );
+    for id in ["escaped-chain", "quoted-chain"] {
+        assert!(
+            error_for(&results, id).is_error,
+            "{id} must fail closed — a local prefix match would admit it"
+        );
+    }
+    assert!(!error_for(&results, "plain-ok").is_error);
+}
+
+/// P1, second half — the reason the canonicalization belongs at the chain's
+/// ENTRY rather than inside each restriction helper. `extract_file_path` (the
+/// Step 3 workspace check) matches `"Read"`/`"Write"`/`"Edit"` exactly, with a
+/// stray `"edit"` arm showing the casing class had been noticed and only
+/// half-patched. A lowercase `write` therefore returned `None` from that
+/// extractor, skipped `check_workspace_access` entirely, and executed against
+/// an arbitrary absolute path — in Yolo silently, in Default after one approval
+/// labelled `write`.
+///
+/// Paired control: the same out-of-workspace path under the canonical `Write`
+/// was already denied, which is what proves this test discriminates the casing
+/// rather than the workspace policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_p1_lowercase_alias_cannot_escape_the_workspace_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let escape = outside.path().join("escaped.txt");
+    let agent = active_agent(tmp.path(), "open", None, None);
+
+    let (executed, results, _) = drive_agent_tool_calls(
+        tmp.path(),
+        None,
+        agent,
+        PermissionMode::Yolo,
+        None,
+        vec![
+            (
+                "lower-escape",
+                "write",
+                serde_json::json!({"file_path": escape.to_string_lossy(), "content": "x"}),
+            ),
+            (
+                "canonical-escape",
+                "Write",
+                serde_json::json!({"file_path": escape.to_string_lossy(), "content": "x"}),
+            ),
+        ],
+    )
+    .await;
+
+    assert!(
+        executed.is_empty(),
+        "no casing may write outside the workspace, executed: {executed:?}"
+    );
+    for id in ["lower-escape", "canonical-escape"] {
+        assert!(
+            error_for(&results, id).is_error,
+            "{id} must be denied by the workspace check, got: {}",
+            error_for(&results, id).content
+        );
+    }
+    assert!(
+        !escape.exists(),
+        "the out-of-workspace file must never have been created"
+    );
+}

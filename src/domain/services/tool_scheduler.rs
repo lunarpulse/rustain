@@ -85,12 +85,29 @@ impl ToolScheduler {
         *self.progress_tx.write().await = tx;
     }
 
-    /// Run a batch of tool calls through the scheduler.
+    /// Run a batch of tool calls through the scheduler with **no** agent-side
+    /// restriction and `UserOriginated` provenance.
     ///
     /// If every tool in the batch is `parallel_safe`, the calls execute
     /// concurrently via `FuturesOrdered` while preserving input order in the
     /// returned `Vec<ToolCall>`.  Otherwise the batch falls back to sequential
     /// execution.
+    ///
+    /// ⛔ **Not a production dispatch entry.** This hardcodes both
+    /// `ProvenanceTag::UserOriginated` and `agent_restriction: None`, and
+    /// `None` means *no tool restriction at all* (`check_agent_tools` opens
+    /// `let restriction = restriction?`). Production dispatch has exactly three
+    /// sites and all three call
+    /// [`Self::schedule_with_provenance_and_restriction`] (Story 19.28 A8's
+    /// census: `turn.rs`'s interleaved and ordinary branches, and the
+    /// in-process child runner). This wrapper exists for the integration
+    /// suites, which legitimately want an unrestricted scheduler; a production
+    /// caller appearing here is the fail-open Story 17.4b R-D and Story 19.28
+    /// AC5 both forbid. Behaviourally guarded at both axes:
+    /// `turn_scheduler_migration::successful_a2a_result_taints_next_main_turn_dispatch`
+    /// goes RED on a provenance revert, and
+    /// `skill_restriction_notice::ac1_agent_allowlist_denies_bash_and_allows_read_in_yolo`
+    /// goes RED on a restriction revert.
     pub async fn schedule(
         self: Arc<Self>,
         source: ApprovalSource,
@@ -109,7 +126,12 @@ impl ToolScheduler {
         .await
     }
 
-    /// Schedule calls using the caller node's derived provenance.
+    /// Schedule calls using the caller node's derived provenance, with **no**
+    /// agent-side restriction.
+    ///
+    /// ⛔ Not a production dispatch entry — see [`Self::schedule`] for why
+    /// `agent_restriction: None` is a fail-open here and which three sites are
+    /// the real perimeter.
     pub async fn schedule_with_provenance(
         self: Arc<Self>,
         source: ApprovalSource,
