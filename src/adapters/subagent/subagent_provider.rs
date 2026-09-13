@@ -15,6 +15,7 @@ pub struct TaskToolContext {
     pub conversation_id: String,
     pub parent_ctx_tokens: u32,
     pub parent_trace: Option<TraceContext>,
+    pub parent_tool_restriction: Option<crate::domain::models::AgentToolRestriction>,
 }
 
 pub struct SubagentProvider {
@@ -243,6 +244,9 @@ impl SubagentProvider {
         let parent_trace: Option<TraceContext> = input
             .get("__parent_trace")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let parent_tool_restriction: Option<crate::domain::models::AgentToolRestriction> = input
+            .get("__parent_tool_restriction")
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
         let conversation_id = input
             .get("__conversation_id")
             .and_then(|v| v.as_str())
@@ -252,6 +256,7 @@ impl SubagentProvider {
         let _ = input.as_object_mut().map(|m| {
             m.remove("__parent_ctx_tokens");
             m.remove("__parent_trace");
+            m.remove("__parent_tool_restriction");
             m.remove("__conversation_id");
         });
 
@@ -413,6 +418,7 @@ impl SubagentProvider {
             tier,
             parent_ctx_tokens,
             parent_trace,
+            parent_tool_restriction.as_ref(),
         );
 
         // 7. Launch

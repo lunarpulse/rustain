@@ -76,12 +76,20 @@ fn specifier_is_usable_grant(specifier: &str) -> bool {
 
 /// Whether every shell segment is admitted by at least one item for `tool_name`.
 pub fn command_matches_allowed_items(items: &[String], tool_name: &str, command: &str) -> bool {
+    command_matches_allowed_item_refs(items.iter().map(String::as_str), tool_name, command)
+}
+
+pub fn command_matches_allowed_item_refs<'a>(
+    items: impl Iterator<Item = &'a str> + Clone,
+    tool_name: &str,
+    command: &str,
+) -> bool {
     if command.trim().is_empty() {
         return false;
     }
 
     let mut has_restricted_pattern = false;
-    for item in items {
+    for item in items.clone() {
         let Some(pattern) = parse_allowed_tool_pattern(item) else {
             continue;
         };
@@ -99,7 +107,7 @@ pub fn command_matches_allowed_items(items: &[String], tool_name: &str, command:
     }
 
     command_segments_match(command, |segment| {
-        items.iter().any(|item| {
+        items.clone().any(|item| {
             parse_allowed_tool_pattern(item).is_some_and(|pattern| {
                 pattern.tool_name == tool_name
                     && pattern

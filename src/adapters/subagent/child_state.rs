@@ -23,6 +23,7 @@ pub fn tool_policy_summary(policy: &ToolPolicy) -> String {
         ToolPolicy::InheritFromParent => "inherit".to_string(),
         ToolPolicy::Allowlist { tools } => summarise("allow", tools),
         ToolPolicy::Denylist { tools } => summarise("deny", tools),
+        ToolPolicy::ResolvedAgainstParent { effective, .. } => summarise("allow", effective),
     }
 }
 

@@ -695,6 +695,10 @@ impl ToolSetPort for CompositeToolsetAdapter {
                                 "__parent_trace".into(),
                                 serde_json::json!(ctx.parent_trace),
                             );
+                            obj.insert(
+                                "__parent_tool_restriction".into(),
+                                serde_json::json!(ctx.parent_tool_restriction),
+                            );
                         }
                         let conv_id = self.conversation_id.read().await;
                         obj.insert("__conversation_id".into(), serde_json::json!(*conv_id));
@@ -770,6 +774,10 @@ impl ToolSetPort for CompositeToolsetAdapter {
                             obj.insert(
                                 "__parent_trace".into(),
                                 serde_json::json!(ctx.parent_trace),
+                            );
+                            obj.insert(
+                                "__parent_tool_restriction".into(),
+                                serde_json::json!(ctx.parent_tool_restriction),
                             );
                         }
                         let conv_id = self.conversation_id.read().await;
@@ -950,6 +958,7 @@ impl ToolSetPort for CompositeToolsetAdapter {
         &self,
         parent_ctx_tokens: u32,
         parent_trace: Option<crate::domain::models::TraceContext>,
+        parent_tool_restriction: Option<crate::domain::models::AgentToolRestriction>,
     ) {
         // D1 fix: store context on CTA (not SubagentProvider), injected at dispatch time
         *self.parent_ctx.write().await = Some(
@@ -957,10 +966,11 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 conversation_id: String::new(), // populated from set_execution_context via self.conversation_id
                 parent_ctx_tokens,
                 parent_trace: parent_trace.clone(),
+                parent_tool_restriction: parent_tool_restriction.clone(),
             },
         );
         self.builtin
-            .set_parent_context(parent_ctx_tokens, parent_trace)
+            .set_parent_context(parent_ctx_tokens, parent_trace, parent_tool_restriction)
             .await;
     }
 }

@@ -601,6 +601,71 @@ async fn emit_yield(terminal: NodeState, accumulated_text: &str, yield_tx: &mpsc
     }
 }
 
+fn tool_policy_allows_offer(policy: &crate::domain::models::ToolPolicy, tool_name: &str) -> bool {
+    use crate::domain::models::ToolPolicy;
+    match policy {
+        ToolPolicy::InheritFromParent => true,
+        ToolPolicy::Allowlist { tools } => tools.iter().any(|item| {
+            crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
+        }),
+        ToolPolicy::Denylist { tools } => !tools
+            .iter()
+            .any(|item| crate::domain::models::agent::excluded_item_names_tool(item, tool_name)),
+        ToolPolicy::ResolvedAgainstParent { effective, .. } => effective.iter().any(|item| {
+            crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
+        }),
+    }
+}
+
+fn restriction_from_policy(
+    policy: &crate::domain::models::ToolPolicy,
+    all_tool_names: &[String],
+) -> Option<crate::domain::models::AgentToolRestriction> {
+    use crate::domain::models::ToolPolicy;
+    if matches!(policy, ToolPolicy::InheritFromParent) {
+        return None;
+    }
+    let declared_items = match policy {
+        ToolPolicy::Allowlist { tools } => tools.clone(),
+        ToolPolicy::Denylist { tools } => all_tool_names
+            .iter()
+            .filter(|tool_name| {
+                !tools.iter().any(|item| {
+                    crate::domain::models::agent::excluded_item_names_tool(item, tool_name)
+                })
+            })
+            .cloned()
+            .collect(),
+        ToolPolicy::ResolvedAgainstParent { effective, .. } => effective.clone(),
+        ToolPolicy::InheritFromParent => unreachable!(),
+    };
+    Some(crate::domain::models::AgentToolRestriction {
+        agent_name: "delegated agent policy".to_string(),
+        policy: policy.clone(),
+        declared_items,
+    })
+}
+
+fn update_child_policy(
+    current: &crate::domain::models::ToolPolicy,
+    allowlist: Vec<String>,
+) -> crate::domain::models::ToolPolicy {
+    use crate::domain::models::ToolPolicy;
+    let child = ToolPolicy::Allowlist {
+        tools: allowlist.into_iter().collect(),
+    };
+    if let ToolPolicy::ResolvedAgainstParent { parent, .. } = current {
+        let effective = child.resolve(parent);
+        ToolPolicy::ResolvedAgainstParent {
+            effective,
+            parent: parent.clone(),
+            child: Box::new(child),
+        }
+    } else {
+        child
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_child(
     spec: AgentLaunchSpec,
@@ -1204,9 +1269,8 @@ async fn run_child(
                     child_state.update_metrics(|m| m.effective_model = new_model);
                 }
                 Op::UpdateTools(allowlist) => {
-                    let policy = crate::domain::models::ToolPolicy::Allowlist {
-                        tools: allowlist.into_iter().collect(),
-                    };
+                    let current = child_state.tools_allow.load_full();
+                    let policy = update_child_policy(&current, allowlist);
                     let summary =
                         crate::adapters::subagent::child_state::tool_policy_summary(&policy);
                     child_state.tools_allow.store(Arc::new(policy));
@@ -1321,25 +1385,21 @@ async fn run_child(
             continue; // Go back to pause wait loop
         }
 
-        // Build completion options from ChildState
+        // Build completion options from ChildState. Policy patterns use the
+        // same offer matcher as foreground agents and execution.
         let model = (*child_state.effective_model.load_full()).clone();
-        // P9 fix: filter available tools by the current ToolPolicy from ChildState
         let all_tools = tools.available_tools();
+        let all_tool_names: Vec<String> = all_tools.iter().map(|tool| tool.name.clone()).collect();
         let policy = child_state.tools_allow.load_full();
-        let filtered_tools = match (*policy).clone() {
-            crate::domain::models::ToolPolicy::Allowlist { tools: allowed } => all_tools
-                .into_iter()
-                .filter(|t| allowed.contains(&t.name))
-                .collect(),
-            crate::domain::models::ToolPolicy::Denylist { tools: denied } => all_tools
-                .into_iter()
-                .filter(|t| !denied.contains(&t.name))
-                .collect(),
-            crate::domain::models::ToolPolicy::InheritFromParent => all_tools,
-        };
+        let agent_restriction = restriction_from_policy(&policy, &all_tool_names);
+        let filtered_tools = all_tools
+            .into_iter()
+            .filter(|tool| tool_policy_allows_offer(&policy, &tool.name))
+            .collect();
         let options = CompletionOptions {
             model,
             max_tokens: 4096,
+            // Children have no skill activation state or prompt plumbing.
             system_prompt: String::new(),
             temperature: None,
             tools: filtered_tools,
@@ -1432,9 +1492,8 @@ async fn run_child(
                             continue;
                         }
                         Some(Op::UpdateTools(allowlist)) => {
-                            let policy = crate::domain::models::ToolPolicy::Allowlist {
-                                tools: allowlist.into_iter().collect(),
-                            };
+                            let current = child_state.tools_allow.load_full();
+                            let policy = update_child_policy(&current, allowlist);
                             let summary = crate::adapters::subagent::child_state::tool_policy_summary(&policy);
                             child_state.tools_allow.store(Arc::new(policy));
                             child_state.update_metrics(|m| m.tools_summary = summary);
@@ -1739,7 +1798,14 @@ async fn run_child(
 
                 let terminal = scheduler
                     .clone()
-                    .schedule_with_provenance(source, requests, cancel.clone(), None, provenance)
+                    .schedule_with_provenance_and_restriction(
+                        source,
+                        requests,
+                        cancel.clone(),
+                        None,
+                        agent_restriction.as_ref(),
+                        provenance,
+                    )
                     .await;
 
                 let mut tool_result_messages: Vec<ToolResultMessage> = Vec::new();
@@ -3122,11 +3188,21 @@ mod tests {
             .unwrap();
 
         let _ = handle.command_tx.send(Op::ChangeModel("opus".into())).await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        let entries = runner.registry.list().await;
+        let entries = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                let entries = runner.registry.list().await;
+                if entries
+                    .first()
+                    .is_some_and(|entry| entry.effective_model == "opus")
+                {
+                    break entries;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("model update reached registry");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].effective_model, "opus");
 
         handle.cancel.cancel();
     }
@@ -3160,10 +3236,21 @@ mod tests {
             .command_tx
             .send(Op::UpdateTools(vec!["bash".into()]))
             .await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let entries = runner.registry.list().await;
+        let entries = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                let entries = runner.registry.list().await;
+                if entries
+                    .first()
+                    .is_some_and(|entry| entry.tools_summary == "allow: bash")
+                {
+                    break entries;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tool update reached registry");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].tools_summary, "allow: bash");
 
         handle.cancel.cancel();
     }
@@ -8344,5 +8431,446 @@ mod tests {
             matches!(exec_err, OrchestrationError::InvalidConcurrency { .. }),
             "executor refusal: {exec_err:?}"
         );
+    }
+
+    struct PolicyProbeProvider {
+        calls: std::sync::atomic::AtomicU32,
+        requested: Vec<(String, serde_json::Value)>,
+        offered: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for PolicyProbeProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                *self.offered.lock().await =
+                    options.tools.into_iter().map(|tool| tool.name).collect();
+                let mut chunks = Vec::with_capacity(self.requested.len() + 1);
+                for (index, (name, input)) in self.requested.iter().enumerate() {
+                    chunks.push(StreamChunk::ToolUse {
+                        id: format!("policy-{index}"),
+                        name: name.clone(),
+                        input: input.clone(),
+                    });
+                }
+                chunks.push(StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::ToolUse,
+                });
+                Ok(Box::pin(futures::stream::iter(chunks)))
+            } else {
+                Ok(Box::pin(futures::stream::iter(vec![
+                    StreamChunk::Text {
+                        content: "done".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: crate::domain::models::StopReason::EndTurn,
+                    },
+                ])))
+            }
+        }
+
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        fn provider_id(&self) -> String {
+            "policy-probe".into()
+        }
+
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            Vec::new()
+        }
+
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct PolicyProbeTools {
+        executed: tokio::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::ToolSetPort for PolicyProbeTools {
+        fn available_tools(&self) -> Vec<crate::domain::models::ToolDefinition> {
+            ["Bash", "Read"]
+                .into_iter()
+                .map(|name| crate::domain::models::ToolDefinition {
+                    name: name.to_string(),
+                    description: name.to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    parallel_safe: false,
+                })
+                .collect()
+        }
+
+        async fn execute(
+            &self,
+            tool_name: &str,
+            input: serde_json::Value,
+            _cancel: CancellationToken,
+        ) -> Result<crate::domain::models::ToolResult, crate::domain::errors::ToolError> {
+            self.executed
+                .lock()
+                .await
+                .push((tool_name.to_string(), input));
+            Ok(crate::domain::models::ToolResult {
+                tool_use_id: String::new(),
+                content: "ok".into(),
+                is_error: false,
+            })
+        }
+    }
+
+    async fn run_policy_probe(
+        policy: crate::domain::models::ToolPolicy,
+        requested: Vec<(String, serde_json::Value)>,
+    ) -> (Vec<String>, Vec<(String, serde_json::Value)>) {
+        use crate::domain::ports::{SecurityPort as _, SubagentRunner as _};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let offered = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(PolicyProbeProvider {
+            calls: std::sync::atomic::AtomicU32::new(0),
+            requested,
+            offered: offered.clone(),
+        }) as Arc<dyn StreamingProvider>;
+        let storage = Arc::new(FileSystemStorage::new(tmp.path().to_path_buf()))
+            as Arc<dyn crate::domain::ports::StoragePort>;
+        let security_adapter = Arc::new(SecurityAdapter::new(tmp.path().to_path_buf()));
+        security_adapter.set_mode(crate::domain::models::PermissionMode::Yolo);
+        let security = security_adapter as Arc<dyn crate::domain::ports::SecurityPort>;
+        let tools = Arc::new(PolicyProbeTools::default());
+        let tool_port = tools.clone() as Arc<dyn crate::domain::ports::ToolSetPort>;
+        let approval = ApprovalRuntime::new(32, Arc::new(NoOpApprovalPersistence));
+        let scheduler =
+            ToolScheduler::new(security.clone(), tool_port.clone(), approval.clone(), 32);
+        let (event_bus, event_rx) = EventBus::new(32);
+        std::mem::forget(event_rx);
+        let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+        let (authority, root_authority) = authority_pair();
+        let runner = InProcessSubagentRunner::new(
+            provider,
+            storage,
+            security,
+            tool_port,
+            approval,
+            scheduler,
+            Arc::new(event_bus),
+            Arc::new(NodeTree::new()),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::SandboxPolicy::Permissive,
+            )),
+            spool,
+            authority,
+            root_authority,
+        );
+        let spec = AgentLaunchSpec {
+            prompt: "exercise delegated policy".into(),
+            effective_model: "test-model".into(),
+            tier: crate::domain::models::ModelTier::CheapAgentic,
+            tools_allow: policy,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+        };
+        let handle = runner
+            .launch(
+                spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
+        let mut status = handle.status_rx;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(state) = status.recv().await {
+                if state.is_terminal() {
+                    assert_eq!(state, NodeState::Completed);
+                    return;
+                }
+            }
+            panic!("child status stream ended before terminal");
+        })
+        .await
+        .expect("child completed");
+        let offered = offered.lock().await.clone();
+        let executed = tools.executed.lock().await.clone();
+        (offered, executed)
+    }
+
+    #[tokio::test]
+    async fn story_19_28_child_pattern_policy_is_offered_and_command_enforced() {
+        use std::collections::BTreeSet;
+
+        let own_pattern = crate::domain::models::ToolPolicy::Allowlist {
+            tools: BTreeSet::from(["Bash(kubectl:*)".to_string()]),
+        };
+        let (own_offered, own_executed) = run_policy_probe(
+            own_pattern,
+            vec![
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "kubectl get pods"}),
+                ),
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "helm upgrade billing"}),
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(own_offered, vec!["Bash"]);
+        assert_eq!(own_executed.len(), 1);
+        assert_eq!(own_executed[0].1["command"], "kubectl get pods");
+
+        let parent_items = BTreeSet::from([
+            "Bash(git:*)".to_string(),
+            "Bash(kubectl:*)".to_string(),
+            "Read".to_string(),
+        ]);
+        let parent = crate::domain::models::AgentToolRestriction {
+            agent_name: "parent".into(),
+            policy: crate::domain::models::ToolPolicy::Allowlist {
+                tools: parent_items.clone(),
+            },
+            declared_items: parent_items,
+        };
+        let exact_child = crate::domain::models::AgentDef {
+            name: "child".into(),
+            description: "child".into(),
+            file: PathBuf::new(),
+            allowed_tools: Some(vec!["Bash(kubectl:*)".into(), "Read".into()]),
+            exclude_tools: None,
+            model: None,
+            isolated: false,
+        };
+        let exact_policy =
+            crate::domain::services::launch_spec_builder::LaunchSpecBuilder::from_task_tool(
+                "probe",
+                &exact_child,
+                "model",
+                crate::domain::models::ModelTier::CheapAgentic,
+                0,
+                None,
+                Some(&parent),
+            )
+            .tools_allow;
+        let (offered, executed) = run_policy_probe(
+            exact_policy,
+            vec![
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "kubectl get pods"}),
+                ),
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "helm upgrade billing"}),
+                ),
+                ("Read".into(), serde_json::json!({"file_path": "input.txt"})),
+            ],
+        )
+        .await;
+        assert_eq!(offered, vec!["Bash", "Read"]);
+        assert_eq!(executed.len(), 2);
+        assert_eq!(executed[0].1["command"], "kubectl get pods");
+        assert_eq!(executed[1].0, "Read");
+
+        let broad_child = crate::domain::models::AgentDef {
+            allowed_tools: Some(vec!["Bash".into(), "Read".into()]),
+            ..exact_child
+        };
+        let broad_policy =
+            crate::domain::services::launch_spec_builder::LaunchSpecBuilder::from_task_tool(
+                "probe",
+                &broad_child,
+                "model",
+                crate::domain::models::ModelTier::CheapAgentic,
+                0,
+                None,
+                Some(&parent),
+            )
+            .tools_allow;
+        let (offered, executed) = run_policy_probe(
+            broad_policy,
+            vec![
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "kubectl get pods"}),
+                ),
+                ("Read".into(), serde_json::json!({"file_path": "input.txt"})),
+            ],
+        )
+        .await;
+        assert_eq!(offered, vec!["Read"]);
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].0, "Read");
+    }
+
+    #[tokio::test]
+    async fn story_19_28_child_inherits_parent_without_widening() {
+        use std::collections::BTreeSet;
+
+        let parent_items = BTreeSet::from(["Read".to_string()]);
+        let parent = crate::domain::models::AgentToolRestriction {
+            agent_name: "parent".into(),
+            policy: crate::domain::models::ToolPolicy::Allowlist {
+                tools: parent_items.clone(),
+            },
+            declared_items: parent_items,
+        };
+        let child = crate::domain::models::AgentDef::default_worker();
+        let policy =
+            crate::domain::services::launch_spec_builder::LaunchSpecBuilder::from_task_tool(
+                "probe",
+                &child,
+                "model",
+                crate::domain::models::ModelTier::CheapAgentic,
+                0,
+                None,
+                Some(&parent),
+            )
+            .tools_allow;
+        let (offered, executed) = run_policy_probe(
+            policy,
+            vec![
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "printf forbidden"}),
+                ),
+                ("Read".into(), serde_json::json!({"file_path": "input.txt"})),
+            ],
+        )
+        .await;
+        assert_eq!(offered, vec!["Read"]);
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].0, "Read");
+
+        let (unrestricted_offered, unrestricted_executed) = run_policy_probe(
+            crate::domain::models::ToolPolicy::InheritFromParent,
+            vec![(
+                "Bash".into(),
+                serde_json::json!({"command": "printf allowed"}),
+            )],
+        )
+        .await;
+        assert!(unrestricted_offered.contains(&"Bash".to_string()));
+        assert_eq!(unrestricted_executed.len(), 1);
+    }
+
+    #[test]
+    fn story_19_28_resolved_child_crosses_only_its_effective_declared_items() {
+        use std::collections::BTreeSet;
+
+        let policy = crate::domain::models::ToolPolicy::ResolvedAgainstParent {
+            effective: BTreeSet::from(["Read".to_string()]),
+            parent: BTreeSet::from(["Bash".to_string(), "Read".to_string()]),
+            child: Box::new(crate::domain::models::ToolPolicy::Allowlist {
+                tools: BTreeSet::from(["Read".to_string()]),
+            }),
+        };
+        let restriction =
+            restriction_from_policy(&policy, &["Bash".to_string(), "Read".to_string()]).unwrap();
+        let grandchild = crate::domain::models::ToolPolicy::Allowlist {
+            tools: BTreeSet::from(["Bash".to_string(), "Read".to_string()]),
+        };
+
+        assert_eq!(
+            grandchild.resolve(&restriction.declared_items),
+            BTreeSet::from(["Read".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn story_19_28_child_allow_and_exclude_compose_at_execution() {
+        use crate::domain::models::PlanTaskStatus;
+        use crate::domain::models::plan::{PlanSubTask, PlanTask};
+        use crate::domain::services::launch_spec_builder::LaunchSpecBuilder;
+
+        let agent = crate::domain::models::AgentDef {
+            name: "reader".into(),
+            description: "reader".into(),
+            file: PathBuf::new(),
+            allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+            exclude_tools: Some(vec!["Bash".into()]),
+            model: None,
+            isolated: false,
+        };
+        let task = PlanTask {
+            number: 1,
+            title: "parent".into(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Pending,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
+            delegated_to: None,
+            sub_tasks: vec![],
+        };
+        let sub_task = PlanSubTask {
+            number: 1,
+            title: "child".into(),
+            description: String::new(),
+            status: PlanTaskStatus::Pending,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            delegated_to: None,
+        };
+        let policies = [
+            LaunchSpecBuilder::from_plan_task(&task, &agent, "model", 0, None).tools_allow,
+            LaunchSpecBuilder::from_task_tool(
+                "child",
+                &agent,
+                "model",
+                crate::domain::models::ModelTier::CheapAgentic,
+                0,
+                None,
+                None,
+            )
+            .tools_allow,
+            LaunchSpecBuilder::from_sub_task(&task, &sub_task, &agent, "model", 0, None)
+                .tools_allow,
+        ];
+
+        for policy in policies {
+            let (offered, executed) = run_policy_probe(
+                policy,
+                vec![
+                    (
+                        "Bash".into(),
+                        serde_json::json!({"command": "printf forbidden"}),
+                    ),
+                    ("Read".into(), serde_json::json!({"file_path": "input.txt"})),
+                ],
+            )
+            .await;
+            assert_eq!(offered, vec!["Read"]);
+            assert_eq!(executed.len(), 1);
+            assert_eq!(executed[0].0, "Read");
+        }
     }
 }

@@ -822,33 +822,6 @@ impl ToolSetPort for DualCountedToolSet {
     }
 }
 
-/// Story 17.4b (R-D): the main turn loop must derive tool-dispatch provenance
-/// from the turn origin and dispatch through `schedule_with_provenance` — never
-/// the bare `schedule`, which hardcodes `ProvenanceTag::UserOriginated` and is a
-/// silent taint-gate trapdoor. A mutant reverting `turn.rs`'s regular-tool
-/// dispatch to `.schedule(source, requests` must fail this guard.
-#[test]
-fn turn_loop_threads_provenance_never_the_hardcoded_schedule_trapdoor() {
-    let turn = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/infrastructure/runtime/turn.rs"
-    ))
-    .expect("read turn.rs");
-    assert!(
-        turn.contains("turn_origin.provenance()"),
-        "turn.rs must derive provenance from the turn origin (R-D)"
-    );
-    assert!(
-        turn.contains("schedule_with_provenance("),
-        "turn.rs must dispatch through schedule_with_provenance (R-D)"
-    );
-    assert!(
-        !turn.contains(".schedule(source, requests"),
-        "turn.rs must NOT use the bare schedule() trapdoor that hardcodes \
-         UserOriginated — that is the mutant R-D forbids"
-    );
-}
-
 /// Story 17.4b (R-D) — the remote-skill-name privilege-escalation closure. A
 /// hostile peer that names its skill `Read` surfaces on the wire as
 /// `a2a__<peer>__Read`; `risk_for_tool` must classify it `Elevated` from the

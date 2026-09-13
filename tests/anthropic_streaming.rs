@@ -762,6 +762,7 @@ data: {\"type\":\"message_stop\"}\n\
             Arc::new(rustain::adapters::noop::NoOpStorage),
             make_conversation(),
             None,
+            None,
             tokio_util::sync::CancellationToken::new(),
             Arc::new(rustain::adapters::noop::NoOpUsageLedger)
                 as Arc<dyn rustain::domain::ports::UsageLedgerPort>,

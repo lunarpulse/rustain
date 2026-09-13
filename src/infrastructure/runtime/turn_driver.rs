@@ -437,6 +437,9 @@ impl LocalTurnDriver {
         let agent_filter = agent_snapshot
             .as_ref()
             .and_then(|a| a.effective_tool_filter(&all_tool_names));
+        let agent_restriction = agent_snapshot
+            .as_ref()
+            .and_then(|agent| agent.tool_restriction(&all_tool_names));
         let skill_filter = activation.effective_allowed_tools(&all_tool_names);
         let combined: Option<std::collections::HashSet<String>> = match (agent_filter, skill_filter)
         {
@@ -487,17 +490,36 @@ impl LocalTurnDriver {
                         unmatched.insert(item);
                     }
                 }
-                if let Some(agent_allowed) = agent_snapshot
-                    .as_ref()
-                    .and_then(|agent| agent.allowed_tools.as_ref())
-                {
-                    unmatched.extend(
-                        agent_allowed
-                            .iter()
-                            .map(String::as_str)
-                            .filter(|item| *item != "activate_skill")
-                            .filter(|item| !all_tool_names.iter().any(|tool| tool == item)),
-                    );
+                if let Some(agent) = agent_snapshot.as_ref() {
+                    if let Some(agent_allowed) = agent.allowed_tools.as_ref() {
+                        unmatched.extend(
+                            agent_allowed
+                                .iter()
+                                .map(String::as_str)
+                                .filter(|item| *item != "activate_skill")
+                                .filter(|item| {
+                                    !all_tool_names.iter().any(|tool_name| {
+                                        crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(
+                                            item, tool_name,
+                                        )
+                                    })
+                                }),
+                        );
+                    }
+                    if let Some(agent_excluded) = agent.exclude_tools.as_ref() {
+                        unmatched
+                            .extend(agent_excluded.iter().map(String::as_str).filter(|item| {
+                            crate::domain::services::skill_tool_pattern::parse_allowed_tool_pattern(
+                                item,
+                            )
+                            .is_none_or(|pattern| {
+                                pattern.specifier.is_some()
+                                    || !all_tool_names
+                                        .iter()
+                                        .any(|tool_name| tool_name == pattern.tool_name)
+                            })
+                        }));
+                    }
                 }
                 let unmatched: Vec<&str> = unmatched.into_iter().collect();
                 if !unmatched.is_empty() {
@@ -666,6 +688,7 @@ impl LocalTurnDriver {
             storage.clone(),
             conversation.clone(),
             activation_set,
+            agent_restriction,
             turn_cancel,
             usage_ledger.clone(),
             resolved,
@@ -696,14 +719,13 @@ impl TurnDriver for LocalTurnDriver {
     }
 }
 
-/// Whether a tool survives an agent/skill allowlist, preserving the skill-chaining
-/// (`activate_skill`) carve-out. ADR-10-5 S3 extends this with a `task` delegation
-/// carve-out so an active agent with `allowed-tools` can still delegate to subagents.
+/// Whether a tool survives the merged agent/skill allowlist. The driver reads
+/// the union of the per-origin carve-outs; execution reads each origin's list.
 pub(crate) fn tool_survives_allowlist(
     name: &str,
     allowed: &std::collections::HashSet<String>,
 ) -> bool {
-    allowed.contains(name) || name == "activate_skill" || name == "task"
+    allowed.contains(name) || crate::domain::models::is_any_allowlist_carve_out(name)
 }
 
 /// Whether the context actually injected into this turn carries peer-origin
@@ -746,6 +768,19 @@ mod turn_driver_allowlist_tests {
     fn activate_skill_carve_out_preserved() {
         let allowed = set(&["Read"]);
         assert!(tool_survives_allowlist("activate_skill", &allowed));
+    }
+
+    #[test]
+    fn offer_carve_outs_are_derived_from_every_origin_list() {
+        let allowed = HashSet::new();
+        for origin in [
+            crate::domain::models::ToolRestrictionOrigin::Skill,
+            crate::domain::models::ToolRestrictionOrigin::Agent,
+        ] {
+            for name in crate::domain::models::allowlist_carve_outs(origin) {
+                assert!(tool_survives_allowlist(name, &allowed));
+            }
+        }
     }
 
     #[test]

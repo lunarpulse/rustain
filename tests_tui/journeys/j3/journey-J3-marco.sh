@@ -276,9 +276,10 @@ tier 3 is NOT captured. Model-driven activation does not call
   lives under the workspace, but the gap remains load-bearing for global
   skills.
 
-agent-side patterns and subagent skill enforcement are NOT captured. Agents
-  have no command-level permission-chain backstop, so their pattern items stay
-  unoffered and disclosed; subagents carry no active skills.
+agent-side patterns and delegated-agent restrictions are NOT captured by this
+  skill-only gate. Story 19.28 adds their command-level permission-chain
+  backstop; Rust integration tests own that axis. Delegated children still
+  carry no active skills.
 
 cross-tool compatibility is NOT proved. This single-binary capture proves the
   standard file loads unmodified in rustain, not that Claude Code, Codex and

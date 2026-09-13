@@ -389,6 +389,8 @@ impl DaemonTurnRuntime {
             self.storage.clone(),
             conversation.clone(),
             None,
+            // Story 19.28 AC5: daemon turns have no custom-agent input or state; unrestricted is proven-correct.
+            None,
             turn_cancel,
             self.usage_ledger.clone(),
             resolved,

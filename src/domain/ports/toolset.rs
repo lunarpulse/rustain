@@ -167,6 +167,7 @@ pub trait ToolSetPort: Send + Sync {
         &self,
         _parent_ctx_tokens: u32,
         _parent_trace: Option<crate::domain::models::TraceContext>,
+        _parent_tool_restriction: Option<crate::domain::models::AgentToolRestriction>,
     ) {
     }
 }

@@ -2,11 +2,12 @@
 //! Pure orchestration: calls port traits, no I/O itself.
 
 use crate::domain::models::{
-    ActiveSkill, ApprovalSource, FileOperation, PermissionMode, ProvenanceTag, TaintDecision,
-    ToolRisk, risk_for_builtin,
+    ActiveSkill, AgentToolRestriction, ApprovalSource, FileOperation, PermissionMode,
+    ProvenanceTag, TaintDecision, ToolPolicy, ToolRestrictionOrigin, ToolRisk,
+    is_allowlist_carve_out, risk_for_builtin,
 };
 use crate::domain::ports::{SecurityPort, ToolSetPort};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 /// Result of a permission chain check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +138,33 @@ pub async fn check_with_source_and_provenance(
     source: Option<&crate::domain::models::tool_call::ApprovalSource>,
     provenance: ProvenanceTag,
 ) -> PermissionDecision {
+    check_with_source_and_provenance_and_restriction(
+        security,
+        tool_name,
+        input,
+        active_skills,
+        None,
+        plan_file,
+        tools_port,
+        source,
+        provenance,
+    )
+    .await
+}
+
+/// Permission check with immutable agent- and skill-origin restrictions.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_with_source_and_provenance_and_restriction(
+    security: &dyn SecurityPort,
+    tool_name: &str,
+    input: &serde_json::Value,
+    active_skills: Option<&[ActiveSkill]>,
+    agent_restriction: Option<&AgentToolRestriction>,
+    plan_file: Option<&std::path::Path>,
+    tools_port: &dyn ToolSetPort,
+    source: Option<&crate::domain::models::tool_call::ApprovalSource>,
+    provenance: ProvenanceTag,
+) -> PermissionDecision {
     // Step 0: exit_plan_mode short-circuit
     if tool_name == "exit_plan_mode" {
         return match security.current_mode() {
@@ -182,16 +210,21 @@ pub async fn check_with_source_and_provenance(
         }
     };
 
-    // Step 1: Tool restriction (active skill allowed_tools)
-    // activate_skill is always allowed (carve-out for skill chaining)
-    if tool_name != "activate_skill" {
+    // Step 1: Declared tool restrictions. Carve-outs are per-origin: a skill
+    // may activate another skill, while an agent may also delegate.
+    if !is_allowlist_carve_out(ToolRestrictionOrigin::Agent, tool_name) {
+        if let Some(deny_reason) = check_agent_tools(tool_name, input, agent_restriction) {
+            return PermissionDecision::Deny(deny_reason);
+        }
+    }
+    if !is_allowlist_carve_out(ToolRestrictionOrigin::Skill, tool_name) {
         if let Some(deny_reason) = check_allowed_tools(tool_name, input, active_skills) {
             return PermissionDecision::Deny(deny_reason);
         }
     }
 
     // Step 2: Blocklist check (Bash tool only)
-    if tool_name == "Bash" {
+    if tool_name.eq_ignore_ascii_case("Bash") {
         match input.get("command").and_then(|v| v.as_str()) {
             Some(command) => {
                 if let Err(e) = security.check_blocklist(command) {
@@ -447,6 +480,107 @@ fn extract_file_path(
     Some((path.to_string(), op))
 }
 
+fn canonical_tool_name(tool_name: &str) -> &str {
+    if tool_name.eq_ignore_ascii_case("Bash") {
+        "Bash"
+    } else {
+        tool_name
+    }
+}
+
+fn allowlist_allows_execution(
+    tools: &BTreeSet<String>,
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> bool {
+    if !tools.iter().any(|item| {
+        crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
+    }) {
+        return false;
+    }
+    if tool_name != "Bash" {
+        return true;
+    }
+    let command = input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    crate::domain::services::skill_tool_pattern::command_matches_allowed_item_refs(
+        tools.iter().map(String::as_str),
+        tool_name,
+        command,
+    )
+}
+
+fn policy_allows_execution(
+    policy: &ToolPolicy,
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> bool {
+    let tool_name = canonical_tool_name(tool_name);
+    match policy {
+        ToolPolicy::InheritFromParent => true,
+        ToolPolicy::Allowlist { tools } => allowlist_allows_execution(tools, tool_name, input),
+        ToolPolicy::Denylist { tools } => !tools
+            .iter()
+            .any(|item| crate::domain::models::agent::excluded_item_names_tool(item, tool_name)),
+        ToolPolicy::ResolvedAgainstParent { effective, .. } => {
+            allowlist_allows_execution(effective, tool_name, input)
+        }
+    }
+}
+
+fn check_agent_tools(
+    tool_name: &str,
+    input: &serde_json::Value,
+    restriction: Option<&AgentToolRestriction>,
+) -> Option<String> {
+    let restriction = restriction?;
+    if policy_allows_execution(&restriction.policy, tool_name, input) {
+        return None;
+    }
+    let tool_name = canonical_tool_name(tool_name);
+    let detail = match &restriction.policy {
+        ToolPolicy::Allowlist { tools } => {
+            let items: Vec<&str> = tools.iter().map(String::as_str).collect();
+            if tool_name == "Bash"
+                && tools.iter().any(|item| {
+                    crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(
+                        item, tool_name,
+                    )
+                })
+            {
+                format!("command not allowed. Allowed: [{}]", items.join(", "))
+            } else {
+                format!("not allowed. Allowed: [{}]", items.join(", "))
+            }
+        }
+        ToolPolicy::Denylist { tools } => {
+            let items: Vec<&str> = tools.iter().map(String::as_str).collect();
+            format!("excluded. Excluded: [{}]", items.join(", "))
+        }
+        ToolPolicy::ResolvedAgainstParent { parent, child, .. } => {
+            let parent_items: Vec<&str> = parent.iter().map(String::as_str).collect();
+            let child_items: Vec<&str> = match child.as_ref() {
+                ToolPolicy::Allowlist { tools } | ToolPolicy::Denylist { tools } => {
+                    tools.iter().map(String::as_str).collect()
+                }
+                ToolPolicy::InheritFromParent => vec!["inherit"],
+                ToolPolicy::ResolvedAgainstParent { .. } => vec!["resolved"],
+            };
+            format!(
+                "not allowed by inherited restrictions. Parent: [{}]; Child: [{}]",
+                parent_items.join(", "),
+                child_items.join(", ")
+            )
+        }
+        ToolPolicy::InheritFromParent => return None,
+    };
+    Some(format!(
+        "Tool '{}' {} by agent '{}'",
+        tool_name, detail, restriction.agent_name
+    ))
+}
 /// Check if the tool is allowed by the active skills' `allowed_tools`.
 /// Returns `Some(deny_reason)` if denied, `None` if allowed or no constraints.
 fn check_allowed_tools(
@@ -454,6 +588,7 @@ fn check_allowed_tools(
     input: &serde_json::Value,
     active_skills: Option<&[ActiveSkill]>,
 ) -> Option<String> {
+    let tool_name = canonical_tool_name(tool_name);
     let skills = active_skills?;
     let mut constrained = skills
         .iter()

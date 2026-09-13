@@ -141,6 +141,7 @@ pub async fn run_turn(
     storage: Arc<dyn StoragePort>,
     conversation_snapshot: crate::domain::models::Conversation,
     mut activation_set: Option<crate::domain::models::SkillActivationSet>,
+    agent_restriction: Option<crate::domain::models::AgentToolRestriction>,
     turn_cancel: CancellationToken,
     ledger: Arc<dyn UsageLedgerPort>,
     resolved: ResolvedModel,
@@ -397,7 +398,11 @@ pub async fn run_turn(
                             )
                             .await;
                         tools
-                            .set_parent_context(parent_ctx_tokens, parent_trace.clone())
+                            .set_parent_context(
+                                parent_ctx_tokens,
+                                parent_trace.clone(),
+                                agent_restriction.clone(),
+                            )
                             .await;
 
                         let indexed: Vec<(usize, ToolCallInfo)> =
@@ -519,11 +524,12 @@ pub async fn run_turn(
                                             activation_set.as_ref().map(|s| s.active_skills());
                                         tool_scheduler
                                             .clone()
-                                            .schedule_with_provenance(
+                                            .schedule_with_provenance_and_restriction(
                                                 source.clone(),
                                                 vec![request],
                                                 turn_cancel.clone(),
                                                 active_skills,
+                                                agent_restriction.as_ref(),
                                                 provenance,
                                             )
                                             .await
@@ -553,11 +559,12 @@ pub async fn run_turn(
                                     activation_set.as_ref().map(|s| s.active_skills());
                                 tool_scheduler
                                     .clone()
-                                    .schedule_with_provenance(
+                                    .schedule_with_provenance_and_restriction(
                                         source,
                                         requests,
                                         turn_cancel.clone(),
                                         active_skills,
+                                        agent_restriction.as_ref(),
                                         provenance,
                                     )
                                     .await

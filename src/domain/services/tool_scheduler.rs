@@ -20,10 +20,10 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::events::ToolProgressEvent;
-use crate::domain::models::ActiveSkill;
 use crate::domain::models::tool_call::{
     ApprovalSource, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
 };
+use crate::domain::models::{ActiveSkill, AgentToolRestriction};
 use crate::domain::ports::{SecurityPort, ToolSetPort};
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::permission_chain;
@@ -98,11 +98,12 @@ impl ToolScheduler {
         cancel: CancellationToken,
         active_skills: Option<&[ActiveSkill]>,
     ) -> Vec<ToolCall> {
-        self.schedule_with_provenance(
+        self.schedule_with_provenance_and_restriction(
             source,
             batch,
             cancel,
             active_skills,
+            None,
             crate::domain::models::ProvenanceTag::UserOriginated,
         )
         .await
@@ -117,10 +118,32 @@ impl ToolScheduler {
         active_skills: Option<&[ActiveSkill]>,
         provenance: crate::domain::models::ProvenanceTag,
     ) -> Vec<ToolCall> {
+        self.schedule_with_provenance_and_restriction(
+            source,
+            batch,
+            cancel,
+            active_skills,
+            None,
+            provenance,
+        )
+        .await
+    }
+
+    /// Schedule calls with the immutable agent-side execution restriction.
+    pub async fn schedule_with_provenance_and_restriction(
+        self: Arc<Self>,
+        source: ApprovalSource,
+        batch: Vec<ToolCallRequest>,
+        cancel: CancellationToken,
+        active_skills: Option<&[ActiveSkill]>,
+        agent_restriction: Option<&AgentToolRestriction>,
+        provenance: crate::domain::models::ProvenanceTag,
+    ) -> Vec<ToolCall> {
         let all_parallel = batch
             .iter()
             .all(|req| self.tools.is_parallel_safe(&req.tool_name));
         let active_owned: Option<Vec<ActiveSkill>> = active_skills.map(|s| s.to_vec());
+        let agent_owned = agent_restriction.cloned();
 
         if all_parallel {
             let mut futures = FuturesOrdered::new();
@@ -129,7 +152,10 @@ impl ToolScheduler {
                 let src = source.clone();
                 let c = cancel.child_token();
                 let active = active_owned.clone();
-                futures.push_back(async move { s.run_one(src, req, c, active, provenance).await });
+                let agent = agent_owned.clone();
+                futures.push_back(async move {
+                    s.run_one(src, req, c, active, agent, provenance).await
+                });
             }
             let mut out = Vec::with_capacity(futures.len());
             while let Some(call) = futures.next().await {
@@ -142,7 +168,14 @@ impl ToolScheduler {
                 let c = cancel.child_token();
                 out.push(
                     self.clone()
-                        .run_one(source.clone(), req, c, active_owned.clone(), provenance)
+                        .run_one(
+                            source.clone(),
+                            req,
+                            c,
+                            active_owned.clone(),
+                            agent_owned.clone(),
+                            provenance,
+                        )
                         .await,
                 );
             }
@@ -156,6 +189,7 @@ impl ToolScheduler {
         req: ToolCallRequest,
         cancel: CancellationToken,
         active_skills: Option<Vec<ActiveSkill>>,
+        agent_restriction: Option<AgentToolRestriction>,
         provenance: crate::domain::models::ProvenanceTag,
     ) -> ToolCall {
         let id = req.id.clone();
@@ -184,7 +218,7 @@ impl ToolScheduler {
                 &conversation_id,
                 ToolCall::Cancelled {
                     id,
-                    request: req,
+                    request: req.clone(),
                     reason: "pre-schedule".into(),
                 },
             );
@@ -199,11 +233,12 @@ impl ToolScheduler {
 
         // Phase 3: Permission chain check
         let plan_file = self.plan_file.read().await.clone();
-        let decision_fut = permission_chain::check_with_source_and_provenance(
+        let decision_fut = permission_chain::check_with_source_and_provenance_and_restriction(
             self.security.as_ref(),
             &req.tool_name,
             &req.input,
             active_skills.as_deref(),
+            agent_restriction.as_ref(),
             plan_file.as_deref(),
             self.tools.as_ref(),
             Some(&source),
@@ -507,6 +542,7 @@ mod tests {
                 req,
                 CancellationToken::new(),
                 None,
+                None,
                 crate::domain::models::ProvenanceTag::UserOriginated,
             )
             .await;
@@ -552,6 +588,7 @@ mod tests {
                 req,
                 cancel,
                 None,
+                None,
                 crate::domain::models::ProvenanceTag::UserOriginated,
             )
             .await;
@@ -577,6 +614,7 @@ mod tests {
                     },
                     req,
                     cancel2,
+                    None,
                     None,
                     crate::domain::models::ProvenanceTag::UserOriginated,
                 )

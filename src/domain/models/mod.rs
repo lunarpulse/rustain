@@ -107,8 +107,9 @@ pub use a2a_peer_spec::{
     alias_pseudonym,
 };
 pub use agent::{
-    ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
-    validate_agent_frontmatter,
+    ActiveAgent, AgentDef, AgentToolRestriction, AgentValidationError, MAX_AGENT_FILE_SIZE,
+    MAX_AGENT_SCAN_FILES, ToolRestrictionOrigin, allowlist_carve_outs, is_allowlist_carve_out,
+    is_any_allowlist_carve_out, validate_agent_frontmatter,
 };
 #[allow(unused_imports)]
 pub use agent_message::{

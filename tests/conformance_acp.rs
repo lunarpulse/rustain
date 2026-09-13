@@ -1804,6 +1804,7 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         storage,
         conversation,
         None,
+        None,
         CancellationToken::new(),
         ledger,
         ResolvedModel {

@@ -728,6 +728,8 @@ impl RustainAcpAgent {
             storage.clone(),
             conversation,
             activation_set,
+            // Story 19.28 AC5: ACP has no custom-agent input or state; unrestricted is proven-correct.
+            None,
             turn_cancel.clone(),
             ledger,
             resolved,

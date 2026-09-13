@@ -867,6 +867,8 @@ pub async fn run_ask_core(
         storage.clone(),
         conversation.clone(),
         None,
+        // Story 19.28 AC5: `rustain ask` has no custom-agent input or state; unrestricted is proven-correct.
+        None,
         turn_cancel,
         ledger.clone(),
         resolved,

@@ -1,5 +1,11 @@
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
+
+use super::ToolPolicy;
+use crate::domain::services::skill_tool_pattern::{
+    allowed_item_matches_tool, parse_allowed_tool_pattern,
+};
 
 pub const MAX_AGENT_FILE_SIZE: u64 = 1_048_576;
 pub const MAX_AGENT_SCAN_FILES: usize = 100;
@@ -18,6 +24,43 @@ pub struct AgentDef {
     pub isolated: bool,
 }
 
+/// The active agent's dispatch-time restriction, including the declared-item
+/// representation required when a child inherits from this turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentToolRestriction {
+    pub agent_name: String,
+    pub policy: ToolPolicy,
+    pub declared_items: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRestrictionOrigin {
+    Skill,
+    Agent,
+}
+
+const SKILL_CARVE_OUTS: &[&str] = &["activate_skill"];
+const AGENT_CARVE_OUTS: &[&str] = &["activate_skill", "task"];
+
+/// Single source for allowlist carve-outs. The chain reads one origin; the
+/// offer filter reads the union.
+pub fn allowlist_carve_outs(origin: ToolRestrictionOrigin) -> &'static [&'static str] {
+    match origin {
+        ToolRestrictionOrigin::Skill => SKILL_CARVE_OUTS,
+        ToolRestrictionOrigin::Agent => AGENT_CARVE_OUTS,
+    }
+}
+
+pub fn is_allowlist_carve_out(origin: ToolRestrictionOrigin, tool_name: &str) -> bool {
+    allowlist_carve_outs(origin).contains(&tool_name)
+}
+
+pub fn is_any_allowlist_carve_out(tool_name: &str) -> bool {
+    [ToolRestrictionOrigin::Skill, ToolRestrictionOrigin::Agent]
+        .into_iter()
+        .any(|origin| is_allowlist_carve_out(origin, tool_name))
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ActiveAgent {
@@ -32,32 +75,98 @@ pub struct ActiveAgent {
 #[allow(dead_code)]
 impl ActiveAgent {
     pub fn effective_tool_filter(&self, all_tool_names: &[String]) -> Option<HashSet<String>> {
-        match (&self.allowed_tools, &self.exclude_tools) {
-            (None, None) => None,
-            (Some(allow), None) => {
-                let set: HashSet<String> = allow.iter().cloned().collect();
-                Some(set)
-            }
-            (None, Some(exclude)) => {
-                let exclude_set: HashSet<String> = exclude.iter().cloned().collect();
-                let set: HashSet<String> = all_tool_names
-                    .iter()
-                    .filter(|t| !exclude_set.contains(*t))
-                    .cloned()
-                    .collect();
-                Some(set)
-            }
-            (Some(allow), Some(exclude)) => {
-                let exclude_set: HashSet<String> = exclude.iter().cloned().collect();
-                let set: HashSet<String> = allow
-                    .iter()
-                    .filter(|t| !exclude_set.contains(*t))
-                    .cloned()
-                    .collect();
-                Some(set)
-            }
+        if self.allowed_tools.is_none() && self.exclude_tools.is_none() {
+            return None;
         }
+        Some(
+            all_tool_names
+                .iter()
+                .filter(|tool_name| {
+                    let allowed = self.allowed_tools.as_ref().is_none_or(|items| {
+                        items
+                            .iter()
+                            .any(|item| allowed_item_matches_tool(item, tool_name))
+                    });
+                    let excluded = self.exclude_tools.as_ref().is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|item| excluded_item_names_tool(item, tool_name))
+                    });
+                    allowed && !excluded
+                })
+                .cloned()
+                .collect(),
+        )
     }
+
+    pub fn tool_restriction(&self, all_tool_names: &[String]) -> Option<AgentToolRestriction> {
+        let policy = tool_policy_from_lists(&self.allowed_tools, &self.exclude_tools);
+        if policy == ToolPolicy::InheritFromParent {
+            return None;
+        }
+        let declared_items = match &policy {
+            ToolPolicy::Allowlist { tools } => tools.clone(),
+            ToolPolicy::Denylist { tools } => all_tool_names
+                .iter()
+                .filter(|tool_name| {
+                    !tools
+                        .iter()
+                        .any(|item| excluded_item_names_tool(item, tool_name))
+                })
+                .cloned()
+                .collect(),
+            ToolPolicy::InheritFromParent | ToolPolicy::ResolvedAgainstParent { .. } => {
+                unreachable!("active agents are never pre-resolved")
+            }
+        };
+        Some(AgentToolRestriction {
+            agent_name: self.name.clone(),
+            policy,
+            declared_items,
+        })
+    }
+}
+
+impl AgentDef {
+    pub fn tool_policy(&self) -> ToolPolicy {
+        tool_policy_from_lists(&self.allowed_tools, &self.exclude_tools)
+    }
+}
+
+fn tool_policy_from_lists(
+    allowed_tools: &Option<Vec<String>>,
+    exclude_tools: &Option<Vec<String>>,
+) -> ToolPolicy {
+    if let Some(allow) = allowed_tools.as_ref() {
+        let tools = allow
+            .iter()
+            .filter(|allowed| {
+                let tool_name = parse_allowed_tool_pattern(allowed)
+                    .map(|pattern| pattern.tool_name)
+                    .unwrap_or(allowed);
+                !exclude_tools.as_ref().is_some_and(|excluded| {
+                    excluded
+                        .iter()
+                        .any(|item| excluded_item_names_tool(item, tool_name))
+                })
+            })
+            .cloned()
+            .collect();
+        return ToolPolicy::Allowlist { tools };
+    }
+    if let Some(tools) = exclude_tools.as_ref() {
+        return ToolPolicy::Denylist {
+            tools: tools.iter().cloned().collect(),
+        };
+    }
+    ToolPolicy::InheritFromParent
+}
+
+pub(crate) fn excluded_item_names_tool(item: &str, tool_name: &str) -> bool {
+    parse_allowed_tool_pattern(item)
+        .map(|pattern| pattern.tool_name)
+        .unwrap_or(item)
+        == tool_name
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

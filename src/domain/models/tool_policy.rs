@@ -5,18 +5,35 @@ use std::collections::BTreeSet;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolPolicy {
     InheritFromParent,
-    Allowlist { tools: BTreeSet<String> },
-    Denylist { tools: BTreeSet<String> },
+    Allowlist {
+        tools: BTreeSet<String>,
+    },
+    Denylist {
+        tools: BTreeSet<String>,
+    },
+    /// A delegated policy narrowed by the parent's declared items. `effective`
+    /// is the exact-name intersection from [`ToolPolicy::resolve`]; `parent`
+    /// and `child` retain command patterns so Bash can be checked without
+    /// widening either side to the bare tool.
+    ResolvedAgainstParent {
+        effective: BTreeSet<String>,
+        parent: BTreeSet<String>,
+        child: Box<ToolPolicy>,
+    },
 }
 
 impl ToolPolicy {
-    /// Resolve the effective allowed-tool set against the parent's effective set.
-    /// `parent` is the parent's effective allowed-tool set after its own policy applied.
+    /// Resolve exact declared items against the parent's declared-item set.
+    /// Command patterns remain declared items here; execution evaluates them
+    /// through the shared matcher rather than expanding them before inheritance.
     pub fn resolve(&self, parent: &BTreeSet<String>) -> BTreeSet<String> {
         match self {
             ToolPolicy::InheritFromParent => parent.clone(),
             ToolPolicy::Allowlist { tools } => tools.intersection(parent).cloned().collect(),
             ToolPolicy::Denylist { tools } => parent.difference(tools).cloned().collect(),
+            ToolPolicy::ResolvedAgainstParent { effective, .. } => {
+                effective.intersection(parent).cloned().collect()
+            }
         }
     }
 }

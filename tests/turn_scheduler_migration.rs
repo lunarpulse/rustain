@@ -347,6 +347,7 @@ async fn turn_scheduler_migration() {
         Arc::new(rustain::adapters::noop::NoOpStorage),
         make_conversation(),
         None,
+        None,
         CancellationToken::new(),
         Arc::new(rustain::adapters::noop::NoOpUsageLedger) as Arc<dyn UsageLedgerPort>,
         ResolvedModel {
@@ -441,6 +442,7 @@ async fn successful_a2a_result_taints_next_main_turn_dispatch() {
         "conv-taint".into(),
         Arc::new(rustain::adapters::noop::NoOpStorage),
         make_conversation(),
+        None,
         None,
         turn_cancel.clone(),
         Arc::new(rustain::adapters::noop::NoOpUsageLedger) as Arc<dyn UsageLedgerPort>,

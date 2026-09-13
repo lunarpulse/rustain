@@ -275,6 +275,7 @@ async fn ac2_keystone_run_turn_emits_the_real_overwrite_diff() {
         storage.clone(),
         empty_conversation(),
         None,
+        None,
         CancellationToken::new(),
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         ResolvedModel {
