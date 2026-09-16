@@ -594,10 +594,14 @@ fn test_import_site_count_pinned() {
     // already-composed tree and constructs the shared outbound delegation runtime.
     // This is the one egress-composition boundary called by both roots; it is not
     // a new daemon-owned tree or a domain/executor coupling.
+    // 29 -> 30 (Story 19.14): `infrastructure/runtime/transparency_bridge.rs`
+    // `credential_tests` constructs a real `NodeTree` only under
+    // `#[cfg(all(test, feature = "a2a"))]`; this preserves the real A2A
+    // egress/front-door test and adds no production boundary coupling.
     //
     // Not covered by `ratchet-signoff-guard.yml`, which gates only the seven named
     // constants in `tests/conformance.rs`.
-    const EXPECTED: usize = 29;
+    const EXPECTED: usize = 30;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());
