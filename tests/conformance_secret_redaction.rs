@@ -113,6 +113,12 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
         // SHA-256 before comparing with `subtle::ConstantTimeEq`, so the
         // plaintext never reaches a comparison, a log line, or a `Debug`.
         "adapters/a2a/auth.rs",
+        // Story 19.14 — the ONE place the A2A CLIENT's credential is read, and it
+        // reads it only to build the `x-api-key` header value, which is marked
+        // sensitive immediately. The plaintext never reaches a refusal string, a
+        // journal row, a log line or a `Debug`; `HeaderValue::from_str` failing is
+        // reported as "no usable credential", ⛔ never as the rejected bytes.
+        "adapters/a2a/client.rs",
         "adapters/auth_store.rs",
         "adapters/anthropic/mod.rs",
         "adapters/openai/mod.rs",
@@ -136,9 +142,10 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 14,
-        "expose_secret() pinned count changed: got {count}, expected 14. \
-         If you added a legitimate call site, update the allowlist AND this count."
+        count, 15,
+        "expose_secret() pinned count changed: got {count}, expected 15. \
+         If you added a legitimate call site, update the allowlist AND this count. \
+         (14 → 15 in Story 19.14: `adapters/a2a/client.rs::credential_header`.)"
     );
 }
 

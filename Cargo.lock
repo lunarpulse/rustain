@@ -6315,6 +6315,7 @@ dependencies = [
  "rpassword",
  "rustls",
  "rustls-pemfile",
+ "rustls-webpki",
  "scopeguard",
  "self-replace",
  "semver",

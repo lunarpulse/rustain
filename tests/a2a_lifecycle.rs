@@ -125,12 +125,11 @@ async fn cassette_drives_message_send_then_ordered_tasks_get_to_completed() {
         .mount(&server)
         .await;
 
-    let peer = A2aPeerSpec {
-        id: "cassette-peer".to_owned(),
-        url: RedactedUrl::from(server.uri()),
-        pinned_key: None,
-        source: A2aPeerSource::Workspace,
-    };
+    let peer = A2aPeerSpec::new(
+        "cassette-peer",
+        RedactedUrl::from(server.uri()),
+        A2aPeerSource::Workspace,
+    );
     let client = Arc::new(A2aClientAdapter::new(&peer, None).unwrap());
     client.refresh_agent_card(&peer).await.unwrap();
 

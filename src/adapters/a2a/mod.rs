@@ -41,6 +41,10 @@ pub mod send;
 pub mod server;
 #[cfg(feature = "a2a")]
 pub mod task;
+/// Story 19.14's keystone fixtures: locally generated certificates and a
+/// recording loopback peer. ⛔ Test-only; never compiled into a shipped binary.
+#[cfg(all(test, feature = "a2a"))]
+pub(crate) mod test_fixtures;
 #[cfg(feature = "a2a")]
 pub mod tls;
 pub mod transparency;

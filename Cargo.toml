@@ -82,6 +82,16 @@ axum = { version = "0.8", optional = true }
 rustls = { version = "0.23", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2", optional = true }
+# Story 19.14 (`A1`) — named SOLELY to downcast `rustls::CertificateError::Other`
+# to `webpki::Error::CaUsedAsEndEntity`, the one anchor sub-cause rustls does not
+# give a first-class variant. `rustls` already depends on this exact crate
+# (lib name `webpki`); this declaration copies rustls's own form so cargo
+# unifies on ONE copy and adds no feature. ⛔ Not zero bytes: a direct
+# dependency changes crate-metadata hashes, so the proof is the one-copy
+# `cargo tree` line plus the measured release-size delta — never "byte-identical".
+rustls-webpki = { version = "0.103", default-features = false, features = [
+    "alloc",
+], optional = true }
 # Constant-time credential comparison (Story 18.1b, R6). A naive `==` over a
 # shared secret reachable from a network socket is a timing oracle.
 subtle = { version = "2", optional = true }
@@ -296,6 +306,7 @@ a2a = [
     "dep:rustls",
     "dep:tokio-rustls",
     "dep:rustls-pemfile",
+    "dep:rustls-webpki",
     "dep:subtle",
 ]
 # Story 18.4 — cross-host peer transport. Kept independent from the A2A HTTP

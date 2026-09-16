@@ -123,12 +123,11 @@ mod a2a_feature_tests {
     use crate::domain::models::{A2aPeerSource, A2aPeerSpec, RedactedUrl};
 
     fn configured_peer() -> A2aPeerSpec {
-        A2aPeerSpec {
-            id: "peer".to_owned(),
-            url: RedactedUrl::from("https://peer.example"),
-            pinned_key: None,
-            source: A2aPeerSource::Workspace,
-        }
+        A2aPeerSpec::new(
+            "peer",
+            RedactedUrl::from("https://peer.example"),
+            A2aPeerSource::Workspace,
+        )
     }
 
     #[test]

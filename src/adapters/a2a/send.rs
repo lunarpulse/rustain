@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use super::client::CardSlot;
 use super::driver::{
     A2aDelegationRuntime, DelegationError, TaskClient, build_message, disclosable_task_id,
 };
 use super::endpoint::resolve_jsonrpc_endpoint;
-use super::error::A2aError;
+use super::error::{A2aError, AnchorCause, anchor_error, anchor_refusal};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendOutcome {
@@ -39,6 +40,16 @@ pub enum SendError {
     Delegation {
         peer: String,
         source: DelegationError,
+    },
+    /// The boot card GET — this peer's first TLS handshake — refused its
+    /// certificate, or its anchor could not be loaded (`A22`).
+    ///
+    /// ⛔ Deliberately NOT routed through `DelegationError`: nothing was
+    /// delegated, and `Delegation`'s `Display` would prefix the operator's
+    /// ratified sentence with `A2A send to peer …: A2A transport failure:`.
+    AnchorRefused {
+        peer: String,
+        cause: AnchorCause,
     },
 }
 
@@ -76,6 +87,8 @@ impl std::fmt::Display for SendError {
             Self::Delegation { peer, source } => {
                 write!(f, "A2A send to peer `{peer}` failed: {source}")
             }
+            // The one formatter for forms 5–9, shared with `A2aError`.
+            Self::AnchorRefused { peer, cause } => f.write_str(&anchor_refusal(peer, cause)),
         }
     }
 }
@@ -94,10 +107,29 @@ pub async fn send_text(
             peer: peer_id.to_owned(),
             known: runtime.known_peer_ids(),
         })?;
-    let Some((card, trust)) = client.cached_card().await else {
-        return Err(SendError::CardNotCached {
-            peer: peer_id.to_owned(),
-        });
+    // `AnchorRefused` is checked BEFORE `CardNotCached` (`A22` item 2): a
+    // retained anchor cause is the actionable one, and `CardNotCached`'s text
+    // ("discovery may still be in flight") would be false beside it.
+    let (card, trust) = match client.card_slot().await {
+        CardSlot::Ready(card, trust) => (card, trust),
+        CardSlot::AnchorRefused(cause) => {
+            // Durable-first, exactly one row, and ⛔ no `Dispatched` row: nothing
+            // was dispatched. A journal failure is latched the way the driver
+            // latches it; the send is refused either way, so the operator still
+            // sees the anchor form.
+            let _ = runtime
+                .journal_anchor_refusal(&spec, &anchor_error(&spec.id, &cause))
+                .await;
+            return Err(SendError::AnchorRefused {
+                peer: peer_id.to_owned(),
+                cause,
+            });
+        }
+        CardSlot::Pending | CardSlot::Unavailable => {
+            return Err(SendError::CardNotCached {
+                peer: peer_id.to_owned(),
+            });
+        }
     };
     let endpoint = resolve_jsonrpc_endpoint(&card).map_err(|source| SendError::Endpoint {
         peer: peer_id.to_owned(),
@@ -215,12 +247,11 @@ mod tests {
     }
 
     fn peer(id: &str) -> A2aPeerSpec {
-        A2aPeerSpec {
-            id: id.to_owned(),
-            url: RedactedUrl::from("http://127.0.0.1:9"),
-            pinned_key: None,
-            source: A2aPeerSource::Workspace,
-        }
+        A2aPeerSpec::new(
+            id,
+            RedactedUrl::from("http://127.0.0.1:9"),
+            A2aPeerSource::Workspace,
+        )
     }
 
     fn runtime(peers: Vec<(A2aPeerSpec, Arc<client::A2aClientAdapter>)>) -> A2aDelegationRuntime {

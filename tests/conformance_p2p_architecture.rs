@@ -248,12 +248,17 @@ fn p2p_feature_is_isolated_and_pins_the_i_roh_stack() {
             "dep:reqwest",
             "dep:rustls",
             "dep:rustls-pemfile",
+            "dep:rustls-webpki",
             "dep:serde_jcs",
             "dep:subtle",
             "dep:tokio-rustls",
             "mcp",
         ]),
-        "p2p must not widen the independent A2A HTTP feature"
+        "p2p must not widen the independent A2A HTTP feature. `dep:rustls-webpki` is \
+         Story 19.14's addition and is `a2a`-only: it types the anchor sub-cause \
+         `webpki::Error::CaUsedAsEndEntity` for the A2A client's TLS refusals and has no \
+         p2p role. ⚠ This lane is the ONLY CI lane that runs this assertion, so a change \
+         to the `a2a` list that forgets it goes red here and nowhere else."
     );
 
     let deny = source("deny.toml");

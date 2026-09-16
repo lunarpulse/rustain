@@ -613,16 +613,16 @@ mod tests {
     fn pinned_alias_resolves_unpinned_rejected_and_status_annotates_source() {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let pinned = crate::domain::models::A2aPeerSpec {
-            id: "alice".to_owned(),
-            url: crate::domain::models::RedactedUrl::new("https://alice.example/a2a".to_owned()),
-            pinned_key: Some(crate::domain::models::PinnedKey::new(
-                crate::domain::models::PinnedKeyAlgorithm::EdDsa,
-                URL_SAFE_NO_PAD.encode([7u8; 32]),
-                None,
-            )),
-            source: crate::domain::models::A2aPeerSource::Workspace,
-        };
+        let pinned = crate::domain::models::A2aPeerSpec::new(
+            "alice",
+            crate::domain::models::RedactedUrl::new("https://alice.example/a2a".to_owned()),
+            crate::domain::models::A2aPeerSource::Workspace,
+        )
+        .with_pinned_key(Some(crate::domain::models::PinnedKey::new(
+            crate::domain::models::PinnedKeyAlgorithm::EdDsa,
+            URL_SAFE_NO_PAD.encode([7u8; 32]),
+            None,
+        )));
         let identity = pinned.pinned_identity().unwrap();
         // F3: a pinned alias resolves to its transport-authenticated PeerId.
         assert_eq!(
@@ -637,12 +637,11 @@ mod tests {
         assert!(resolve_peer_target("unknown", std::slice::from_ref(&pinned)).is_err());
         // F3: an unpinned alias is rejected — standing consent must key on a pin,
         // never a rename-unstable alias pseudonym.
-        let unpinned = crate::domain::models::A2aPeerSpec {
-            id: "bob".to_owned(),
-            url: crate::domain::models::RedactedUrl::new("https://bob.example/a2a".to_owned()),
-            pinned_key: None,
-            source: crate::domain::models::A2aPeerSource::Workspace,
-        };
+        let unpinned = crate::domain::models::A2aPeerSpec::new(
+            "bob",
+            crate::domain::models::RedactedUrl::new("https://bob.example/a2a".to_owned()),
+            crate::domain::models::A2aPeerSource::Workspace,
+        );
         assert!(resolve_peer_target("bob", std::slice::from_ref(&unpinned)).is_err());
 
         let entries = vec![crate::domain::models::JournalEntry::new(

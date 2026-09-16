@@ -120,12 +120,11 @@ async fn a2a_inventory_enters_the_llm_surface_under_namespaced_wire_names() {
 }
 
 fn peer_spec(url: String) -> A2aPeerSpec {
-    A2aPeerSpec {
-        id: "wire-peer".to_owned(),
-        url: RedactedUrl::from(url),
-        pinned_key: None,
-        source: A2aPeerSource::Workspace,
-    }
+    A2aPeerSpec::new(
+        "wire-peer",
+        RedactedUrl::from(url),
+        A2aPeerSource::Workspace,
+    )
 }
 
 fn composite() -> Arc<CompositeToolsetAdapter> {

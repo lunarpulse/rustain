@@ -245,15 +245,17 @@ mod tests {
         };
         use base64::Engine as _;
 
-        let peer = |alias: &str, key: [u8; 32]| A2aPeerSpec {
-            id: alias.to_owned(),
-            url: RedactedUrl::new("https://peer.example/a2a".to_owned()),
-            pinned_key: Some(PinnedKey::new(
+        let peer = |alias: &str, key: [u8; 32]| {
+            A2aPeerSpec::new(
+                alias,
+                RedactedUrl::new("https://peer.example/a2a".to_owned()),
+                A2aPeerSource::Workspace,
+            )
+            .with_pinned_key(Some(PinnedKey::new(
                 PinnedKeyAlgorithm::EdDsa,
                 base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key),
                 None,
-            )),
-            source: A2aPeerSource::Workspace,
+            )))
         };
         let trusted = peer("trusted", [7; 32]);
         let trusted_id = trusted.pinned_identity().unwrap();

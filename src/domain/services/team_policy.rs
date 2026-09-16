@@ -886,18 +886,18 @@ mod tests {
     }
 
     fn peer(alias: &str, pin: Option<[u8; 32]>) -> A2aPeerSpec {
-        A2aPeerSpec {
-            id: alias.to_owned(),
-            url: RedactedUrl::new("https://peer.example/a2a".to_owned()),
-            pinned_key: pin.map(|bytes| {
-                PinnedKey::new(
-                    PinnedKeyAlgorithm::EdDsa,
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
-                    None,
-                )
-            }),
-            source: A2aPeerSource::Workspace,
-        }
+        A2aPeerSpec::new(
+            alias,
+            RedactedUrl::new("https://peer.example/a2a".to_owned()),
+            A2aPeerSource::Workspace,
+        )
+        .with_pinned_key(pin.map(|bytes| {
+            PinnedKey::new(
+                PinnedKeyAlgorithm::EdDsa,
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+                None,
+            )
+        }))
     }
 
     const ALL_MODES: [ResponseMode; 3] = [

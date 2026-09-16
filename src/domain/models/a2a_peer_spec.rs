@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -77,15 +79,63 @@ pub enum A2aPeerSource {
 }
 
 /// An allowlisted A2A peer. The optional pin is the sole trust-tier source.
+///
+/// Story 19.14 adds the two remaining trust inputs of `AD-1823`, and neither is
+/// a secret: `auth` is the **name** of an environment variable, and `ca_cert` is
+/// a **path** to a PEM anchor. ⛔ Neither field ever holds key material, and
+/// neither is dereferenced at parse time — a roster loads whether or not the
+/// variable is exported and whether or not the file exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct A2aPeerSpec {
     pub id: String,
     pub url: RedactedUrl,
     pub pinned_key: Option<PinnedKey>,
+    /// Name of the environment variable holding this peer's API key.
+    /// ⛔ Never the key itself; the client reads it per RPC (`A18`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// Path to the PEM trust anchor this peer's server must chain to, already
+    /// resolved against the roster root (`A27`). ⛔ Never certificate bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<PathBuf>,
     pub source: A2aPeerSource,
 }
 
 impl A2aPeerSpec {
+    /// A peer with no pin, no credential and no anchor.
+    ///
+    /// The constructor exists so a new trust input is an additive change rather
+    /// than 21 struct literals (`A8`); the `with_*` methods take `Option` so a
+    /// parser can hand through what it read without branching.
+    pub fn new(id: impl Into<String>, url: RedactedUrl, source: A2aPeerSource) -> Self {
+        Self {
+            id: id.into(),
+            url,
+            pinned_key: None,
+            auth: None,
+            ca_cert: None,
+            source,
+        }
+    }
+
+    #[must_use]
+    pub fn with_pinned_key(mut self, pinned_key: Option<PinnedKey>) -> Self {
+        self.pinned_key = pinned_key;
+        self
+    }
+
+    #[must_use]
+    pub fn with_auth(mut self, auth: Option<String>) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    #[must_use]
+    pub fn with_ca_cert(mut self, ca_cert: Option<PathBuf>) -> Self {
+        self.ca_cert = ca_cert;
+        self
+    }
+
     pub fn trust_tier(&self) -> TrustTier {
         if self.pinned_key.is_some() {
             TrustTier::Verified
@@ -203,12 +253,12 @@ mod tests {
     const PIN_1: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE";
 
     fn spec(id: &str, pin: Option<&str>) -> A2aPeerSpec {
-        A2aPeerSpec {
-            id: id.to_owned(),
-            url: RedactedUrl::new("https://peer.example/a2a".to_owned()),
-            pinned_key: pin.map(|x| PinnedKey::new(PinnedKeyAlgorithm::EdDsa, x.to_owned(), None)),
-            source: A2aPeerSource::Workspace,
-        }
+        A2aPeerSpec::new(
+            id,
+            RedactedUrl::new("https://peer.example/a2a".to_owned()),
+            A2aPeerSource::Workspace,
+        )
+        .with_pinned_key(pin.map(|x| PinnedKey::new(PinnedKeyAlgorithm::EdDsa, x.to_owned(), None)))
     }
 
     #[test]

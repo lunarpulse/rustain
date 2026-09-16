@@ -57,6 +57,7 @@ fn a2a_feature_is_off_by_default_and_declares_the_documented_fallback() {
             "dep:reqwest",
             "dep:rustls",
             "dep:rustls-pemfile",
+            "dep:rustls-webpki",
             "dep:serde_jcs",
             "dep:subtle",
             "dep:tokio-rustls",
@@ -65,7 +66,11 @@ fn a2a_feature_is_off_by_default_and_declares_the_documented_fallback() {
         "DF-17-4a-3 fallback must remain explicit until composite gating is separated. \
          Story 18.1b adds the server-side TLS stack (rustls/tokio-rustls/rustls-pemfile) \
          and the constant-time credential comparison (subtle) — all `a2a`-gated, none \
-         reachable from a default build."
+         reachable from a default build. Story 19.14 adds `rustls-webpki`, named ONLY to \
+         downcast `rustls::CertificateError::Other` to `webpki::Error::CaUsedAsEndEntity`: \
+         without it an anchor refusal cannot say a CA was served as a server certificate \
+         and collapses to the generic mismatch form. It is the crate `rustls` already \
+         depends on, declared in rustls's own form so cargo unifies on ONE copy."
     );
     for dependency in [
         "reqwest",
@@ -74,6 +79,7 @@ fn a2a_feature_is_off_by_default_and_declares_the_documented_fallback() {
         "rustls",
         "tokio-rustls",
         "rustls-pemfile",
+        "rustls-webpki",
         "subtle",
     ] {
         assert_eq!(
@@ -194,6 +200,13 @@ fn every_public_a2a_enum_is_non_exhaustive() {
             "A2aPeerSpecError".to_owned(),
             "A2aServerAuth".to_owned(),
             "AdmissionVerdict".to_owned(),
+            // Story 19.14: the anchor refusal taxonomy. `AnchorFailure`'s
+            // members are the sub-causes `UX-DR-TM-10` v0.6 separates, and a
+            // fifth one is a real possibility (revocation, for instance) — so
+            // it is `#[non_exhaustive]` for the same reason every enum above
+            // is.
+            "AnchorCause".to_owned(),
+            "AnchorFailure".to_owned(),
             "AuthOutcome".to_owned(),
             "BindDecision".to_owned(),
             "Disclosure".to_owned(),

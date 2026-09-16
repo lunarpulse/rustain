@@ -61,7 +61,9 @@ impl CapabilityProvider for A2aProvider {
     async fn discover(&self) -> Result<Vec<Capability>, CapabilityError> {
         let mut capabilities = Vec::new();
         for (peer, client) in self.peers.iter() {
-            let Some((card, trust)) = client.cached_card().await else {
+            // Only a `Ready` slot yields a catalogue entry — unchanged behaviour
+            // for every other slot state (`A28` item 5).
+            let Some((card, trust)) = client.ready_card().await else {
                 continue;
             };
             capabilities.reserve(card.skills.len());
@@ -127,7 +129,10 @@ impl CapabilityProvider for A2aProvider {
                 )
             })?;
 
-        let (card, trust) = client.cached_card().await.ok_or_else(|| {
+        // Slot-type migration only: the model rail keeps today's refusal for every
+        // non-`Ready` state (`A28` item 5). Its RPCs still get origin binding,
+        // because that check lives in `post_jsonrpc`.
+        let (card, trust) = client.ready_card().await.ok_or_else(|| {
             CapabilityError::InvocationFailed(
                 capability_id.to_string(),
                 "A2A peer AgentCard is not cached; refresh discovery first".to_owned(),
@@ -203,12 +208,11 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn spec(url: String) -> A2aPeerSpec {
-        A2aPeerSpec {
-            id: "security-peer".to_owned(),
-            url: RedactedUrl::from(url),
-            pinned_key: None,
-            source: A2aPeerSource::Workspace,
-        }
+        A2aPeerSpec::new(
+            "security-peer",
+            RedactedUrl::from(url),
+            A2aPeerSource::Workspace,
+        )
     }
 
     const MULTI_SKILL_CARD: &str = r#"{

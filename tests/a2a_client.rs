@@ -12,12 +12,12 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn spec(url: String, pinned_key: Option<PinnedKey>) -> A2aPeerSpec {
-    A2aPeerSpec {
-        id: "remote-peer".to_owned(),
-        url: RedactedUrl::from(url),
-        pinned_key,
-        source: A2aPeerSource::Workspace,
-    }
+    A2aPeerSpec::new(
+        "remote-peer",
+        RedactedUrl::from(url),
+        A2aPeerSource::Workspace,
+    )
+    .with_pinned_key(pinned_key)
 }
 
 fn signed_card(key: &SigningKey, kid: &str) -> String {
@@ -61,7 +61,7 @@ async fn fetches_exact_well_known_path_and_caches_unverified_card() {
     let peer = spec(server.uri(), None);
     let client = A2aClientAdapter::new(&peer, None).expect("loopback HTTP is allowed");
     client.refresh_agent_card(&peer).await.expect("fetch card");
-    let (card, trust) = client.cached_card().await.expect("cached card");
+    let (card, trust) = client.ready_card().await.expect("cached card");
     assert_eq!(card.name, "Remote");
     assert_eq!(trust, TrustTier::Unverified);
 }
@@ -84,7 +84,7 @@ async fn refresh_recomputes_tier_after_the_pin_is_removed() {
         .refresh_agent_card(&verified)
         .await
         .expect("verified refresh");
-    assert_eq!(client.cached_card().await.unwrap().1, TrustTier::Verified);
+    assert_eq!(client.ready_card().await.unwrap().1, TrustTier::Verified);
 
     let unverified = spec(server.uri(), None);
     client
@@ -92,7 +92,7 @@ async fn refresh_recomputes_tier_after_the_pin_is_removed() {
         .await
         .expect("unverified refresh");
     assert_eq!(
-        client.cached_card().await.unwrap().1,
+        client.ready_card().await.unwrap().1,
         TrustTier::Unverified,
         "trust must come from current config, not cached card state"
     );
@@ -115,7 +115,7 @@ async fn pinned_unsigned_and_html_responses_clear_the_cache() {
         client.refresh_agent_card(&pinned).await,
         Err(A2aError::MissingSignatures)
     ));
-    assert!(client.cached_card().await.is_none());
+    assert!(client.ready_card().await.is_none());
 
     let html_server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -128,7 +128,7 @@ async fn pinned_unsigned_and_html_responses_clear_the_cache() {
         client.refresh_agent_card(&unverified).await,
         Err(A2aError::UnexpectedContentType { .. })
     ));
-    assert!(client.cached_card().await.is_none());
+    assert!(client.ready_card().await.is_none());
 }
 
 #[test]

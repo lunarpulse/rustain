@@ -171,18 +171,18 @@ mod tests {
             "[interaction.overrides.profile-peer]\nnotification = \"immediate\"\n",
         );
         let pin = [7u8; 32];
-        let peer = A2aPeerSpec {
-            id: "profile-peer".to_owned(),
-            url: RedactedUrl::new("https://peer.example/a2a".to_owned()),
-            pinned_key: Some(PinnedKey::new(
-                PinnedKeyAlgorithm::EdDsa,
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pin),
-                None,
-            )),
-            source: A2aPeerSource::Profile {
+        let peer = A2aPeerSpec::new(
+            "profile-peer",
+            RedactedUrl::new("https://peer.example/a2a".to_owned()),
+            A2aPeerSource::Profile {
                 profile_name: "team".to_owned(),
             },
-        };
+        )
+        .with_pinned_key(Some(PinnedKey::new(
+            PinnedKeyAlgorithm::EdDsa,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pin),
+            None,
+        )));
         let identity = PeerId::from_public_key(&pin).unwrap();
 
         let (policy, _) =
@@ -299,16 +299,18 @@ mod tests {
                 ..Default::default()
             },
         );
-        let peers = vec![A2aPeerSpec {
-            id: "marcus-arch".to_owned(),
-            url: RedactedUrl::new("https://p.example/a2a".to_owned()),
-            pinned_key: Some(PinnedKey::new(
+        let peers = vec![
+            A2aPeerSpec::new(
+                "marcus-arch",
+                RedactedUrl::new("https://p.example/a2a".to_owned()),
+                A2aPeerSource::Workspace,
+            )
+            .with_pinned_key(Some(PinnedKey::new(
                 PinnedKeyAlgorithm::EdDsa,
                 base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([5u8; 32]),
                 None,
-            )),
-            source: A2aPeerSource::Workspace,
-        }];
+            ))),
+        ];
 
         let policy = resolve_effective_policy(&individual, None, &peers);
         let lines = collect_consent_lines(&policy, &OneGrant(identity));

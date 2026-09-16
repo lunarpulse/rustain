@@ -128,10 +128,8 @@ impl TomlProfileResolver {
 
         // Story 17.4a: A2A config is parsed even without the feature so a
         // configured peer can fail loud instead of disappearing.
-        let a2a_path = std::env::current_dir()
-            .unwrap_or_default()
-            .join(".rustain")
-            .join("a2a.json");
+        let roster_root = std::env::current_dir().unwrap_or_default();
+        let a2a_path = roster_root.join(".rustain").join("a2a.json");
         let workspace_a2a = crate::adapters::a2a::config::parse_workspace_a2a_config(&a2a_path)
             .map_err(|error| ProfileError::Parse {
                 path: a2a_path.clone(),
@@ -149,8 +147,14 @@ impl TomlProfileResolver {
             path: config_dir.join(format!("{active_name}.toml")),
             reason: error.to_string(),
         })?;
-        resolved.a2a_peers =
+        let mut a2a_peers =
             crate::adapters::a2a::config::merge_a2a_specs(workspace_a2a, profile_a2a);
+        // Story 19.14 `A27`: the anchor path is resolved once, here, against the
+        // root that located `a2a.json` — for workspace AND profile peers.
+        // ⛔ Never in the A2A client adapter's constructor, which has no root and
+        // must not read `current_dir()` again on the client path.
+        crate::adapters::a2a::config::resolve_ca_cert_paths(&roster_root, &mut a2a_peers);
+        resolved.a2a_peers = a2a_peers;
 
         // Story 9.1: Parse MCP server configs from workspace + profile
         #[allow(unused_mut)]

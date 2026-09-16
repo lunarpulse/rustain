@@ -11,12 +11,11 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn spec(url: String) -> A2aPeerSpec {
-    A2aPeerSpec {
-        id: "security-peer".to_owned(),
-        url: RedactedUrl::from(url),
-        pinned_key: None,
-        source: A2aPeerSource::Workspace,
-    }
+    A2aPeerSpec::new(
+        "security-peer",
+        RedactedUrl::from(url),
+        A2aPeerSource::Workspace,
+    )
 }
 
 #[tokio::test]

@@ -215,6 +215,33 @@ impl A2aDelegationRuntime {
         ids
     }
 
+    /// Journal a send refused by a **retained** anchor cause (`A22` item 5).
+    ///
+    /// One narrow method rather than widening `emit_room`, and it writes exactly
+    /// one row: ⛔ no `RemoteEnvelopeDispatched`, because nothing was dispatched —
+    /// the refusal happens before a transport even exists. The emission shape is
+    /// the driver's own first-hop shape, so the two paths cannot describe the same
+    /// failure two ways, and it goes through `emit_room` so a journal failure is
+    /// latched identically.
+    pub(crate) async fn journal_anchor_refusal(
+        &self,
+        spec: &A2aPeerSpec,
+        error: &A2aError,
+    ) -> Result<(), DelegationError> {
+        self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+            peer: spec.resolved_identity(),
+            reason: RejectReason::Policy {
+                detail: sanitize_disclosable(
+                    &format!("A2A transport failure: {error}"),
+                    MAX_SUMMARY_BYTES,
+                ),
+            },
+            direction: Direction::Outbound,
+            task: None,
+        })
+        .await
+    }
+
     /// Delegate one task to a discovered peer and drive it to terminal.
     ///
     /// `trust` is admission-only (R-D): it is stamped into observability but
@@ -832,18 +859,18 @@ mod tests {
 
     fn spec(id: &str, verified: bool) -> A2aPeerSpec {
         use crate::domain::models::{A2aPeerSource, PinnedKey, PinnedKeyAlgorithm};
-        A2aPeerSpec {
-            id: id.to_owned(),
-            url: RedactedUrl::new("https://peer.example/a2a".to_owned()),
-            pinned_key: verified.then(|| {
-                PinnedKey::new(
-                    PinnedKeyAlgorithm::EdDsa,
-                    URL_SAFE_NO_PAD.encode([7u8; 32]),
-                    None,
-                )
-            }),
-            source: A2aPeerSource::Workspace,
-        }
+        A2aPeerSpec::new(
+            id,
+            RedactedUrl::new("https://peer.example/a2a".to_owned()),
+            A2aPeerSource::Workspace,
+        )
+        .with_pinned_key(verified.then(|| {
+            PinnedKey::new(
+                PinnedKeyAlgorithm::EdDsa,
+                URL_SAFE_NO_PAD.encode([7u8; 32]),
+                None,
+            )
+        }))
     }
 
     struct Scripted {

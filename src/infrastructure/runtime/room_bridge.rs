@@ -505,12 +505,11 @@ mod tests {
     }
 
     fn configured_peer(alias: &str) -> A2aPeerSpec {
-        A2aPeerSpec {
-            id: alias.to_owned(),
-            url: crate::domain::models::RedactedUrl::new(format!("https://{alias}.example/a2a")),
-            pinned_key: None,
-            source: crate::domain::models::A2aPeerSource::Workspace,
-        }
+        A2aPeerSpec::new(
+            alias,
+            crate::domain::models::RedactedUrl::new(format!("https://{alias}.example/a2a")),
+            crate::domain::models::A2aPeerSource::Workspace,
+        )
     }
 
     #[test]

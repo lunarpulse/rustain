@@ -25,6 +25,11 @@ Create `.rustain/a2a.json` in the workspace:
         "x": "Pii06SUCwAi0D_BTTOeCsD5XSSrjqFqw0nXF8STr14w",
         "kid": "ci-key-2026"
       }
+    },
+    "remote-reviewer": {
+      "url": "https://reviewer.example",
+      "auth": "RUSTAIN_REVIEWER_API_KEY",
+      "caCert": "certs/reviewer-ca.pem"
     }
   }
 }
@@ -45,9 +50,136 @@ url = "https://ci.example"
 alg = "EdDSA"
 x = "Pii06SUCwAi0D_BTTOeCsD5XSSrjqFqw0nXF8STr14w"
 kid = "ci-key-2026"
+
+[tools.config.a2a.remote-reviewer]
+url = "https://reviewer.example"
+auth = "RUSTAIN_REVIEWER_API_KEY"
+ca_cert = "certs/reviewer-ca.pem"
 ```
 
 If peers are configured but the binary was built without `a2a`, startup fails loudly instead of silently omitting them.
+
+## Reaching a credentialed peer across a network boundary
+
+Two optional roster fields let a rustain process — not `curl` — reach a peer that
+demands TLS and an API key. They are independent: either may be used alone.
+
+| Key | Value | Meaning |
+|---|---|---|
+| `auth` | env var **name** | The variable holding this peer's API key. The key itself never lives in the file, and the roster is safe to commit |
+| `caCert` / `ca_cert` | path to a PEM file | The trust anchor this peer's server certificate must chain to |
+
+### `auth` — the client credential
+
+The value is a **variable name**, exactly like the server block's `apiKeyEnv`. The
+variable is read **on every outbound JSON-RPC call**, so exporting it after
+rustain starts works, and rotating it takes effect on the next send without a
+restart.
+
+The key is sent as `x-api-key`, on `POST` only. The AgentCard fetch is
+**unauthenticated** — the served card is the document that explains how to get
+past the gate, so gating it would gate the instructions.
+
+**The credential is sent only to the origin your roster `url` names** — scheme,
+host and port. An AgentCard decides where the JSON-RPC request goes, and a card
+is written by the peer; without this bound, a card naming another host would
+collect your key. If a peer's card advertises a different origin, the send is
+refused and nothing is sent. So a credentialed peer's server must advertise an
+authority equal to your roster `url` (the card's endpoint is built from the
+server's `advertisedHost`).
+
+### `caCert` — the trust anchor
+
+A relative path is resolved against the directory that `.rustain/a2a.json` was
+found in — **not** against `.rustain/` itself and not against a profile's
+directory, so `"certs/ca.pem"` means `<workspace>/certs/ca.pem` for workspace and
+profile peers alike. An absolute path is used as given.
+
+Parsing never touches the file — a roster loads whether or not the anchor
+exists. The client then reads it **once, at startup**, when the peer is
+composed: a missing or unparseable anchor is kept as that peer's refusal, and
+every send to it fails with the `<alias>'s pinned anchor could not be loaded: …`
+form. Repairing or replacing the file therefore takes effect **only after a
+restart**, like any other roster change.
+
+`caCert` requires an `https` roster `url`. A plain-HTTP (loopback) peer never
+performs a TLS handshake, so an anchor there could never be consulted — the
+roster refuses to load that combination and says so, rather than silently
+ignoring your trust setting.
+
+An anchored peer's client trusts **only** that anchor. The platform root store is
+switched off for it, so a public CA mis-issuance cannot impersonate that peer. A
+peer without `caCert` is unchanged and keeps the system trust store.
+
+This is **anchor validation**, not certificate fingerprint pinning: rustain
+installs the file's certificates as roots and validates the presented chain
+against them. Two certificate shapes therefore work, and one that looks like it
+should does not.
+
+**Form 1 — a private CA that issues the server's certificate.** Commands as run
+on OpenSSL 3.5.5:
+
+```bash
+# The anchor you put in caCert
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout ca.key -out ca.pem -days 3650 -subj /CN=rustain-peer-ca \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign"
+
+# The certificate the peer's server presents
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout server.key -out server.csr -subj /CN=peer.example
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:peer.example\n' > ext.cnf
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -out server.pem \
+  -days 825 -extfile ext.cnf
+openssl verify -CAfile ca.pem server.pem      # -> server.pem: OK
+```
+
+**Form 2 — a non-CA self-signed certificate, pinned as its own anchor.** The
+`-addext` line is the load-bearing part:
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout leaf.key -out leaf.pem -days 365 -subj /CN=localhost \
+  -addext "basicConstraints=critical,CA:FALSE" \
+  -addext "subjectAltName=DNS:localhost" \
+  -addext "extendedKeyUsage=serverAuth"
+```
+
+⚠ **`openssl req -x509` without that line emits `CA:TRUE`** (verified on OpenSSL
+3.5.5), and a `CA:TRUE` certificate presented as a server's own certificate is
+**refused** — rustain reports that the peer presents a CA certificate as its
+server certificate. Add `basicConstraints=critical,CA:FALSE`, or use form 1.
+
+⚠ **An expired anchor is still trusted.** A trust anchor's own validity period is
+not checked (RFC 5280 §6.1.1 leaves it optional and the verifier here omits it),
+so an expired CA keeps validating leaves it issued. The server's *own*
+certificate is checked normally. Rotate anchors on a calendar, not on an error
+message.
+
+⚠ **A certificate fixed on the server needs a rustain restart.** The anchor
+decision is made during the one AgentCard fetch at startup and retained, so a
+peer whose certificate was wrong when rustain started stays refused until the
+next start even after the server is repaired.
+
+### When it refuses
+
+Each failure names one trust decision, because each has a different fix:
+
+| Rendered | What to change |
+|---|---|
+| `no credential for <alias>: set the env var named in its auth field` | export the variable your `auth` field names |
+| `no credential configured for <alias>: add an auth field naming the env var that holds its key` | the peer wants a key and your roster entry has no `auth` field |
+| `<alias> rejected this credential` | either side — a wrong key here, or a revoked grant there |
+| `<alias>'s card sends requests to another host; its credential is only sent to <origin>` | the peer's `advertisedHost`, or your roster `url` |
+| `<alias>'s certificate does not match the pinned anchor` | the wrong file in `caCert`, or a certificate not issued under it |
+| `<alias>'s certificate has expired or is not yet valid` | the peer's certificate, or a clock on either host |
+| `<alias>'s certificate is not valid for its roster address` | the certificate's SAN, or the host in your roster `url` |
+| `<alias> presents a CA certificate as its server certificate` | the peer's certificate shape — see form 2 above |
+| `<alias>'s pinned anchor could not be loaded: <reason>` | the `caCert` path or its contents; the reason names both |
+
+There is still **no** mutual TLS: rustain presents a bearer secret, never a client
+certificate (`DF-18-1-MTLS`).
 
 ## Sending to a configured peer from the TUI
 
@@ -69,9 +201,10 @@ Failures are explicit and terminal:
 - a configured peer whose AgentCard was unavailable at startup is refused without an on-demand discovery request;
 - a transport failure after dispatch records `dispatched` followed by `refused` and renders the transport error;
 - a remote refusal renders the peer's reason;
-- `input-required` renders a cancellation message because this command is single-turn; multi-turn peer input is not supported here.
+- `input-required` renders a cancellation message because this command is single-turn; multi-turn peer input is not supported here;
+- a missing, out-of-scope or rejected credential, and every trust-anchor failure, name the one trust decision that failed — see [When it refuses](#when-it-refuses).
 
-`/team send` exists only in the interactive TUI in this release. There is no headless `rustain team send` command. Client authentication for non-loopback servers is not configured by this surface yet; see the server security requirements below rather than assuming that a roster URL supplies credentials.
+`/team send` exists only in the interactive TUI in this release. There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
 
 ## Trust tiers
 

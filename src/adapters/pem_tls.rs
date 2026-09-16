@@ -48,20 +48,23 @@ impl std::fmt::Display for PemTlsError {
 
 impl std::error::Error for PemTlsError {}
 
-/// Load a PEM certificate chain and key into a `rustls::ServerConfig`.
+/// Load a PEM certificate bundle: every `CERTIFICATE` block in one file.
+///
+/// # Why this is shared (Story 19.14, `A23`)
+///
+/// Story 19.14's A2A **client** needs exactly this — read, `rustls_pemfile::certs`,
+/// refuse a file with no `CERTIFICATE` block — to turn an operator's `caCert` into
+/// trust anchors. ⛔ A second loader would be a second error vocabulary for one
+/// operator mistake, which is the reason this module exists; the three messages
+/// below are already shipped by `relay serve` and the A2A server, so ⛔ do not
+/// reword them.
 ///
 /// Blocking file I/O — call from `spawn_blocking` or from a non-async startup
 /// path, never from inside a request handler.
-pub fn load_server_tls_config(
+pub fn load_certificate_bundle(
     cert_path: &Path,
-    key_path: &Path,
-) -> Result<rustls::ServerConfig, PemTlsError> {
-    let read = |path: &Path| -> Result<Vec<u8>, PemTlsError> {
-        std::fs::read(path)
-            .map_err(|error| PemTlsError(format!("reading {}: {error}", path.display())))
-    };
-
-    let cert_pem = read(cert_path)?;
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, PemTlsError> {
+    let cert_pem = read_pem(cert_path)?;
     let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| {
@@ -76,8 +79,25 @@ pub fn load_server_tls_config(
             cert_path.display()
         )));
     }
+    Ok(certs)
+}
 
-    let key_pem = read(key_path)?;
+fn read_pem(path: &Path) -> Result<Vec<u8>, PemTlsError> {
+    std::fs::read(path).map_err(|error| PemTlsError(format!("reading {}: {error}", path.display())))
+}
+
+/// Load a PEM certificate chain and key into a `rustls::ServerConfig`.
+///
+/// Blocking file I/O — call from `spawn_blocking` or from a non-async startup
+/// path, never from inside a request handler.
+pub fn load_server_tls_config(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<rustls::ServerConfig, PemTlsError> {
+    let certs = load_certificate_bundle(cert_path)?;
+
+    let key_pem = read_pem(key_path)?;
+
     let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
         .map_err(|error| {
             PemTlsError(format!(

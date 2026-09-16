@@ -37,27 +37,26 @@ fn pinned_peer(alias: &str, key: [u8; 32]) -> rustain::domain::models::A2aPeerSp
     use base64::Engine as _;
     use rustain::domain::models::{A2aPeerSource, PinnedKey, PinnedKeyAlgorithm, RedactedUrl};
 
-    rustain::domain::models::A2aPeerSpec {
-        id: alias.to_owned(),
-        url: RedactedUrl::new(format!("https://{alias}.example/a2a")),
-        pinned_key: Some(PinnedKey::new(
-            PinnedKeyAlgorithm::EdDsa,
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key),
-            None,
-        )),
-        source: A2aPeerSource::Workspace,
-    }
+    rustain::domain::models::A2aPeerSpec::new(
+        alias,
+        RedactedUrl::new(format!("https://{alias}.example/a2a")),
+        A2aPeerSource::Workspace,
+    )
+    .with_pinned_key(Some(PinnedKey::new(
+        PinnedKeyAlgorithm::EdDsa,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key),
+        None,
+    )))
 }
 
 fn unpinned_peer(alias: &str) -> rustain::domain::models::A2aPeerSpec {
     use rustain::domain::models::{A2aPeerSource, RedactedUrl};
 
-    rustain::domain::models::A2aPeerSpec {
-        id: alias.to_owned(),
-        url: RedactedUrl::new(format!("https://{alias}.example/a2a")),
-        pinned_key: None,
-        source: A2aPeerSource::Workspace,
-    }
+    rustain::domain::models::A2aPeerSpec::new(
+        alias,
+        RedactedUrl::new(format!("https://{alias}.example/a2a")),
+        A2aPeerSource::Workspace,
+    )
 }
 
 fn resolved_delivery_policy(
