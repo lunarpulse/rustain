@@ -2328,6 +2328,7 @@ mod tests {
         for i in 0..n {
             let env = Envelope::new(
                 MessageHeader {
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                     sender: AgentId::from_validated("parent"),
                     recipient: agent_id.clone(),
                     correlation_id: CorrelationId::new(format!("c{i}")),
@@ -2467,6 +2468,7 @@ mod tests {
         );
         let env = Envelope::new(
             MessageHeader {
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
                 sender: AgentId::from_validated("attacker"),
                 recipient: agent_id.clone(),
                 correlation_id: CorrelationId::new("hostile-1"),
@@ -2565,6 +2567,7 @@ mod tests {
             &agent_id,
             Envelope::new(
                 MessageHeader {
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                     sender: AgentId::from_validated("sender"),
                     recipient: agent_id.clone(),
                     correlation_id: CorrelationId::new("taint-ingest"),
@@ -2920,6 +2923,7 @@ mod tests {
         };
         let make_delivery = |content: &str| {
             let header = MessageHeader {
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
                 sender: AgentId::from_validated("parent"),
                 recipient: AgentId::from_validated("child"),
                 correlation_id: CorrelationId::new("corr-1"),
@@ -7409,6 +7413,7 @@ mod tests {
         let delivery = AgentDelivery::new(
             Envelope::new(
                 MessageHeader {
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                     sender: AgentId::from_validated("sender"),
                     recipient: agent_id.clone(),
                     correlation_id: correlation.clone(),
@@ -7474,6 +7479,7 @@ mod tests {
         let delivery = AgentDelivery {
             envelope: Envelope {
                 header: MessageHeader {
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                     sender: AgentId::from_validated("s"),
                     recipient: AgentId::from_validated("r"),
                     correlation_id: CorrelationId::new("c"),

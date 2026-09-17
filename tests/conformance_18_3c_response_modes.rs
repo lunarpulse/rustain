@@ -153,6 +153,7 @@ async fn drive_bus_consumer(
             &recipient,
             Envelope {
                 header: MessageHeader {
+                    message_type: rustain::domain::models::SemanticMessageType::Unknown,
                     sender: sender.clone(),
                     recipient: recipient.clone(),
                     correlation_id: CorrelationId::new(format!("response-mode-{sequence}")),
@@ -195,21 +196,32 @@ fn ac1_production_uses_verified_sender_effective_policy_at_the_real_bus() {
     assert!(composition.contains("EffectiveDeliveryPolicy::new"));
     assert!(composition.contains("peer_bus_slot_with_policy"));
     assert!(composition.contains("new_with_node_tree_bus_policy_journal_and_urgency"));
-    assert!(policy.contains("sender_policy_for(&self.policy, peer_id)"));
+    assert!(policy.contains("sender_policy_for(&self.policy, peer_id, message_type)"));
     assert!(policy.contains("relationship_disposition(recipient_ownership)"));
     assert!(delivery.contains("local.header.verified_peer_id = Some(peer_id)"));
     assert!(delivery.contains("ingest_with_policy"));
 }
 
 #[test]
-fn ac1_semantic_message_type_deferral_remains_operator_visible() {
+fn ac1_resolved_message_types_remove_the_stale_startup_notice() {
     let startup = source("src/adapters/daemon/policy_startup.rs");
-    // Behavioral enforcement is covered by
-    // `ac1_pinned_sender_mode_routes_through_bus_and_unpinned_fails_closed`.
-    assert!(startup.contains("MESSAGE_TYPE_DEFERRAL_NOTICE"));
-    assert!(startup.contains("semantic message type is not carried"));
-    assert!(startup.contains("tracing::info!(\"{MESSAGE_TYPE_DEFERRAL_NOTICE}\")"));
-    assert!(startup.contains("per-sender response mode is enforced"));
+    for stale in [
+        concat!("MESSAGE_TYPE_", "DEFERRAL_NOTICE"),
+        concat!("semantic message type is ", "not carried"),
+        concat!("per-sender response mode is ", "enforced"),
+    ] {
+        assert!(
+            !startup.contains(stale),
+            "stale startup claim remains: {stale}"
+        );
+    }
+    // Presence half (`A25`): a deleted banner and a never-printing banner both pass
+    // the absence loop, so absence alone cannot kill the no-op mutant this ratchet
+    // guards — the NFR66-shaped replacement must still be in the guarded source.
+    assert!(
+        startup.contains("STARTUP_BANNER") && startup.contains("interaction policy resolved"),
+        "the resolved-policy startup banner must remain in policy_startup.rs"
+    );
 }
 
 /// [K1] A pinned sender's workspace override must survive the real local-bus
@@ -436,6 +448,7 @@ async fn ac6_delivery_decisions_never_reload_workspace_policy() {
         assert_eq!(rustain::adapters::policy::workspace_policy_load_count(), 1);
 
         let header = MessageHeader {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             sender: AgentId::parse("peer-agent").expect("sender"),
             recipient: AgentId::parse("recipient").expect("recipient"),
             correlation_id: CorrelationId::new("load-ratchet"),

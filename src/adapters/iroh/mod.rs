@@ -25,7 +25,7 @@ use crate::domain::ports::{
     FrameResponder, InboundFrame, PeerAddress, PeerTransport, PeerTransportError,
 };
 
-const PEER_ALPN: &[u8] = b"rustain/peer/1";
+const PEER_ALPN: &[u8] = b"rustain/peer/2";
 const INBOUND_CAPACITY: usize = 128;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 

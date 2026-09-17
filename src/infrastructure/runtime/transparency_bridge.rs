@@ -432,7 +432,7 @@ pub(crate) fn team_send_refusal(error: &crate::adapters::a2a::send::SendError) -
     use crate::adapters::a2a::error::A2aError;
     use crate::adapters::a2a::send::SendError;
 
-    match error {
+    let rendered = match error {
         SendError::AnchorRefused { .. } => error.to_string(),
         SendError::Delegation {
             source: DelegationError::Transport(transport),
@@ -446,7 +446,8 @@ pub(crate) fn team_send_refusal(error: &crate::adapters::a2a::send::SendError) -
             _ => error.to_string(),
         },
         _ => error.to_string(),
-    }
+    };
+    crate::domain::services::peer_text::sanitize_peer_text_line(&rendered).into_owned()
 }
 
 fn emit_team_warning(
@@ -770,7 +771,7 @@ mod tests {
         assert!(!level.is_turn_fatal());
         assert_eq!(
             message,
-            "[peer: moon] task peer-task-42 — completed\npeer answer"
+            "[peer] moon task peer-task-42 — completed\npeer answer"
         );
 
         let input_required = team_send_event(
@@ -1525,7 +1526,7 @@ mod credential_tests {
         };
 
         assert!(
-            message.contains("[peer: plain]") && message.contains("completed"),
+            message.contains("[peer] plain") && message.contains("completed"),
             "the normal success row still renders: {message}"
         );
         assert!(
@@ -1553,7 +1554,7 @@ mod credential_tests {
         unexport(VAR);
 
         assert!(
-            message.contains("[peer: welcome]") && message.contains("completed"),
+            message.contains("[peer] welcome") && message.contains("completed"),
             "a credentialed send still renders its normal success row: {message}"
         );
         assert_eq!(fixture.api_keys_seen().await, vec!["accepted-secret"]);
@@ -1692,5 +1693,31 @@ mod credential_tests {
             untouched,
             "A2A send to peer `beta` failed: A2A transport failure: A2A peer returned HTTP 503"
         );
+    }
+    #[test]
+    fn remote_transport_failure_variants_are_sanitized_before_feedback() {
+        use crate::adapters::a2a::driver::DelegationError;
+        use crate::adapters::a2a::error::A2aError;
+        use crate::adapters::a2a::send::SendError;
+
+        for transport in [
+            A2aError::JsonRpc {
+                code: -32000,
+                message: "bad\x1b[2J\n[forged]".to_owned(),
+            },
+            A2aError::NoJsonRpcEndpoint {
+                reason: "missing\x1b]0;title\x07\r\n[forged]".to_owned(),
+            },
+        ] {
+            let rendered = team_send_refusal(&SendError::Delegation {
+                peer: "beta".to_owned(),
+                source: DelegationError::Transport(transport),
+            });
+            assert!(rendered.contains("bad[forged]") || rendered.contains("missing[forged]"));
+            assert!(
+                !rendered.chars().any(char::is_control),
+                "remote error text reached feedback unsanitized: {rendered:?}"
+            );
+        }
     }
 }

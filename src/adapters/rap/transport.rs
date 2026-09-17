@@ -59,6 +59,7 @@ mod tests {
                 AgentId::parse("recipient").unwrap(),
                 CorrelationId::new("corr"),
                 MessageKind::PeerMessage,
+                String::new(),
                 1,
                 2_000,
                 "nonce".to_string(),

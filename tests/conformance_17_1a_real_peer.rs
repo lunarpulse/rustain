@@ -96,6 +96,7 @@ fn peer_envelope(
                 recipient,
                 CorrelationId::new("real-peer-corr"),
                 MessageKind::PeerMessage,
+                String::new(),
                 sequence,
                 not_after,
                 nonce.to_string(),

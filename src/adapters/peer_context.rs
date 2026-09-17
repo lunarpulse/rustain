@@ -168,6 +168,7 @@ mod tests {
 
     fn header(sequence: u64) -> AgentEnvelopeHeader {
         AgentEnvelopeHeader {
+            message_type: String::new(),
             sender: AgentId::parse("sender").expect("valid agent id"),
             recipient: AgentId::parse("recipient").expect("valid agent id"),
             correlation_id: CorrelationId::new("architecture"),

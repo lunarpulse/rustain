@@ -10,6 +10,8 @@ pub struct AgentEnvelopeHeader {
     pub recipient: AgentId,
     pub correlation_id: CorrelationId,
     pub kind: MessageKind,
+    #[serde(default)]
+    pub message_type: String,
     pub sequence: u64,
     pub not_after: i64,
     pub nonce: String,

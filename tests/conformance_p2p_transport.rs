@@ -36,6 +36,7 @@ fn signed_envelope(seed: u8) -> AgentEnvelope<serde_json::Value> {
             AgentId::parse("local-recipient").expect("recipient"),
             CorrelationId::new("p2p-round-trip"),
             MessageKind::PeerMessage,
+            "consultation".to_owned(),
             1,
             9_999,
             "p2p-nonce".to_owned(),
@@ -58,6 +59,38 @@ fn one_public_key_derives_both_peer_and_endpoint_identity() {
     assert_eq!(
         iroh::EndpointId::from_bytes(derived.endpoint_id.as_bytes()).expect("round trip"),
         derived.endpoint_id
+    );
+}
+
+#[tokio::test]
+async fn pre_semantic_header_alpn_is_refused_during_connection_handshake() {
+    let server = IrohPeerTransport::bind(
+        signing_key(13).to_bytes(),
+        HashMap::new(),
+        &RelayMode::Disabled,
+    )
+    .await
+    .expect("bind production server");
+    let server_address: iroh::EndpointAddr =
+        serde_json::from_slice(server.local_address().expect("server address").as_bytes())
+            .expect("decode adapter address for the deliberately old client");
+
+    let old_client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .secret_key(iroh::SecretKey::from_bytes(&signing_key(14).to_bytes()))
+        .alpns(vec![b"rustain/peer/1".to_vec()])
+        .bind()
+        .await
+        .expect("bind deliberately old client");
+
+    let refusal = old_client
+        .connect(server_address, b"rustain/peer/1")
+        .await
+        .expect_err("the pre-semantic-header ALPN must not negotiate");
+    assert!(
+        refusal.to_string().contains("closed")
+            || refusal.to_string().contains("handshake")
+            || refusal.to_string().contains("application"),
+        "ALPN mismatch must surface as a connection-handshake refusal: {refusal}"
     );
 }
 
@@ -112,6 +145,10 @@ async fn minimal_i_roh_adapter_round_trips_an_unverified_frame() {
 
     assert_eq!(frame.peer_id, client_identity.peer_id);
     assert_eq!(frame.envelope, envelope);
+    assert_eq!(
+        frame.envelope.header.message_type, "consultation",
+        "the current ALPN must carry the signed semantic type end to end"
+    );
     assert_eq!(
         verdict.outcome(),
         FrameOutcome::Accepted,

@@ -51,7 +51,9 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
-use crate::domain::models::{AppConfig, CapabilityRegistry, PeerId, RapTaskState};
+use crate::domain::models::{
+    AppConfig, CapabilityRegistry, PeerId, RapTaskState, SemanticMessageType,
+};
 use crate::domain::ports::{InboundApprovalTicket, InboundPeerRuntime, InboundPeerTask};
 
 use super::admission::{
@@ -727,6 +729,16 @@ async fn message_send(
     echo: serde_json::Value,
     notification: bool,
 ) -> Result<serde_json::Value, JsonRpcErrorResponse> {
+    // AC1(e) one-key-one-spelling: the receive side reads the carrier through
+    // the shared const, so a one-side key respelling cannot compile silently.
+    let message_type = SemanticMessageType::parse_optional(
+        params
+            .pointer(&format!(
+                "/message/metadata/{}",
+                super::MESSAGE_TYPE_METADATA_KEY
+            ))
+            .and_then(serde_json::Value::as_str),
+    );
     let Some(message) = well_formed_message(params.get("message")) else {
         return Err(JsonRpcErrorResponse::new(
             echo,
@@ -782,11 +794,13 @@ async fn message_send(
                 .await;
             Ok(rejected_task_json(&task_id, &reason, &state.signer))
         }
-        AdmissionVerdict::Accept => start_task(state, caller, task_id, message, false)
-            .await
-            .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason)),
+        AdmissionVerdict::Accept => {
+            start_task(state, caller, task_id, message, message_type, false)
+                .await
+                .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason))
+        }
         AdmissionVerdict::AcceptPendingApproval => {
-            start_task(state, caller, task_id, message, true)
+            start_task(state, caller, task_id, message, message_type, true)
                 .await
                 .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason))
         }
@@ -807,6 +821,7 @@ async fn start_task(
     caller: &Caller,
     task_id: String,
     text: String,
+    message_type: SemanticMessageType,
     needs_approval: bool,
 ) -> Result<serde_json::Value, String> {
     let runtime = state
@@ -840,6 +855,7 @@ async fn start_task(
             task_id,
             text,
             peer_id,
+            message_type,
             needs_approval,
         )
         .await;
@@ -862,6 +878,7 @@ async fn setup_task(
     task_id: String,
     text: String,
     peer_id: PeerId,
+    message_type: SemanticMessageType,
     needs_approval: bool,
 ) -> Result<serde_json::Value, String> {
     if needs_approval || runtime.enforces_sender_consent() {
@@ -913,6 +930,7 @@ async fn setup_task(
                 task.clone(),
                 text,
                 peer_id,
+                message_type,
                 pending,
                 ticket,
             ));
@@ -959,7 +977,16 @@ async fn setup_task(
         terminalize_canceled(&state, &task, &peer_id, None).await;
         return task_projection(&state, &task, &peer_id).await;
     }
-    launch(&state, &runtime, &task, text, peer_id.clone(), None).await;
+    launch(
+        &state,
+        &runtime,
+        &task,
+        text,
+        peer_id.clone(),
+        message_type,
+        None,
+    )
+    .await;
     task_projection(&state, &task, &peer_id).await
 }
 
@@ -1048,6 +1075,7 @@ async fn watch_pending_approval(
     task: Arc<super::exec::InboundTask>,
     text: String,
     peer_id: PeerId,
+    message_type: SemanticMessageType,
     pending: PendingTaskRecord,
     ticket: InboundApprovalTicket,
 ) {
@@ -1087,7 +1115,16 @@ async fn watch_pending_approval(
         terminalize_canceled(&state, &task, &peer_id, Some(&pending)).await;
         return;
     }
-    launch(&state, &runtime, &task, text, peer_id, Some(pending)).await;
+    launch(
+        &state,
+        &runtime,
+        &task,
+        text,
+        peer_id,
+        message_type,
+        Some(pending),
+    )
+    .await;
 }
 
 /// Record acceptance durably, then register the peer node, drive the turn, and
@@ -1098,6 +1135,7 @@ async fn launch(
     task: &Arc<super::exec::InboundTask>,
     text: String,
     peer_id: PeerId,
+    message_type: SemanticMessageType,
     pending: Option<PendingTaskRecord>,
 ) {
     // ── AC1 fail-closed keystone ────────────────────────────────────────────
@@ -1136,7 +1174,7 @@ async fn launch(
         return;
     }
     task.advance(RapTaskState::Working).await;
-    let response_policy = runtime.response_policy(&peer_id);
+    let response_policy = runtime.response_policy(&peer_id, message_type);
     let started = runtime
         .start(
             InboundPeerTask {

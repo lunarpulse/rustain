@@ -3090,6 +3090,7 @@ mod tests {
         use crate::domain::models::*;
         Envelope::new(
             MessageHeader {
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
                 sender: AgentId::from_validated("parent"),
                 recipient: AgentId::from_validated("child"),
                 correlation_id: CorrelationId::new(corr),
@@ -3811,6 +3812,7 @@ mod tests {
                 recipient: node.clone(),
                 correlation_id: crate::domain::models::CorrelationId::new("self-release"),
                 kind: crate::domain::models::MessageKind::PeerMessage,
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
                 sequence: None,
                 verified_peer_id: None,
             },

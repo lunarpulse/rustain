@@ -35,6 +35,7 @@ fn sample_peer_envelope() -> AgentEnvelope<serde_json::Value> {
             AgentId::parse("peer-b").expect("valid recipient"),
             CorrelationId::new("peer-corr"),
             MessageKind::PeerMessage,
+            String::new(),
             42,
             9_999,
             "peer-nonce".to_string(),

@@ -24,7 +24,7 @@
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::models::{AgentId, NodeState, PeerId};
+use crate::domain::models::{AgentId, NodeState, PeerId, SemanticMessageType};
 use crate::domain::ports::PeerResponsePolicy;
 
 /// One admitted inbound task, ready to execute as a local peer node.
@@ -122,8 +122,12 @@ impl std::error::Error for InboundPeerError {}
 #[async_trait::async_trait]
 pub trait InboundPeerRuntime: Send + Sync {
     /// Resolve response automation for a verified transport identity.
-    fn response_policy(&self, peer_id: &PeerId) -> PeerResponsePolicy {
-        let _ = peer_id;
+    fn response_policy(
+        &self,
+        peer_id: &PeerId,
+        message_type: SemanticMessageType,
+    ) -> PeerResponsePolicy {
+        let _ = (peer_id, message_type);
         PeerResponsePolicy::default()
     }
 

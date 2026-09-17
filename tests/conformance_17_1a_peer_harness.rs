@@ -22,6 +22,7 @@ fn signed_peer_envelope(sequence: u64, not_after: i64, nonce: &str) -> AgentEnve
             AgentId::parse("peer-b").expect("valid recipient"),
             CorrelationId::new("harness-corr"),
             MessageKind::PeerMessage,
+            String::new(),
             sequence,
             not_after,
             nonce.to_string(),

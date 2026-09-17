@@ -208,6 +208,7 @@ fn signed_envelope_to(
             AgentId::parse(&recipient).expect("recipient"),
             CorrelationId::new(correlation),
             MessageKind::PeerMessage,
+            String::new(),
             sequence,
             2_000,
             format!("nonce-{sequence}"),

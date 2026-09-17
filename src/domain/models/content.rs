@@ -13,6 +13,9 @@ pub enum ContentBlockType {
     PermissionPrompt,
     Error,
     Feedback,
+    /// Raw peer-authored transcript content. Persisted so render-time
+    /// sanitization and host framing remain active after reload.
+    PeerText,
 
     // v0.5
     Thinking(String),

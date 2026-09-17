@@ -179,6 +179,7 @@ fn provenance_clauses_name_the_stored_sources_without_fabricated_defaults() {
 
     let constrained = rustain::domain::models::InteractionPolicySnapshot {
         sender_label: Some("marcus-arch".to_owned()),
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
         response: rustain::domain::models::Resolved {
             value: rustain::domain::models::ResponseMode::NotifyAndWait,
             source: rustain::domain::models::PolicySource::TeamCapped {

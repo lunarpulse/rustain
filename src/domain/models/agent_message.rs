@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::models::{AgentId, NodeState, OwnershipKind};
+use crate::domain::models::{AgentId, NodeState, OwnershipKind, SemanticMessageType};
 
 /// A conversation thread key — **and, since Story 18.4a, a Topic key**
 /// (`Topic := CorrelationId`, COLLAB D2). ⛔ No `TopicId` newtype exists: the
@@ -48,6 +48,8 @@ pub struct MessageHeader {
     pub recipient: AgentId,
     pub correlation_id: CorrelationId,
     pub kind: MessageKind,
+    #[serde(default)]
+    pub message_type: SemanticMessageType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
     /// Transport-authenticated peer identity. Claimed sender ids never drive policy.
@@ -273,6 +275,7 @@ mod tests {
     #[test]
     fn ac5_header_round_trips_with_sequence_none() {
         let header = MessageHeader {
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
             sender: id("parent"),
             recipient: id("child"),
             correlation_id: CorrelationId::new("c-1"),

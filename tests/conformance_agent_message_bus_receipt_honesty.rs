@@ -276,6 +276,7 @@ async fn ac5_real_tree_wiring_behavioral() {
 
     let env = Envelope {
         header: MessageHeader {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             sender: AgentId::parse("parent").unwrap(),
             recipient: agent.clone(),
             correlation_id: CorrelationId::new("wiring"),
@@ -315,6 +316,7 @@ async fn ac5_mutant_empty_tree_returns_not_found() {
     let ghost = AgentId::parse("ghost").unwrap();
     let env = Envelope {
         header: MessageHeader {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             sender: AgentId::parse("parent").unwrap(),
             recipient: ghost.clone(),
             correlation_id: CorrelationId::new("mutant"),

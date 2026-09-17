@@ -17,6 +17,7 @@
 use crate::adapters::tui::state::TuiState;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
+use crate::domain::services::peer_text::sanitize_peer_text_line;
 use crate::domain::services::transparency::{
     ATTRIBUTION_CAVEAT, STRUCTURAL_REPLAY_CLAIM, TransparencyExport, TransparencyRow,
 };
@@ -125,10 +126,13 @@ pub(crate) fn team_send(
     state: &str,
     reply_text: Option<&str>,
 ) -> AppEvent {
-    let mut message = format!("[peer: {peer}] task {task_id} — {state}");
+    let peer = sanitize_peer_text_line(peer);
+    let task_id = sanitize_peer_text_line(task_id);
+    let state = sanitize_peer_text_line(state);
+    let mut message = format!("[peer] {peer} task {task_id} — {state}");
     if let Some(reply_text) = reply_text {
         message.push('\n');
-        message.push_str(reply_text);
+        message.push_str(&sanitize_peer_text_line(reply_text));
     }
     // Advisory, not Warning: a peer reply can land minutes after dispatch,
     // and Warning is turn-fatal (`NoticeLevel::is_turn_fatal`) — it would
@@ -322,8 +326,12 @@ pub fn render_team_status(
             ConsentState::Trusted => "trusted (journaled)".to_owned(),
             ConsentState::Revoked => "revoked".to_owned(),
             ConsentState::None => {
-                if crate::domain::services::team_policy::sender_policy_for(policy, &sender)
-                    .is_some()
+                if crate::domain::services::team_policy::sender_policy_for(
+                    policy,
+                    &sender,
+                    crate::domain::models::SemanticMessageType::Unknown,
+                )
+                .is_some()
                 {
                     "consent implied by TOML override".to_owned()
                 } else {
@@ -442,7 +450,30 @@ mod tests {
         assert!(!level.is_turn_fatal());
         assert_eq!(
             message,
-            "[peer: moon] task peer-task-42 — completed\npeer answer"
+            "[peer] moon task peer-task-42 — completed\npeer answer"
+        );
+    }
+
+    #[test]
+    fn send_result_sanitizes_each_peer_derived_one_line_slot() {
+        let AppEvent::SystemNotice { message, .. } = team_send(
+            "conv",
+            "mo\non",
+            "peer-\x1b[2Jtask-42",
+            "completed\x1b[2J\r\n[urgent]",
+            Some("answer\x1b]0;forged\x07\nsecond"),
+        ) else {
+            panic!("peer send result must use the existing feedback event path");
+        };
+        assert_eq!(
+            message,
+            "[peer] moon task peer-task-42 — completed[urgent]\nanswersecond"
+        );
+        assert!(
+            message
+                .lines()
+                .all(|line| !line.chars().any(char::is_control)),
+            "{message:?}"
         );
     }
 

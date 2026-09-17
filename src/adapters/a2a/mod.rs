@@ -3,6 +3,9 @@
 //! Configuration parsing remains available without the `a2a` feature so startup
 //! can reject configured peers loudly instead of silently omitting them.
 
+#[cfg(feature = "a2a")]
+pub(crate) const MESSAGE_TYPE_METADATA_KEY: &str = "x-rustain-message-type";
+
 pub mod config;
 
 #[cfg(feature = "a2a")]

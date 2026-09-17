@@ -42,7 +42,7 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// Current wire protocol version. Bump on ANY breaking frame-shape change so an
 /// older client/daemon is rejected with [`ProtocolError::VersionMismatch`]
 /// rather than mis-parsing (forward-compat for 12.3/12.4).
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force

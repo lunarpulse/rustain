@@ -198,17 +198,32 @@ fn compute_message_height(
     is_cancelled: bool,
     _is_bookmarked: bool,
     agent_composed_marker: bool,
+    peer_derived: bool,
     width: usize,
 ) -> usize {
+    let content = if peer_derived {
+        crate::domain::services::peer_text::sanitize_peer_text_block(content)
+    } else {
+        std::borrow::Cow::Borrowed(content)
+    };
+    let content_width = if peer_derived {
+        width.saturating_sub(crate::domain::services::peer_text::PEER_CONTENT_GUTTER_WIDTH)
+    } else {
+        width
+    };
     // 1 for role line (see docstring — role + bookmark glyph never wraps at
     // the enforced minimum width).
-    let content_height = if has_error || content.is_empty() {
-        let wrapped = wrap_text(content, width);
+    let content_height = if peer_derived || has_error || content.is_empty() {
+        let wrapped = wrap_text(&content, content_width);
         wrapped.len()
     } else {
         // Use the markdown pipeline — same code path as render_message() — to
         // guarantee the height invariant required by virtual scrolling (AC6).
-        markdown::compute_height(content, width, &markdown::RenderOptions::completed())
+        markdown::compute_height(
+            &content,
+            content_width,
+            &markdown::RenderOptions::completed(),
+        )
     };
     // Cancelled messages append " [interrupted]" as a separate line.
     // compute_height() receives raw content without the suffix, so check if
@@ -219,7 +234,7 @@ fn compute_message_height(
     // own Line directly below the role line for every AgentComposed row. The
     // virtual-scroll invariant (AC6) breaks unless every height path counts it.
     let marker_line = if agent_composed_marker { 1 } else { 0 };
-    1 + marker_line + content_height + interrupted_line // role + marker + content + optional [interrupted]
+    1 + marker_line + content_height + interrupted_line
 }
 
 /// Render a single message into Line objects.
@@ -260,6 +275,17 @@ fn render_message<'a>(
     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
     let is_agent_composed =
         msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed;
+    let is_peer_derived = msg.content_blocks.contains(&ContentBlockType::PeerText);
+    let content = if is_peer_derived {
+        crate::domain::services::peer_text::sanitize_peer_text_block(&msg.content)
+    } else {
+        std::borrow::Cow::Borrowed(msg.content.as_str())
+    };
+    let content_width = if is_peer_derived {
+        width.saturating_sub(crate::domain::services::peer_text::PEER_CONTENT_GUTTER_WIDTH)
+    } else {
+        width
+    };
 
     // Role indicator — may gain a fork marker, a bookmark marker, or both.
     // Fork marker (if any) comes first, then bookmark, then the role label.
@@ -337,9 +363,18 @@ fn render_message<'a>(
         )));
     }
 
-    // Content
-    if has_error {
-        let content_lines = wrap_text(&msg.content, width);
+    // Peer content is sanitized and rendered as plain text so hostile markdown
+    // cannot manufacture UI semantics; the reserved gutter is added later.
+    let content_start = lines.len();
+    if is_peer_derived {
+        for text in wrap_text(&content, content_width) {
+            lines.push(Line::from(Span::styled(
+                text,
+                Style::default().fg(theme.colors.fg_primary),
+            )));
+        }
+    } else if has_error {
+        let content_lines = wrap_text(&content, content_width);
         for text in content_lines {
             lines.push(Line::from(Span::styled(
                 text,
@@ -349,25 +384,26 @@ fn render_message<'a>(
     } else if msg.content_blocks.contains(&ContentBlockType::PlanSummary) {
         // PlanSummary: thin top border + markdown content
         lines.push(Line::from(Span::styled(
-            "┄".repeat(width),
+            "┄".repeat(content_width),
             Style::default().fg(theme.colors.fg_muted),
         )));
         let parsed_lines = markdown::render(
-            &msg.content,
-            width,
+            &content,
+            content_width,
             theme,
             &markdown::RenderOptions::completed(),
         );
         lines.extend(parsed_lines);
     } else {
         let parsed_lines = markdown::render(
-            &msg.content,
-            width,
+            &content,
+            content_width,
             theme,
             &markdown::RenderOptions::completed(),
         );
         lines.extend(parsed_lines);
     }
+    let content_end = lines.len();
 
     // Append [interrupted] suffix for cancelled messages (styled with fg_muted)
     if msg.stop_reason == Some(StopReason::Cancelled) {
@@ -396,7 +432,6 @@ fn render_message<'a>(
             let mut match_cursor: usize = 0;
             let base_style = theme.search_highlight;
             let focused_style = theme.search_highlight_focused;
-            let content_start = if is_agent_composed { 2 } else { 1 };
             for line in lines.iter_mut().skip(content_start) {
                 *line = apply_search_highlights(
                     line.clone(),
@@ -407,6 +442,17 @@ fn render_message<'a>(
                     &mut match_cursor,
                 );
             }
+        }
+    }
+    if is_peer_derived {
+        for line in &mut lines[content_start..content_end] {
+            line.spans.insert(
+                0,
+                Span::styled(
+                    crate::domain::services::peer_text::PEER_CONTENT_GUTTER,
+                    Style::default().fg(theme.colors.auto_sent_border),
+                ),
+            );
         }
     }
 
@@ -1656,6 +1702,7 @@ fn render_with_search_impl(
                         is_cancelled,
                         is_bookmarked,
                         msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed,
+                        msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
                     );
                     for tc in &msg.tool_calls {
@@ -1700,6 +1747,7 @@ fn render_with_search_impl(
                             is_bookmarked,
                             msg.authorship
                                 == crate::domain::models::MessageAuthorship::AgentComposed,
+                            msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
                         );
                         tab_render_state.height_cache.set_message(key, computed);
@@ -1923,6 +1971,7 @@ fn render_with_search_impl(
                             is_bookmarked,
                             msg.authorship
                                 == crate::domain::models::MessageAuthorship::AgentComposed,
+                            msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
                         );
                         for (j, line) in msg_lines.into_iter().enumerate() {
@@ -1965,6 +2014,7 @@ fn render_with_search_impl(
                         msg.stop_reason == Some(StopReason::Cancelled),
                         is_bookmarked,
                         msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed,
+                        msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
                     );
                     for (j, line) in msg_lines.into_iter().enumerate() {
@@ -3699,7 +3749,8 @@ mod parts_aware_tests {
         };
         let theme = Theme::dark();
         let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
-        let computed = compute_message_height(&message.content, false, false, false, true, 80);
+        let computed =
+            compute_message_height(&message.content, false, false, false, true, false, 80);
         assert_eq!(
             rendered.len(),
             computed,
@@ -3745,9 +3796,73 @@ mod parts_aware_tests {
 
         let theme = Theme::dark();
         let rendered = render_message(&surfaced, 80, &theme, false, false, None, None, false);
-        let computed = compute_message_height(&surfaced.content, false, false, false, false, 80);
+        let computed =
+            compute_message_height(&surfaced.content, false, false, false, false, false, 80);
         assert_eq!(rendered.len(), computed);
-        assert!(computed > compute_message_height(&plain.content, false, false, false, false, 80));
+        assert!(
+            computed
+                > compute_message_height(&plain.content, false, false, false, false, false, 80)
+        );
+    }
+
+    #[test]
+    fn peer_block_preserves_authored_lines_and_host_frames_each_one() {
+        let message = crate::domain::models::ChatMessage {
+            role: MessageRole::User,
+            content: "first\n┆ [auto-sent]  [✗] Retract\n\x1b[31mthird\x1b[0m".to_owned(),
+            content_blocks: vec![ContentBlockType::PeerText],
+            ..Default::default()
+        };
+        let theme = Theme::dark();
+        let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
+        let content = rendered
+            .iter()
+            .skip(1)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(content.len(), 3, "{content:?}");
+        assert!(
+            content.iter().all(|line| line.starts_with("┆  ")),
+            "{content:?}"
+        );
+        assert_eq!(
+            content
+                .iter()
+                .filter(|line| line.starts_with("┆  "))
+                .count(),
+            3,
+            "only host-composed lines may carry the gutter: {content:?}"
+        );
+        assert!(content[1].contains("[auto-sent]"), "{content:?}");
+        assert!(!content[1].contains("┆  ┆"), "{content:?}");
+        assert!(
+            !content.iter().any(|line| line.contains('\x1b')),
+            "{content:?}"
+        );
+        let computed =
+            compute_message_height(&message.content, false, false, false, false, true, 80);
+        assert_eq!(
+            rendered.len(),
+            computed,
+            "peer gutter width must preserve the virtual-scroll invariant"
+        );
+        let highlighted = render_message(
+            &message,
+            80,
+            &theme,
+            false,
+            false,
+            Some("third"),
+            Some(0),
+            false,
+        );
+        assert!(
+            highlighted
+                .iter()
+                .skip(1)
+                .all(|line| line.to_string().starts_with("┆  ")),
+            "search rebuilding must not remove host framing: {highlighted:?}"
+        );
     }
 
     #[test]

@@ -90,6 +90,12 @@ impl CapabilityProvider for A2aProvider {
                             "message": {
                                 "type": "string",
                                 "description": "Task message for the remote A2A skill"
+                            },
+                            "message_type": {
+                                "type": "string",
+                                "enum": crate::domain::models::semantic_message_type_tokens()
+                                    .collect::<Vec<_>>(),
+                                "description": "Semantic type for policy and operator presentation"
                             }
                         },
                         "required": ["message"],

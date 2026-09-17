@@ -72,6 +72,7 @@ impl rustain::domain::ports::DeliveryPolicy for ModePolicy {
     fn response_policy_for_peer(
         &self,
         _peer_id: &rustain::domain::models::PeerId,
+        _message_type: rustain::domain::models::SemanticMessageType,
     ) -> rustain::domain::ports::PeerResponsePolicy {
         rustain::domain::ports::PeerResponsePolicy {
             mode: self.0,
@@ -212,6 +213,7 @@ impl InboundPeerRuntime for ScrubRuntime {
     fn response_policy(
         &self,
         _peer_id: &rustain::domain::models::PeerId,
+        _message_type: rustain::domain::models::SemanticMessageType,
     ) -> rustain::domain::ports::PeerResponsePolicy {
         rustain::domain::ports::PeerResponsePolicy {
             mode: rustain::domain::models::ResponseMode::NotifyAndAuto,
@@ -3163,6 +3165,7 @@ fn peer_envelope(
     use rustain::domain::models::{AgentId, AgentMessage, CorrelationId, Envelope, MessageHeader};
     Envelope {
         header: MessageHeader {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             sender: AgentId::parse("peer-sender").expect("valid sender id"),
             recipient: recipient.clone(),
             correlation_id: CorrelationId::new(correlation),

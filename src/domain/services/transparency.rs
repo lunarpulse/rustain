@@ -1444,6 +1444,7 @@ mod tests {
         // floor raised the member's authored `queue` to `immediate`.
         let snapshot = InteractionPolicySnapshot {
             sender_label: None,
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
             response: Resolved {
                 value: ResponseMode::NotifyAndWait,
                 source: PolicySource::Default,

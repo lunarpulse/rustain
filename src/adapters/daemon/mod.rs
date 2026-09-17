@@ -304,13 +304,6 @@ async fn run_daemon_foreground(
         &a2a_peers,
         consent_projection.as_ref(),
     )?;
-    if !effective_policy.deferred_overrides.is_empty() {
-        tracing::info!(
-            message_type = "policy_deferred_override",
-            count = effective_policy.deferred_overrides.len(),
-            "policy contains accepted-but-unenforced sender overrides"
-        );
-    }
     let effective_policy = std::sync::Arc::new(effective_policy);
     // The admission value only feeds the authority-widening WARNING — a
     // malformed optional-listener config must not be fatal to daemon startup
@@ -1230,6 +1223,7 @@ mod p2p_listener_composition_tests {
                 recipient.clone(),
                 CorrelationId::new("composition-1"),
                 MessageKind::PeerMessage,
+                String::new(),
                 1,
                 not_after,
                 "composition-nonce".to_owned(),

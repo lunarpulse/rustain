@@ -86,7 +86,7 @@ impl PolicyConfigError {
 }
 
 /// Both policy files, loaded.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PolicyFiles {
     pub individual: IndividualPolicy,
     /// `None` when no team file exists — which is different from an empty one:
@@ -380,8 +380,9 @@ auto_response_always_marked = true
             Some(ResponseMode::NotifyAndWait)
         );
         assert_eq!(team.defaults.notification, Some(NotificationUrgency::Queue));
-        // The type-keyed tier parses but is never resolved.
-        assert_eq!(team.overrides.configured_keys().len(), 4);
+        // Legacy flat keys load into the refusal inventory instead of stopping
+        // startup or masquerading as the new type grammar.
+        assert_eq!(team.overrides.retired_keys().len(), 4);
         assert_eq!(
             team.overrides.status_detail_minimum.as_deref(),
             Some("story-and-blockers")
@@ -445,6 +446,121 @@ notification = "queue"
             individual.overrides["*"]
                 .per_type
                 .contains_key("status_request")
+        );
+    }
+
+    #[test]
+    fn both_tiers_parse_the_same_message_type_sub_block_grammar() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            INDIVIDUAL_POLICY_FILE,
+            r#"
+[interaction.overrides.peer.consultation]
+response_mode = "notify-and-wait"
+notification = "immediate"
+auto_response = "I will review this."
+"#,
+        );
+        write(
+            dir.path(),
+            TEAM_POLICY_FILE,
+            r#"
+[team.overrides]
+status_detail_minimum = "story-and-blockers"
+
+[team.overrides.consultation]
+response_mode = "notify-and-draft"
+notification = "queue"
+"#,
+        );
+
+        let loaded = load_workspace_policies(dir.path()).expect("shared grammar parses");
+        assert!(
+            loaded.individual.overrides["peer"]
+                .per_type
+                .contains_key("consultation")
+        );
+        let team = loaded.team.expect("team file");
+        let block = <crate::domain::models::TeamTypeOverride as serde::Deserialize>::deserialize(
+            team.overrides.per_type["consultation"].clone(),
+        )
+        .expect("the shared grammar deserializes as a team type block");
+        assert_eq!(block.response_mode, Some(ResponseMode::NotifyAndDraft));
+        assert_eq!(
+            team.overrides.status_detail_minimum.as_deref(),
+            Some("story-and-blockers")
+        );
+    }
+
+    #[test]
+    fn retired_team_keys_load_into_the_refusal_inventory_instead_of_stopping_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            TEAM_POLICY_FILE,
+            r#"
+[team.overrides]
+story_assignment_notification = "immediate"
+architecture_updates = "queue"
+bug_reports = "digest"
+status_request_response = "notify-and-wait"
+"#,
+        );
+
+        let team = load_workspace_policies(dir.path())
+            .expect("retired keys are parse-and-refuse, not daemon-down")
+            .team
+            .expect("team file");
+        assert_eq!(
+            team.overrides.retired_keys(),
+            [
+                "story_assignment_notification",
+                "architecture_updates",
+                "bug_reports",
+                "status_request_response",
+            ]
+        );
+        assert!(team.overrides.per_type.is_empty());
+    }
+
+    /// A scalar-shaped unknown `[team.overrides]` key must load — the file
+    /// parses, the daemon starts — and be refused by name by the resolver,
+    /// never take the workspace down as a hard parse error (`AC5(c)`).
+    #[test]
+    fn a_scalar_unknown_team_override_key_loads_and_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            TEAM_POLICY_FILE,
+            "[team.overrides]\nfuture_message = \"queue\"\n",
+        );
+        let team = load_workspace_policies(dir.path())
+            .expect("a scalar unknown key must not stop the file from loading")
+            .team
+            .expect("team file");
+        assert_eq!(
+            team.overrides.per_type["future_message"],
+            toml::Value::String("queue".to_owned())
+        );
+
+        let effective = crate::domain::services::team_policy::resolve_effective_policy(
+            &crate::domain::models::IndividualPolicy::default(),
+            Some(&team),
+            &[],
+        );
+        let refused = effective
+            .invalid_message_types
+            .iter()
+            .find(|entry| entry.key == "team.overrides.future_message")
+            .expect("the unknown key must be refused by name");
+        assert!(
+            matches!(
+                refused.reason,
+                crate::domain::models::InvalidMessageTypeKeyReason::UnrecognizedToken
+            ),
+            "{:?}",
+            refused.reason
         );
     }
 
@@ -540,6 +656,7 @@ notification = "queue"
                 bug_reports: Some(NotificationUrgency::Immediate),
                 status_request_response: Some(ResponseMode::NotifyAndAuto),
                 status_detail_minimum: Some("story-and-blockers".to_owned()),
+                per_type: std::collections::BTreeMap::new(),
             },
             transparency: crate::domain::models::TeamTransparency::default(),
         };

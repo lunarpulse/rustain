@@ -32,9 +32,11 @@ use crate::domain::events::{AppEvent, DomainEventPayload};
 use crate::domain::models::{
     A2aPeerSpec, AgentId, AgentMetrics, CapabilityTokenId, ContentHash, CorrelationId, Direction,
     MessageKind, NodeState, Op, PeerId, RapTaskState, RefuseReason, RejectReason, RoomEvent,
-    SubagentEnvelope, SubagentEvent, TrustTier,
+    SemanticMessageType, SubagentEnvelope, SubagentEvent, TrustTier,
+    semantic_message_type_metadata,
 };
 use crate::domain::ports::{RoomJournal, RoomJournalError};
+use crate::domain::services::peer_text::sanitize_peer_text_line;
 use crate::domain::services::transparency::{
     MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, TRUNCATION_MARKER, sanitize_disclosable,
 };
@@ -580,7 +582,9 @@ impl A2aDelegationRuntime {
                     };
                     self.reject(node_id, peer, parent_tool_call_id, &task.id, &reason)
                         .await?;
-                    Err(DelegationError::Refused { reason })
+                    Err(DelegationError::Refused {
+                        reason: sanitize_peer_text_line(&reason).into_owned(),
+                    })
                 }
             },
             Ok(LifecycleOutcome::InputRequired { task }) => {
@@ -825,22 +829,46 @@ fn outbound_message_fact(message: &serde_json::Value) -> (Option<String>, usize)
 
 /// Build an A2A `message/send` params object from the tool input. The JSON-RPC
 /// binding uses `kind`-tagged parts.
+///
+/// D3: the closed semantic-type domain holds on the emit side too. A recognised
+/// token is re-emitted under its canonical spelling; absence/empty omits the
+/// carrier key entirely (the receiver resolves absence to Unknown); any other
+/// token is dropped with a warning — never forwarded raw.
 pub fn build_message(input: &serde_json::Value) -> serde_json::Value {
     let text = input
         .get("message")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| input.to_string());
+    let message_type = input
+        .get("message_type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|token| !token.is_empty())
+        .and_then(|token| match SemanticMessageType::parse(token) {
+            SemanticMessageType::Unknown => {
+                tracing::warn!("dropping unrecognized a2a message_type token {token:?}");
+                None
+            }
+            kind => Some(semantic_message_type_metadata(kind).token),
+        });
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let mut metadata = serde_json::Map::new();
+    if let Some(token) = message_type {
+        metadata.insert(
+            super::MESSAGE_TYPE_METADATA_KEY.to_owned(),
+            serde_json::Value::String(token.to_owned()),
+        );
+    }
     serde_json::json!({
         "message": {
             "kind": "message",
             "messageId": format!("rustain-{nanos}"),
             "role": "user",
-            "parts": [{ "kind": "text", "text": text }]
+            "parts": [{ "kind": "text", "text": text }],
+            "metadata": metadata,
         }
     })
 }
@@ -852,10 +880,61 @@ mod tests {
     use std::time::Duration;
 
     use parking_lot::Mutex;
+    use tracing_test::traced_test;
 
     use super::*;
     use crate::domain::models::{JournalRecord, RedactedUrl};
     use crate::infrastructure::subagent::{NodeJournal, NodeRoomJournal};
+
+    #[test]
+    fn build_message_emits_the_exact_semantic_type_metadata_key() {
+        let typed = build_message(&serde_json::json!({
+            "message": "review this",
+            "message_type": "consultation"
+        }));
+        assert_eq!(
+            typed.pointer("/message/metadata/x-rustain-message-type"),
+            Some(&serde_json::Value::String("consultation".to_owned()))
+        );
+
+        let untyped = build_message(&serde_json::json!({ "message": "review this" }));
+        assert_eq!(
+            untyped.pointer("/message/metadata/x-rustain-message-type"),
+            None,
+            "D3: absence already resolves to Unknown on receipt, so the key is omitted"
+        );
+    }
+
+    #[test]
+    #[traced_test]
+    fn build_message_drops_an_unrecognized_type_token_and_warns_its_name() {
+        // D3: the closed domain holds on emit too — an unrecognized token is
+        // never forwarded raw; the carrier key is omitted so the receiver
+        // resolves Unknown, and the drop warns once, naming the token.
+        let dropped = build_message(&serde_json::json!({
+            "message": "review this",
+            "message_type": "urgent_escalation"
+        }));
+        assert_eq!(
+            dropped.pointer("/message/metadata/x-rustain-message-type"),
+            None,
+            "an unrecognized token must never reach the wire"
+        );
+        assert!(
+            logs_contain("urgent_escalation"),
+            "the warn must name the dropped token"
+        );
+
+        let empty = build_message(&serde_json::json!({
+            "message": "review this",
+            "message_type": ""
+        }));
+        assert_eq!(
+            empty.pointer("/message/metadata/x-rustain-message-type"),
+            None,
+            "an empty token is absence, not a type"
+        );
+    }
 
     fn spec(id: &str, verified: bool) -> A2aPeerSpec {
         use crate::domain::models::{A2aPeerSource, PinnedKey, PinnedKeyAlgorithm};
@@ -1256,7 +1335,7 @@ mod tests {
                     "status": {
                         "state": "rejected",
                         "message": {
-                            "parts": [{ "kind": "text", "text": "quota exceeded on peer" }]
+                            "parts": [{ "kind": "text", "text": "quota \u{001b}[2Jexceeded\r\n[urgent] ┆ on peer" }]
                         }
                     }
                 }))
@@ -1287,8 +1366,16 @@ mod tests {
         let DelegationError::Refused { reason } = &error else {
             panic!("expected a refusal, got {error:?}");
         };
-        assert!(reason.contains("quota exceeded on peer"), "{reason}");
+        assert!(
+            reason.contains("quota exceeded[urgent] ┆ on peer"),
+            "{reason}"
+        );
         assert!(reason.contains("rejected"), "{reason}");
+        assert!(
+            !reason.chars().any(char::is_control),
+            "peer refusal reached the human-facing error with controls: {reason:?}"
+        );
+        assert!(!reason.contains("[2J"), "{reason}");
 
         let room_events = std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|event| {
@@ -1303,7 +1390,7 @@ mod tests {
             Some(RoomEvent::RemoteEnvelopeRejected {
                 reason: RejectReason::Policy { detail },
                 ..
-            }) if detail.contains("quota exceeded on peer")
+            }) if detail.contains("quota [2Jexceeded[urgent] ┆ on peer")
         ));
     }
 

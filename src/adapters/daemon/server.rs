@@ -34,8 +34,9 @@ use crate::adapters::rap::{
 use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
-    AgentId, AgentMessage, ChannelKind, ChannelTurnRequest, ChatMessage, Conversation, MessageRole,
-    NodeState, PeerId, StopReason, StreamChunk, ToolRisk, TurnOrigin, generate_message_id,
+    AgentId, AgentMessage, ChannelKind, ChannelTurnRequest, ChatMessage, ContentBlockType,
+    Conversation, MessageRole, NodeState, PeerId, StopReason, StreamChunk, ToolRisk, TurnOrigin,
+    generate_message_id,
 };
 use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntimeEvent};
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
@@ -56,6 +57,30 @@ const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120
 
 const CHANNEL_TURN_FAILED_REPLY: &str =
     "Sorry, processing failed before the agent produced a response. Please try again.";
+/// Peer-authored transcript row: the provenance header wraps the raw text, a
+/// real id is minted (rows persist, so an empty id breaks addressing), and
+/// `synthetic: false` — peer utterances are not host-synthesized, so the `⤷`
+/// glyph must not render on them.
+fn peer_transcript_message(
+    text: &str,
+    peer: &PeerId,
+    provenance: &crate::domain::models::InteractionPolicySnapshot,
+) -> ChatMessage {
+    ChatMessage {
+        id: generate_message_id(),
+        role: MessageRole::User,
+        content: format!(
+            "{}\n{text}\n{}\n{}",
+            provenance.peer_header(peer),
+            provenance.response_clause(),
+            provenance.notification_clause()
+        ),
+        content_blocks: vec![ContentBlockType::PeerText],
+        created_at: crate::domain::models::session_meta::now_unix(),
+        synthetic: false,
+        ..Default::default()
+    }
+}
 
 /// A consolidation proposal set retained by the daemon for token-gated resolve
 /// (Story 12.2d AC2/AC4). Keyed by the marker's `queued_at_unix` in
@@ -722,18 +747,11 @@ impl AttachServer {
         }
         let mut conversation = self.conversation.lock().await;
         for interaction in queued {
-            conversation.messages.push(ChatMessage {
-                id: generate_message_id(),
-                role: MessageRole::User,
-                content: format!(
-                    "{}\n{}\n{}",
-                    interaction.text,
-                    interaction.provenance.response_clause(),
-                    interaction.provenance.notification_clause()
-                ),
-                created_at: crate::domain::models::session_meta::now_unix(),
-                ..Default::default()
-            });
+            conversation.messages.push(peer_transcript_message(
+                &interaction.text,
+                &interaction.peer,
+                &interaction.provenance,
+            ));
         }
         self.core.storage.save_conversation(&conversation).await?;
         Ok(())
@@ -1962,13 +1980,11 @@ impl AttachServer {
                 }
                 {
                     let mut conversation = self.conversation.lock().await;
-                    conversation.messages.push(ChatMessage {
-                        id: generate_message_id(),
-                        role: MessageRole::User,
-                        content: text,
-                        created_at: crate::domain::models::session_meta::now_unix(),
-                        ..Default::default()
-                    });
+                    conversation.messages.push(peer_transcript_message(
+                        &text,
+                        &peer_id,
+                        &response_policy.provenance,
+                    ));
                     if fresh {
                         conversation.messages.push(ChatMessage {
                             id: response_row_id.clone(),
@@ -2014,13 +2030,11 @@ impl AttachServer {
                 );
                 {
                     let mut conversation = self.conversation.lock().await;
-                    conversation.messages.push(ChatMessage {
-                        id: generate_message_id(),
-                        role: MessageRole::User,
-                        content: text,
-                        created_at: crate::domain::models::session_meta::now_unix(),
-                        ..Default::default()
-                    });
+                    conversation.messages.push(peer_transcript_message(
+                        &text,
+                        &peer_id,
+                        &response_policy.provenance,
+                    ));
                     conversation.messages.push(ChatMessage {
                         id: generate_message_id(),
                         role: MessageRole::Assistant,
@@ -2068,13 +2082,11 @@ impl AttachServer {
                 // duplicate row id.
                 if !self.pending_drafts.begin(recipient.as_str()).await {
                     let mut conversation = self.conversation.lock().await;
-                    conversation.messages.push(ChatMessage {
-                        id: generate_message_id(),
-                        role: MessageRole::User,
-                        content: text,
-                        created_at: crate::domain::models::session_meta::now_unix(),
-                        ..Default::default()
-                    });
+                    conversation.messages.push(peer_transcript_message(
+                        &text,
+                        &peer_id,
+                        &response_policy.provenance,
+                    ));
                     self.core
                         .storage
                         .save_conversation(&conversation)
@@ -2084,13 +2096,11 @@ impl AttachServer {
                 }
                 {
                     let mut conversation = self.conversation.lock().await;
-                    conversation.messages.push(ChatMessage {
-                        id: generate_message_id(),
-                        role: MessageRole::User,
-                        content: text,
-                        created_at: crate::domain::models::session_meta::now_unix(),
-                        ..Default::default()
-                    });
+                    conversation.messages.push(peer_transcript_message(
+                        &text,
+                        &peer_id,
+                        &response_policy.provenance,
+                    ));
                     conversation.messages.push(ChatMessage {
                         id: response_row_id.clone(),
                         role: MessageRole::Assistant,
@@ -3175,8 +3185,13 @@ fn disclosure_forbidden_fragments(system_prompt: &str) -> Vec<String> {
 /// everything but name.
 #[async_trait::async_trait]
 impl crate::domain::ports::InboundPeerRuntime for AttachServer {
-    fn response_policy(&self, peer_id: &PeerId) -> crate::domain::ports::PeerResponsePolicy {
-        self.delivery_policy.response_policy_for_peer(peer_id)
+    fn response_policy(
+        &self,
+        peer_id: &PeerId,
+        message_type: crate::domain::models::SemanticMessageType,
+    ) -> crate::domain::ports::PeerResponsePolicy {
+        self.delivery_policy
+            .response_policy_for_peer(peer_id, message_type)
     }
 
     async fn park_pending_consent(
@@ -3426,18 +3441,11 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     {
                         let mut conversation = self.conversation.lock().await;
                         if surface_now {
-                            conversation.messages.push(ChatMessage {
-                                id: generate_message_id(),
-                                role: MessageRole::User,
-                                content: format!(
-                                    "{}\n{}\n{}",
-                                    task.text,
-                                    task.response_policy.provenance.response_clause(),
-                                    task.response_policy.provenance.notification_clause()
-                                ),
-                                created_at: crate::domain::models::session_meta::now_unix(),
-                                ..Default::default()
-                            });
+                            conversation.messages.push(peer_transcript_message(
+                                &task.text,
+                                &task.peer_id,
+                                &task.response_policy.provenance,
+                            ));
                         }
                         conversation.messages.push(ChatMessage {
                             id: format!("peer-response-{}", task.node_id.as_str()),
@@ -3480,18 +3488,11 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     {
                         let mut conversation = self.conversation.lock().await;
                         if surface_now {
-                            conversation.messages.push(ChatMessage {
-                                id: generate_message_id(),
-                                role: MessageRole::User,
-                                content: format!(
-                                    "{}\n{}\n{}",
-                                    task.text,
-                                    task.response_policy.provenance.response_clause(),
-                                    task.response_policy.provenance.notification_clause()
-                                ),
-                                created_at: crate::domain::models::session_meta::now_unix(),
-                                ..Default::default()
-                            });
+                            conversation.messages.push(peer_transcript_message(
+                                &task.text,
+                                &task.peer_id,
+                                &task.response_policy.provenance,
+                            ));
                         }
                         conversation.messages.push(ChatMessage {
                             id: format!("peer-response-{}", task.node_id.as_str()),
@@ -3544,18 +3545,11 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     {
                         let mut conversation = self.conversation.lock().await;
                         if surface_now {
-                            conversation.messages.push(ChatMessage {
-                                id: generate_message_id(),
-                                role: MessageRole::User,
-                                content: format!(
-                                    "{}\n{}\n{}",
-                                    task.text,
-                                    task.response_policy.provenance.response_clause(),
-                                    task.response_policy.provenance.notification_clause()
-                                ),
-                                created_at: crate::domain::models::session_meta::now_unix(),
-                                ..Default::default()
-                            });
+                            conversation.messages.push(peer_transcript_message(
+                                &task.text,
+                                &task.peer_id,
+                                &task.response_policy.provenance,
+                            ));
                         }
                         conversation.messages.push(ChatMessage {
                             id: format!("peer-response-{}", task.node_id.as_str()),
@@ -4090,6 +4084,50 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn peer_transcript_message_persists_raw_content_and_render_boundary_marker() {
+        let peer = test_signer(89).identity().peer_id.clone();
+        let provenance = crate::domain::models::InteractionPolicySnapshot {
+            sender_label: Some("moon".to_owned()),
+            message_type: crate::domain::models::SemanticMessageType::BugReport,
+            ..Default::default()
+        };
+        let raw = "first\n┆ [auto-sent]\n\x1b[31mthird\x1b[0m";
+        let message = peer_transcript_message(raw, &peer, &provenance);
+        assert!(
+            message.content.contains(raw),
+            "storage must retain byte-identical peer evidence"
+        );
+        assert_eq!(message.content_blocks, vec![ContentBlockType::PeerText]);
+        assert!(
+            !message.id.is_empty(),
+            "peer rows persist; an empty id would break transcript addressing"
+        );
+        assert!(
+            !message.synthetic,
+            "peer utterances are not host-synthesized; the ⤷ glyph must not render"
+        );
+        assert!(message.content.starts_with("bug_report · moon\n"));
+
+        let encoded = serde_json::to_string(&message).expect("serialize peer transcript row");
+        let reloaded: ChatMessage =
+            serde_json::from_str(&encoded).expect("reload peer transcript row");
+        assert!(reloaded.content.contains(raw));
+        assert_eq!(reloaded.content_blocks, vec![ContentBlockType::PeerText]);
+        let unknown = peer_transcript_message(
+            "payload",
+            &peer,
+            &crate::domain::models::InteractionPolicySnapshot {
+                sender_label: Some("moon".to_owned()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            unknown.content.starts_with("unknown type · moon\n"),
+            "the unknown type uses the registry's fixed safe disclosure"
+        );
     }
 
     async fn wait_for_terminal(status: &mut tokio::sync::watch::Receiver<NodeState>) -> NodeState {
@@ -5456,6 +5494,7 @@ mod tests {
                     recipient,
                     CorrelationId::new("corr"),
                     MessageKind::PeerMessage,
+                    String::new(),
                     sequence,
                     not_after,
                     "env-nonce".to_string(),
@@ -5886,9 +5925,10 @@ mod tests {
         shutdown.cancel();
         handle.abort();
     }
-    /// AC2: a protocol version mismatch is rejected with a clear Error frame.
+    /// Story 19.15 AC2: the pre-semantic-header daemon protocol is rejected
+    /// before proof validation, with the named version-mismatch error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn version_mismatch_is_rejected() {
+    async fn pre_semantic_header_protocol_is_rejected_before_proof() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
         let (core, _storage) = mock_core(ws, vec![]);
@@ -5913,7 +5953,7 @@ mod tests {
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: PROTOCOL_VERSION + 99,
+                protocol_version: 2,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -5926,7 +5966,7 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, PROTOCOL_VERSION + 99);
+                assert_eq!(client, 2);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }

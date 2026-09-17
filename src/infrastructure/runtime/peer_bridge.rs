@@ -775,6 +775,7 @@ async fn send_ping_frames(
                     recipient.clone(),
                     CorrelationId::new(&correlation),
                     MessageKind::PeerMessage,
+                    String::new(),
                     position.next_sequence,
                     now_ms.saturating_add(ping::PING_TTL_MS),
                     correlation.clone(),

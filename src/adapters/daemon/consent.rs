@@ -181,7 +181,12 @@ impl PendingConsentManager {
         let Some(policy) = guard.as_ref() else {
             return false;
         };
-        crate::domain::services::team_policy::sender_policy_for(policy, sender).is_some()
+        crate::domain::services::team_policy::sender_policy_for(
+            policy,
+            sender,
+            crate::domain::models::SemanticMessageType::Unknown,
+        )
+        .is_some()
     }
 
     /// Resolve the sender's whole waiting group. `AllowAlways` is fail-closed:

@@ -35,10 +35,11 @@
 use std::collections::BTreeMap;
 
 use crate::domain::models::{
-    A2aPeerSpec, DeferredKey, EffectivePolicy, INDIVIDUAL_POLICY_FILE, IndividualPolicy,
-    MSGTYPE_DEFERRAL, NotificationUrgency, PeerId, PolicySource, Resolved, ResponseMode,
-    SenderBinding, SenderIdentity, SenderIdentityConflict, SenderPolicy, SharingBreadth,
-    TEAM_POLICY_FILE, TeamPolicy, TransparencyInvariant,
+    A2aPeerSpec, EffectivePolicy, INDIVIDUAL_POLICY_FILE, IndividualPolicy, InvalidMessageTypeKey,
+    InvalidMessageTypeKeyReason, MessageTypeOverride, NotificationUrgency, PeerId, PolicySource,
+    Resolved, ResponseMode, SemanticMessageType, SenderBinding, SenderIdentity,
+    SenderIdentityConflict, SenderPolicy, SharingBreadth, TEAM_POLICY_FILE, TeamPolicy,
+    TeamTypeOverride, TransparencyInvariant, semantic_message_type_metadata,
 };
 
 /// The deferral that owns sharing-breadth enforcement semantics.
@@ -136,7 +137,12 @@ pub fn resolve_effective_policy(
         sharing,
         digest_interval_minutes: individual.defaults.digest_interval_minutes,
         team_file_present: team.is_some(),
-        deferred_overrides: collect_deferred_overrides(individual, team),
+        team_type_overrides: team
+            .into_iter()
+            .flat_map(|policy| &policy.overrides.per_type)
+            .filter_map(|(token, value)| team_type_block(token, value))
+            .collect(),
+        invalid_message_types: collect_invalid_message_types(individual, team),
         transparency_invariants: collect_transparency_invariants(team),
         sender_overrides,
         sender_conflicts,
@@ -183,50 +189,100 @@ fn cap_source<T: PartialEq>(
     }
 }
 
-/// Every per-message-type key either file configured, all of them unenforceable.
+/// Configured keys that could not enter the closed message-type vocabulary.
 ///
-/// `MessageKind` has three transport variants and `MessageHeader` carries no
-/// semantic type field, so there is no key to match on in production today. These
-/// are surfaced rather than dropped: the operator wrote them.
-fn collect_deferred_overrides(
+/// The team schema deliberately parses any value shape, so this is the
+/// post-parse gate: a key becomes policy only when it names a closed-vocabulary
+/// token and carries a parseable block; everything else is inventoried here
+/// with the reason it was refused. The reason is load-bearing — a wildcard
+/// block never binds a sender identity, which is a different fact from a
+/// misspelled token.
+fn collect_invalid_message_types(
     individual: &IndividualPolicy,
     team: Option<&TeamPolicy>,
-) -> Vec<DeferredKey> {
-    let mut deferred = Vec::new();
+) -> Vec<InvalidMessageTypeKey> {
+    let mut invalid = Vec::new();
     for (alias, override_) in &individual.overrides {
-        for key in override_.per_type.keys() {
-            deferred.push(DeferredKey {
+        let wildcard = alias.as_str() == "*";
+        for key in override_
+            .per_type
+            .keys()
+            .filter(|key| wildcard || recognised_message_type(key).is_none())
+        {
+            invalid.push(InvalidMessageTypeKey {
                 key: format!("interaction.overrides.\"{alias}\".{key}"),
                 file: INDIVIDUAL_POLICY_FILE.to_owned(),
-                deferral: MSGTYPE_DEFERRAL.to_owned(),
+                reason: if wildcard {
+                    // A wildcard binds no sender identity: nothing under it
+                    // can ever apply, valid spelling or not. It is not an
+                    // invalid spelling and must not be called one.
+                    InvalidMessageTypeKeyReason::WildcardSender
+                } else {
+                    InvalidMessageTypeKeyReason::UnrecognizedToken
+                },
             });
         }
-        if alias == "*" {
+        if wildcard {
             for (key, configured) in [
                 ("response_mode", override_.response_mode.is_some()),
                 ("notification", override_.notification.is_some()),
                 ("auto_response", override_.auto_response.is_some()),
             ] {
                 if configured {
-                    deferred.push(DeferredKey {
+                    invalid.push(InvalidMessageTypeKey {
                         key: format!("interaction.overrides.\"*\".{key}"),
                         file: INDIVIDUAL_POLICY_FILE.to_owned(),
-                        deferral: MSGTYPE_DEFERRAL.to_owned(),
+                        reason: InvalidMessageTypeKeyReason::WildcardSender,
                     });
                 }
             }
         }
     }
     if let Some(team) = team {
-        for key in team.overrides.configured_keys() {
-            deferred.push(DeferredKey {
+        for key in team.overrides.retired_keys() {
+            invalid.push(InvalidMessageTypeKey {
                 key: format!("team.overrides.{key}"),
                 file: TEAM_POLICY_FILE.to_owned(),
-                deferral: MSGTYPE_DEFERRAL.to_owned(),
+                reason: InvalidMessageTypeKeyReason::UnrecognizedToken,
             });
         }
+        for (token, value) in &team.overrides.per_type {
+            if team_type_block(token, value).is_none() {
+                invalid.push(InvalidMessageTypeKey {
+                    key: format!("team.overrides.{token}"),
+                    file: TEAM_POLICY_FILE.to_owned(),
+                    reason: team_type_block_refusal(token),
+                });
+            }
+        }
     }
-    deferred
+    invalid
+}
+
+/// The valid team per-type block behind a `[team.overrides]` key, if any: the
+/// key must name a closed-vocabulary token AND carry a table that deserializes
+/// as [`TeamTypeOverride`] — the same `deny_unknown_fields` shape the
+/// delivery-time lookup consumes.
+fn team_type_block(
+    token: &str,
+    value: &toml::Value,
+) -> Option<(SemanticMessageType, TeamTypeOverride)> {
+    recognised_message_type(token)
+        .zip(<TeamTypeOverride as serde::Deserialize>::deserialize(value.clone()).ok())
+}
+
+/// Why a `[team.overrides]` key never became a per-type block.
+fn team_type_block_refusal(token: &str) -> InvalidMessageTypeKeyReason {
+    if recognised_message_type(token).is_some() {
+        InvalidMessageTypeKeyReason::InvalidValue
+    } else {
+        InvalidMessageTypeKeyReason::UnrecognizedToken
+    }
+}
+
+fn recognised_message_type(token: &str) -> Option<SemanticMessageType> {
+    let message_type = SemanticMessageType::parse(token);
+    (message_type != SemanticMessageType::Unknown).then_some(message_type)
 }
 
 fn collect_transparency_invariants(team: Option<&TeamPolicy>) -> Vec<TransparencyInvariant> {
@@ -277,13 +333,21 @@ fn resolve_sender_overrides(
                     team: team_urgency,
                 }
             });
+            let per_type = override_
+                .per_type
+                .iter()
+                .filter_map(|(token, override_)| {
+                    recognised_message_type(token)
+                        .map(|message_type| (message_type, override_.clone()))
+                })
+                .collect();
             SenderPolicy {
                 alias: alias.clone(),
                 identity: resolve_sender_identity(alias, override_.peer_id.as_deref(), peers),
                 response_mode,
                 notification,
                 auto_response: override_.auto_response.clone(),
-                deferred_types: override_.per_type.keys().cloned().collect(),
+                per_type,
             }
         })
         .collect();
@@ -360,18 +424,157 @@ pub fn resolve_sender_identity(
     }
 }
 
-/// Look a resolved override up by the identity a delivery would carry.
-///
-/// The lookup 18-3c will drive. Keyed on `PeerId`, so it is immune to alias
-/// churn by construction.
+/// One identity-bound sender policy plus the override selected by the closed
+/// semantic message type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SenderPolicyMatch<'a> {
+    pub policy: &'a SenderPolicy,
+    pub type_override: Option<&'a MessageTypeOverride>,
+}
+
+impl std::ops::Deref for SenderPolicyMatch<'_> {
+    type Target = SenderPolicy;
+
+    fn deref(&self) -> &Self::Target {
+        self.policy
+    }
+}
+
+/// Look a resolved override up by verified identity and closed message type.
 pub fn sender_policy_for<'a>(
     policy: &'a EffectivePolicy,
     sender: &PeerId,
-) -> Option<&'a SenderPolicy> {
+    message_type: SemanticMessageType,
+) -> Option<SenderPolicyMatch<'a>> {
     policy
         .sender_overrides
         .iter()
         .find(|override_| override_.identity.peer_id() == Some(sender))
+        .map(|policy| SenderPolicyMatch {
+            type_override: policy.per_type.get(&message_type),
+            policy,
+        })
+}
+
+/// Resolve the two delivery quantities for one semantic type without allowing
+/// either a team or individual type block to loosen the type-agnostic answer.
+pub fn resolve_message_type_policy(
+    policy: &EffectivePolicy,
+    sender: Option<SenderPolicyMatch<'_>>,
+    message_type: SemanticMessageType,
+) -> (Resolved<ResponseMode>, Resolved<NotificationUrgency>) {
+    let base_response = sender
+        .and_then(|matched| matched.response_mode.clone())
+        .unwrap_or_else(|| policy.automation.clone());
+    let base_notification = sender
+        .and_then(|matched| matched.notification.clone())
+        .unwrap_or_else(|| policy.urgency.clone());
+    let individual = sender.and_then(|matched| matched.type_override);
+    let team = policy.team_type_overrides.get(&message_type);
+
+    (
+        resolve_type_automation(
+            base_response,
+            individual.and_then(|override_| override_.response_mode),
+            team.and_then(|override_| override_.response_mode),
+        ),
+        resolve_type_urgency(
+            base_notification,
+            individual.and_then(|override_| override_.notification),
+            team.and_then(|override_| override_.notification),
+        ),
+    )
+}
+
+fn resolve_type_automation(
+    base: Resolved<ResponseMode>,
+    individual_override: Option<ResponseMode>,
+    team_override: Option<ResponseMode>,
+) -> Resolved<ResponseMode> {
+    if individual_override.is_none() && team_override.is_none() {
+        return base;
+    }
+    let individual = individual_override.map_or(base.value, |value| base.value.min(value));
+    let value = team_override.map_or(individual, |team| individual.min(team));
+    let source = if value != individual {
+        PolicySource::TeamCapped {
+            file: TEAM_POLICY_FILE.to_owned(),
+        }
+    } else if individual != base.value {
+        PolicySource::Individual {
+            file: INDIVIDUAL_POLICY_FILE.to_owned(),
+        }
+    } else {
+        base.source
+    };
+    Resolved {
+        value,
+        source,
+        individual,
+        team: team_override,
+    }
+}
+
+fn resolve_type_urgency(
+    base: Resolved<NotificationUrgency>,
+    individual_override: Option<NotificationUrgency>,
+    team_override: Option<NotificationUrgency>,
+) -> Resolved<NotificationUrgency> {
+    if individual_override.is_none() && team_override.is_none() {
+        return base;
+    }
+    let individual = individual_override.map_or(base.value, |value| base.value.max(value));
+    let value = team_override.map_or(individual, |team| individual.max(team));
+    let source = if value != individual {
+        PolicySource::TeamRaised {
+            file: TEAM_POLICY_FILE.to_owned(),
+        }
+    } else if individual != base.value {
+        PolicySource::Individual {
+            file: INDIVIDUAL_POLICY_FILE.to_owned(),
+        }
+    } else {
+        base.source
+    };
+    Resolved {
+        value,
+        source,
+        individual,
+        team: team_override,
+    }
+}
+
+/// One team per-type block folded through the same lattice the delivery-time
+/// lookup uses — the row material for the explainer's per-type sentences and
+/// the JSON mirror.
+///
+/// A quantity is `None` exactly when the block does not configure it; when
+/// `Some`, `.team` is that configured override and `.individual` is the
+/// type-agnostic effective value it was folded against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamTypeResolution {
+    pub message_type: SemanticMessageType,
+    pub response: Option<Resolved<ResponseMode>>,
+    pub notification: Option<Resolved<NotificationUrgency>>,
+}
+
+/// Fold every configured team per-type block through
+/// [`resolve_type_automation`] / [`resolve_type_urgency`]. The explainer
+/// renders these; it never re-derives the merge.
+pub fn team_type_resolutions(policy: &EffectivePolicy) -> Vec<TeamTypeResolution> {
+    policy
+        .team_type_overrides
+        .iter()
+        .map(|(message_type, override_)| TeamTypeResolution {
+            message_type: *message_type,
+            response: override_
+                .response_mode
+                .map(|team| resolve_type_automation(policy.automation.clone(), None, Some(team))),
+            notification: override_
+                .notification
+                .map(|team| resolve_type_urgency(policy.urgency.clone(), None, Some(team))),
+        })
+        .collect()
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -565,20 +768,134 @@ pub fn explain_effective_policy(
         });
     }
 
-    // ── keys that parsed but cannot act ──
-    for deferred in &policy.deferred_overrides {
-        rows.push(PolicyRow {
-            key: format!("deferred:{}", deferred.key),
-            detail: format!(
-                "`{}` ({}) parsed but is NOT yet enforced: no semantic message type exists to \
-                 match on, so this key currently changes nothing",
-                deferred.key, deferred.file
+    // ── per-type team overrides, folded into this one check (`A12`): each
+    //    configured block shows its own resolution — quantity, floor bit,
+    //    binding direction via min()/max(), effective value — instead of
+    //    riding along invisibly in the JSON mirror ──
+    for resolution in team_type_resolutions(policy) {
+        let token = semantic_message_type_metadata(resolution.message_type).token;
+        if let Some(resolved) = &resolution.response {
+            // The block moved the answer iff it is stricter than the
+            // type-agnostic effective value it was folded against.
+            let moved = resolved.value != resolved.individual;
+            rows.push(PolicyRow {
+                key: format!("type:{token}:response_automation"),
+                detail: format!(
+                    "per-type response automation for `{token}`: team agreement {} binds \
+                     DOWNWARD via min() against the type-agnostic effective `{}` (yours `{}`, \
+                     team default: {}) — effective `{}`",
+                    describe_team_input(resolved.team.as_ref()),
+                    resolved.individual,
+                    policy.automation.individual,
+                    describe_team_input(policy.automation.team.as_ref()),
+                    resolved.value,
+                ),
+                guidance: moved.then(|| {
+                    let team = resolved
+                        .team
+                        .map_or(String::new(), |value| value.to_string());
+                    format!(
+                        "`[team.overrides.{token}].response_mode = \"{team}\"` binds DOWNWARD via \
+                         min(): no individual setting can make `{token}` looser than `{}`. A \
+                         looser setting on `{token}` requires the agreement to change in \
+                         {TEAM_POLICY_FILE}.",
+                        resolved.value
+                    )
+                }),
+                notice: if moved {
+                    PolicyNotice::Warning
+                } else {
+                    PolicyNotice::Info
+                },
+            });
+        }
+        if let Some(resolved) = &resolution.notification {
+            let moved = resolved.value != resolved.individual;
+            rows.push(PolicyRow {
+                key: format!("type:{token}:notification_urgency"),
+                detail: format!(
+                    "per-type notification urgency for `{token}`: team floor {} binds UPWARD \
+                     via max() against the type-agnostic effective `{}` (yours `{}`, team \
+                     default: {}) — effective `{}`",
+                    describe_team_input(resolved.team.as_ref()),
+                    resolved.individual,
+                    policy.urgency.individual,
+                    describe_team_input(policy.urgency.team.as_ref()),
+                    resolved.value,
+                ),
+                guidance: moved.then(|| {
+                    let team = resolved
+                        .team
+                        .map_or(String::new(), |value| value.to_string());
+                    format!(
+                        "`[team.overrides.{token}].notification = \"{team}\"` binds UPWARD via \
+                         max(): no individual setting can make `{token}` quieter than `{}`. A \
+                         quieter setting on `{token}` requires the floor to change in \
+                         {TEAM_POLICY_FILE}.",
+                        resolved.value
+                    )
+                }),
+                notice: if moved {
+                    PolicyNotice::Warning
+                } else {
+                    PolicyNotice::Info
+                },
+            });
+        }
+    }
+
+    // ── invalid message-type keys: parsed so startup can continue, refused so
+    //    a typo, retired name, wrong-shaped block, or wildcard bind can never
+    //    become policy. Each reason gets truthful wording — a wildcard binds no
+    //    sender identity, which is not an invalid spelling ──
+    let valid_message_types = crate::domain::models::semantic_message_type_tokens()
+        .collect::<Vec<_>>()
+        .join(", ");
+    for invalid in &policy.invalid_message_types {
+        let (key, detail, guidance) = match invalid.reason {
+            InvalidMessageTypeKeyReason::UnrecognizedToken => (
+                format!("invalid-message-type:{}", invalid.key),
+                format!(
+                    "`{}` ({}) is invalid and refused by name; the policy file loaded and \
+                     daemon startup continues",
+                    invalid.key, invalid.file
+                ),
+                Some(format!(
+                    "Use one of the eight valid message types: {valid_message_types}."
+                )),
             ),
-            guidance: Some(format!(
-                "Tracked as {}. The key is retained, not dropped — remove it if you expected it \
-                 to take effect today.",
-                deferred.deferral
-            )),
+            InvalidMessageTypeKeyReason::InvalidValue => (
+                format!("invalid-message-type:{}", invalid.key),
+                format!(
+                    "`{}` ({}) names a valid message type but its value is not a valid \
+                     per-type policy block; it is refused by name and daemon startup continues",
+                    invalid.key, invalid.file
+                ),
+                Some(
+                    "A per-type block accepts `response_mode` (`notify-and-wait`, \
+                     `notify-and-draft`, `notify-and-auto`) and `notification` (`digest`, \
+                     `queue`, `immediate`)."
+                        .to_owned(),
+                ),
+            ),
+            InvalidMessageTypeKeyReason::WildcardSender => (
+                format!("wildcard-override:{}", invalid.key),
+                format!(
+                    "`{}` sits under the `[interaction.overrides.\"*\"]` wildcard, which binds \
+                     no sender identity, so it can never apply; it is retained and reported",
+                    invalid.key
+                ),
+                Some(
+                    "Overrides bind a sender by alias block name or `peer_id`; replace the \
+                     wildcard with the peer's alias or pin its `peer_id`."
+                        .to_owned(),
+                ),
+            ),
+        };
+        rows.push(PolicyRow {
+            key,
+            detail,
+            guidance,
             notice: PolicyNotice::Warning,
         });
     }
@@ -853,8 +1170,9 @@ fn short_id(peer_id: &PeerId) -> String {
 mod tests {
     use super::*;
     use crate::domain::models::{
-        A2aPeerSource, IndividualDefaults, PinnedKey, PinnedKeyAlgorithm, RedactedUrl,
-        SenderOverride, TeamDefaults, TeamOverrides, TeamTransparency, alias_pseudonym,
+        A2aPeerSource, IndividualDefaults, InvalidMessageTypeKeyReason, PinnedKey,
+        PinnedKeyAlgorithm, RedactedUrl, SenderOverride, TeamDefaults, TeamOverrides,
+        TeamTransparency, TeamTypeOverride, alias_pseudonym,
     };
     use base64::Engine as _;
 
@@ -1125,8 +1443,8 @@ mod tests {
         // Before the rename.
         let before = resolve_effective_policy(&policy, None, &[peer("marcus-arch", Some(key))]);
         assert_eq!(
-            sender_policy_for(&before, &identity)
-                .and_then(|sender| sender.response_mode.as_ref())
+            sender_policy_for(&before, &identity, SemanticMessageType::Unknown)
+                .and_then(|sender| sender.response_mode.clone())
                 .map(|resolved| resolved.value),
             Some(ResponseMode::NotifyAndDraft)
         );
@@ -1135,8 +1453,8 @@ mod tests {
         // file's alias alone. The binding is the identity, so it holds.
         let after = resolve_effective_policy(&policy, None, &[peer("marcus", Some(key))]);
         assert_eq!(
-            sender_policy_for(&after, &identity)
-                .and_then(|sender| sender.response_mode.as_ref())
+            sender_policy_for(&after, &identity, SemanticMessageType::Unknown)
+                .and_then(|sender| sender.response_mode.clone())
                 .map(|resolved| resolved.value),
             Some(ResponseMode::NotifyAndDraft),
             "an explicit identity binding must survive an alias rename"
@@ -1160,8 +1478,8 @@ mod tests {
         let effective = resolve_effective_policy(&policy, None, &[peer("lena-po", Some(key))]);
         let identity = PeerId::from_public_key(&key).unwrap();
         assert_eq!(
-            sender_policy_for(&effective, &identity)
-                .and_then(|sender| sender.notification.as_ref())
+            sender_policy_for(&effective, &identity, SemanticMessageType::Unknown)
+                .and_then(|sender| sender.notification.clone())
                 .map(|resolved| resolved.value),
             Some(NotificationUrgency::Immediate)
         );
@@ -1183,7 +1501,11 @@ mod tests {
             SenderIdentity::Unpinned { .. }
         ));
         assert_eq!(
-            sender_policy_for(&effective, &alias_pseudonym("drive-by")),
+            sender_policy_for(
+                &effective,
+                &alias_pseudonym("drive-by"),
+                SemanticMessageType::Unknown,
+            ),
             None,
             "an alias pseudonym is diagnostic and must never grant a sender policy"
         );
@@ -1237,8 +1559,8 @@ mod tests {
         // sender that presents this key in a signed envelope resolves to the
         // pinned identity, so the override really does bind for it …
         assert_eq!(
-            sender_policy_for(&effective, &pinned)
-                .and_then(|sender| sender.response_mode.as_ref())
+            sender_policy_for(&effective, &pinned, SemanticMessageType::Unknown)
+                .and_then(|sender| sender.response_mode.clone())
                 .map(|resolved| resolved.value),
             Some(ResponseMode::NotifyAndAuto),
             "a declared pin must still bind for the identity it names"
@@ -1247,7 +1569,11 @@ mod tests {
         // handle>)`, which no pinned public key can equal.
         for handle in ["loopback", "apikey:some-presented-key"] {
             assert_eq!(
-                sender_policy_for(&effective, &alias_pseudonym(handle)),
+                sender_policy_for(
+                    &effective,
+                    &alias_pseudonym(handle),
+                    SemanticMessageType::Unknown,
+                ),
                 None,
                 "an A2A submitter identity must never resolve a pinned override"
             );
@@ -1289,7 +1615,11 @@ mod tests {
             SenderIdentity::Unknown
         );
         assert_eq!(
-            sender_policy_for(&effective, &alias_pseudonym("ghost")),
+            sender_policy_for(
+                &effective,
+                &alias_pseudonym("ghost"),
+                SemanticMessageType::Unknown,
+            ),
             None
         );
     }
@@ -1323,7 +1653,8 @@ mod tests {
 
         let effective =
             resolve_effective_policy(&policy, Some(&team_policy), &[peer("peer", Some(key))]);
-        let sender = sender_policy_for(&effective, &identity).expect("sender policy");
+        let sender = sender_policy_for(&effective, &identity, SemanticMessageType::Unknown)
+            .expect("sender policy");
         assert_eq!(
             sender.response_mode.as_ref().map(|resolved| resolved.value),
             Some(ResponseMode::NotifyAndWait)
@@ -1387,7 +1718,10 @@ mod tests {
         let effective = resolve_effective_policy(&policy, None, &[peer("renamed", Some(key))]);
         assert!(effective.sender_overrides.is_empty());
         assert_eq!(effective.sender_conflicts.len(), 1);
-        assert_eq!(sender_policy_for(&effective, &identity), None);
+        assert_eq!(
+            sender_policy_for(&effective, &identity, SemanticMessageType::Unknown),
+            None
+        );
         let explanation = explain_effective_policy(&effective, &[]);
         assert!(explanation.rows.iter().any(|row| {
             row.key.starts_with("sender-conflict:")
@@ -1430,8 +1764,11 @@ mod tests {
         );
     }
 
+    /// `P7`: the real rule is that a wildcard binds no sender identity, so a
+    /// valid spelling under `[interaction.overrides."*"]` is retained and
+    /// reported with the wildcard reason — never called an invalid spelling.
     #[test]
-    fn wildcard_override_is_deferred_not_treated_as_a_peer_alias() {
+    fn wildcard_override_is_refused_not_treated_as_a_peer_alias() {
         let mut policy = IndividualPolicy::default();
         let mut wildcard = SenderOverride {
             notification: Some(NotificationUrgency::Immediate),
@@ -1445,17 +1782,195 @@ mod tests {
 
         let effective = resolve_effective_policy(&policy, None, &[]);
         assert!(effective.sender_overrides.is_empty());
-        assert!(
-            effective
-                .deferred_overrides
+        for key in [
+            "interaction.overrides.\"*\".notification",
+            "interaction.overrides.\"*\".status_request",
+        ] {
+            let entry = effective
+                .invalid_message_types
                 .iter()
-                .any(|key| key.key == "interaction.overrides.\"*\".notification")
+                .find(|entry| entry.key == key)
+                .unwrap_or_else(|| panic!("missing wildcard entry for {key}"));
+            assert_eq!(entry.reason, InvalidMessageTypeKeyReason::WildcardSender);
+        }
+
+        // The wording must tell the wildcard truth, not the spelling lie.
+        let explanation = explain_effective_policy(&effective, &[]);
+        for needle in [
+            "interaction.overrides.\"*\".notification",
+            "interaction.overrides.\"*\".status_request",
+        ] {
+            let row = explanation
+                .rows
+                .iter()
+                .find(|row| row.detail.contains(needle))
+                .unwrap_or_else(|| panic!("missing wildcard row for {needle}"));
+            assert!(
+                row.detail.contains("binds no sender identity"),
+                "a wildcard entry is a binding fact, not a spelling: {}",
+                row.detail
+            );
+            assert!(
+                !row.detail.contains("invalid"),
+                "wildcard entries must not be called invalid spellings: {}",
+                row.detail
+            );
+            let guidance = row.guidance.as_deref().expect("wildcard guidance");
+            assert!(
+                !guidance.contains("valid message types"),
+                "the spelling guidance is wrong for a wildcard: {guidance}"
+            );
+        }
+    }
+
+    /// `AC5(e)`/`AC7(a)`: per-type rows folded into the ONE explanation, each
+    /// naming the quantity, the team floor bit, the binding direction via
+    /// max()/min(), and the effective value — rendered through the same
+    /// `resolve_type_*` lattice the delivery-time lookup uses, never a
+    /// re-derived merge.
+    #[test]
+    fn team_type_blocks_render_their_min_and_max_resolution() {
+        let mut team_policy = team(None, None);
+        team_policy.overrides.per_type = std::collections::BTreeMap::from([
+            (
+                "status_request".to_owned(),
+                toml::Value::try_from(TeamTypeOverride {
+                    response_mode: Some(ResponseMode::NotifyAndWait),
+                    notification: None,
+                })
+                .unwrap(),
+            ),
+            (
+                "bug_report".to_owned(),
+                toml::Value::try_from(TeamTypeOverride {
+                    response_mode: None,
+                    notification: Some(NotificationUrgency::Immediate),
+                })
+                .unwrap(),
+            ),
+        ]);
+        let effective = resolve_effective_policy(
+            &individual(ResponseMode::NotifyAndAuto, NotificationUrgency::Digest),
+            Some(&team_policy),
+            &[],
+        );
+
+        let explanation = explain_effective_policy(&effective, &[]);
+        let row = |key: &str| {
+            explanation
+                .rows
+                .iter()
+                .find(|row| row.key == key)
+                .unwrap_or_else(|| panic!("missing per-type row {key}: {:?}", explanation.rows))
+        };
+
+        // DOWNWARD: min(notify-and-auto, notify-and-wait) = notify-and-wait.
+        let automation = row("type:status_request:response_automation");
+        for needle in [
+            "response automation",
+            "team agreement `notify-and-wait`",
+            "binds DOWNWARD via min()",
+            "yours `notify-and-auto`",
+            "effective `notify-and-wait`",
+        ] {
+            assert!(automation.detail.contains(needle), "{}", automation.detail);
+        }
+        assert_eq!(automation.notice, PolicyNotice::Warning);
+        assert!(
+            automation
+                .guidance
+                .as_deref()
+                .is_some_and(|text| text.contains("[team.overrides.status_request].response_mode")),
+            "{:?}",
+            automation.guidance
+        );
+
+        // UPWARD: max(digest, immediate) = immediate.
+        let urgency = row("type:bug_report:notification_urgency");
+        for needle in [
+            "notification urgency",
+            "team floor `immediate`",
+            "binds UPWARD via max()",
+            "yours `digest`",
+            "effective `immediate`",
+        ] {
+            assert!(urgency.detail.contains(needle), "{}", urgency.detail);
+        }
+        assert_eq!(urgency.notice, PolicyNotice::Warning);
+    }
+
+    /// Defect #3's named post-state (`AC7(a)`): with
+    /// `[team.overrides.status_request].response_mode` configured, the
+    /// explainer shows it resolving through FR96's downward `min()` — here the
+    /// type-agnostic answer is already stricter, so it stays effective and the
+    /// row is informative, not a conflict.
+    #[test]
+    fn status_request_response_mode_shows_its_downward_min_resolution() {
+        let mut team_policy = team(None, None);
+        team_policy.overrides.per_type.insert(
+            "status_request".to_owned(),
+            toml::Value::try_from(TeamTypeOverride {
+                response_mode: Some(ResponseMode::NotifyAndAuto),
+                notification: None,
+            })
+            .unwrap(),
+        );
+        let effective =
+            resolve_effective_policy(&IndividualPolicy::default(), Some(&team_policy), &[]);
+        let explanation = explain_effective_policy(&effective, &[]);
+        let row = explanation
+            .rows
+            .iter()
+            .find(|row| row.key == "type:status_request:response_automation")
+            .expect("the configured block must render");
+        assert!(row.detail.contains("min()"), "{}", row.detail);
+        assert!(row.detail.contains("`notify-and-auto`"), "{}", row.detail);
+        assert!(
+            row.detail.contains("effective `notify-and-wait`"),
+            "{}",
+            row.detail
+        );
+        assert_eq!(row.notice, PolicyNotice::Info);
+    }
+
+    /// A recognized token whose value is not a parseable block is refused by
+    /// name with its own reason and repair guidance — the block shape's
+    /// `deny_unknown_fields` semantics survive the tolerant parse.
+    #[test]
+    fn a_recognized_team_key_with_a_wrong_shaped_value_is_refused_not_loaded() {
+        let team_policy: TeamPolicy = toml::from_str(
+            r#"
+[overrides]
+status_request = "queue"
+"#,
+        )
+        .expect("the tolerant parse accepts any value shape");
+        let effective =
+            resolve_effective_policy(&IndividualPolicy::default(), Some(&team_policy), &[]);
+        assert!(effective.team_type_overrides.is_empty());
+        let entry = effective
+            .invalid_message_types
+            .iter()
+            .find(|entry| entry.key == "team.overrides.status_request")
+            .expect("the wrong-shaped block must be refused by name");
+        assert_eq!(entry.reason, InvalidMessageTypeKeyReason::InvalidValue);
+        let explanation = explain_effective_policy(&effective, &[]);
+        let row = explanation
+            .rows
+            .iter()
+            .find(|row| row.detail.contains("team.overrides.status_request"))
+            .expect("refusal row");
+        assert!(
+            row.detail.contains("names a valid message type"),
+            "{}",
+            row.detail
         );
         assert!(
-            effective
-                .deferred_overrides
-                .iter()
-                .any(|key| key.key == "interaction.overrides.\"*\".status_request")
+            row.guidance.as_deref().is_some_and(
+                |text| text.contains("`response_mode`") && text.contains("`notification`")
+            ),
+            "{:?}",
+            row.guidance
         );
     }
 
@@ -1754,46 +2269,74 @@ mod tests {
     }
 
     #[test]
-    fn unenforced_per_type_keys_from_both_files_are_reported() {
+    fn invalid_config_type_blocks_are_refused_by_name_with_the_closed_vocabulary() {
         let mut policy = IndividualPolicy::default();
-        let mut per_type = std::collections::BTreeMap::new();
-        per_type.insert(
-            "story_assignment".to_owned(),
-            crate::domain::models::MessageTypeOverride::default(),
-        );
         policy.overrides.insert(
             "lena-po".to_owned(),
             SenderOverride {
-                per_type,
+                per_type: std::collections::BTreeMap::from([(
+                    "future_message".to_owned(),
+                    crate::domain::models::MessageTypeOverride::default(),
+                )]),
                 ..SenderOverride::default()
             },
         );
         let team_policy = TeamPolicy {
             overrides: TeamOverrides {
                 bug_reports: Some(NotificationUrgency::Immediate),
+                per_type: std::collections::BTreeMap::from([(
+                    "future_message".to_owned(),
+                    toml::Value::try_from(crate::domain::models::TeamTypeOverride::default())
+                        .unwrap(),
+                )]),
                 ..TeamOverrides::default()
             },
             ..TeamPolicy::default()
         };
 
         let effective = resolve_effective_policy(&policy, Some(&team_policy), &[]);
-        assert_eq!(effective.deferred_overrides.len(), 2);
+        assert_eq!(effective.invalid_message_types.len(), 3);
+        for (key, reason) in [
+            (
+                "interaction.overrides.\"lena-po\".future_message",
+                InvalidMessageTypeKeyReason::UnrecognizedToken,
+            ),
+            (
+                "team.overrides.bug_reports",
+                InvalidMessageTypeKeyReason::UnrecognizedToken,
+            ),
+            (
+                "team.overrides.future_message",
+                InvalidMessageTypeKeyReason::UnrecognizedToken,
+            ),
+        ] {
+            let entry = effective
+                .invalid_message_types
+                .iter()
+                .find(|entry| entry.key == key)
+                .unwrap_or_else(|| panic!("missing refusal entry for {key}"));
+            assert_eq!(entry.reason, reason, "{key}");
+        }
         let explanation = explain_effective_policy(&effective, &[]);
         for needle in [
-            "interaction.overrides.\"lena-po\".story_assignment",
+            "interaction.overrides.\"lena-po\".future_message",
             "team.overrides.bug_reports",
+            "team.overrides.future_message",
         ] {
             let row = explanation
                 .rows
                 .iter()
                 .find(|row| row.detail.contains(needle))
-                .unwrap_or_else(|| panic!("missing deferred row for {needle}"));
-            assert!(row.detail.contains("NOT yet enforced"), "{}", row.detail);
+                .unwrap_or_else(|| panic!("missing invalid-type row for {needle}"));
             assert!(
-                row.guidance
-                    .as_deref()
-                    .is_some_and(|g| g.contains(MSGTYPE_DEFERRAL))
+                row.detail.contains("invalid and refused by name"),
+                "{}",
+                row.detail
             );
+            let guidance = row.guidance.as_deref().expect("repair guidance");
+            for token in crate::domain::models::semantic_message_type_tokens() {
+                assert!(guidance.contains(token), "{guidance}");
+            }
             assert_eq!(row.notice, PolicyNotice::Warning);
         }
     }

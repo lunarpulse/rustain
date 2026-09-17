@@ -31,7 +31,7 @@ use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::domain::models::PeerId;
+use crate::domain::models::{PeerId, SemanticMessageType, semantic_message_type_metadata};
 
 /// The individual policy file, relative to `.rustain/`.
 pub const INDIVIDUAL_POLICY_FILE: &str = "a2a-interaction.toml";
@@ -46,9 +46,6 @@ pub const TEAM_POLICY_FILE: &str = "team-policy.toml";
 /// story's loader rejects unknown fields; the accumulator and flush machinery
 /// that *act* on it are 18-3c's.
 pub const DEFAULT_DIGEST_INTERVAL_MINUTES: u32 = 15;
-
-/// The deferred-work id that owns every parsed-but-unenforceable per-type key.
-pub const MSGTYPE_DEFERRAL: &str = "DF-18-3b-MSGTYPE";
 
 // ──────────────────────────────────────────────────────────────────
 // The three quantities
@@ -193,7 +190,7 @@ impl Default for IndividualDefaults {
     }
 }
 
-/// A per-message-type sub-block. Parsed; not enforced (`DF-18-3b-MSGTYPE`).
+/// One individual per-message-type policy block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageTypeOverride {
@@ -222,8 +219,8 @@ pub struct MessageTypeOverride {
 ///
 /// - an unknown **scalar** key is an **error** — that is the operator's typo, and
 ///   forgiving it would hide the misconfiguration a human authored moments ago;
-/// - an unknown **table** is a per-message-type override — parsed, retained, and
-///   reported by the explainer as configured-but-not-yet-enforced.
+/// - an unknown **table** is a candidate per-message-type override — parsed and
+///   retained so the closed vocabulary can either resolve or refuse it by name.
 ///
 /// Serialization emits scalars before tables, which TOML requires and a derived
 /// `flatten` would get wrong.
@@ -238,10 +235,9 @@ pub struct SenderOverride {
     pub auto_response: Option<String>,
     /// Per-message-type sub-blocks (`story_assignment`, `bug_report`,
     /// `status_request`, …).
-    ///
-    /// **Parsed, never resolved.** `MessageKind` carries three transport variants
-    /// and `MessageHeader` has no semantic type field, so there is no key to
-    /// match on in production today (`DF-18-3b-MSGTYPE`, trigger-story 18.3c).
+    /// Per-message-type sub-blocks are retained in their source spelling here;
+    /// policy resolution converts recognised names into `SemanticMessageType`
+    /// keys and refuses every other name with operator guidance.
     pub per_type: BTreeMap<String, MessageTypeOverride>,
 }
 
@@ -323,8 +319,8 @@ impl<'de> Deserialize<'de> for SenderOverride {
                             }
                             out.auto_response = Some(map.next_value()?);
                         }
-                        // Not a known scalar. A nested table is a per-message-type
-                        // override (deferred, retained); anything else is the
+                        // Not a known scalar. A nested table is a candidate
+                        // per-message-type override; anything else is the
                         // operator's typo and must not be swallowed.
                         other => {
                             let value = map.next_value::<MessageTypeOverride>().map_err(|_| {
@@ -381,14 +377,34 @@ pub struct TeamDefaults {
     pub notification: Option<NotificationUrgency>,
 }
 
-/// `[team.overrides]` — the per-message-type tier.
+/// One team per-message-type policy block.
 ///
-/// **Parsed, never resolved**, deferred under the *same* `DF-18-3b-MSGTYPE` as
-/// the individual file's per-type overrides. Modelled with named fields rather
-/// than a map because `prd.md:853-863` names exactly these keys, and a typo in
-/// one of them should be rejected rather than accepted as a novel message type.
+/// Team policy carries only the two lattice quantities. `auto_response` remains
+/// an individual/per-sender value and is never merged.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct TeamTypeOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<ResponseMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<NotificationUrgency>,
+}
+
+/// `[team.overrides]` — type-independent sharing norm plus message-type blocks.
+///
+/// The four legacy scalar keys remain readable only so a previously valid file
+/// can be loaded and refused by name without taking the daemon down. They never
+/// reach resolution.
+///
+/// Every other key parses as a raw [`toml::Value`] whatever its shape — a
+/// scalar typo (`future_message = "queue"`) must load and be refused by name,
+/// never take the daemon down as a hard parse error. Whether a key is a valid
+/// per-type block is decided after parse, in the service layer.
+///
+/// `toml::Value` is `PartialEq` but not `Eq` (its `Datetime` offset), so this
+/// struct and [`TeamPolicy`] give up `Eq`; `PartialEq` covers every comparison
+/// the shells and tests make.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TeamOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub story_assignment_notification: Option<NotificationUrgency>,
@@ -398,21 +414,16 @@ pub struct TeamOverrides {
     pub bug_reports: Option<NotificationUrgency>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_request_response: Option<ResponseMode>,
-    /// A team **norm** displayed beside the effective value, never a merge input
-    /// (FR96 amendment, `prd.md:1319`).
+    /// A team norm displayed beside the effective value; never a merge input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_detail_minimum: Option<String>,
+    #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_type: BTreeMap<String, toml::Value>,
 }
 
 impl TeamOverrides {
-    /// The per-type keys this block actually set, in declaration order, for the
-    /// explainer to report as *parsed but not yet enforced*.
-    ///
-    /// `status_detail_minimum` is deliberately absent: it is a displayed norm
-    /// with its own deferral (`DF-18-3b-SHARING-SEMANTICS`), not an unenforced
-    /// per-message-type key, and conflating the two would tell the operator the
-    /// wrong story about why it does nothing.
-    pub fn configured_keys(&self) -> Vec<&'static str> {
+    /// Legacy scalar keys present in this block, in stable schema order.
+    pub fn retired_keys(&self) -> Vec<&'static str> {
         let mut keys = Vec::new();
         if self.story_assignment_notification.is_some() {
             keys.push("story_assignment_notification");
@@ -501,7 +512,7 @@ impl TeamTransparency {
 }
 
 /// `.rustain/team-policy.toml`, parsed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TeamPolicy {
     #[serde(default)]
@@ -586,6 +597,8 @@ pub struct Resolved<T> {
 pub struct InteractionPolicySnapshot {
     #[serde(default)]
     pub sender_label: Option<String>,
+    #[serde(default)]
+    pub message_type: SemanticMessageType,
     pub response: Resolved<ResponseMode>,
     pub notification: Resolved<NotificationUrgency>,
 }
@@ -594,6 +607,7 @@ impl Default for InteractionPolicySnapshot {
     fn default() -> Self {
         Self {
             sender_label: None,
+            message_type: SemanticMessageType::Unknown,
             response: Resolved {
                 value: ResponseMode::NotifyAndWait,
                 source: PolicySource::Default,
@@ -611,6 +625,12 @@ impl Default for InteractionPolicySnapshot {
 }
 
 impl InteractionPolicySnapshot {
+    #[must_use]
+    pub fn peer_header(&self, peer: &PeerId) -> String {
+        let type_name = semantic_message_type_metadata(self.message_type).operator_noun;
+        let sender = self.sender_label.as_deref().unwrap_or(peer.as_str());
+        format!("{type_name} · {sender}")
+    }
     #[must_use]
     pub fn response_clause(&self) -> String {
         let value = self.response.value.as_str();
@@ -732,18 +752,38 @@ pub struct SenderPolicy {
     pub response_mode: Option<Resolved<ResponseMode>>,
     pub notification: Option<Resolved<NotificationUrgency>>,
     pub auto_response: Option<String>,
-    /// Per-message-type keys inside this sender's block that parsed but cannot
-    /// resolve (`DF-18-3b-MSGTYPE`).
-    pub deferred_types: Vec<String>,
+    /// Valid per-message-type values keyed on the closed domain vocabulary.
+    pub per_type: BTreeMap<SemanticMessageType, MessageTypeOverride>,
 }
 
-/// A key that parsed but has no enforcement path yet.
+/// Why a configured key could not enter the closed FR163 vocabulary.
+///
+/// The discriminator is load-bearing: a wildcard block never binds a sender,
+/// which is a different fact from a misspelled token, and the explainer must
+/// not call the former an invalid spelling.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InvalidMessageTypeKeyReason {
+    /// The spelling names none of the eight tokens — including the four
+    /// retired scalar keys, which are recognised only to be refused.
+    UnrecognizedToken,
+    /// The key names a valid token but its value is not a parseable per-type
+    /// policy block (scalar or array value, wrong fields, bad enum value).
+    InvalidValue,
+    /// The key sits under `[interaction.overrides."*"]`, which binds no
+    /// sender identity — nothing under it can ever apply, valid spelling or
+    /// not.
+    WildcardSender,
+}
+
+/// A configured message-type key outside the closed FR163 vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeferredKey {
+pub struct InvalidMessageTypeKey {
     pub key: String,
     pub file: String,
-    /// The deferred-work id that owns it.
-    pub deferral: String,
+    /// Why the key was refused — the explainer words each reason differently.
+    pub reason: InvalidMessageTypeKeyReason,
 }
 
 /// More than one alias resolved to the same pinned identity. No policy for that
@@ -775,8 +815,10 @@ pub struct EffectivePolicy {
     pub digest_interval_minutes: u32,
     /// Whether a team file participated at all.
     pub team_file_present: bool,
-    /// Per-type keys parsed from either file, none of them enforceable today.
-    pub deferred_overrides: Vec<DeferredKey>,
+    /// Valid team per-message-type blocks keyed on the closed domain vocabulary.
+    pub team_type_overrides: BTreeMap<SemanticMessageType, TeamTypeOverride>,
+    /// Invalid or retired type keys retained for operator-facing refusal.
+    pub invalid_message_types: Vec<InvalidMessageTypeKey>,
     /// `[team.transparency]` keys, never merged.
     pub transparency_invariants: Vec<TransparencyInvariant>,
     /// Per-sender overrides, keyed on identity.
@@ -846,19 +888,41 @@ mod tests {
     }
 
     #[test]
-    fn team_overrides_reports_only_configured_per_type_keys() {
+    fn team_overrides_reports_only_present_retired_keys() {
         let overrides = TeamOverrides {
             bug_reports: Some(NotificationUrgency::Immediate),
             status_request_response: Some(ResponseMode::NotifyAndAuto),
-            // A displayed norm, not an unenforced per-type key.
+            // A displayed norm, not a retired key.
             status_detail_minimum: Some("story-and-blockers".to_owned()),
             ..TeamOverrides::default()
         };
         assert_eq!(
-            overrides.configured_keys(),
+            overrides.retired_keys(),
             vec!["bug_reports", "status_request_response"]
         );
-        assert!(TeamOverrides::default().configured_keys().is_empty());
+        assert!(TeamOverrides::default().retired_keys().is_empty());
+    }
+
+    /// `per_type` holds raw [`toml::Value`]s so any shape parses; the writer
+    /// must emit them verbatim — scalars before tables, which TOML requires —
+    /// and the reader must read them back byte-for-byte.
+    #[test]
+    fn team_policy_round_trips_arbitrary_per_type_values() {
+        let original: TeamPolicy = toml::from_str(
+            r#"
+[overrides]
+future_message = "queue"
+
+[overrides.status_request]
+response_mode = "notify-and-draft"
+"#,
+        )
+        .expect("a scalar and a table both parse into the flattened map");
+        let text = toml::to_string(&original).expect("per-type values emit");
+        assert_eq!(
+            toml::from_str::<TeamPolicy>(&text).expect("round-trip parses"),
+            original
+        );
     }
 
     // ── SenderOverride: the scalar/table split the hand-written serde exists for ──

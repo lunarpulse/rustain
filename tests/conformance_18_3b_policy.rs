@@ -570,14 +570,25 @@ fn ac4_ratchet_daemon_composition_installs_effective_delivery_policy() {
 }
 
 #[test]
-fn ac4_ratchet_startup_names_the_semantic_message_type_deferral() {
+fn ac4_ratchet_startup_reports_resolved_semantic_message_type_policy() {
     let source = std::fs::read_to_string("src/adapters/daemon/policy_startup.rs")
         .expect("read policy_startup.rs");
+    for stale in [
+        concat!("MESSAGE_TYPE_", "DEFERRAL_NOTICE"),
+        concat!("semantic message type is ", "not carried"),
+        concat!("per-message-type response overrides remain ", "deferred"),
+    ] {
+        assert!(
+            !source.contains(stale),
+            "stale startup claim remains: {stale}"
+        );
+    }
+    // Presence half (`A25`): a deleted banner and a never-printing banner both pass
+    // the absence loop, so absence alone cannot kill the no-op mutant this ratchet
+    // guards — the NFR66-shaped replacement must still be in the guarded source.
     assert!(
-        source.contains("MESSAGE_TYPE_DEFERRAL_NOTICE")
-            && source.contains("per-sender response mode is enforced")
-            && source.contains("semantic message type is not carried"),
-        "startup must state that per-sender policy is live while message-type selection remains deferred"
+        source.contains("STARTUP_BANNER") && source.contains("interaction policy resolved"),
+        "the resolved-policy startup banner must remain in policy_startup.rs"
     );
 }
 

@@ -28,6 +28,7 @@ pub mod patch_review;
 pub mod peer_admission;
 pub mod peer_dial;
 pub mod peer_reach_filter;
+pub mod peer_text;
 pub mod permission_chain;
 pub mod plan_effort;
 pub mod plan_manager;

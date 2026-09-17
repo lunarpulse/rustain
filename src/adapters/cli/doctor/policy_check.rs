@@ -133,9 +133,9 @@ impl HealthCheck for PolicyExplainerCheck {
                     != crate::domain::models::DEFAULT_DIGEST_INTERVAL_MINUTES
                 || !policy.sender_overrides.is_empty()
                 || policy
-                    .deferred_overrides
+                    .invalid_message_types
                     .iter()
-                    .any(|deferred| deferred.file == INDIVIDUAL_POLICY_FILE);
+                    .any(|invalid| invalid.file == INDIVIDUAL_POLICY_FILE);
         let individual_source = if individual_contributed {
             INDIVIDUAL_POLICY_FILE
         } else {
@@ -216,7 +216,35 @@ fn machine_detail(
         },
         "digest_interval_minutes": policy.digest_interval_minutes,
         "team_file_present": policy.team_file_present,
-        "deferred_overrides": policy.deferred_overrides,
+        "team_type_overrides": policy.team_type_overrides,
+        "team_type_resolutions": crate::domain::services::team_policy::team_type_resolutions(
+            policy,
+        )
+        .iter()
+        .map(|resolution| {
+            let token = crate::domain::models::semantic_message_type_metadata(
+                resolution.message_type,
+            )
+            .token;
+            json!({
+                "message_type": token,
+                "response_automation": resolution.response.as_ref().map(|resolved| json!({
+                    "effective": resolved.value.as_str(),
+                    "type_agnostic_effective": resolved.individual.as_str(),
+                    "team_override": resolved.team.map(|value| value.as_str()),
+                    "source": resolved.source.label(),
+                    "merge": "min(type-agnostic effective, team override)",
+                })),
+                "notification_urgency": resolution.notification.as_ref().map(|resolved| json!({
+                    "effective": resolved.value.as_str(),
+                    "type_agnostic_effective": resolved.individual.as_str(),
+                    "team_override": resolved.team.map(|value| value.as_str()),
+                    "source": resolved.source.label(),
+                    "merge": "max(type-agnostic effective, team override)",
+                })),
+            })
+        })
+        .collect::<Vec<_>>(),
         "transparency_invariants": policy.transparency_invariants,
         "sender_overrides": policy.sender_overrides,
         "sender_conflicts": policy.sender_conflicts,
@@ -337,5 +365,148 @@ mod tests {
                 .contains("no journaled consent grants recorded")
         );
         assert!(!workspace.path().join(".rustain").exists());
+    }
+
+    #[tokio::test]
+    async fn doctor_front_door_keeps_base_rows_and_rejects_type_keys_by_name() {
+        let clean_workspace = tempfile::TempDir::new().unwrap();
+        let clean =
+            PolicyExplainerCheck::new(Some(clean_workspace.path().to_path_buf()), Vec::new());
+        let clean_result = clean.run().await;
+        assert_eq!(clean_result.status, CheckStatus::Info);
+        for row in [
+            "- notification urgency: `queue` (yours: `queue`, team: not configured) — source: default",
+            "- response automation: `notify-and-wait` (yours: `notify-and-wait`, team: not configured) — source: default",
+            "- sharing breadth: you configured none — yours applies; no team norm is configured.",
+        ] {
+            assert!(
+                clean_result.message.contains(row),
+                "default doctor output changed or lost a base row:\n{}",
+                clean_result.message
+            );
+        }
+
+        let invalid_workspace = tempfile::TempDir::new().unwrap();
+        let policy_dir = invalid_workspace.path().join(".rustain");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(
+            policy_dir.join(crate::domain::models::TEAM_POLICY_FILE),
+            r#"
+[team.overrides]
+bug_reports = "immediate"
+future_scalar = "queue"
+
+[team.overrides.future_message]
+response_mode = "notify-and-auto"
+"#,
+        )
+        .unwrap();
+        let invalid =
+            PolicyExplainerCheck::new(Some(invalid_workspace.path().to_path_buf()), Vec::new());
+        let invalid_result = invalid.run().await;
+        assert_eq!(
+            invalid_result.status,
+            CheckStatus::Warning,
+            "invalid type blocks are reported without taking doctor or daemon startup down"
+        );
+        let machine = invalid.machine_detail().expect("machine-readable mirror");
+        assert!(
+            machine["team_type_overrides"]
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty),
+            "retired and unknown names must never become effective aliases: {machine}"
+        );
+        let rendered = format!(
+            "{}\n{}",
+            invalid_result.message,
+            serde_json::to_string(&machine).unwrap()
+        );
+        for false_clause in [
+            "parsed but is NOT yet enforced",
+            "no semantic message type exists to match on",
+            "currently changes nothing",
+        ] {
+            assert!(
+                !rendered.contains(false_clause),
+                "retired explainer clause survived: {false_clause}"
+            );
+        }
+        for refused in [
+            "team.overrides.bug_reports",
+            "team.overrides.future_scalar",
+            "team.overrides.future_message",
+        ] {
+            assert!(rendered.contains(refused), "missing refusal for {refused}");
+        }
+        assert!(
+            rendered.contains(
+                "invalid and refused by name; the policy file loaded and daemon startup continues"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            invalid_result
+                .fix
+                .as_deref()
+                .is_some_and(|fix| fix.contains(
+                    "consultation, story_assignment, design_update, status_request, bug_report, \
+                 scope_change, architecture_update, retro_request"
+                )),
+            "doctor guidance must list all eight valid names: {:?}",
+            invalid_result.fix
+        );
+    }
+    /// `AC7(a)`'s defect #3 post-state, through the real check: a configured
+    /// `[team.overrides.status_request].response_mode` renders its downward
+    /// `min()` resolution in the human message AND the JSON mirror — no second
+    /// check, per `A12`.
+    #[tokio::test]
+    async fn doctor_renders_the_per_type_min_resolution_through_the_front_door() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let policy_dir = workspace.path().join(".rustain");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(
+            policy_dir.join(crate::domain::models::TEAM_POLICY_FILE),
+            r#"
+[team.overrides.status_request]
+response_mode = "notify-and-auto"
+"#,
+        )
+        .unwrap();
+        let check = PolicyExplainerCheck::new(Some(workspace.path().to_path_buf()), Vec::new());
+        let result = check.run().await;
+
+        assert!(
+            result.message.contains(
+                "per-type response automation for `status_request`: team agreement \
+                 `notify-and-auto` binds DOWNWARD via min()",
+            ),
+            "{}",
+            result.message
+        );
+        assert!(
+            result.message.contains("— effective `notify-and-wait`"),
+            "the type-agnostic answer already beats this block and must be shown as \
+             effective:\n{}",
+            result.message
+        );
+
+        let machine = check.machine_detail().expect("machine-readable mirror");
+        assert_eq!(
+            machine["team_type_resolutions"][0]["message_type"],
+            "status_request"
+        );
+        assert_eq!(
+            machine["team_type_resolutions"][0]["response_automation"]["merge"],
+            "min(type-agnostic effective, team override)"
+        );
+        assert_eq!(
+            machine["team_type_resolutions"][0]["response_automation"]["team_override"],
+            "notify-and-auto"
+        );
+        assert_eq!(
+            machine["team_type_resolutions"][0]["response_automation"]["effective"],
+            "notify-and-wait"
+        );
     }
 }

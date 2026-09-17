@@ -16,9 +16,9 @@
 //! # Severity
 //!
 //! NFR66 says conflicts are *"reported with resolution guidance"*, so a conflict —
-//! a team floor stricter than the individual on urgency, an unenforced per-type
-//! key, an unpinned per-sender target — is **normal, expected, and non-fatal**. A
-//! **malformed file** is fatal (AC2 fail-closed). The two must not be conflated:
+//! a team floor stricter than the individual on urgency, an invalid message-type
+//! key, or an unpinned per-sender target — is **normal, expected, and non-fatal**.
+//! A **malformed file** is fatal (AC2 fail-closed). The two must not be conflated:
 //! refusing to start over a team floor would make the feature unusable, and
 //! starting anyway over a malformed file would silently upgrade autonomy.
 //!
@@ -41,9 +41,6 @@ use crate::domain::services::team_policy::{PolicyExplanation, PolicyNotice};
 /// would be indistinguishable from "validation was skipped", which is exactly the
 /// no-op mutant this AC guards against.
 pub(crate) const STARTUP_BANNER: &str = "interaction policy resolved (NFR66)";
-pub(crate) const MESSAGE_TYPE_DEFERRAL_NOTICE: &str = "per-sender response mode is enforced; \
-    semantic message type is not carried, so per-message-type response overrides remain deferred \
-    (DF-18-3b-MSGTYPE)";
 pub(crate) const AUTO_AUTHORITY_WARNING: &str = "server.admission=\"allow\" authorizes inbound \
     execution and at least one notify-and-auto sender lacks journaled or TOML-implied consent; \
     grant that sender, use admission=\"ask\", or lower its effective response mode";
@@ -63,7 +60,6 @@ pub(crate) fn validate_startup_policies(
     let (policy, explanation) =
         crate::adapters::policy::resolve_workspace_policy(workspace, peers, projection)?;
     report_to_log(&explanation);
-    tracing::info!("{MESSAGE_TYPE_DEFERRAL_NOTICE}");
     Ok(policy)
 }
 pub(crate) fn report_auto_authority_widening(

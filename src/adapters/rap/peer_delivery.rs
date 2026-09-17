@@ -19,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     AgentEnvelope, AgentId, AgentMessage, AgentMetrics, CapabilityTokenId, CorrelationId, Envelope,
-    MessageHeader, MessageKind, NodeState, PeerId, SubagentEnvelope, SubagentEvent,
+    MessageHeader, MessageKind, NodeState, PeerId, SemanticMessageType, SubagentEnvelope,
+    SubagentEvent,
 };
 use crate::domain::ports::{
     AgentMessageBus, PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder,
@@ -1058,6 +1059,7 @@ pub fn topic_frame(
             recipient,
             topic.clone(),
             MessageKind::TopicGossip,
+            String::new(),
             position.next_sequence,
             now_ms.saturating_add(TOPIC_FRAME_TTL_MS),
             format!(
@@ -1097,6 +1099,7 @@ pub fn translate_verified_peer_envelope(
             recipient: envelope.header.recipient,
             correlation_id: envelope.header.correlation_id,
             kind: envelope.header.kind,
+            message_type: SemanticMessageType::parse(&envelope.header.message_type),
             sequence: None,
             verified_peer_id: None,
         },
@@ -1232,6 +1235,7 @@ mod tests {
             .expect("peer-rooted fixture sender");
         AgentEnvelope::new(
             AgentEnvelopeHeader {
+                message_type: String::new(),
                 sender,
                 recipient,
                 correlation_id: CorrelationId::new("corr-1"),
@@ -1601,10 +1605,40 @@ mod tests {
         fn response_policy_for_peer(
             &self,
             _peer_id: &PeerId,
+            _message_type: crate::domain::models::SemanticMessageType,
         ) -> crate::domain::ports::PeerResponsePolicy {
             crate::domain::ports::PeerResponsePolicy {
                 mode: self.0,
                 auto_response: None,
+                ..Default::default()
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct TypeResponseModes(parking_lot::Mutex<Vec<crate::domain::models::SemanticMessageType>>);
+
+    impl DeliveryPolicy for TypeResponseModes {
+        fn decide(&self, _header: &MessageHeader, ownership: OwnershipKind) -> DeliveryDisposition {
+            crate::domain::models::relationship_disposition(ownership)
+        }
+
+        fn response_policy_for_peer(
+            &self,
+            _peer_id: &PeerId,
+            message_type: crate::domain::models::SemanticMessageType,
+        ) -> crate::domain::ports::PeerResponsePolicy {
+            self.0.lock().push(message_type);
+            crate::domain::ports::PeerResponsePolicy {
+                mode: match message_type {
+                    crate::domain::models::SemanticMessageType::Consultation => {
+                        crate::domain::models::ResponseMode::NotifyAndDraft
+                    }
+                    crate::domain::models::SemanticMessageType::BugReport => {
+                        crate::domain::models::ResponseMode::NotifyAndAuto
+                    }
+                    _ => crate::domain::models::ResponseMode::NotifyAndWait,
+                },
                 ..Default::default()
             }
         }
@@ -1663,6 +1697,51 @@ mod tests {
         assert_eq!(
             consumer.0.lock().await.as_slice(),
             &[crate::domain::models::ResponseMode::NotifyAndDraft]
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_front_door_resolves_response_mode_from_the_signed_message_type() {
+        let policy = Arc::new(TypeResponseModes::default());
+        let consumer = Arc::new(ModeRecordingConsumer::default());
+        let (handler, _tree, _events) = handler_with(policy.clone(), consumer.clone());
+
+        for (index, (token, expected_type)) in [
+            (
+                "consultation",
+                crate::domain::models::SemanticMessageType::Consultation,
+            ),
+            (
+                "bug_report",
+                crate::domain::models::SemanticMessageType::BugReport,
+            ),
+            (
+                "future_type",
+                crate::domain::models::SemanticMessageType::Unknown,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut signed = envelope(MessageKind::PeerMessage, serde_json::json!("typed message"));
+            signed.header.message_type = token.to_owned();
+            signed.header.correlation_id = CorrelationId::new(format!("typed-{index}"));
+            let peer_id = signed.signer.peer_id.clone();
+            handler
+                .handle_verified_peer_frame(signed, peer_id)
+                .await
+                .expect("typed delivery reaches the mode-aware consumer");
+            assert_eq!(policy.0.lock()[index], expected_type);
+        }
+
+        assert_eq!(
+            consumer.0.lock().await.as_slice(),
+            &[
+                crate::domain::models::ResponseMode::NotifyAndDraft,
+                crate::domain::models::ResponseMode::NotifyAndAuto,
+                crate::domain::models::ResponseMode::NotifyAndWait,
+            ],
+            "consultation, bug_report, and Unknown must select distinct effective modes"
         );
     }
 

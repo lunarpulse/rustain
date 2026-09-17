@@ -190,7 +190,12 @@ mod tests {
                 .expect("profile peer resolves");
 
         assert!(
-            crate::domain::services::team_policy::sender_policy_for(&policy, &identity).is_some()
+            crate::domain::services::team_policy::sender_policy_for(
+                &policy,
+                &identity,
+                crate::domain::models::SemanticMessageType::Unknown,
+            )
+            .is_some()
         );
     }
 
@@ -263,11 +268,12 @@ mod tests {
             write(dir.path(), "a2a.json", &peer_json(alias));
 
             let (resolved, _) = resolve(dir.path()).expect("policy resolves");
-            let bound =
-                crate::domain::services::team_policy::sender_policy_for(&resolved, &identity)
-                    .unwrap_or_else(|| {
-                        panic!("override lost after the peer was renamed to `{alias}`")
-                    });
+            let bound = crate::domain::services::team_policy::sender_policy_for(
+                &resolved,
+                &identity,
+                crate::domain::models::SemanticMessageType::Unknown,
+            )
+            .unwrap_or_else(|| panic!("override lost after the peer was renamed to `{alias}`"));
             assert_eq!(
                 bound.response_mode.as_ref().map(|resolved| resolved.value),
                 Some(ResponseMode::NotifyAndDraft)

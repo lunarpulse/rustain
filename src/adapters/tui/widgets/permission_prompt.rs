@@ -60,12 +60,20 @@ pub fn render_permission_lines<'a>(
     theme: &'a Theme,
     queue_len: usize,
 ) -> Vec<Line<'a>> {
-    let display = if tool_input.is_empty() {
-        String::new()
-    } else {
-        tool_input.to_string()
+    let display = match source {
+        ApprovalSource::RemotePeer { .. } => {
+            crate::domain::services::peer_text::sanitize_peer_text_line(tool_input).into_owned()
+        }
+        _ => tool_input.to_owned(),
     };
-
+    let display_tool_name = display_tool_name(tool_name);
+    let tool_name = match source {
+        ApprovalSource::RemotePeer { .. } => {
+            crate::domain::services::peer_text::sanitize_peer_text_line(&display_tool_name)
+                .into_owned()
+        }
+        _ => display_tool_name.into_owned(),
+    };
     // Subagent/background prefix (AC11)
     let prefix = match source {
         ApprovalSource::ForegroundSubagent { subagent_type, .. } => {
@@ -75,7 +83,7 @@ pub fn render_permission_lines<'a>(
             format!("[background: {}] ", subagent_type)
         }
         ApprovalSource::RemotePeer { peer_id, .. } => {
-            format!("[remote peer: {}] ", peer_id)
+            format!("[remote peer] {} ", peer_id)
         }
         ApprovalSource::ForegroundTurn { .. } | ApprovalSource::AcpSession { .. } => String::new(),
     };
@@ -95,7 +103,7 @@ pub fn render_permission_lines<'a>(
         ));
     }
     line1_spans.push(Span::styled(
-        format!("{}: ", display_tool_name(tool_name)),
+        format!("{tool_name}: "),
         Style::default()
             .fg(theme.colors.tool_name)
             .add_modifier(Modifier::BOLD),
@@ -246,6 +254,31 @@ mod tests {
         let line3: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line3.contains("[n]"));
         assert!(line3.contains("[f]"));
+    }
+
+    #[test]
+    fn remote_approval_preview_sanitizes_the_peer_slot_without_mangling_plain_text() {
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let peer = crate::domain::models::PeerId::from_public_key(&[7_u8; 32]).unwrap();
+        let lines = render_permission_lines(
+            &ApprovalSource::RemotePeer {
+                conversation_id: "conv".to_owned(),
+                peer_id: peer,
+            },
+            "a2a/\nmessage",
+            "review\x1b[2J\r\n[urgent]",
+            &theme,
+            0,
+        );
+        let line: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(line.contains("a2a/message:"), "{line:?}");
+        assert!(line.contains("[remote peer] "), "{line:?}");
+        assert!(line.contains("review[urgent]"), "{line:?}");
+        assert!(!line.chars().any(char::is_control), "{line:?}");
     }
 
     #[test]

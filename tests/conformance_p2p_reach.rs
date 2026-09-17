@@ -592,6 +592,7 @@ fn signed(
             recipient,
             CorrelationId::new(format!("corr-{nonce}")),
             MessageKind::PeerMessage,
+            String::new(),
             sequence,
             i64::MAX,
             format!("nonce-{nonce}"),
@@ -715,6 +716,7 @@ async fn a_bound_sender_name_cannot_be_claimed_by_a_second_peer() {
             .peer_id;
     let forged = AgentEnvelope::new(
         AgentEnvelopeHeader {
+            message_type: String::new(),
             sender: sender_name,
             recipient: AgentId::parse("peer-ping-recipient").expect("recipient"),
             correlation_id: CorrelationId::new("forged"),

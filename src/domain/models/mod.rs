@@ -68,6 +68,7 @@ pub mod router;
 pub mod sandbox;
 pub mod search_hit;
 pub mod secret;
+pub mod semantic_message_type;
 pub mod session;
 pub mod session_boundary;
 pub mod session_meta;
@@ -317,6 +318,10 @@ pub use redaction::{RedactionOp, RedactionRecord};
 #[allow(unused_imports)]
 pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
 pub use search_hit::SearchHit;
+pub use semantic_message_type::{
+    SemanticMessagePolicyCapabilities, SemanticMessageRecognition, SemanticMessageType,
+    SemanticMessageTypeMetadata, semantic_message_type_metadata, semantic_message_type_tokens,
+};
 #[allow(unused_imports)]
 pub use subagent_envelope::{SubagentEnvelope, SubagentEvent};
 #[allow(unused_imports)]
@@ -325,12 +330,12 @@ pub use tab::{ConversationId, TabId, TabManager, TabState};
 pub use taint::{ProvenanceTag, TaintDecision};
 #[allow(unused_imports)]
 pub use team_policy::{
-    DEFAULT_DIGEST_INTERVAL_MINUTES, DeferredKey, EffectivePolicy, INDIVIDUAL_POLICY_FILE,
-    IndividualDefaults, IndividualPolicy, InteractionPolicySnapshot, MSGTYPE_DEFERRAL,
-    MessageTypeOverride, NotificationUrgency, PolicySource, Resolved, ResponseMode, SenderBinding,
-    SenderIdentity, SenderIdentityConflict, SenderOverride, SenderPolicy, SharingBreadth,
-    TEAM_POLICY_FILE, TeamDefaults, TeamOverrides, TeamPolicy, TeamTransparency,
-    TransparencyInvariant,
+    DEFAULT_DIGEST_INTERVAL_MINUTES, EffectivePolicy, INDIVIDUAL_POLICY_FILE, IndividualDefaults,
+    IndividualPolicy, InteractionPolicySnapshot, InvalidMessageTypeKey,
+    InvalidMessageTypeKeyReason, MessageTypeOverride, NotificationUrgency, PolicySource, Resolved,
+    ResponseMode, SenderBinding, SenderIdentity, SenderIdentityConflict, SenderOverride,
+    SenderPolicy, SharingBreadth, TEAM_POLICY_FILE, TeamDefaults, TeamOverrides, TeamPolicy,
+    TeamTransparency, TeamTypeOverride, TransparencyInvariant,
 };
 #[allow(unused_imports)]
 pub use tool_call::{

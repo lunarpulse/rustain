@@ -109,6 +109,7 @@ fn signed_envelope(seed: u8, nonce: &str) -> AgentEnvelope<serde_json::Value> {
             AgentId::parse("local-recipient").expect("recipient"),
             CorrelationId::new(nonce),
             MessageKind::PeerMessage,
+            String::new(),
             1,
             chrono::Utc::now().timestamp_millis() + 60_000,
             nonce.to_owned(),

@@ -1,6 +1,6 @@
 #![cfg(feature = "a2a")]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
@@ -29,12 +29,13 @@ use rustain::domain::models::capability_id::CapabilityId;
 use rustain::domain::models::capability_registry::{CapabilityRegistry, RegisteredCapability};
 use rustain::domain::models::{
     AgentEnvelope, AgentEnvelopeHeader, AgentId, AgentMessage, CorrelationId, Ed25519Sig,
-    MessageKind, NodeState, PeerId, PeerIdentity,
+    MessageKind, NodeState, PeerId, PeerIdentity, SemanticMessageType,
 };
 use rustain::domain::models::{PinnedKey, PinnedKeyAlgorithm, TrustTier};
 use rustain::domain::ports::{
-    AgentMessageBus, DeliveryPolicy, InboundApprovalTicket, InboundPeerError, InboundPeerRuntime,
-    InboundPeerTask, PeerInteractionRecorder, RelationshipDeliveryPolicy, RoomJournal,
+    AgentMessageBus, DeliveryPolicy, EffectiveDeliveryPolicy, InboundApprovalTicket,
+    InboundPeerError, InboundPeerRuntime, InboundPeerTask, PeerInteractionRecorder,
+    RelationshipDeliveryPolicy, RoomJournal,
 };
 use rustain::domain::services::transparency::{TransparencyKind, fold_transparency};
 use rustain::infrastructure::agent_message_bus::LocalMessageBus;
@@ -151,6 +152,61 @@ impl InboundPeerRuntime for DisclosureRuntime {
     }
 }
 
+#[derive(Default)]
+struct TypeRecordingRuntime {
+    seen: Mutex<Vec<SemanticMessageType>>,
+    modes: Mutex<Vec<rustain::domain::models::ResponseMode>>,
+    policy: Option<EffectiveDeliveryPolicy>,
+    senders: Mutex<Vec<tokio::sync::watch::Sender<NodeState>>>,
+}
+
+#[async_trait::async_trait]
+impl InboundPeerRuntime for TypeRecordingRuntime {
+    fn response_policy(
+        &self,
+        peer_id: &PeerId,
+        message_type: SemanticMessageType,
+    ) -> rustain::domain::ports::PeerResponsePolicy {
+        let response = self.policy.as_ref().map_or_else(
+            rustain::domain::ports::PeerResponsePolicy::default,
+            |policy| policy.response_policy_for_peer(peer_id, message_type),
+        );
+        self.seen.lock().expect("seen lock").push(message_type);
+        self.modes.lock().expect("mode lock").push(response.mode);
+        response
+    }
+
+    async fn start(
+        &self,
+        _task: InboundPeerTask,
+        _cancel: CancellationToken,
+    ) -> Result<tokio::sync::watch::Receiver<NodeState>, InboundPeerError> {
+        let (sender, receiver) = tokio::sync::watch::channel(NodeState::Running);
+        self.senders.lock().expect("senders lock").push(sender);
+        Ok(receiver)
+    }
+
+    async fn request_admission_approval(
+        &self,
+        _peer_id: &PeerId,
+        _summary: &str,
+    ) -> Result<InboundApprovalTicket, InboundPeerError> {
+        Err(InboundPeerError::unavailable("approval is not used"))
+    }
+
+    async fn take_result_text(&self, _node_id: &AgentId) -> Option<String> {
+        None
+    }
+
+    async fn disclosure_forbidden_fragments(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn reconcile_orphaned_tasks(&self, _subagent_type: &str) -> Vec<AgentId> {
+        Vec::new()
+    }
+}
+
 async fn rpc(
     client: &reqwest::Client,
     endpoint: &str,
@@ -221,6 +277,7 @@ fn peer_delivery_envelope(correlation_id: &str) -> AgentEnvelope<serde_json::Val
             .expect("peer-rooted recipient");
     AgentEnvelope::new(
         AgentEnvelopeHeader {
+            message_type: String::new(),
             sender: AgentId::parse("peer-agent").expect("valid sender"),
             recipient,
             correlation_id: CorrelationId::new(correlation_id),
@@ -578,6 +635,162 @@ async fn serve_refuses_a_self_bound_non_loopback_listener_without_tls_and_auth()
         "unexpected error: {message}"
     );
     assert!(message.contains("TLS"), "unexpected error: {message}");
+}
+
+#[tokio::test]
+async fn message_type_metadata_is_exact_match_and_vanilla_defaults_to_unknown() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(journal, Some(domain_tx)));
+    let team = rustain::domain::models::TeamPolicy {
+        overrides: rustain::domain::models::TeamOverrides {
+            per_type: std::collections::BTreeMap::from([
+                (
+                    "consultation".to_owned(),
+                    toml::Value::try_from(rustain::domain::models::TeamTypeOverride {
+                        response_mode: Some(rustain::domain::models::ResponseMode::NotifyAndDraft),
+                        notification: None,
+                    })
+                    .expect("test value serializes"),
+                ),
+                (
+                    "bug_report".to_owned(),
+                    toml::Value::try_from(rustain::domain::models::TeamTypeOverride {
+                        response_mode: Some(rustain::domain::models::ResponseMode::NotifyAndWait),
+                        notification: None,
+                    })
+                    .expect("test value serializes"),
+                ),
+            ]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let individual = rustain::domain::models::IndividualPolicy {
+        defaults: rustain::domain::models::IndividualDefaults {
+            response_mode: Some(rustain::domain::models::ResponseMode::NotifyAndAuto),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let effective = rustain::domain::services::team_policy::resolve_effective_policy(
+        &individual,
+        Some(&team),
+        &[],
+    );
+    let runtime = Arc::new(TypeRecordingRuntime {
+        policy: Some(EffectiveDeliveryPolicy::new(Arc::new(effective))),
+        ..Default::default()
+    });
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: Some(runtime.clone()),
+            transparency: Arc::new(TransparencySink::new(room)),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+    let client = reqwest::Client::new();
+
+    let requests = [
+        serde_json::json!({
+            "message": {
+                "messageId": "typed",
+                "role": "user",
+                "parts": [{ "kind": "text", "text": "typed" }],
+                "metadata": { "x-rustain-message-type": "consultation" }
+            }
+        }),
+        serde_json::json!({
+            "message": {
+                "messageId": "second-type",
+                "role": "user",
+                "parts": [{ "kind": "text", "text": "second type" }],
+                "metadata": { "x-rustain-message-type": "bug_report" }
+            }
+        }),
+        serde_json::json!({
+            "message": {
+                "messageId": "case-variant",
+                "role": "user",
+                "parts": [{ "kind": "text", "text": "case variant" }],
+                "metadata": { "X-Rustain-Message-Type": "bug_report" }
+            }
+        }),
+        serde_json::json!({
+            "message": {
+                "messageId": "vanilla",
+                "role": "user",
+                "parts": [{ "kind": "text", "text": "vanilla" }]
+            }
+        }),
+    ];
+    for (index, params) in requests.into_iter().enumerate() {
+        let response = rpc(
+            &client,
+            &endpoint,
+            u64::try_from(index + 1).expect("small id"),
+            "message/send",
+            params,
+        )
+        .await;
+        assert!(
+            matches!(
+                response["result"]["status"]["state"].as_str(),
+                Some("submitted" | "working")
+            ),
+            "message must reach the execution runtime: {response}"
+        );
+    }
+
+    assert_eq!(
+        *runtime.seen.lock().expect("seen lock"),
+        vec![
+            SemanticMessageType::Consultation,
+            SemanticMessageType::BugReport,
+            SemanticMessageType::Unknown,
+            SemanticMessageType::Unknown,
+        ],
+        "only the exact metadata spelling is extracted; vanilla A2A is the common Unknown path"
+    );
+    assert_eq!(
+        *runtime.modes.lock().expect("mode lock"),
+        vec![
+            rustain::domain::models::ResponseMode::NotifyAndDraft,
+            rustain::domain::models::ResponseMode::NotifyAndWait,
+            rustain::domain::models::ResponseMode::NotifyAndAuto,
+            rustain::domain::models::ResponseMode::NotifyAndAuto,
+        ],
+        "the A2A setup_task rail must apply team per-type policy and keep Unknown on the base tier"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
 }
 
 /// **[K4] AC4 differential.** A real listener must distinguish a poll that
