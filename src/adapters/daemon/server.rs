@@ -139,6 +139,36 @@ impl ConnRegistry {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecipientAckGate {
+    Allow,
+    ReadOnly,
+    UntrustedTier,
+    RoleDenied,
+}
+
+fn recipient_ack_gate(
+    mode: AttachMode,
+    tier: ConnectionTier,
+    acting: &AgentId,
+) -> RecipientAckGate {
+    if mode != AttachMode::ReadWrite {
+        return RecipientAckGate::ReadOnly;
+    }
+    if tier != ConnectionTier::TrustedLocal {
+        return RecipientAckGate::UntrustedTier;
+    }
+    let role = crate::domain::services::room_role::local_room_role(acting);
+    if crate::domain::services::room_role::room_edit_decision(
+        role,
+        crate::domain::models::RoomEditKind::DurableContent,
+    ) != crate::domain::models::RoomEditDecision::Allow
+    {
+        return RecipientAckGate::RoleDenied;
+    }
+    RecipientAckGate::Allow
+}
+
 /// The daemon attach server. Holds the lazily-built core, the per-process
 /// conversation, the connection registry, and the daemon-owned event bus.
 pub struct AttachServer {
@@ -1772,6 +1802,103 @@ impl AttachServer {
                 if let Err(error) = self.retract_auto_response(&message_id, target_seq).await {
                     self.send_to(conn_id, DaemonFrame::Error(ProtocolError::Internal(error)))
                         .await;
+                }
+            }
+            ClientFrame::AcknowledgeRecipientItem { item_id } => {
+                let acting = AgentId::local_operator();
+                match recipient_ack_gate(mode, tier, &acting) {
+                    RecipientAckGate::Allow => {}
+                    RecipientAckGate::ReadOnly => {
+                        self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
+                            .await;
+                        return false;
+                    }
+                    RecipientAckGate::UntrustedTier => {
+                        self.send_to(
+                            conn_id,
+                            DaemonFrame::Error(ProtocolError::PeerVerification(
+                                "recipient acknowledgement is same-host trusted-local only"
+                                    .to_owned(),
+                            )),
+                        )
+                        .await;
+                        return false;
+                    }
+                    RecipientAckGate::RoleDenied => {
+                        self.send_to(
+                            conn_id,
+                            DaemonFrame::Error(ProtocolError::PeerVerification(
+                                "room role does not permit durable recipient acknowledgement"
+                                    .to_owned(),
+                            )),
+                        )
+                        .await;
+                        return false;
+                    }
+                }
+                let Some(reader) = &self.room_journal_reader else {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::Internal(
+                            "room journal reader is unavailable".to_owned(),
+                        )),
+                    )
+                    .await;
+                    return false;
+                };
+                let Some(journal) = &self.room_journal else {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::Internal(
+                            "room journal is unavailable".to_owned(),
+                        )),
+                    )
+                    .await;
+                    return false;
+                };
+                let entries = match reader.load_entries().await {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        self.send_to(
+                            conn_id,
+                            DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
+                        )
+                        .await;
+                        return false;
+                    }
+                };
+                let projection =
+                    crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
+                let Some(item) = projection.find_by_id(&item_id) else {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::Malformed(
+                            "recipient item not found".to_owned(),
+                        )),
+                    )
+                    .await;
+                    return false;
+                };
+                if item.state != crate::domain::models::RecipientItemState::Acknowledged
+                    && let Err(error) = journal
+                        .record_event(
+                            crate::domain::models::RoomEvent::RecipientItemAcknowledged {
+                                address: item.address,
+                                // AC2(c)/A7: attribution is the roster alias the
+                                // message ARRIVED on — the item's own alias,
+                                // which is `None` (a renderable unresolved
+                                // state) for the A2A pseudonym path. Never a
+                                // fabricated person-shaped string.
+                                alias: item.alias.clone(),
+                            },
+                        )
+                        .await
+                {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
+                    )
+                    .await;
                 }
             }
             ClientFrame::PeerShare {
@@ -3812,6 +3939,39 @@ mod tests {
     use tokio::net::UnixStream;
 
     #[test]
+    fn recipient_acknowledgement_requires_all_three_authority_gates() {
+        let operator = AgentId::local_operator();
+        assert_eq!(
+            recipient_ack_gate(
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                &operator,
+            ),
+            RecipientAckGate::Allow
+        );
+        assert_eq!(
+            recipient_ack_gate(
+                AttachMode::ReadOnly,
+                ConnectionTier::TrustedLocal,
+                &operator,
+            ),
+            RecipientAckGate::ReadOnly
+        );
+        assert_eq!(
+            recipient_ack_gate(AttachMode::ReadWrite, ConnectionTier::Peer, &operator),
+            RecipientAckGate::UntrustedTier
+        );
+        assert_eq!(
+            recipient_ack_gate(
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                &AgentId::root(),
+            ),
+            RecipientAckGate::RoleDenied
+        );
+    }
+
+    #[test]
     fn inbound_peer_refusal_reason_separates_policy_unavailable_and_terminal() {
         use crate::domain::models::{DeliveryDisposition, RefuseReason};
 
@@ -4540,6 +4700,73 @@ mod tests {
             None,
             Some(urgency),
         )
+    }
+
+    #[tokio::test]
+    async fn acknowledge_frame_appends_then_folds_the_deliberate_human_act() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "recipient-ack".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let journal = Arc::new(RecordingJournal::default());
+        let address = crate::domain::models::ItemAddress::from_a2a_ingress(
+            test_signer(111).identity().peer_id.clone(),
+            crate::domain::models::ItemId::from_replay("ri_ack_front_door"),
+        );
+        journal
+            .record_event(crate::domain::models::RoomEvent::RecipientItemReceived {
+                address: address.clone(),
+                task: "sender-task".to_owned(),
+                alias: None,
+                content: "review".to_owned(),
+            })
+            .await
+            .unwrap();
+        let server = journaled_server(core, conversation, domain_tx, journal.clone());
+
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::AcknowledgeRecipientItem {
+                    item_id: "ri_ack_front_door".to_owned(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+
+        let entries = crate::domain::ports::RoomJournalReader::load_entries(journal.as_ref())
+            .await
+            .unwrap();
+        let Some(crate::domain::models::JournalRecord::Room(
+            crate::domain::models::RoomEvent::RecipientItemAcknowledged {
+                address: acked_address,
+                alias: acked_alias,
+            },
+        )) = entries.last().map(|entry| &entry.record)
+        else {
+            panic!("the acknowledge frame must journal RecipientItemAcknowledged");
+        };
+        assert_eq!(acked_address, &address);
+        assert_eq!(
+            acked_alias, &None,
+            "attribution is the arrival alias, never a fabricated operator string"
+        );
+        crate::adapters::policy::recipient_item::reset_recipient_item_transition_count();
+        let projection =
+            crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
+        assert_eq!(
+            projection.get(&address).unwrap().state,
+            crate::domain::models::RecipientItemState::Acknowledged
+        );
+        assert_eq!(
+            crate::adapters::policy::recipient_item::recipient_item_transition_count(),
+            1,
+            "one acknowledgement command must produce one state transition"
+        );
     }
 
     #[tokio::test]

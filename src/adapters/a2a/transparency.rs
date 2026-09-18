@@ -164,6 +164,30 @@ impl TransparencySink {
         }
     }
 
+    /// Load the canonical room journal for replay-backed projections.
+    pub async fn load_entries(
+        &self,
+    ) -> Result<Vec<crate::domain::models::JournalEntry>, RoomJournalError> {
+        match &self.reader {
+            Some(reader) => reader.load_entries().await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Append an already-formed room event through the same durable-first seam.
+    pub async fn record_room_event(&self, event: RoomEvent) -> Result<(), RoomJournalError> {
+        let Some(journal) = &self.journal else {
+            return Err(RoomJournalError::Append(
+                "room journal is unavailable".to_owned(),
+            ));
+        };
+        if let Err(error) = journal.record_event(event).await {
+            self.latch_failure(&error).await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// How many journal appends this sink has failed to make. Every one of
     /// these is a transparency record that does not exist.
     #[must_use]

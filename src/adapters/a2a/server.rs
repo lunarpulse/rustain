@@ -52,7 +52,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::domain::models::{
-    AppConfig, CapabilityRegistry, PeerId, RapTaskState, SemanticMessageType,
+    AppConfig, CapabilityRegistry, PeerId, RapTaskState, RecipientItemAllocator, RoomEvent,
+    SemanticMessageType,
 };
 use crate::domain::ports::{InboundApprovalTicket, InboundPeerRuntime, InboundPeerTask};
 
@@ -76,6 +77,7 @@ use super::jsonrpc::{
 };
 use super::projection::{RemotePeerViewer, RoomProjection};
 use super::transparency::{InboundOutcome, TransparencySink};
+use crate::adapters::policy::JournalRecipientItemProjection;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -101,6 +103,8 @@ struct ServerState {
     tasks: Arc<InboundTaskStore>,
     cards: Arc<SignedCardCache>,
     transparency: Arc<TransparencySink>,
+    recipient_items: Arc<JournalRecipientItemProjection>,
+    item_allocator: Arc<RecipientItemAllocator>,
     policy: A2aAdmissionPolicy,
     workspace: Arc<PathBuf>,
     /// Host-sensitive fragments supplied by the runtime and used only as
@@ -209,6 +213,13 @@ pub async fn serve(
         Some(runtime) => runtime.disclosure_forbidden_fragments().await,
         None => Vec::new(),
     };
+    let recipient_entries = config.transparency.load_entries().await?;
+    let recipient_items = Arc::new(JournalRecipientItemProjection::from_entries(
+        &recipient_entries,
+    ));
+    let item_allocator = Arc::new(RecipientItemAllocator::from_addresses(
+        recipient_items.snapshot().keys().cloned(),
+    ));
     let state = ServerState {
         registry: config.registry,
         signer: Arc::new(config.signer),
@@ -217,6 +228,8 @@ pub async fn serve(
         tasks: Arc::new(InboundTaskStore::default()),
         cards: config.cards,
         transparency: config.transparency,
+        recipient_items,
+        item_allocator,
         policy: config.policy,
         workspace: Arc::new(config.workspace),
         scrub_fragments,
@@ -288,6 +301,10 @@ async fn reconcile_after_restart(state: &ServerState) {
             .await
         {
             task.restore_status_query();
+        }
+        let principal = crate::domain::models::ItemPrincipal::A2aPseudonym(peer_id.clone());
+        if let Some(item) = state.recipient_items.find_by_task(&principal, &task_id) {
+            task.set_item_address(item.address).await;
         }
         task.advance(RapTaskState::Working).await;
         task.set_detail(RESTART_DETAIL).await;
@@ -934,7 +951,9 @@ async fn setup_task(
                 pending,
                 ticket,
             ));
-            return Ok(projection_for(&state, &task_id, RapTaskState::AuthRequired, None).await);
+            return Ok(
+                projection_for(&state, &task_id, RapTaskState::AuthRequired, None, None).await,
+            );
         }
 
         // Policy resolved it without a human. Still race cancellation so a
@@ -986,7 +1005,7 @@ async fn setup_task(
         message_type,
         None,
     )
-    .await;
+    .await?;
     task_projection(&state, &task, &peer_id).await
 }
 
@@ -998,7 +1017,14 @@ async fn task_projection(
     let snapshot = task.snapshot().await;
     let disclosing_result = snapshot.result.is_some();
     let text = snapshot.result.as_deref().or(snapshot.detail.as_deref());
-    let projection = projection_for(state, &task.id, snapshot.state, text).await;
+    let projection = projection_for(
+        state,
+        &task.id,
+        snapshot.state,
+        text,
+        snapshot.item_address.as_ref(),
+    )
+    .await;
     if disclosing_result
         && let Some(disclosed_bytes) = disclosed_text_bytes(&projection)
         && task.claim_result_disclosure().await
@@ -1115,7 +1141,7 @@ async fn watch_pending_approval(
         terminalize_canceled(&state, &task, &peer_id, Some(&pending)).await;
         return;
     }
-    launch(
+    let _ = launch(
         &state,
         &runtime,
         &task,
@@ -1137,7 +1163,39 @@ async fn launch(
     peer_id: PeerId,
     message_type: SemanticMessageType,
     pending: Option<PendingTaskRecord>,
-) {
+) -> Result<(), String> {
+    let address = match state
+        .item_allocator
+        .allocate_a2a_ingress(peer_id.clone())
+        .await
+    {
+        Ok(address) => address,
+        Err(error) => {
+            tracing::error!(%error, task = %task.id, "refusing A2A task after item-id collision");
+            task.fail_without_execution(error.to_string()).await;
+            if let Some(record) = pending.as_ref() {
+                remove_pending_task(state, record).await;
+            }
+            return Err(error.to_string());
+        }
+    };
+    let received = RoomEvent::RecipientItemReceived {
+        address: address.clone(),
+        task: task.id.clone(),
+        alias: None,
+        content: text.clone(),
+    };
+    if let Err(error) = state.transparency.record_room_event(received.clone()).await {
+        tracing::error!(%error, task = %task.id, "refusing A2A task: recipient item was not durable");
+        task.fail_without_execution(UNRECORDED_ACCEPT_DETAIL).await;
+        if let Some(record) = pending.as_ref() {
+            remove_pending_task(state, record).await;
+        }
+        return Err(error.to_string());
+    }
+    state.recipient_items.apply(&received);
+    task.set_item_address(address).await;
+
     // ── AC1 fail-closed keystone ────────────────────────────────────────────
     // The canonical acceptance must exist before `InboundPeerRuntime::start`
     // can register a node or spawn provider/tool work. A failed append therefore
@@ -1171,7 +1229,11 @@ async fn launch(
                 reason: UNRECORDED_ACCEPT_DETAIL.to_owned(),
             })
             .await;
-        return;
+        // AC1(e)/AD-1803 fail closed: the acceptance was never journaled, so
+        // the request path must surface a JSON-RPC error, not a success
+        // envelope wrapping a task that never executed. On the detached
+        // watcher path this `Err` is discarded by design.
+        return Err(error.to_string());
     }
     task.advance(RapTaskState::Working).await;
     let response_policy = runtime.response_policy(&peer_id, message_type);
@@ -1193,7 +1255,7 @@ async fn launch(
         Err(error) => {
             tracing::error!(%error, task = %task.id, "failed to start A2A inbound task");
             terminalize_start_failure(state, task, &peer_id, pending.as_ref()).await;
-            return;
+            return Ok(());
         }
     };
     let node_state = *status.borrow();
@@ -1210,7 +1272,7 @@ async fn launch(
         if let Some(record) = pending.as_ref() {
             remove_pending_task(state, record).await;
         }
-        return;
+        return Ok(());
     }
 
     let state = ServerState::clone(state);
@@ -1264,6 +1326,7 @@ async fn launch(
             }
         }
     });
+    Ok(())
 }
 
 // ── tasks/get, tasks/cancel ─────────────────────────────────────────────────
@@ -1359,6 +1422,7 @@ async fn projection_for(
     task_id: &str,
     task_state: RapTaskState,
     text: Option<&str>,
+    item_address: Option<&crate::domain::models::ItemAddress>,
 ) -> serde_json::Value {
     RoomProjection::<RemotePeerViewer>::disclose(
         task_id,
@@ -1368,6 +1432,7 @@ async fn projection_for(
         &state.scrub_fragments,
         state.signer.identity().peer_id.to_string(),
     )
+    .with_recipient_item_id(item_address.map(|address| address.item().as_str()))
     .to_task_json()
 }
 

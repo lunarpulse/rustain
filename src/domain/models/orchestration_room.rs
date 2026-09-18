@@ -17,6 +17,7 @@ use crate::domain::models::invocation_fingerprint::InvocationFingerprint;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::peer_frame::FrameRefusal;
 use crate::domain::models::peer_identity::PeerId;
+use crate::domain::models::recipient_item::ItemAddress;
 use crate::domain::models::room_role::RoomRole;
 use crate::domain::models::team_policy::{InteractionPolicySnapshot, NotificationUrgency};
 use crate::domain::models::ticket_addressee::TicketAddressee;
@@ -849,6 +850,23 @@ pub enum RoomEvent {
         #[serde(default)]
         advertised: String,
     },
+    /// A recipient-owned durable work item was accepted from an inbound peer.
+    RecipientItemReceived {
+        address: ItemAddress,
+        /// Sender-selected correlation. Never used as the recipient item id.
+        task: String,
+        /// Optional display attribution, not identity.
+        #[serde(default)]
+        alias: Option<String>,
+        content: String,
+    },
+    /// A local human deliberately acknowledged a recipient-owned item.
+    RecipientItemAcknowledged {
+        address: ItemAddress,
+        /// Optional display attribution, not identity.
+        #[serde(default)]
+        alias: Option<String>,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -1258,7 +1276,11 @@ impl OrchestrationRoom {
             // 18.4b's `PeerAdmissionRecorded`. It renders through the
             // transparency projection, which is where a peer-interaction fact
             // belongs.
-            | RoomEvent::PeerEquivocated { .. } => {}
+            | RoomEvent::PeerEquivocated { .. }
+            // Recipient items have their own projection; they are deliberately
+            // not folded into the orchestration node read model.
+            | RoomEvent::RecipientItemReceived { .. }
+            | RoomEvent::RecipientItemAcknowledged { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

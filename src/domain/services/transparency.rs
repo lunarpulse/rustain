@@ -144,6 +144,10 @@ pub enum TransparencyKind {
     /// The six touch points are paid: variant, glyph, wire label, the fold arm,
     /// the filter parse arm, and this story's own coverage.
     PeerEquivocated,
+    /// Recipient-owned durable item accepted from an inbound principal.
+    RecipientItemReceived,
+    /// Local human acknowledgement of a recipient-owned durable item.
+    RecipientItemAcknowledged,
     /// Interaction became visible in the audit spine before interruption routing.
     InteractionSurfaced,
     /// A batch of prior digest-tier interactions was shown to the operator.
@@ -176,6 +180,8 @@ impl TransparencyKind {
             Self::PeerFrameAttempted => "↗",
             // ≠ is unused by every other kind: two heads that do not reconcile.
             Self::PeerEquivocated => "≠",
+            Self::RecipientItemReceived => "↓",
+            Self::RecipientItemAcknowledged => "✓",
             Self::InteractionSurfaced => "!",
             Self::DigestFlushed => "≋",
             _ => "·",
@@ -198,6 +204,8 @@ impl TransparencyKind {
             Self::TransportAdmission => "transport-admission",
             Self::PeerFrameAttempted => "peer-frame",
             Self::PeerEquivocated => "peer-equivocated",
+            Self::RecipientItemReceived => "item-received",
+            Self::RecipientItemAcknowledged => "item-acknowledged",
             Self::InteractionSurfaced => "surfaced",
             Self::DigestFlushed => "digest-flushed",
             _ => "unknown",
@@ -518,6 +526,31 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             Some(topic.clone()),
             peer_equivocation_summary(issuer.as_ref(), *sequence),
         ),
+        RoomEvent::RecipientItemReceived {
+            address, content, ..
+        } => (
+            TransparencyKind::RecipientItemReceived,
+            Direction::Inbound,
+            item_principal_label(address.principal()),
+            Some(address.item().as_str().to_owned()),
+            format!(
+                "recipient item received: {}",
+                sanitize_disclosable(content, 120)
+            ),
+        ),
+        RoomEvent::RecipientItemAcknowledged { address, alias } => (
+            TransparencyKind::RecipientItemAcknowledged,
+            Direction::Unknown,
+            item_principal_label(address.principal()),
+            Some(address.item().as_str().to_owned()),
+            format!(
+                "recipient item acknowledged{}",
+                alias
+                    .as_deref()
+                    .map(|value| format!(" by {}", sanitize_disclosable(value, 80)))
+                    .unwrap_or_default()
+            ),
+        ),
         // Retractions mutate the prior projected row in `fold_transparency`;
         // they never create a second visible row.
         RoomEvent::AutoResponseRetracted { .. } => return None,
@@ -568,6 +601,14 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         summary: sanitize_disclosable(&summary, MAX_SUMMARY_BYTES),
         provenance,
     })
+}
+
+fn item_principal_label(principal: &crate::domain::models::ItemPrincipal) -> String {
+    match principal {
+        crate::domain::models::ItemPrincipal::Rap(peer)
+        | crate::domain::models::ItemPrincipal::A2aPseudonym(peer) => peer.as_str().to_owned(),
+        crate::domain::models::ItemPrincipal::Unknown => "unknown-peer".to_owned(),
+    }
 }
 
 /// Copy for a transport-admission row.
@@ -776,13 +817,15 @@ impl TransparencyFilter {
                         "transport-admission" => TransparencyKind::TransportAdmission,
                         "peer-frame" => TransparencyKind::PeerFrameAttempted,
                         "peer-equivocated" => TransparencyKind::PeerEquivocated,
+                        "item-received" => TransparencyKind::RecipientItemReceived,
+                        "item-acknowledged" => TransparencyKind::RecipientItemAcknowledged,
                         "unknown" => TransparencyKind::Unknown,
                         _ => {
                             return Err(format!(
                                 "unknown kind `{value}` — valid: accepted, refused, dispatched, \
                                  awaiting-approval, status-query, disclosed, room-role-granted, \
                                  room-role-revoked, transport-admission, peer-frame, \
-                                 peer-equivocated, unknown"
+                                 peer-equivocated, item-received, item-acknowledged, unknown"
                             ));
                         }
                     }));

@@ -792,6 +792,60 @@ fn test_event_loop_complexity_floor() {
     }
 }
 
+/// Story 19.16 AC5 — durable recipient-item names must not imply cryptographic
+/// properties the unsigned room journal does not provide.
+///
+/// The needles are AC5(a)'s merged ban list as identifier substrings:
+/// `verified|attested|proof|audit|signed` plus `authenticated|tamper|evidence`
+/// (identifiers cannot carry the prose forms `tamper-evident`/`audit trail`).
+/// Genuine mechanism names (`authenticate_request`) do not match: the ban is on
+/// the claim word `authenticated`, not on functions that actually authenticate.
+#[test]
+fn recipient_item_claim_identifier_ratchet_does_not_grow() {
+    const MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS: usize = 84;
+
+    let declaration = regex::Regex::new(
+        r"(?i)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:struct|enum|trait|type|fn|const|static)\s+([A-Za-z_][A-Za-z0-9_]*)",
+    )
+    .unwrap();
+    let enum_variant = regex::Regex::new(r"^\s*([A-Z][A-Za-z0-9_]*)\s*(?:\{|\(|,)\s*$").unwrap();
+    let banned =
+        regex::Regex::new(r"(?i)(verified|attested|proof|audit|signed|authenticated|tamper|evidence)").unwrap();
+    let mut sites = Vec::new();
+    for file in collect_rs_files(Path::new("src")) {
+        let source = fs::read_to_string(&file).expect("read Rust source");
+        for (line, text) in source.lines().enumerate() {
+            let captures = declaration
+                .captures(text)
+                .or_else(|| enum_variant.captures(text));
+            let Some(captures) = captures else {
+                continue;
+            };
+            let identifier = captures.get(1).unwrap().as_str();
+            if banned.is_match(identifier) {
+                sites.push(format!("{}:{} {identifier}", file.display(), line + 1));
+            }
+        }
+    }
+
+    let actual = sites.len();
+    assert!(
+        actual <= MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS,
+        "durable-item claim identifier count grew from \
+         {MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS} to {actual}. New recipient-item \
+         symbols must not claim authentication, tamper-evidence, signatures, proof, \
+         attestation, audit, or evidence properties the room journal does not \
+         provide.\n{}",
+        sites.join("\n")
+    );
+    if actual < MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS {
+        eprintln!(
+            "durable-item claim identifier ratchet dropped from \
+             {MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS} to {actual}; lower the baseline"
+        );
+    }
+}
+
 /// AC-3 handler-count + information-scent invariants. Verifies:
 /// 1. Zero handler-prefix free fns remain in `event_loop.rs`
 /// 2. Expected number of `pub fn handle_*` definitions under `src/adapters/tui/handlers/`

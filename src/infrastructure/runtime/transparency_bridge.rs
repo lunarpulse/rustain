@@ -369,6 +369,14 @@ pub(crate) async fn team_command(
                 );
             }
         }
+        TeamCommandArgs::Acknowledge { item_id: _ } => {
+            emit_team_warning(
+                state,
+                conversation_id,
+                app_state,
+                "Recipient acknowledgement requires a daemon-attached session.".to_owned(),
+            );
+        }
         TeamCommandArgs::Log(args) => {
             let input = team_log_input(app_state, &args).await;
             for event in handler::team_command(state, conversation_id, &args, input) {

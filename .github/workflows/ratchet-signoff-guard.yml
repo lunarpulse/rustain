@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Tracked ratchet constants. Keep in sync with tests/conformance.rs.
-      CONST_RE: 'const (MAX_KNOWN_BYPASSES|MAX_KNOWN_STD_SYNC_LOCKS|EVENT_LOOP_BASELINE_LINES|EVENT_LOOP_BASELINE_SHA|EVENT_LOOP_SOFT_BUDGET|EVENT_LOOP_HARD_BUDGET|EXPECTED_HANDLE_COUNT)'
+      CONST_RE: 'const (MAX_KNOWN_BYPASSES|MAX_KNOWN_STD_SYNC_LOCKS|MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS|EVENT_LOOP_BASELINE_LINES|EVENT_LOOP_BASELINE_SHA|EVENT_LOOP_SOFT_BUDGET|EVENT_LOOP_HARD_BUDGET|EXPECTED_HANDLE_COUNT)'
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       PR_BODY: ${{ github.event.pull_request.body }}

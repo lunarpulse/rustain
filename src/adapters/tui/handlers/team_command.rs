@@ -23,7 +23,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team send <peer-id> <text…> | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team ack <item-id> | /team send <peer-id> <text…> | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
 
 /// What the dispatch arm already did on the caller's behalf.
 pub struct TeamLogInput {
@@ -48,6 +48,7 @@ pub struct TeamLogArgs {
 pub enum TeamCommandArgs {
     Log(TeamLogArgs),
     Send { peer: String, text: String },
+    Acknowledge { item_id: String },
     Trust,
     Untrust(String),
     Status,
@@ -72,6 +73,19 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
             Ok(TeamCommandArgs::Send {
                 peer: peer.to_owned(),
                 text,
+            })
+        }
+        "ack" => {
+            let item_id = tokens
+                .next()
+                .ok_or_else(|| format!("Missing item id after '/team ack'. Use: {USAGE}"))?;
+            if tokens.next().is_some() {
+                return Err(format!(
+                    "Expected exactly one item id after '/team ack'. Use: {USAGE}"
+                ));
+            }
+            Ok(TeamCommandArgs::Acknowledge {
+                item_id: item_id.to_owned(),
             })
         }
         "trust" => {
@@ -424,6 +438,19 @@ mod tests {
             "`rustain team send` (the CLI twin) is not in this cut — \
              `18-9b-cli-team-send`"
         ));
+    }
+
+    #[test]
+    fn acknowledge_parses_one_item_without_an_alias_parameter() {
+        assert_eq!(
+            parse_team_command(Some("ack ri_123")),
+            Ok(TeamCommandArgs::Acknowledge {
+                item_id: "ri_123".to_owned(),
+            })
+        );
+        assert!(parse_team_command(Some("ack")).is_err());
+        assert!(parse_team_command(Some("ack ri_123 alias")).is_err());
+        assert!(USAGE.contains("/team ack <item-id>"));
     }
 
     #[test]

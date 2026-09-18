@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::models::{AgentId, NodeState, PeerId, RapTaskState};
+use crate::domain::models::{AgentId, ItemAddress, NodeState, PeerId, RapTaskState};
 
 /// Whether a task is waiting on a human before it may run.
 ///
@@ -157,6 +157,9 @@ struct TaskState {
     result: Option<String>,
     /// Human-readable explanation for a non-obvious terminal state.
     detail: Option<String>,
+    /// Recipient-owned durable address, present only after the received event
+    /// has committed.
+    item_address: Option<ItemAddress>,
 }
 
 /// A consistent read of a task's disclosable state.
@@ -165,6 +168,7 @@ pub struct TaskSnapshot {
     pub state: RapTaskState,
     pub result: Option<String>,
     pub detail: Option<String>,
+    pub item_address: Option<ItemAddress>,
 }
 
 impl InboundTask {
@@ -190,6 +194,7 @@ impl InboundTask {
                 pending: PendingAuth::None,
                 result: None,
                 detail: None,
+                item_address: None,
             }),
         }
     }
@@ -284,6 +289,7 @@ impl InboundTask {
             state: state.rap,
             result: state.result.clone(),
             detail: state.detail.clone(),
+            item_address: state.item_address.clone(),
         }
     }
 
@@ -346,6 +352,10 @@ impl InboundTask {
 
     pub async fn set_result(&self, result: Option<String>) {
         self.state.write().await.result = result;
+    }
+
+    pub async fn set_item_address(&self, address: ItemAddress) {
+        self.state.write().await.item_address = Some(address);
     }
 
     pub async fn is_terminal(&self) -> bool {

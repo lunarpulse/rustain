@@ -991,6 +991,31 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                     };
                                 } else if !input.trim().is_empty() {
                                     let text = std::mem::take(&mut input);
+                                    if let Some(arg) = text.strip_prefix("/team ") {
+                                        match crate::adapters::tui::handlers::team_command::parse_team_command(Some(arg)) {
+                                            Ok(crate::adapters::tui::handlers::team_command::TeamCommandArgs::Acknowledge { item_id }) => {
+                                                let _ = frame_tx.send(
+                                                    ClientFrame::AcknowledgeRecipientItem { item_id },
+                                                );
+                                                auto_scroll = true;
+                                                continue;
+                                            }
+                                            // Other `/team` verbs keep their
+                                            // pre-existing fall-through.
+                                            Ok(_) => {}
+                                            // A malformed ack must never become
+                                            // a model turn — consume it and
+                                            // show the parser's usage error.
+                                            Err(error) => {
+                                                state.status = StatusState::Flash {
+                                                    message: error,
+                                                    remaining_ms: 1500,
+                                                };
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                        }
+                                    }
                                     if let Some(node) = peer_draft_edit_node.take() {
                                         // Prefilled FROM the draft (the [e]
                                         // path): resolves as Edit, the
@@ -1740,6 +1765,7 @@ mod tests {
             // the daemon-owned topic log and membership, NOT memory — it stays
             // outside this memory-write-surface ratchet.
             | ClientFrame::PeerShare { .. }
+            | ClientFrame::AcknowledgeRecipientItem { .. }
             | ClientFrame::PeerEnvelope(_)
             | ClientFrame::Detach => {}
         }

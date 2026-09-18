@@ -5,6 +5,8 @@
 
 #[cfg(feature = "a2a")]
 pub(crate) const MESSAGE_TYPE_METADATA_KEY: &str = "x-rustain-message-type";
+#[cfg(feature = "a2a")]
+pub const RECIPIENT_ITEM_METADATA_KEY: &str = "x-rustain-item-id";
 
 pub mod config;
 

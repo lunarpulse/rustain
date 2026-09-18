@@ -206,6 +206,19 @@ impl InboundPeerRuntime for TypeRecordingRuntime {
         Vec::new()
     }
 }
+struct BrokenRoomJournal;
+
+#[async_trait::async_trait]
+impl RoomJournal for BrokenRoomJournal {
+    async fn record_event(
+        &self,
+        _event: rustain::domain::models::RoomEvent,
+    ) -> Result<(), rustain::domain::ports::RoomJournalError> {
+        Err(rustain::domain::ports::RoomJournalError::Append(
+            "disk full".to_owned(),
+        ))
+    }
+}
 
 async fn rpc(
     client: &reqwest::Client,
@@ -648,7 +661,8 @@ async fn message_type_metadata_is_exact_match_and_vanilla_defaults_to_unknown() 
     );
     let (domain_tx, _domain_rx) =
         tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
-    let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(journal, Some(domain_tx)));
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
     let team = rustain::domain::models::TeamPolicy {
         overrides: rustain::domain::models::TeamOverrides {
             per_type: std::collections::BTreeMap::from([
@@ -789,6 +803,13 @@ async fn message_type_metadata_is_exact_match_and_vanilla_defaults_to_unknown() 
         "the A2A setup_task rail must apply team per-type policy and keep Unknown on the base tier"
     );
 
+    let rows = fold_transparency(&journal.load().await.expect("load journal"));
+    assert!(
+        rows.iter()
+            .all(|row| row.kind != TransparencyKind::RecipientItemAcknowledged),
+        "notify-and-auto execution is not a deliberate human acknowledgement"
+    );
+
     cancel.cancel();
     http.await.expect("server task").expect("server shutdown");
 }
@@ -797,6 +818,62 @@ async fn message_type_metadata_is_exact_match_and_vanilla_defaults_to_unknown() 
 /// merely asks about work from a response that actually hands result text back.
 /// The journal is real: the fold observes exactly the same durable records that
 /// `/team log`, the CLI, and the panel will render.
+#[tokio::test]
+async fn message_send_fails_closed_before_exposing_an_unrecorded_recipient_item() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let runtime = Arc::new(TypeRecordingRuntime::default());
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: Some(runtime.clone()),
+            transparency: Arc::new(TransparencySink::new(Arc::new(BrokenRoomJournal))),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+
+    let response = rpc(
+        &reqwest::Client::new(),
+        &endpoint,
+        1,
+        "message/send",
+        serde_json::json!({
+            "message": {
+                "messageId": "must-not-exist",
+                "role": "user",
+                "parts": [{ "kind": "text", "text": "not durable" }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response["error"]["code"], -32603);
+    assert!(
+        runtime
+            .senders
+            .lock()
+            .is_ok_and(|senders| senders.is_empty()),
+        "the execution runtime must not see an item whose creation append failed"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
 #[tokio::test]
 async fn ac4_working_poll_records_status_query_without_disclosure_but_completed_fetch_records_both()
 {
@@ -849,6 +926,9 @@ async fn ac4_working_poll_records_status_query_without_disclosure_but_completed_
     ));
     let client = reqwest::Client::new();
 
+    let spoofed_peer = rustain::domain::models::PeerId::from_public_key(&[99; 32])
+        .expect("fixed spoof id")
+        .to_string();
     let accepted = rpc(
         &client,
         &endpoint,
@@ -858,7 +938,8 @@ async fn ac4_working_poll_records_status_query_without_disclosure_but_completed_
             "message": {
                 "messageId": TASK_ID,
                 "role": "user",
-                "parts": [{ "kind": "text", "text": "perform the task" }]
+                "parts": [{ "kind": "text", "text": "perform the task" }],
+                "metadata": { "peerId": spoofed_peer.clone() }
             }
         }),
     )
@@ -869,6 +950,14 @@ async fn ac4_working_poll_records_status_query_without_disclosure_but_completed_
             Some("submitted" | "working")
         ),
         "message/send must enter the real task lifecycle: {accepted}"
+    );
+    let item_id = accepted["result"]["metadata"]["x-rustain-item-id"]
+        .as_str()
+        .expect("accepted task carries the recipient-minted item id");
+    assert_ne!(item_id, TASK_ID, "recipient id is distinct from task.id");
+    assert!(
+        item_id.starts_with("ri_"),
+        "recipient id is opaque and minted"
     );
 
     let working = rpc(
@@ -883,6 +972,10 @@ async fn ac4_working_poll_records_status_query_without_disclosure_but_completed_
     assert!(
         working["result"]["status"].get("message").is_none(),
         "a working poll must hand no text back: {working}"
+    );
+    assert_eq!(
+        working["result"]["metadata"]["x-rustain-item-id"], item_id,
+        "polling preserves the durable recipient address"
     );
     let working_rows = fold_transparency(&journal.load().await.expect("load journal"));
     assert_eq!(
@@ -900,6 +993,27 @@ async fn ac4_working_poll_records_status_query_without_disclosure_but_completed_
             !(row.kind == TransparencyKind::Disclosed && row.task.as_deref() == Some(TASK_ID))
         }),
         "a working poll must not fabricate a disclosure row"
+    );
+    assert!(
+        working_rows.iter().any(|row| {
+            row.kind == TransparencyKind::RecipientItemReceived
+                && row.task.as_deref() == Some(item_id)
+        }),
+        "message/send durably records the recipient item before returning it"
+    );
+    let received_row = working_rows
+        .iter()
+        .find(|row| row.kind == TransparencyKind::RecipientItemReceived)
+        .expect("recipient item row");
+    assert_ne!(
+        received_row.peer, spoofed_peer,
+        "caller-supplied identity metadata must never become item provenance"
+    );
+    assert!(
+        working_rows
+            .iter()
+            .all(|row| row.kind != TransparencyKind::RecipientItemAcknowledged),
+        "viewing a task is not acknowledgement"
     );
 
     complete.notify_one();

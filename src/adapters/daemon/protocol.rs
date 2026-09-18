@@ -293,6 +293,9 @@ pub enum ClientFrame {
         /// A ≤240-byte human summary; `None` derives one from the artifact.
         summary: Option<String>,
     },
+    /// Deliberately acknowledge one recipient-owned durable item.
+    /// Trusted-local + read-write; the daemon also enforces the room-content role.
+    AcknowledgeRecipientItem { item_id: String },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
 }

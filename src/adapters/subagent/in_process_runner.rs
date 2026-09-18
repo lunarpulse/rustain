@@ -8011,6 +8011,22 @@ mod tests {
                          sequence={sequence} held={held:?} advertised={advertised:?}"
                     ));
                 }
+                RoomEvent::RecipientItemReceived {
+                    address,
+                    task,
+                    alias,
+                    content,
+                } => {
+                    lines.push(format!(
+                        "journal RecipientItemReceived address={address:?} task={task:?} \
+                         alias={alias:?} content={content:?}"
+                    ));
+                }
+                RoomEvent::RecipientItemAcknowledged { address, alias } => {
+                    lines.push(format!(
+                        "journal RecipientItemAcknowledged address={address:?} alias={alias:?}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

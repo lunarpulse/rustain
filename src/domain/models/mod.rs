@@ -60,6 +60,7 @@ pub mod profile;
 pub mod project_context;
 pub mod provider;
 pub mod provider_capabilities;
+pub mod recipient_item;
 pub mod redacted_url;
 pub mod redaction;
 pub mod relay;
@@ -228,6 +229,10 @@ pub use permission::{
 pub use plan::{
     DelegationInfo, EffortEstimate, Plan, PlanDecision, PlanStatus, PlanSubTask, PlanTask,
     PlanTaskStatus, TaskResult,
+};
+pub use recipient_item::{
+    ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, RecipientItemAllocator,
+    RecipientItemState, RecipientItemView,
 };
 pub use redacted_url::RedactedUrl;
 #[allow(unused_imports)]

@@ -1662,6 +1662,14 @@ async fn a_runtime_forbidden_fragment_downgrades_a_real_http_result() {
     let result = format!("completed with private context: {forbidden}");
     let workspace = tempfile::tempdir().expect("workspace");
     let keys = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open room journal"),
+    );
+    let transparency = Arc::new(TransparencySink::new(Arc::new(NodeRoomJournal::new(
+        journal, None,
+    ))));
     let signer = IdentityKeyStore::new(keys.path())
         .load_or_generate()
         .expect("identity");
@@ -1679,7 +1687,7 @@ async fn a_runtime_forbidden_fragment_downgrades_a_real_http_result() {
             signer,
             security: A2aServerSecurity::default(),
             runtime: Some(runtime),
-            transparency: Arc::new(TransparencySink::inert()),
+            transparency,
             policy: A2aAdmissionPolicy::Allow,
             workspace: workspace.path().to_path_buf(),
             advertised_host: None,
@@ -1723,6 +1731,14 @@ async fn a_runtime_forbidden_fragment_downgrades_a_real_http_result() {
 async fn post_insert_start_failure_is_terminal_and_opaque() {
     let workspace = tempfile::tempdir().expect("workspace");
     let keys = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open room journal"),
+    );
+    let transparency = Arc::new(TransparencySink::new(Arc::new(NodeRoomJournal::new(
+        journal, None,
+    ))));
     let signer = IdentityKeyStore::new(keys.path())
         .load_or_generate()
         .expect("identity");
@@ -1737,7 +1753,7 @@ async fn post_insert_start_failure_is_terminal_and_opaque() {
             signer,
             security: A2aServerSecurity::default(),
             runtime: Some(runtime),
-            transparency: Arc::new(TransparencySink::inert()),
+            transparency,
             policy: A2aAdmissionPolicy::Allow,
             workspace: workspace.path().to_path_buf(),
             advertised_host: None,
@@ -2605,6 +2621,22 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
     let task_id = "in-flight";
     let submitter = SubmitterKey::loopback();
     let node_id = mint_inbound_node_id(&submitter, task_id);
+    let durable_item_id = "ri_survives_restart";
+    let durable_address = rustain::domain::models::ItemAddress::from_a2a_ingress(
+        submitter.pseudonymous_peer_id(),
+        rustain::domain::models::ItemId::from_replay(durable_item_id),
+    );
+    rustain::domain::ports::RoomJournal::record_event(
+        &NodeRoomJournal::new(journal.clone(), Some(domain_tx.clone())),
+        rustain::domain::models::RoomEvent::RecipientItemReceived {
+            address: durable_address,
+            task: task_id.to_owned(),
+            alias: None,
+            content: "survive the restart".to_owned(),
+        },
+    )
+    .await
+    .expect("recipient item is durable before process loss");
     {
         // Host binding matters: recovery skips restoring a node whose recorded
         // host is not this one (it is host-bound elsewhere), so both processes
@@ -2725,10 +2757,13 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
             signer,
             security: A2aServerSecurity::default(),
             runtime: Some(server as Arc<dyn InboundPeerRuntime>),
-            transparency: Arc::new(TransparencySink::new(Arc::new(NodeRoomJournal::new(
-                journal.clone(),
-                Some(domain_tx),
-            )))),
+            transparency: Arc::new(
+                TransparencySink::new(Arc::new(NodeRoomJournal::new(
+                    journal.clone(),
+                    Some(domain_tx),
+                )))
+                .with_reader(journal.clone()),
+            ),
             policy: A2aAdmissionPolicy::Allow,
             workspace: ws,
             advertised_host: None,
@@ -2759,6 +2794,22 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
     // whole point.
     assert_ne!(reason, CANCEL_DETAIL);
     assert_eq!(reason, RESTART_DETAIL);
+    assert_eq!(
+        value["result"]["metadata"]["x-rustain-item-id"], durable_item_id,
+        "the recipient-owned item is recovered by journal fold even while the \
+         execution task truthfully resolves failed"
+    );
+    let replayed = rustain::adapters::policy::JournalRecipientItemProjection::from_entries(
+        &journal.load().await.expect("journal reload after restart"),
+    );
+    let recovered = replayed
+        .find_by_id(durable_item_id)
+        .expect("recipient item survives restart");
+    assert_eq!(
+        recovered.state,
+        rustain::domain::models::RecipientItemState::Received,
+        "restart reconciliation cannot impersonate the deliberate human acknowledgement"
+    );
 
     // AC6: restart reconciliation routes the recovered wait through a terminal
     // transition, which clears the durable wait stamp instead of rendering a

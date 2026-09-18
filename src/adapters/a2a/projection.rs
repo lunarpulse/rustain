@@ -73,6 +73,8 @@ pub struct RoomProjection<V: ProjectionViewer> {
     disclosure: Disclosure,
     /// Additive, ignorable ownership metadata (`x-rustain-ownership`).
     ownership_peer_id: String,
+    /// Recipient-minted durable address component, never the sender's task id.
+    recipient_item_id: Option<String>,
     _viewer: PhantomData<V>,
 }
 
@@ -110,6 +112,7 @@ impl<V: ProjectionViewer> RoomProjection<V> {
             state,
             disclosure,
             ownership_peer_id: ownership_peer_id.into(),
+            recipient_item_id: None,
             _viewer: PhantomData,
         }
     }
@@ -122,6 +125,13 @@ impl<V: ProjectionViewer> RoomProjection<V> {
     #[must_use]
     pub fn disclosure(&self) -> &Disclosure {
         &self.disclosure
+    }
+
+    /// Attach the recipient-owned item id after its received event is durable.
+    #[must_use]
+    pub fn with_recipient_item_id(mut self, item_id: Option<&str>) -> Self {
+        self.recipient_item_id = item_id.map(str::to_owned);
+        self
     }
 
     /// Render the A2A `Task` object this projection is allowed to produce.
@@ -161,11 +171,17 @@ impl<V: ProjectionViewer> RoomProjection<V> {
             });
         }
 
-        serde_json::json!({
+        let mut task = serde_json::json!({
             "kind": "task",
             "id": self.task_id,
             "status": status,
-        })
+        });
+        if let Some(item_id) = &self.recipient_item_id {
+            task["metadata"] = serde_json::json!({
+                super::RECIPIENT_ITEM_METADATA_KEY: item_id,
+            });
+        }
+        task
     }
 }
 
@@ -418,6 +434,7 @@ mod tests {
                 "state",
                 "disclosure",
                 "ownership_peer_id",
+                "recipient_item_id",
                 "_viewer"
             ],
             "RoomProjection gained or lost a field. Every member must be a value \
