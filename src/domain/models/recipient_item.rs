@@ -42,7 +42,13 @@ pub enum ItemPrincipal {
     Unknown,
 }
 
-/// Complete recipient-side address. Item-id uniqueness is per principal.
+/// Complete recipient-side address.
+///
+/// Item-id uniqueness is **global, not per principal**: [`RecipientItemAllocator`]
+/// keys `claimed_ids` on the bare id and refuses one already claimed under any
+/// principal, because `/team ack` and `/team remove` address an item by id
+/// alone. AD-1825's per-`(provenance, PeerId)` rule is the floor this exceeds,
+/// never a cap.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ItemAddress {
     principal: ItemPrincipal,
@@ -83,16 +89,23 @@ impl ItemAddress {
 
 /// Current replay-folded recipient-item state.
 ///
-/// `#[non_exhaustive]` per AC4(d)/A15 (NFR68): 19-16c extends this vocabulary
-/// through the same transition function, and downstream consumers must already
-/// tolerate a state they do not know. The one exhaustive `match` lives in
-/// `acknowledge_state` (`adapters/policy/recipient_item.rs`), same crate.
+/// `#[non_exhaustive]` per AC4(d)/A15 (NFR68): downstream consumers must
+/// already tolerate a state they do not know. The one exhaustive `match` is
+/// the legality table in `next_item_state` over `(state, act)`
+/// (`adapters/policy/recipient_item.rs`), same crate.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipientItemState {
     Received,
     Acknowledged,
+    /// The recipient disposed of their own copy (FR165). **Terminal**: no act
+    /// leaves it, from either predecessor, and the projection does not retain
+    /// which one it came from — that fact lives in the journal and the
+    /// `/team log` ledger. The entry itself is **kept**, because an absent
+    /// entry is byte-identically "not found" and AD-1822 requires a tombstone
+    /// distinct from one.
+    Removed,
 }
 
 /// Content and state reconstructed solely from durable recipient-item events.
@@ -101,12 +114,23 @@ pub struct RecipientItemView {
     pub address: ItemAddress,
     pub task: String,
     pub alias: Option<String>,
-    pub content: String,
+    /// Message content, or `None` once the recipient removed the item.
+    ///
+    /// `content.is_none()` ⟺ `state == RecipientItemState::Removed`, enforced
+    /// at the fold's single join point. Never `Some(String::new())` for a
+    /// removal: an empty content is a genuinely empty message.
+    pub content: Option<String>,
     pub state: RecipientItemState,
     /// Fold order of the creating `RecipientItemReceived` event. An ordering
     /// aid for ambiguous task lookups (a resent `messageId` produces one item
-    /// per execution); never part of the address. Deterministic under re-fold,
-    /// so AC4's structural-equality ratchet still holds.
+    /// per execution); never part of the address.
+    ///
+    /// ⚠ Deterministic **re-fold versus re-fold**, which is all AC4's
+    /// structural-equality ratchet compares. It is NOT stable across the two
+    /// assignment schemes: `from_entries` uses the absolute journal index and
+    /// `apply` uses `max(existing) + 1`, so a cross-scheme comparison must
+    /// exclude this field. Both are monotonic in append order, so every
+    /// ordering consumer agrees regardless.
     #[serde(default)]
     pub journal_order: u64,
 }
@@ -193,8 +217,7 @@ mod tests {
         // under one principal must be refused under every other.
         let first_peer = PeerId::from_public_key(&[4; 32]).unwrap();
         let second_peer = PeerId::from_public_key(&[5; 32]).unwrap();
-        let existing =
-            ItemAddress::from_a2a_ingress(first_peer, ItemId::from_replay("ri_fixed"));
+        let existing = ItemAddress::from_a2a_ingress(first_peer, ItemId::from_replay("ri_fixed"));
         let allocator = RecipientItemAllocator::from_addresses([existing]);
 
         assert_eq!(

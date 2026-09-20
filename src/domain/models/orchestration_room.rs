@@ -867,6 +867,18 @@ pub enum RoomEvent {
         #[serde(default)]
         alias: Option<String>,
     },
+    /// The recipient disposed of their own copy of an item (FR165).
+    ///
+    /// ⛔ A **distinct fact class**, never a second acknowledgement and never a
+    /// retract: retract is the sender marking their own content, removal is
+    /// the recipient's housekeeping, and FR165 exempts it from the
+    /// append-only discipline binding the sender's edit. The journal line
+    /// stands forever — this record marks, it never erases — while the
+    /// projection and the transparency row stop carrying the content.
+    /// AD-1822's tombstone, distinct from not-found.
+    RecipientItemRemoved {
+        address: ItemAddress,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -1280,7 +1292,8 @@ impl OrchestrationRoom {
             // Recipient items have their own projection; they are deliberately
             // not folded into the orchestration node read model.
             | RoomEvent::RecipientItemReceived { .. }
-            | RoomEvent::RecipientItemAcknowledged { .. } => {}
+            | RoomEvent::RecipientItemAcknowledged { .. }
+            | RoomEvent::RecipientItemRemoved { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

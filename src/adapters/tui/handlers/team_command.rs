@@ -23,7 +23,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team ack <item-id> | /team send <peer-id> <text…> | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team ack <item-id> | /team remove <item-id> | /team send <peer-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
 
 /// What the dispatch arm already did on the caller's behalf.
 pub struct TeamLogInput {
@@ -49,6 +49,7 @@ pub enum TeamCommandArgs {
     Log(TeamLogArgs),
     Send { peer: String, text: String },
     Acknowledge { item_id: String },
+    Remove { item_id: String },
     Trust,
     Untrust(String),
     Status,
@@ -85,6 +86,19 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
                 ));
             }
             Ok(TeamCommandArgs::Acknowledge {
+                item_id: item_id.to_owned(),
+            })
+        }
+        "remove" => {
+            let item_id = tokens
+                .next()
+                .ok_or_else(|| format!("Missing item id after '/team remove'. Use: {USAGE}"))?;
+            if tokens.next().is_some() {
+                return Err(format!(
+                    "Expected exactly one item id after '/team remove'. Use: {USAGE}"
+                ));
+            }
+            Ok(TeamCommandArgs::Remove {
                 item_id: item_id.to_owned(),
             })
         }

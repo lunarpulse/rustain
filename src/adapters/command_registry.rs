@@ -155,7 +155,7 @@ impl CommandRegistry {
             },
             SlashCommandDef {
                 name: "team".to_string(),
-                description: "A2A team interactions: /team log (transparency log) [--filter=…] [--json] [--export] | /team trust (list grants) | /team untrust <alias-or-peer-id>"
+                description: "A2A team interactions: /team log (transparency log) [--filter=…] [--json] [--export] | /team send <peer-id> <text…> | /team ack <item-id> | /team remove <item-id> | /team status | /team trust (list grants) | /team untrust <alias-or-peer-id>"
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,

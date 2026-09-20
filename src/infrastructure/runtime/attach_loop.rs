@@ -576,6 +576,45 @@ pub fn apply_client_event(
     }
 }
 
+/// What an attached session does with one submitted input line that may be a
+/// `/team` command.
+///
+/// Extracted so the intercept table is reachable by a test: the match it holds
+/// is **not** compile-forced. A new `/team` verb with no arm here compiles,
+/// falls through to `driver.submit`, and becomes a model prompt — which is
+/// exactly what happened to `log`, `trust`, `status` and `send`.
+#[derive(Debug)]
+enum AttachedTeamLine {
+    /// An intercepted verb: send this frame; never a model turn.
+    Frame(ClientFrame),
+    /// A malformed `/team` line: flash the parser's usage error; never a model
+    /// turn.
+    Refused(String),
+    /// Not intercepted here — the pre-existing fall-through to the model.
+    PassThrough,
+}
+
+fn attached_team_line(text: &str) -> AttachedTeamLine {
+    use crate::adapters::tui::handlers::team_command::{TeamCommandArgs, parse_team_command};
+
+    let Some(arg) = text.strip_prefix("/team ") else {
+        return AttachedTeamLine::PassThrough;
+    };
+    match parse_team_command(Some(arg)) {
+        Ok(TeamCommandArgs::Acknowledge { item_id }) => {
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { item_id })
+        }
+        // A destructive verb must not become a model prompt either: the
+        // daemon's own refusal reaches the operator as `[daemon error] …`.
+        Ok(TeamCommandArgs::Remove { item_id }) => {
+            AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { item_id })
+        }
+        // Other `/team` verbs keep their pre-existing fall-through.
+        Ok(_) => AttachedTeamLine::PassThrough,
+        Err(error) => AttachedTeamLine::Refused(error),
+    }
+}
+
 /// Connect to this workspace's daemon and run the rich attach TUI until the user
 /// detaches (`Esc`/`Ctrl+D`) or the daemon closes the connection. The daemon and
 /// any in-flight turn keep running across detach (AC4).
@@ -991,30 +1030,24 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                     };
                                 } else if !input.trim().is_empty() {
                                     let text = std::mem::take(&mut input);
-                                    if let Some(arg) = text.strip_prefix("/team ") {
-                                        match crate::adapters::tui::handlers::team_command::parse_team_command(Some(arg)) {
-                                            Ok(crate::adapters::tui::handlers::team_command::TeamCommandArgs::Acknowledge { item_id }) => {
-                                                let _ = frame_tx.send(
-                                                    ClientFrame::AcknowledgeRecipientItem { item_id },
-                                                );
-                                                auto_scroll = true;
-                                                continue;
-                                            }
-                                            // Other `/team` verbs keep their
-                                            // pre-existing fall-through.
-                                            Ok(_) => {}
-                                            // A malformed ack must never become
-                                            // a model turn — consume it and
-                                            // show the parser's usage error.
-                                            Err(error) => {
-                                                state.status = StatusState::Flash {
-                                                    message: error,
-                                                    remaining_ms: 1500,
-                                                };
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
+                                    match attached_team_line(&text) {
+                                        AttachedTeamLine::Frame(frame) => {
+                                            let _ = frame_tx.send(frame);
+                                            auto_scroll = true;
+                                            continue;
                                         }
+                                        // A malformed `/team` line must never
+                                        // become a model turn — consume it and
+                                        // show the parser's usage error.
+                                        AttachedTeamLine::Refused(error) => {
+                                            state.status = StatusState::Flash {
+                                                message: error,
+                                                remaining_ms: 1500,
+                                            };
+                                            state.needs_redraw = true;
+                                            continue;
+                                        }
+                                        AttachedTeamLine::PassThrough => {}
                                     }
                                     if let Some(node) = peer_draft_edit_node.take() {
                                         // Prefilled FROM the draft (the [e]
@@ -1766,9 +1799,51 @@ mod tests {
             // outside this memory-write-surface ratchet.
             | ClientFrame::PeerShare { .. }
             | ClientFrame::AcknowledgeRecipientItem { .. }
+            // Removal disposes of a recipient-owned durable ITEM, not memory.
+            | ClientFrame::RemoveRecipientItem { .. }
             | ClientFrame::PeerEnvelope(_)
             | ClientFrame::Detach => {}
         }
+    }
+
+    /// Story 19.16c AC3(h) — in an **attached** session a `/team` verb the
+    /// intercept table does not name falls through to `driver.submit` and
+    /// becomes a model prompt. That is already true of `log`, `trust`,
+    /// `status` and `send`; a destructive verb must not inherit it.
+    ///
+    /// Mutant → RED: delete the `Remove` arm. The line classifies as
+    /// `PassThrough` and the operator's removal is typed at the model.
+    #[test]
+    fn an_attached_team_remove_becomes_a_frame_not_a_model_prompt() {
+        match attached_team_line("/team remove ri_x") {
+            AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { item_id }) => {
+                assert_eq!(item_id, "ri_x");
+            }
+            other => panic!("`/team remove` must be intercepted as a frame, got {other:?}"),
+        }
+        // The shipped verb is unchanged…
+        assert!(matches!(
+            attached_team_line("/team ack ri_x"),
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
+        // …a malformed removal is consumed and explained, never submitted…
+        let AttachedTeamLine::Refused(error) = attached_team_line("/team remove") else {
+            panic!("a malformed removal must never become a model turn");
+        };
+        assert!(error.contains("/team remove"), "{error}");
+        assert!(matches!(
+            attached_team_line("/team remove ri_x extra"),
+            AttachedTeamLine::Refused(_)
+        ));
+        // …and the pre-existing fall-through is preserved exactly.
+        assert!(matches!(
+            attached_team_line("/team log"),
+            AttachedTeamLine::PassThrough
+        ));
+        assert!(matches!(
+            attached_team_line("tell me about /team remove"),
+            AttachedTeamLine::PassThrough
+        ));
     }
 
     /// Test 7 (re-attach replay) — `Terminal` and `Telegram` origins in the

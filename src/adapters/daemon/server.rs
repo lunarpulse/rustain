@@ -1494,6 +1494,129 @@ impl AttachServer {
         Ok(())
     }
 
+    /// Gate, load, fold, find, and check the legality table for ONE act on one
+    /// recipient-owned item.
+    ///
+    /// Sends its own refusal frame on every failure path: `None` means "the
+    /// client has already been told — return from the arm". The `act`
+    /// parameter is load-bearing, because legality is a function of
+    /// `(state, act)` and the two near-idempotent cells behave oppositely: a
+    /// second acknowledgement is silent, a second removal is refused aloud.
+    ///
+    /// There is exactly ONE write on this rail — the caller's `record_event`.
+    /// The fold below is a throwaway read of the journal, which IS the state
+    /// here, so AD-1803's durable-first ordering is satisfied by construction
+    /// and is not a claim this path can fail.
+    async fn resolve_item_for_edit(
+        &self,
+        conn_id: u64,
+        mode: AttachMode,
+        tier: ConnectionTier,
+        act: crate::adapters::policy::recipient_item::RecipientItemAct,
+        item_id: &str,
+    ) -> Option<(
+        crate::domain::models::RecipientItemView,
+        Arc<dyn crate::domain::ports::RoomJournal>,
+    )> {
+        use crate::adapters::policy::recipient_item::{ItemActOutcome, next_item_state};
+
+        let acting = AgentId::local_operator();
+        match recipient_ack_gate(mode, tier, &acting) {
+            RecipientAckGate::Allow => {}
+            RecipientAckGate::ReadOnly => {
+                self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
+                    .await;
+                return None;
+            }
+            RecipientAckGate::UntrustedTier => {
+                self.send_to(
+                    conn_id,
+                    DaemonFrame::Error(ProtocolError::PeerVerification(format!(
+                        "recipient {} is same-host trusted-local only",
+                        act.noun()
+                    ))),
+                )
+                .await;
+                return None;
+            }
+            RecipientAckGate::RoleDenied => {
+                self.send_to(
+                    conn_id,
+                    DaemonFrame::Error(ProtocolError::PeerVerification(format!(
+                        "room role does not permit durable recipient {}",
+                        act.noun()
+                    ))),
+                )
+                .await;
+                return None;
+            }
+        }
+        let Some(reader) = &self.room_journal_reader else {
+            self.send_to(
+                conn_id,
+                DaemonFrame::Error(ProtocolError::Internal(
+                    "room journal reader is unavailable".to_owned(),
+                )),
+            )
+            .await;
+            return None;
+        };
+        let Some(journal) = &self.room_journal else {
+            self.send_to(
+                conn_id,
+                DaemonFrame::Error(ProtocolError::Internal(
+                    "room journal is unavailable".to_owned(),
+                )),
+            )
+            .await;
+            return None;
+        };
+        let entries = match reader.load_entries().await {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.send_to(
+                    conn_id,
+                    DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
+                )
+                .await;
+                return None;
+            }
+        };
+        let projection =
+            crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
+        let Some(item) = projection.find_by_id(item_id) else {
+            self.send_to(
+                conn_id,
+                DaemonFrame::Error(ProtocolError::Malformed(
+                    "recipient item not found".to_owned(),
+                )),
+            )
+            .await;
+            return None;
+        };
+        match next_item_state(item.state, act) {
+            ItemActOutcome::Applied(_) => Some((item, Arc::clone(journal))),
+            // Already there: the shipped silence, preserved exactly.
+            ItemActOutcome::Idempotent => None,
+            // Told, never swallowed — and deliberately NOT the not-found
+            // string, because a tombstone the operator cannot distinguish
+            // from a never-minted id is the collapse AD-1822 forbids.
+            // `Removed` is the only state any act is refused from today; a
+            // future terminal state must mint its own sentence here rather
+            // than inherit one that would be false.
+            ItemActOutcome::Refused(_) => {
+                self.send_to(
+                    conn_id,
+                    DaemonFrame::Error(ProtocolError::Malformed(
+                        "recipient item already removed".to_owned(),
+                    )),
+                )
+                .await;
+                None
+            }
+        }
+    }
+
     /// Returns `true` if the connection should detach.
     async fn handle_client_frame(
         &self,
@@ -1805,94 +1928,60 @@ impl AttachServer {
                 }
             }
             ClientFrame::AcknowledgeRecipientItem { item_id } => {
-                let acting = AgentId::local_operator();
-                match recipient_ack_gate(mode, tier, &acting) {
-                    RecipientAckGate::Allow => {}
-                    RecipientAckGate::ReadOnly => {
-                        self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
-                            .await;
-                        return false;
-                    }
-                    RecipientAckGate::UntrustedTier => {
-                        self.send_to(
-                            conn_id,
-                            DaemonFrame::Error(ProtocolError::PeerVerification(
-                                "recipient acknowledgement is same-host trusted-local only"
-                                    .to_owned(),
-                            )),
-                        )
-                        .await;
-                        return false;
-                    }
-                    RecipientAckGate::RoleDenied => {
-                        self.send_to(
-                            conn_id,
-                            DaemonFrame::Error(ProtocolError::PeerVerification(
-                                "room role does not permit durable recipient acknowledgement"
-                                    .to_owned(),
-                            )),
-                        )
-                        .await;
-                        return false;
-                    }
+                let Some((item, journal)) = self
+                    .resolve_item_for_edit(
+                        conn_id,
+                        mode,
+                        tier,
+                        crate::adapters::policy::recipient_item::RecipientItemAct::Acknowledge,
+                        &item_id,
+                    )
+                    .await
+                else {
+                    return false;
+                };
+                if let Err(error) = journal
+                    .record_event(
+                        crate::domain::models::RoomEvent::RecipientItemAcknowledged {
+                            address: item.address,
+                            // AC2(c)/A7: attribution is the roster alias the
+                            // message ARRIVED on — the item's own alias,
+                            // which is `None` (a renderable unresolved
+                            // state) for the A2A pseudonym path. Never a
+                            // fabricated person-shaped string.
+                            alias: item.alias.clone(),
+                        },
+                    )
+                    .await
+                {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
+                    )
+                    .await;
                 }
-                let Some(reader) = &self.room_journal_reader else {
-                    self.send_to(
+            }
+            ClientFrame::RemoveRecipientItem { item_id } => {
+                let Some((item, journal)) = self
+                    .resolve_item_for_edit(
                         conn_id,
-                        DaemonFrame::Error(ProtocolError::Internal(
-                            "room journal reader is unavailable".to_owned(),
-                        )),
+                        mode,
+                        tier,
+                        crate::adapters::policy::recipient_item::RecipientItemAct::Remove,
+                        &item_id,
                     )
-                    .await;
+                    .await
+                else {
                     return false;
                 };
-                let Some(journal) = &self.room_journal else {
-                    self.send_to(
-                        conn_id,
-                        DaemonFrame::Error(ProtocolError::Internal(
-                            "room journal is unavailable".to_owned(),
-                        )),
-                    )
-                    .await;
-                    return false;
-                };
-                let entries = match reader.load_entries().await {
-                    Ok(entries) => entries,
-                    Err(error) => {
-                        self.send_to(
-                            conn_id,
-                            DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
-                        )
-                        .await;
-                        return false;
-                    }
-                };
-                let projection =
-                    crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
-                let Some(item) = projection.find_by_id(&item_id) else {
-                    self.send_to(
-                        conn_id,
-                        DaemonFrame::Error(ProtocolError::Malformed(
-                            "recipient item not found".to_owned(),
-                        )),
-                    )
-                    .await;
-                    return false;
-                };
-                if item.state != crate::domain::models::RecipientItemState::Acknowledged
-                    && let Err(error) = journal
-                        .record_event(
-                            crate::domain::models::RoomEvent::RecipientItemAcknowledged {
-                                address: item.address,
-                                // AC2(c)/A7: attribution is the roster alias the
-                                // message ARRIVED on — the item's own alias,
-                                // which is `None` (a renderable unresolved
-                                // state) for the A2A pseudonym path. Never a
-                                // fabricated person-shaped string.
-                                alias: item.alias.clone(),
-                            },
-                        )
-                        .await
+                // The removal record carries the address and nothing else: a
+                // single fact with no outcome, and no attribution field the
+                // one local principal could fill honestly.
+                if let Err(error) = journal
+                    .record_event(crate::domain::models::RoomEvent::RecipientItemRemoved {
+                        address: item.address,
+                    })
+                    .await
                 {
                     self.send_to(
                         conn_id,
@@ -4767,6 +4856,747 @@ mod tests {
             1,
             "one acknowledgement command must produce one state transition"
         );
+    }
+
+    /// Story 19.16c — the one fixture every removal keystone seeds from: a
+    /// journaled server, a **registered writer connection** so the refusal
+    /// frames are observable (the seam a real client would occupy), and one
+    /// recipient item already received.
+    async fn recipient_item_fixture(
+        tmp: &std::path::Path,
+        seeds: &[(&str, Option<&str>, &str)],
+    ) -> (
+        Arc<AttachServer>,
+        Arc<RecordingJournal>,
+        Vec<crate::domain::models::ItemAddress>,
+        mpsc::Receiver<DaemonFrame>,
+    ) {
+        let (core, _storage) = mock_core(tmp, vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "recipient-removal".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let journal = Arc::new(RecordingJournal::default());
+        let mut addresses = Vec::new();
+        for (index, (item_id, alias, content)) in seeds.iter().enumerate() {
+            let address = crate::domain::models::ItemAddress::from_a2a_ingress(
+                test_signer(150 + u8::try_from(index).unwrap())
+                    .identity()
+                    .peer_id
+                    .clone(),
+                crate::domain::models::ItemId::from_replay(*item_id),
+            );
+            journal
+                .record_event(crate::domain::models::RoomEvent::RecipientItemReceived {
+                    address: address.clone(),
+                    task: format!("{item_id}-sender-task"),
+                    alias: alias.map(ToOwned::to_owned),
+                    content: (*content).to_owned(),
+                })
+                .await
+                .unwrap();
+            addresses.push(address);
+        }
+        let server = journaled_server(core, conversation, domain_tx, journal.clone());
+        let (writer_tx, writer_rx) = mpsc::channel(8);
+        server.registry.lock().await.conns.push(Conn {
+            id: 1,
+            tx: writer_tx,
+            mode: AttachMode::ReadWrite,
+        });
+        (server, journal, addresses, writer_rx)
+    }
+
+    fn refusal_text(frame: Option<DaemonFrame>) -> String {
+        match frame {
+            Some(DaemonFrame::Error(ProtocolError::Malformed(message)))
+            | Some(DaemonFrame::Error(ProtocolError::PeerVerification(message))) => message,
+            Some(DaemonFrame::Error(ProtocolError::ReadOnly)) => "read-only".to_owned(),
+            other => panic!("expected a refusal frame, got {other:?}"),
+        }
+    }
+
+    async fn recipient_items(
+        journal: &RecordingJournal,
+    ) -> crate::adapters::policy::JournalRecipientItemProjection {
+        let entries = crate::domain::ports::RoomJournalReader::load_entries(journal)
+            .await
+            .unwrap();
+        crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries)
+    }
+
+    /// Story 19.16c AC1(a)(b)(e) — the removal verb's front door: one gated
+    /// frame, **one** durable record, and a tombstone the fold KEEPS.
+    ///
+    /// Mutant → RED: implement removal as `HashMap::remove`. The entry
+    /// vanishes, `find_by_id` answers `None`, and the removed id becomes
+    /// byte-identical to an id that never existed.
+    #[tokio::test]
+    async fn removal_frame_appends_a_record_and_the_fold_keeps_the_tombstone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, journal, addresses, mut frames) = recipient_item_fixture(
+            tmp.path(),
+            &[
+                ("ri_removed", None, "peer content"),
+                ("ri_untouched", None, "still here"),
+            ],
+        )
+        .await;
+
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::RemoveRecipientItem {
+                    item_id: "ri_removed".to_owned(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+
+        let entries = crate::domain::ports::RoomJournalReader::load_entries(journal.as_ref())
+            .await
+            .unwrap();
+        let Some(crate::domain::models::JournalRecord::Room(
+            crate::domain::models::RoomEvent::RecipientItemRemoved { address },
+        )) = entries.last().map(|entry| &entry.record)
+        else {
+            panic!("the removal frame must journal RecipientItemRemoved");
+        };
+        assert_eq!(address, &addresses[0]);
+
+        let projection = recipient_items(journal.as_ref()).await;
+        let tombstone = projection
+            .find_by_id("ri_removed")
+            .expect("the projection RETAINS the entry — a tombstone, not an absence");
+        assert_eq!(
+            tombstone.state,
+            crate::domain::models::RecipientItemState::Removed
+        );
+        assert_eq!(tombstone.content, None);
+
+        // Positive control: removal is scoped to its target.
+        let untouched = projection.find_by_id("ri_untouched").expect("still there");
+        assert_eq!(
+            untouched.state,
+            crate::domain::models::RecipientItemState::Received
+        );
+        assert_eq!(untouched.content.as_deref(), Some("still here"));
+        assert!(
+            frames.try_recv().is_err(),
+            "a legal removal is silent — no frame, exactly like the shipped acknowledge path"
+        );
+    }
+
+    /// AC1(b)(c)(d)(g) + the distinctness ratchet — in ONE run, a **removed**
+    /// id and a **never-minted** id must refuse differently, byte for byte. A
+    /// one-sided assertion cannot see the collapse.
+    ///
+    /// Mutants → RED: `HashMap::remove` (both refusals become "not found");
+    /// a silent no-op refusal (no frame at all).
+    #[tokio::test]
+    async fn a_removed_id_and_an_unknown_id_refuse_differently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, journal, _addresses, mut frames) =
+            recipient_item_fixture(tmp.path(), &[("ri_twice", None, "peer content")]).await;
+
+        for item_id in ["ri_twice", "ri_twice", "ri_never_minted"] {
+            server
+                .handle_client_frame_tiered(
+                    ClientFrame::RemoveRecipientItem {
+                        item_id: item_id.to_owned(),
+                    },
+                    AttachMode::ReadWrite,
+                    ConnectionTier::TrustedLocal,
+                    1,
+                )
+                .await;
+        }
+
+        let already_removed = refusal_text(frames.try_recv().ok());
+        let never_existed = refusal_text(frames.try_recv().ok());
+        assert_eq!(already_removed, "recipient item already removed");
+        assert_eq!(never_existed, "recipient item not found");
+        assert_ne!(
+            already_removed, never_existed,
+            "a tombstone the operator cannot tell from a never-minted id is the \
+             collapse AD-1822 forbids"
+        );
+
+        let entries = crate::domain::ports::RoomJournalReader::load_entries(journal.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| matches!(
+                    entry.record,
+                    crate::domain::models::JournalRecord::Room(
+                        crate::domain::models::RoomEvent::RecipientItemRemoved { .. }
+                    )
+                ))
+                .count(),
+            1,
+            "idempotent-by-refusal: the second removal writes nothing"
+        );
+    }
+
+    /// AC1(c) — **the headline.** `/team remove ri_x` then `/team ack ri_x`:
+    /// two commands, no concurrency. The shipped `!=` idempotence guard let
+    /// the acknowledgement through, journaling a line that a cold re-fold
+    /// replays forever.
+    ///
+    /// Mutant → RED: keep the `!= <state>` guard in the frame handler instead
+    /// of routing through `resolve_item_for_edit`'s legality check. ⛔ It does
+    /// NOT assert `state == Removed && content == None`: the fold's own table
+    /// holds those under the mutant. What moves is a spurious journal line and
+    /// a refusal the operator never hears.
+    #[tokio::test]
+    async fn acknowledging_a_removed_item_journals_nothing_and_is_told() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, journal, addresses, mut frames) = recipient_item_fixture(
+            tmp.path(),
+            &[("ri_zombie", Some("arrival-alias"), "peer content")],
+        )
+        .await;
+
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::RemoveRecipientItem {
+                    item_id: "ri_zombie".to_owned(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+        let after_removal = crate::domain::ports::RoomJournalReader::load_entries(journal.as_ref())
+            .await
+            .unwrap()
+            .len();
+
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::AcknowledgeRecipientItem {
+                    item_id: "ri_zombie".to_owned(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+
+        let entries = crate::domain::ports::RoomJournalReader::load_entries(journal.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(
+            entries.len(),
+            after_removal,
+            "acknowledging a tombstone must append NOTHING"
+        );
+        assert_eq!(
+            refusal_text(frames.try_recv().ok()),
+            "recipient item already removed",
+            "told, not swallowed: the operator named a disposed item"
+        );
+        let item = crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries)
+            .get(&addresses[0])
+            .expect("the tombstone survives a cold re-fold");
+        assert_eq!(
+            item.alias.as_deref(),
+            Some("arrival-alias"),
+            "no field of a Removed item is touched"
+        );
+    }
+
+    /// AC3(f) + AC1's gate — one gate serves both acts, and each refuses in
+    /// **its own** words. The acknowledge strings are byte-identical to the
+    /// ones 19.16 shipped.
+    ///
+    /// Mutant → RED: drop the `TrustedLocal` check.
+    #[tokio::test]
+    async fn the_gate_refuses_each_act_in_its_own_words() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, _journal, _addresses, mut frames) =
+            recipient_item_fixture(tmp.path(), &[("ri_gated", None, "peer content")]).await;
+
+        for (frame, expected) in [
+            (
+                ClientFrame::RemoveRecipientItem {
+                    item_id: "ri_gated".to_owned(),
+                },
+                "recipient item removal is same-host trusted-local only",
+            ),
+            (
+                ClientFrame::AcknowledgeRecipientItem {
+                    item_id: "ri_gated".to_owned(),
+                },
+                "recipient acknowledgement is same-host trusted-local only",
+            ),
+        ] {
+            server
+                .handle_client_frame_tiered(frame, AttachMode::ReadWrite, ConnectionTier::Peer, 1)
+                .await;
+            assert_eq!(refusal_text(frames.try_recv().ok()), expected);
+        }
+
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::RemoveRecipientItem {
+                    item_id: "ri_gated".to_owned(),
+                },
+                AttachMode::ReadOnly,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+        assert_eq!(refusal_text(frames.try_recv().ok()), "read-only");
+    }
+
+    /// Positive control for the shipped act: `Acknowledged` + acknowledge stays
+    /// **silent** — no write, no word — which is exactly what the replaced
+    /// `!=` guard did.
+    #[tokio::test]
+    async fn a_second_acknowledgement_remains_silently_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, journal, _addresses, mut frames) =
+            recipient_item_fixture(tmp.path(), &[("ri_twice_acked", None, "peer content")]).await;
+
+        for _ in 0..2 {
+            server
+                .handle_client_frame_tiered(
+                    ClientFrame::AcknowledgeRecipientItem {
+                        item_id: "ri_twice_acked".to_owned(),
+                    },
+                    AttachMode::ReadWrite,
+                    ConnectionTier::TrustedLocal,
+                    1,
+                )
+                .await;
+        }
+
+        let entries = crate::domain::ports::RoomJournalReader::load_entries(journal.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| matches!(
+                    entry.record,
+                    crate::domain::models::JournalRecord::Room(
+                        crate::domain::models::RoomEvent::RecipientItemAcknowledged { .. }
+                    )
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            frames.try_recv().is_err(),
+            "the item is still there and the operator's intent already holds"
+        );
+    }
+
+    /// Story 19.16c AC2 — the disposal is complete at **every layer the
+    /// operator can read**, and the ledger never quoted the payload to begin
+    /// with.
+    ///
+    /// Driven with TWO unmistakable peer-supplied strings — the content and the
+    /// sender-selected task correlation — because a well-meaning "the row
+    /// should still say something" swap of one for the other would otherwise
+    /// pass.
+    ///
+    /// Mutants → RED: `content = Some(String::new())` instead of `None`;
+    /// leaving `transparency_row` quoting `content`.
+    #[tokio::test]
+    async fn the_disposal_reaches_the_projection_and_every_rendered_surface() {
+        const PAYLOAD: &str = "PEER-SUPPLIED-PAYLOAD-19-16C";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, journal, _addresses, _frames) =
+            recipient_item_fixture(tmp.path(), &[("ri_disposed", None, PAYLOAD)]).await;
+        // The fixture's task correlation is the second peer-controlled string.
+        let sender_task = "ri_disposed-sender-task";
+
+        // Positive control: there IS something to dispose of.
+        assert_eq!(
+            recipient_items(journal.as_ref())
+                .await
+                .find_by_id("ri_disposed")
+                .unwrap()
+                .content
+                .as_deref(),
+            Some(PAYLOAD)
+        );
+        let before = rendered_surfaces(journal.as_ref()).await;
+        for (surface, text) in &before {
+            assert!(
+                !text.contains(PAYLOAD) && !text.contains(sender_task),
+                "a transparency LEDGER records that an interaction happened, never its \
+                 payload — {surface} still quotes a peer-chosen byte:\n{text}"
+            );
+        }
+
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::RemoveRecipientItem {
+                    item_id: "ri_disposed".to_owned(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+
+        assert_eq!(
+            recipient_items(journal.as_ref())
+                .await
+                .find_by_id("ri_disposed")
+                .unwrap()
+                .content,
+            None,
+            "a removed message and a genuinely empty one must never be one state"
+        );
+        for (surface, text) in rendered_surfaces(journal.as_ref()).await {
+            assert!(
+                text.contains("ri_disposed removed — its content is no longer shown here"),
+                "{surface} must state what the act did:\n{text}"
+            );
+            assert!(
+                !text.contains(PAYLOAD) && !text.contains(sender_task),
+                "{surface} still carries a peer-chosen byte:\n{text}"
+            );
+            for lie in [
+                "deleted",
+                "erased",
+                "purged",
+                "scrubbed",
+                "wiped",
+                "no copy remains",
+            ] {
+                assert!(
+                    !text.contains(lie),
+                    "the journal line keeps the content forever — {surface} must not say \
+                     `{lie}`:\n{text}"
+                );
+            }
+        }
+    }
+
+    /// Every surface that renders `TransparencyRow::summary`, rendered for
+    /// real: the CLI text report, the `--json` envelope, and the TUI panel.
+    /// Patching one of them instead of `transparency_row` is the forbidden fix.
+    async fn rendered_surfaces(journal: &RecordingJournal) -> Vec<(&'static str, String)> {
+        let entries = crate::domain::ports::RoomJournalReader::load_entries(journal)
+            .await
+            .unwrap();
+        let report = crate::domain::services::transparency::TransparencyReport {
+            rows: crate::domain::services::transparency::fold_transparency(&entries),
+            ..Default::default()
+        };
+        let render = |json: bool| {
+            let mut out = Vec::new();
+            crate::adapters::cli::team::log::render_team_log(None, json, &report, None, &mut out)
+                .expect("team log renders");
+            String::from_utf8(out).expect("utf-8")
+        };
+
+        let mut state = crate::adapters::tui::state::TuiState::new(200, 40);
+        state.transparency_panel.apply_read(report.rows.clone(), 1);
+        let area = ratatui::layout::Rect::new(0, 0, 200, 40);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        crate::adapters::tui::widgets::transparency_panel::render(
+            area,
+            &mut buffer,
+            &mut state.transparency_panel,
+            0,
+            &state.focus,
+            &state.theme,
+        );
+        let panel = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        vec![
+            ("/team log", render(false)),
+            ("/team log --json", render(true)),
+            ("the TUI transparency panel", panel),
+        ]
+    }
+
+    /// A runtime that keeps every inbound task alive: the point of the restart
+    /// keystone is the durable item, not the task's terminal transition.
+    #[cfg(feature = "a2a")]
+    #[derive(Default)]
+    struct RestartRuntime {
+        senders:
+            tokio::sync::Mutex<Vec<tokio::sync::watch::Sender<crate::domain::models::NodeState>>>,
+    }
+
+    #[cfg(feature = "a2a")]
+    #[async_trait::async_trait]
+    impl crate::domain::ports::InboundPeerRuntime for RestartRuntime {
+        async fn start(
+            &self,
+            _task: crate::domain::ports::InboundPeerTask,
+            _cancel: CancellationToken,
+        ) -> Result<
+            tokio::sync::watch::Receiver<crate::domain::models::NodeState>,
+            crate::domain::ports::InboundPeerError,
+        > {
+            let (tx, rx) = tokio::sync::watch::channel(crate::domain::models::NodeState::Running);
+            self.senders.lock().await.push(tx);
+            Ok(rx)
+        }
+
+        async fn request_admission_approval(
+            &self,
+            _peer_id: &crate::domain::models::PeerId,
+            _summary: &str,
+        ) -> Result<
+            crate::domain::ports::InboundApprovalTicket,
+            crate::domain::ports::InboundPeerError,
+        > {
+            Err(crate::domain::ports::InboundPeerError::unavailable(
+                "unused",
+            ))
+        }
+
+        async fn take_result_text(&self, _node_id: &AgentId) -> Option<String> {
+            None
+        }
+
+        async fn disclosure_forbidden_fragments(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn reconcile_orphaned_tasks(&self, _subagent_type: &str) -> Vec<AgentId> {
+            Vec::new()
+        }
+    }
+
+    /// Story 19.16c AC4 — **the tombstone survives a real restart.**
+    ///
+    /// Both front doors are real: the item is created by an inbound
+    /// `message/send` over a bound listener, and it is removed through the
+    /// gated daemon frame. Then the process's objects are discarded and a
+    /// second listener is started over the **same workspace journal**, which
+    /// runs the production restart reconciliation before anything is read.
+    ///
+    /// ⛔ No mutant: every byte whose mutation breaks restart recovery is the
+    /// fold arm, and `the_fold_refuses_an_acknowledgement_that_follows_a_removal`
+    /// already turns that RED.
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn the_tombstone_survives_a_real_restart() {
+        use crate::domain::ports::RoomJournalReader;
+
+        async fn listener_over(
+            workspace: &std::path::Path,
+            keys: &std::path::Path,
+            journal: Arc<crate::infrastructure::subagent::NodeJournal>,
+            domain_tx: mpsc::UnboundedSender<AppEvent>,
+        ) -> (
+            String,
+            CancellationToken,
+            tokio::task::JoinHandle<anyhow::Result<()>>,
+        ) {
+            let room: Arc<dyn crate::domain::ports::RoomJournal> = Arc::new(
+                crate::infrastructure::subagent::NodeRoomJournal::new(journal, Some(domain_tx)),
+            );
+            let signer = crate::adapters::rap::IdentityKeyStore::new(keys)
+                .load_or_generate()
+                .expect("identity");
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+            let cancel = CancellationToken::new();
+            let handle = tokio::spawn(crate::adapters::a2a::server::serve(
+                listener,
+                crate::adapters::a2a::server::ServeConfig {
+                    registry: Arc::new(
+                        crate::domain::models::capability_registry::CapabilityRegistry::new(None),
+                    ),
+                    signer,
+                    security: crate::adapters::a2a::auth::A2aServerSecurity::default(),
+                    runtime: Some(Arc::new(RestartRuntime::default())
+                        as Arc<dyn crate::domain::ports::InboundPeerRuntime>),
+                    transparency: Arc::new(
+                        crate::adapters::a2a::transparency::TransparencySink::new(room),
+                    ),
+                    policy: crate::adapters::a2a::admission::A2aAdmissionPolicy::Allow,
+                    workspace: workspace.to_path_buf(),
+                    advertised_host: None,
+                    cards: Arc::new(crate::adapters::a2a::card_cache::SignedCardCache::new()),
+                },
+                cancel.child_token(),
+            ));
+            (endpoint, cancel, handle)
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let keys = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_path_buf();
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+
+        // ── Process #1: a real inbound send, then a real removal frame. ──
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(&ws)
+                .await
+                .expect("journal"),
+        );
+        let (endpoint, cancel, http) =
+            listener_over(&ws, keys.path(), journal.clone(), domain_tx.clone()).await;
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(&endpoint)
+            .json(&crate::adapters::a2a::jsonrpc::JsonRpcRequest::new(
+                1,
+                "message/send",
+                serde_json::json!({
+                    "message": {
+                        "messageId": "restart-task",
+                        "role": "user",
+                        "parts": [{ "kind": "text", "text": "content that outlives the process" }]
+                    }
+                }),
+            ))
+            .send()
+            .await
+            .expect("listener responds")
+            .json()
+            .await
+            .expect("json-rpc");
+        let item_id = response["result"]["metadata"]["x-rustain-item-id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("message/send mints a recipient item: {response}"))
+            .to_owned();
+
+        let (core, _storage) = mock_core(&ws, vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "restart-removal".to_owned(),
+            ..Default::default()
+        }));
+        let node_tree = crate::infrastructure::subagent::NodeTree::with_event_tx(
+            domain_tx.clone(),
+            Arc::new(|| 123_i64),
+        );
+        let delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy> =
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy);
+        let peer_bus = peer_bus_slot_with_policy(&node_tree, delivery_policy.clone());
+        let reader: Arc<dyn RoomJournalReader> = Arc::new(
+            crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                &ws,
+            ),
+        );
+        let server = AttachServer::new_with_node_tree_bus_policy_and_journal(
+            core,
+            conversation,
+            domain_tx.clone(),
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
+                journal.clone(),
+                Some(domain_tx.clone()),
+            )),
+            reader.clone(),
+            None,
+        );
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::RemoveRecipientItem {
+                    item_id: item_id.clone(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+        let before_entries = reader.load_entries().await.unwrap();
+        let before =
+            crate::adapters::policy::JournalRecipientItemProjection::from_entries(&before_entries);
+        let tombstone = before.find_by_id(&item_id).expect("tombstone");
+        assert_eq!(
+            tombstone.state,
+            crate::domain::models::RecipientItemState::Removed
+        );
+        // AC1(e): the removed id stays claimed. The a2a server seeds its
+        // allocator's `claimed_ids` from exactly this snapshot's keys
+        // (adapters/a2a/server.rs:220-222), and the in-crate collision tests
+        // (`a_history_collision_is_refused_without_reminting`) prove a claimed
+        // id is never re-minted — retention of the entry IS retention of the claim.
+        assert!(
+            before
+                .snapshot()
+                .keys()
+                .any(|address| address == &tombstone.address),
+            "the tombstone keeps its key in the allocator's seed set"
+        );
+        // The journal carries non-recipient records too — an inbound admission
+        // row at minimum — so the comparison below is not a recipient-only fold.
+        assert!(
+            before_entries.iter().any(|entry| !matches!(
+                entry.record,
+                crate::domain::models::JournalRecord::Room(
+                    crate::domain::models::RoomEvent::RecipientItemReceived { .. }
+                        | crate::domain::models::RoomEvent::RecipientItemRemoved { .. }
+                )
+            )),
+            "a realistic journal interleaves other records"
+        );
+
+        // …and the process vanishes here.
+        cancel.cancel();
+        let _ = http.await;
+        drop(server);
+        drop(journal);
+
+        // ── Process #2: a fresh journal handle over the same workspace, and a
+        //    fresh listener whose startup runs the production reconciliation. ──
+        let restarted = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(&ws)
+                .await
+                .expect("journal reopens"),
+        );
+        let (_endpoint, cancel2, http2) =
+            listener_over(&ws, keys.path(), restarted.clone(), domain_tx.clone()).await;
+
+        let after_reader: Arc<dyn RoomJournalReader> = Arc::new(
+            crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                &ws,
+            ),
+        );
+        let after_entries = after_reader.load_entries().await.unwrap();
+        let after =
+            crate::adapters::policy::JournalRecipientItemProjection::from_entries(&after_entries);
+        let recovered = after
+            .find_by_id(&item_id)
+            .expect("the tombstone is recovered by folding the journal");
+        assert_eq!(
+            recovered.state,
+            crate::domain::models::RecipientItemState::Removed,
+            "restart reconciliation neither removes nor resurrects — a restart is not a \
+             deliberate human act"
+        );
+        assert_eq!(recovered.content, None);
+
+        // The comparison contract, stated: both sides are COLD folds
+        // (`from_entries`) of the same durable stream, so every field —
+        // including `journal_order`, which is the absolute journal index under
+        // this scheme — must match exactly. ⚠ `journal_order` must be EXCLUDED
+        // from any comparison that crosses schemes: the live `apply` path
+        // assigns `max(existing) + 1` instead, and the two disagree on any
+        // journal containing non-recipient records. Both are monotonic in
+        // append order, so no ordering consumer can tell them apart.
+        assert_eq!(
+            before.snapshot(),
+            after.snapshot(),
+            "a restart must reconstruct the same projection, field for field"
+        );
+
+        cancel2.cancel();
+        let _ = http2.await;
     }
 
     #[tokio::test]

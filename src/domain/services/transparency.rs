@@ -148,6 +148,19 @@ pub enum TransparencyKind {
     RecipientItemReceived,
     /// Local human acknowledgement of a recipient-owned durable item.
     RecipientItemAcknowledged,
+    /// The recipient disposed of their own copy of a durable item (FR165).
+    ///
+    /// ⛔ Distinct from [`Self::RecipientItemAcknowledged`]: acknowledgement is
+    /// the operator taking an item on, removal is the operator disposing of
+    /// it, and collapsing them would put two opposite acts under one glyph.
+    ///
+    /// The six touch points are paid: variant, glyph, wire label, the fold
+    /// arm, the filter parse arm (and its valid-kinds string), and coverage.
+    ///
+    /// The `⊘` glyph's two-set waiver (it also appears in the ownership glyph
+    /// set) is recorded on the `glyph()` arm below, directly beside the
+    /// practice it departs from — read them together.
+    RecipientItemRemoved,
     /// Interaction became visible in the audit spine before interruption routing.
     InteractionSurfaced,
     /// A batch of prior digest-tier interactions was shown to the operator.
@@ -182,9 +195,22 @@ impl TransparencyKind {
             Self::PeerEquivocated => "≠",
             Self::RecipientItemReceived => "↓",
             Self::RecipientItemAcknowledged => "✓",
+            // ⊘ is the sanctioned mark for a disposed thing (UX-DR-TM-01's
+            // table lists it available and unused here; its shipped meaning
+            // elsewhere is `Cancelled`). ⚠ Waiver, stated rather than
+            // discovered: it does appear in the OWNERSHIP glyph set
+            // (`orchestration_glyph.rs`), so it does not satisfy the two-set
+            // practice the `⊙` comment above states. That practice is a code
+            // comment, not a ratified rule; the ratified table sanctions `⊘`,
+            // the ownership set never shares a cell with a transparency row,
+            // and `●` is refused because its shipped meaning is *in flight*.
+            Self::RecipientItemRemoved => "⊘",
             Self::InteractionSurfaced => "!",
             Self::DigestFlushed => "≋",
-            _ => "·",
+            // No wildcard: a kind added without a glyph must not quietly
+            // render as the unknown dot (AD-1820 — nothing at all inside this
+            // crate).
+            Self::Unknown => "·",
         }
     }
 
@@ -206,9 +232,12 @@ impl TransparencyKind {
             Self::PeerEquivocated => "peer-equivocated",
             Self::RecipientItemReceived => "item-received",
             Self::RecipientItemAcknowledged => "item-acknowledged",
+            Self::RecipientItemRemoved => "item-removed",
             Self::InteractionSurfaced => "surfaced",
             Self::DigestFlushed => "digest-flushed",
-            _ => "unknown",
+            // No wildcard: a kind added without a label must not print
+            // `unknown` for a record this build authored.
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -526,16 +555,34 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             Some(topic.clone()),
             peer_equivocation_summary(issuer.as_ref(), *sequence),
         ),
-        RoomEvent::RecipientItemReceived {
-            address, content, ..
-        } => (
+        // ⛔ The summary does NOT quote `content`. A transparency LEDGER
+        // records that an interaction happened, not its payload: the row
+        // already carries the host-minted item id, the host-derived peer
+        // pseudonym, the direction and the kind, and quoting 120 bytes of
+        // peer-supplied text here is what made "remove my copy" remove
+        // nothing the operator can see — the same string is read by the CLI,
+        // the `--json` envelope, the TUI panel, its detail pane and the
+        // panel's search key. Cutting it here scrubs all of them at source.
+        // ⇒ After this arm, an inbound item's row contains zero bytes the
+        // peer chose.
+        RoomEvent::RecipientItemReceived { address, .. } => (
             TransparencyKind::RecipientItemReceived,
             Direction::Inbound,
             item_principal_label(address.principal()),
             Some(address.item().as_str().to_owned()),
+            "recipient item received".to_owned(),
+        ),
+        RoomEvent::RecipientItemRemoved { address } => (
+            TransparencyKind::RecipientItemRemoved,
+            Direction::Unknown,
+            item_principal_label(address.principal()),
+            Some(address.item().as_str().to_owned()),
+            // ⛔ Never "deleted", "erased", "purged", "scrubbed" or "no copy
+            // remains": the journal line keeps the content forever, and this
+            // row states exactly what the act did.
             format!(
-                "recipient item received: {}",
-                sanitize_disclosable(content, 120)
+                "item {} removed — its content is no longer shown here",
+                address.item().as_str()
             ),
         ),
         RoomEvent::RecipientItemAcknowledged { address, alias } => (
@@ -819,13 +866,15 @@ impl TransparencyFilter {
                         "peer-equivocated" => TransparencyKind::PeerEquivocated,
                         "item-received" => TransparencyKind::RecipientItemReceived,
                         "item-acknowledged" => TransparencyKind::RecipientItemAcknowledged,
+                        "item-removed" => TransparencyKind::RecipientItemRemoved,
                         "unknown" => TransparencyKind::Unknown,
                         _ => {
                             return Err(format!(
                                 "unknown kind `{value}` — valid: accepted, refused, dispatched, \
                                  awaiting-approval, status-query, disclosed, room-role-granted, \
                                  room-role-revoked, transport-admission, peer-frame, \
-                                 peer-equivocated, item-received, item-acknowledged, unknown"
+                                 peer-equivocated, item-received, item-acknowledged, \
+                                 item-removed, unknown"
                             ));
                         }
                     }));

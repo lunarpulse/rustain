@@ -8027,6 +8027,9 @@ mod tests {
                         "journal RecipientItemAcknowledged address={address:?} alias={alias:?}"
                     ));
                 }
+                RoomEvent::RecipientItemRemoved { address } => {
+                    lines.push(format!("journal RecipientItemRemoved address={address:?}"));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

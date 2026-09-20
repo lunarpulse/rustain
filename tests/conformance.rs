@@ -809,8 +809,10 @@ fn recipient_item_claim_identifier_ratchet_does_not_grow() {
     )
     .unwrap();
     let enum_variant = regex::Regex::new(r"^\s*([A-Z][A-Za-z0-9_]*)\s*(?:\{|\(|,)\s*$").unwrap();
-    let banned =
-        regex::Regex::new(r"(?i)(verified|attested|proof|audit|signed|authenticated|tamper|evidence)").unwrap();
+    let banned = regex::Regex::new(
+        r"(?i)(verified|attested|proof|audit|signed|authenticated|tamper|evidence)",
+    )
+    .unwrap();
     let mut sites = Vec::new();
     for file in collect_rs_files(Path::new("src")) {
         let source = fs::read_to_string(&file).expect("read Rust source");
@@ -844,6 +846,63 @@ fn recipient_item_claim_identifier_ratchet_does_not_grow() {
              {MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS} to {actual}; lower the baseline"
         );
     }
+}
+
+/// Story 19.16c AC5(c) — the removal kind's **glyph** collides with nothing.
+///
+/// ⛔ Scoped to this story's new kind, deliberately. A whole-enum glyph check
+/// is RED on arrival: 19.16 double-booked `✓` for `Accepted` and
+/// `RecipientItemAcknowledged`, and renaming a shipped kind's mark to make a
+/// new check pass would be the tail wagging the dog. ⛔ And there is no
+/// companion *label* check: labels have zero duplicates today, so one would be
+/// green on arrival and prove nothing.
+#[test]
+fn the_removal_transparency_glyph_is_unique_among_shipped_kinds() {
+    use rustain::domain::services::transparency::TransparencyKind;
+
+    let removal = TransparencyKind::RecipientItemRemoved;
+    assert_eq!(removal.glyph(), "⊘");
+    assert_eq!(removal.label(), "item-removed");
+
+    for other in [
+        TransparencyKind::Accepted,
+        TransparencyKind::Rejected,
+        TransparencyKind::Dispatched,
+        TransparencyKind::AwaitingApproval,
+        TransparencyKind::StatusQueried,
+        TransparencyKind::Disclosed,
+        TransparencyKind::ConsentGranted,
+        TransparencyKind::ConsentRevoked,
+        TransparencyKind::RoomRoleGranted,
+        TransparencyKind::RoomRoleRevoked,
+        TransparencyKind::TransportAdmission,
+        TransparencyKind::PeerFrameAttempted,
+        TransparencyKind::PeerEquivocated,
+        TransparencyKind::RecipientItemReceived,
+        TransparencyKind::RecipientItemAcknowledged,
+        TransparencyKind::InteractionSurfaced,
+        TransparencyKind::DigestFlushed,
+        TransparencyKind::Unknown,
+    ] {
+        assert_ne!(
+            removal.glyph(),
+            other.glyph(),
+            "a shared glyph makes two decisions one row in a monochrome ledger: {} vs {}",
+            removal.label(),
+            other.label()
+        );
+    }
+
+    // The kind is filterable — a rendered kind no `--filter=kind=` token can
+    // name is the drift this story filed rather than repeated.
+    let filter =
+        rustain::domain::services::transparency::TransparencyFilter::parse("kind=item-removed")
+            .expect("the new kind is accepted by the filter grammar");
+    let rejected =
+        rustain::domain::services::transparency::TransparencyFilter::parse("kind=item-disposed")
+            .expect_err("an unknown kind is still refused");
+    assert!(rejected.contains("item-removed"), "{rejected}");
+    let _ = filter;
 }
 
 /// AC-3 handler-count + information-scent invariants. Verifies:

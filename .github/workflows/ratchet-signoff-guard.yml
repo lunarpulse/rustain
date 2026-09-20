@@ -52,7 +52,7 @@ jobs:
           git log --format='%B' "$BASE_SHA".."$HEAD_SHA" > signoff-sources.txt
           printf '\n%s\n' "$PR_BODY" >> signoff-sources.txt
 
-          if grep -qE 'RATCHET-SIGNOFF:[[:space:]]*(MAX_KNOWN_BYPASSES|MAX_KNOWN_STD_SYNC_LOCKS|EVENT_LOOP_BASELINE_LINES|EVENT_LOOP_BASELINE_SHA|EVENT_LOOP_SOFT_BUDGET|EVENT_LOOP_HARD_BUDGET|EXPECTED_HANDLE_COUNT)' signoff-sources.txt; then
+          if grep -qE 'RATCHET-SIGNOFF:[[:space:]]*(MAX_KNOWN_BYPASSES|MAX_KNOWN_STD_SYNC_LOCKS|MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS|EVENT_LOOP_BASELINE_LINES|EVENT_LOOP_BASELINE_SHA|EVENT_LOOP_SOFT_BUDGET|EVENT_LOOP_HARD_BUDGET|EXPECTED_HANDLE_COUNT)' signoff-sources.txt; then
             echo "✅ RATCHET-SIGNOFF found:"
             grep -E 'RATCHET-SIGNOFF:' signoff-sources.txt
           else
@@ -63,7 +63,8 @@ jobs:
             echo ""
             echo "    RATCHET-SIGNOFF: EVENT_LOOP_BASELINE_LINES — extracted /memory forget handler (Story 11.4a); reviewer @architect"
             echo ""
-            echo "Tracked constants: MAX_KNOWN_BYPASSES, MAX_KNOWN_STD_SYNC_LOCKS, EVENT_LOOP_BASELINE_LINES,"
+            echo "Tracked constants: MAX_KNOWN_BYPASSES, MAX_KNOWN_STD_SYNC_LOCKS,"
+            echo "MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS, EVENT_LOOP_BASELINE_LINES,"
             echo "EVENT_LOOP_BASELINE_SHA, EVENT_LOOP_SOFT_BUDGET, EVENT_LOOP_HARD_BUDGET, EXPECTED_HANDLE_COUNT."
             exit 1
           fi

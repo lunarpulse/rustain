@@ -1,0 +1,5 @@
+[toolchain]
+# stable 고정 — devcontainer 이미지의 .env RUST_VERSION 과 무관하게 재현 가능한 컴파일러.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

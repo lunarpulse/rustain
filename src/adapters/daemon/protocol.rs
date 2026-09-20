@@ -296,6 +296,11 @@ pub enum ClientFrame {
     /// Deliberately acknowledge one recipient-owned durable item.
     /// Trusted-local + read-write; the daemon also enforces the room-content role.
     AcknowledgeRecipientItem { item_id: String },
+    /// Deliberately remove one recipient-owned durable item (FR165).
+    /// Trusted-local + read-write; the daemon also enforces the room-content role.
+    /// A new variant is not a breaking frame-shape change: `PROTOCOL_VERSION`
+    /// stays where 19.16's sibling frame left it.
+    RemoveRecipientItem { item_id: String },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
 }

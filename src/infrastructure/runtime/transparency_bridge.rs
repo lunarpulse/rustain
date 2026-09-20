@@ -377,6 +377,19 @@ pub(crate) async fn team_command(
                 "Recipient acknowledgement requires a daemon-attached session.".to_owned(),
             );
         }
+        TeamCommandArgs::Remove { item_id: _ } => {
+            // ⛔ NOT a silent `=> {}`. This is the non-attached, DEFAULT rail:
+            // a swallowed removal would let an operator believe peer-supplied
+            // content is disposed of while the projection still holds it and
+            // the ledger still lists it. Mirrors the acknowledgement's shape,
+            // and mints no new refusal idiom.
+            emit_team_warning(
+                state,
+                conversation_id,
+                app_state,
+                "Recipient item removal requires a daemon-attached session.".to_owned(),
+            );
+        }
         TeamCommandArgs::Log(args) => {
             let input = team_log_input(app_state, &args).await;
             for event in handler::team_command(state, conversation_id, &args, input) {
@@ -740,6 +753,135 @@ mod tests {
                 }
             ]
         ));
+    }
+
+    /// A real `AppState` over `workspace`, composed exactly as the startup
+    /// root composes it, minus the slots this test does not read. Returns the
+    /// domain receiver the event bus feeds.
+    fn bridge_app_state(
+        workspace: &std::path::Path,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
+    ) {
+        use std::sync::Arc;
+
+        use arc_swap::ArcSwap;
+        use clap::Parser;
+
+        use crate::infrastructure::runtime::event_bus::EventBus;
+
+        let (event_bus, domain_rx) = EventBus::new(16);
+        // `AppState::new` hands the receiver straight back; the bridge's
+        // warnings arrive on it, exactly as the event loop sees them.
+        let compose_snapshot = Arc::new(crate::infrastructure::composition::ComposeContext {
+            workspace_path: workspace.to_path_buf(),
+            project_context: crate::domain::models::project_context::ProjectContext::empty(),
+            storage: Arc::new(crate::adapters::noop::NoOpStorage)
+                as Arc<dyn crate::domain::ports::StoragePort>,
+            skill_activator: Arc::new(crate::adapters::skill_activation::SkillActivator::new()),
+            mcp_servers: Vec::new(),
+            include_builtin_tools: true,
+            domain_tx: None,
+            channel_turn_tx: None,
+            tool_exposure: "static-full".into(),
+            assembler: "passthrough".into(),
+            skill_exposure: "l1-metadata".into(),
+            skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new_in_memory()),
+            sandbox_adapter: "noop".into(),
+            sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(
+                crate::adapters::sandbox::NoOpSandbox,
+            )
+                as Arc<dyn crate::domain::ports::SandboxManager>)),
+            memory_slot: Arc::new(ArcSwap::from_pointee(
+                Arc::new(crate::adapters::noop::NoOpMemory)
+                    as Arc<dyn crate::domain::ports::MemoryPort>,
+            )),
+            sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            )),
+            memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+            peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            #[cfg(feature = "meta-search")]
+            search_config: crate::domain::models::SearchConfig::default(),
+            #[cfg(feature = "meta-search")]
+            meta_search_engine: None,
+            a2a_peers: Vec::new(),
+        });
+        let (app_state, domain_rx) = AppState::new(
+            Arc::new(event_bus),
+            domain_rx,
+            crate::domain::services::approval_runtime::ApprovalRuntime::new(
+                16,
+                Arc::new(crate::adapters::noop::NoOpApprovalPersistence),
+            ),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::SandboxPolicy::Permissive,
+            )),
+            Arc::new(crate::domain::services::plan_manager::PlanManager::new(
+                workspace.to_path_buf(),
+            )),
+            Arc::new(crate::domain::services::plan_mode_injector::DefaultPlanInjector::new()),
+            Arc::new(ArcSwap::from_pointee(
+                Arc::new(crate::adapters::noop::NoOpProvider)
+                    as Arc<dyn crate::domain::ports::StreamingProvider>,
+            )),
+            Arc::new(crate::adapters::provider::ProviderRegistry::new()),
+            Arc::new(crate::adapters::noop::NoOpUsageLedger),
+            Arc::new(crate::adapters::budget::BudgetStateStore::new()),
+            Arc::new(ArcSwap::from_pointee(
+                crate::domain::models::AppConfig::default(),
+            )),
+            Arc::new(crate::infrastructure::runtime::agent_core::AgentCore::test_noop()),
+            None,
+            compose_snapshot,
+            Arc::new(ArcSwap::from_pointee(Arc::new(
+                crate::adapters::profile_resolver::noop::NoopProfileResolver,
+            )
+                as Arc<dyn crate::domain::ports::ProfileResolver>)),
+            crate::adapters::cli::commands::Cli::try_parse_from(["rustain"]).expect("bare cli"),
+            None,
+            crate::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
+            #[cfg(feature = "meta-search")]
+            None,
+        );
+        (app_state, domain_rx)
+    }
+
+    /// Story 19.16c AC2, mutant 6 — **the in-process rail is the product's
+    /// default**, and it is the one `match` the compiler forces. The cheapest
+    /// green arm for a new verb is `Remove { .. } => {}`, which would let an
+    /// operator type `/team remove ri_x` in an ordinary session, see nothing
+    /// happen, hear nothing, and believe the peer's content was disposed of
+    /// while the projection still holds it.
+    ///
+    /// Mutant → RED: make the arm a silent `=> {}`.
+    #[tokio::test]
+    async fn the_in_process_rail_says_removal_needs_a_daemon_session() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let (app_state, mut domain_rx) = bridge_app_state(workspace.path());
+        let mut state = TuiState::new(120, 40);
+
+        team_command(&mut state, "conv-1", Some("remove ri_x"), &app_state).await;
+
+        let message = loop {
+            match domain_rx.try_recv() {
+                Ok(crate::domain::events::AppEvent::SystemNotice { message, level, .. }) => {
+                    assert_eq!(level, crate::domain::models::NoticeLevel::Warning);
+                    break message;
+                }
+                Ok(_) => continue,
+                Err(error) => panic!("the non-attached rail must answer, not swallow: {error:?}"),
+            }
+        };
+        assert_eq!(
+            message, "Recipient item removal requires a daemon-attached session.",
+            "mirrors the acknowledgement's shipped sentence; mints no new idiom"
+        );
+        for lie in ["deleted", "erased", "purged", "removed."] {
+            assert!(!message.contains(lie), "{message}");
+        }
     }
 
     #[tokio::test]

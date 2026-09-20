@@ -15,9 +15,10 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
             content: "review the patch".to_owned(),
         },
         RoomEvent::RecipientItemAcknowledged {
-            address,
+            address: address.clone(),
             alias: None,
         },
+        RoomEvent::RecipientItemRemoved { address },
     ];
 
     for event in events {
@@ -28,6 +29,7 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
                 decoded,
                 RoomEvent::RecipientItemReceived { .. }
                     | RoomEvent::RecipientItemAcknowledged { .. }
+                    | RoomEvent::RecipientItemRemoved { .. }
             ),
             "the new event family must not be swallowed by RoomEvent::Unrecognized"
         );
@@ -120,7 +122,7 @@ fn recipient_item_fold_replays_acknowledgement_and_is_idempotent() {
     let projection = JournalRecipientItemProjection::from_entries(&entries);
     let item = projection.get(&address).expect("received item folds");
     assert_eq!(item.state, RecipientItemState::Acknowledged);
-    assert_eq!(item.content, "durable content");
+    assert_eq!(item.content.as_deref(), Some("durable content"));
 
     let replayed = JournalRecipientItemProjection::from_entries(&entries);
     assert_eq!(projection.snapshot(), replayed.snapshot());
@@ -175,7 +177,10 @@ fn find_by_task_binds_the_newest_item_when_a_message_id_is_resent() {
         alias: None,
         content: "durable content".to_owned(),
     };
-    let entries = vec![entry(1, received(first)), entry(2, received(second.clone()))];
+    let entries = vec![
+        entry(1, received(first)),
+        entry(2, received(second.clone())),
+    ];
 
     let projection = JournalRecipientItemProjection::from_entries(&entries);
     let principal = ItemPrincipal::A2aPseudonym(principal_peer);
