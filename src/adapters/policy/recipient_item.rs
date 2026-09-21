@@ -120,6 +120,17 @@ impl JournalRecipientItemProjection {
         found
     }
 
+    /// The item a restart's reconcile re-binds a task to, or `None`.
+    ///
+    /// Story 19.16b `AC4` — **the state predicate is load-bearing**
+    /// (`DF-19-16C-TOMBSTONE-BINDS-ON-RESTART`). Without it a restart re-binds
+    /// an orphaned task to a **tombstone** and republishes the removed id
+    /// through the task-metadata carrier, presenting a disposed item to the
+    /// sender as live; and because a resent `messageId` mints one item per
+    /// execution, a removed newest item would *shadow* a live earlier one.
+    /// ⛔ The predicate belongs here, at the **read** — `AD-1827` makes Story
+    /// 19.16c the only writer of item state, and the fold must keep folding
+    /// removals so the tombstone stays addressable to its own host.
     #[must_use]
     pub fn find_by_task(
         &self,
@@ -133,9 +144,42 @@ impl JournalRecipientItemProjection {
         self.items
             .load()
             .values()
-            .filter(|item| item.address.principal() == principal && item.task == task)
+            .filter(|item| {
+                item.address.principal() == principal
+                    && item.task == task
+                    && !matches!(item.state, RecipientItemState::Removed { .. })
+            })
             .max_by_key(|item| item.journal_order)
             .cloned()
+    }
+
+    /// Every item addressed to one principal, in arrival order.
+    ///
+    /// Story 19.16b `AC3(a)` — the server-side enumerator behind
+    /// `x-rustain-items/list`. Follows [`Self::find_by_task`]'s idiom minus the
+    /// task predicate and the `max_by_key`.
+    ///
+    /// ⛔ **The principal filter is the whole authorization boundary** and it
+    /// runs before any caller classifies a tombstone (`A22`): another
+    ///
+    /// ⚠ Removals are **retained** here, unlike [`Self::find_by_task`]: this is
+    /// the read that has to report a tombstone (`AD-1822`), not the read that
+    /// re-binds a task to one.
+    #[must_use]
+    pub fn find_by_principal(
+        &self,
+        principal: &crate::domain::models::ItemPrincipal,
+    ) -> Vec<RecipientItemView> {
+        let snapshot = self.items.load();
+        let mut owned = snapshot
+            .values()
+            .filter(|item| item.address.principal() == principal)
+            .cloned()
+            .collect::<Vec<_>>();
+        // `journal_order` orders identically under both assignment schemes even
+        // though the numbers differ; only the ordering is used, and only here.
+        owned.sort_by_key(|item| item.journal_order);
+        owned
     }
 
     #[must_use]
@@ -174,7 +218,7 @@ impl RecipientItemAct {
 /// silently, or refuse aloud. A bare `RecipientItemState` return cannot say
 /// *refused*, and `Removed => Removed` would be byte-identical to a silent
 /// no-op.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ItemActOutcome {
     /// Legal: journal it, and the fold moves the item here.
     Applied(RecipientItemState),
@@ -204,16 +248,28 @@ pub enum ItemActOutcome {
 /// An item that was never minted is the fourth outcome and belongs to the
 /// caller's lookup, not to this table.
 #[must_use]
-pub fn next_item_state(current: RecipientItemState, act: RecipientItemAct) -> ItemActOutcome {
+pub fn next_item_state(current: &RecipientItemState, act: RecipientItemAct) -> ItemActOutcome {
     use RecipientItemAct as Act;
     use RecipientItemState as State;
     match (current, act) {
-        (State::Received, Act::Acknowledge) => ItemActOutcome::Applied(State::Acknowledged),
-        (State::Received, Act::Remove) => ItemActOutcome::Applied(State::Removed),
-        (State::Acknowledged, Act::Acknowledge) => ItemActOutcome::Idempotent,
-        (State::Acknowledged, Act::Remove) => ItemActOutcome::Applied(State::Removed),
-        (State::Removed, Act::Acknowledge) => ItemActOutcome::Refused(State::Removed),
-        (State::Removed, Act::Remove) => ItemActOutcome::Refused(State::Removed),
+        (State::Received { content }, Act::Acknowledge) => {
+            ItemActOutcome::Applied(State::Acknowledged {
+                content: content.clone(),
+            })
+        }
+        (State::Received { .. }, Act::Remove) => ItemActOutcome::Applied(State::Removed {
+            acknowledged_before: false,
+        }),
+        (State::Acknowledged { .. }, Act::Acknowledge) => ItemActOutcome::Idempotent,
+        // The tombstone remembers which predecessor it came from — the one
+        // fact `DF-19-16B-TOMBSTONE-LOSES-ACK-PREDECESSOR` needs the read to
+        // keep (`A22`: a removed item renders at its last sender-visible
+        // outcome). One writer of one fact: the state itself (`AD-1827`).
+        (State::Acknowledged { .. }, Act::Remove) => ItemActOutcome::Applied(State::Removed {
+            acknowledged_before: true,
+        }),
+        (State::Removed { .. }, Act::Acknowledge) => ItemActOutcome::Refused(current.clone()),
+        (State::Removed { .. }, Act::Remove) => ItemActOutcome::Refused(current.clone()),
     }
 }
 
@@ -242,8 +298,9 @@ fn transition_recipient_item(
                     address: address.clone(),
                     task: task.clone(),
                     alias: alias.clone(),
-                    content: Some(content.clone()),
-                    state: RecipientItemState::Received,
+                    state: RecipientItemState::Received {
+                        content: content.clone(),
+                    },
                     journal_order: order,
                 });
         }
@@ -256,7 +313,7 @@ fn transition_recipient_item(
         RoomEvent::RecipientItemAcknowledged { address, alias } => {
             if let Some(item) = items.get_mut(address)
                 && let ItemActOutcome::Applied(next) =
-                    next_item_state(item.state, RecipientItemAct::Acknowledge)
+                    next_item_state(&item.state, RecipientItemAct::Acknowledge)
             {
                 item.state = next;
                 item.alias.clone_from(alias);
@@ -265,23 +322,16 @@ fn transition_recipient_item(
         RoomEvent::RecipientItemRemoved { address } => {
             if let Some(item) = items.get_mut(address)
                 && let ItemActOutcome::Applied(next) =
-                    next_item_state(item.state, RecipientItemAct::Remove)
+                    next_item_state(&item.state, RecipientItemAct::Remove)
             {
+                // `next` is `Removed { acknowledged_before }` — the legality
+                // table read the predecessor out of the current variant, so
+                // the tombstone keeps the one fact the board's render needs
+                // (`DF-19-16B-TOMBSTONE-LOSES-ACK-PREDECESSOR`, paid here).
                 item.state = next;
-                item.content = None;
             }
         }
         _ => {}
-    }
-    #[cfg(debug_assertions)]
-    if let Some(address) = touched_item_address(event)
-        && let Some(item) = items.get(address)
-    {
-        debug_assert_eq!(
-            item.content.is_none(),
-            item.state == RecipientItemState::Removed,
-            "content absence is exactly the Removed state, in both directions"
-        );
     }
 }
 
@@ -373,12 +423,13 @@ mod tests {
         let item = JournalRecipientItemProjection::from_entries(&entries)
             .get(&address)
             .expect("the tombstone keeps its entry");
-        assert_eq!(
-            item.state,
-            RecipientItemState::Removed,
+        assert!(
+            matches!(item.state, RecipientItemState::Removed { .. }),
             "Removed is terminal"
         );
-        assert_eq!(item.content, None, "a tombstone carries no content");
+        // (The tombstone's content absence is now UNREPRESENTABLE — the
+        // payload lives inside the state, so the old `content == None`
+        // assertion has nothing left to pin.)
         assert_eq!(
             item.alias.as_deref(),
             Some("arrival-alias"),

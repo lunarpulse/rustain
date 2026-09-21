@@ -23,7 +23,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team ack <item-id> | /team remove <item-id> | /team send <peer-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board | /team ack <item-id> | /team remove <item-id> | /team send <peer-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
 
 /// What the dispatch arm already did on the caller's behalf.
 pub struct TeamLogInput {
@@ -47,9 +47,19 @@ pub struct TeamLogArgs {
 #[derive(Debug, PartialEq, Eq)]
 pub enum TeamCommandArgs {
     Log(TeamLogArgs),
-    Send { peer: String, text: String },
-    Acknowledge { item_id: String },
-    Remove { item_id: String },
+    /// Act 1's distribution board (Story 19.16b, `UX-DR-TM-02`): one
+    /// `x-rustain-items/list` read per configured A2A roster peer.
+    Board,
+    Send {
+        peer: String,
+        text: String,
+    },
+    Acknowledge {
+        item_id: String,
+    },
+    Remove {
+        item_id: String,
+    },
     Trust,
     Untrust(String),
     Status,
@@ -61,6 +71,15 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
     let mut tokens = arg.split_whitespace();
     let verb = tokens.next().unwrap_or("log");
     match verb {
+        "board" => {
+            if tokens.next().is_some() {
+                return Err(format!(
+                    "'/team board' reads every configured A2A peer and takes no arguments. \
+                     Use: {USAGE}"
+                ));
+            }
+            Ok(TeamCommandArgs::Board)
+        }
         "send" => {
             let peer = tokens
                 .next()
@@ -387,6 +406,29 @@ pub(crate) fn show_team_status(state: &mut TuiState, message: String) {
     state.needs_redraw = true;
 }
 
+/// Stable id for the board block. `/team board` is a **view** with its own
+/// refresh verb and a stated refresh floor (19.16b): re-running it replaces
+/// the block — `team-log` and `team-status` semantics — ⛔ never a fresh
+/// dismissible `wfb-N` warning stacked under the previous board.
+pub const TEAM_BOARD_BLOCK_ID: &str = "team-board";
+
+/// Render the board (or its refusal) into the stable in-chat block, at Info
+/// level. The board is not a warning about anything: it is the answer to a
+/// question the operator asked.
+pub(crate) fn show_team_board(state: &mut TuiState, message: String) {
+    state.feedback_blocks.insert(
+        TEAM_BOARD_BLOCK_ID.to_owned(),
+        crate::domain::models::FeedbackBlock {
+            id: TEAM_BOARD_BLOCK_ID.to_owned(),
+            level: crate::domain::models::FeedbackLevel::Info,
+            message,
+            actions: Vec::new(),
+        },
+    );
+    state.active_feedback_id = Some(TEAM_BOARD_BLOCK_ID.to_owned());
+    state.needs_redraw = true;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +458,27 @@ mod tests {
         assert_eq!(
             parse_team_command(Some("log")),
             Ok(TeamCommandArgs::Log(TeamLogArgs::default()))
+        );
+    }
+
+    /// Story 19.16b AC3 — `/team board` is a named verb on the shared parser,
+    /// so every rail classifies it identically.
+    ///
+    /// Mutant → RED: drop the `board` arm — the verb falls into
+    /// `Unknown /team subcommand`, and on the attached rail that difference is
+    /// the gap between a refusal and an LLM prompt.
+    #[test]
+    fn board_is_a_named_verb_that_takes_no_arguments() {
+        assert_eq!(
+            parse_team_command(Some("board")),
+            Ok(TeamCommandArgs::Board)
+        );
+        let error = parse_team_command(Some("board jun-dev"))
+            .expect_err("the board reads the whole roster; a peer argument is a mistake");
+        assert!(error.contains("/team board"), "{error}");
+        assert!(
+            USAGE.contains("/team board"),
+            "every parser refusal names the verb set verbatim: {USAGE}"
         );
     }
 

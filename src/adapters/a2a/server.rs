@@ -104,6 +104,27 @@ struct ServerState {
     cards: Arc<SignedCardCache>,
     transparency: Arc<TransparencySink>,
     recipient_items: Arc<JournalRecipientItemProjection>,
+    /// Highest journal `seq` already folded into `recipient_items`.
+    ///
+    /// Story 19.16b: the served read must see acts this host performed on its
+    /// **other** rail. `recipient_items` is applied in place only by the
+    /// inbound ingress (`message/send`); a `/team ack` or `/team remove`
+    /// travels the daemon socket and reaches the durable journal, never this
+    /// projection — so without a refresh the cross-host read would answer
+    /// `received` for an item the operator acknowledged an hour ago, until the
+    /// host restarted. Mirrors the shipped `ConsentGate::refresh_projection`
+    /// watermark: re-fold only when the journal actually grew.
+    recipient_items_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Serializes the recipient-item fold's two writer shapes (19.16b review):
+    /// the ingress's durable-append + in-place `apply` pair, and the read-side
+    /// refresh's load + `replace_from` + watermark store. Without this, a
+    /// refresh snapshot loaded before an ingress append can land after the
+    /// ingress's `apply` and erase the just-accepted item, and two interleaved
+    /// refreshes can leave the watermark AHEAD of the fold — a stall that does
+    /// not self-heal until the journal grows again. `tokio::sync` because both
+    /// critical sections span journal I/O (`.await`) — the std-sync exception
+    /// pattern does not apply across an await point.
+    recipient_items_fold: Arc<tokio::sync::Mutex<()>>,
     item_allocator: Arc<RecipientItemAllocator>,
     policy: A2aAdmissionPolicy,
     workspace: Arc<PathBuf>,
@@ -217,6 +238,9 @@ pub async fn serve(
     let recipient_items = Arc::new(JournalRecipientItemProjection::from_entries(
         &recipient_entries,
     ));
+    let recipient_items_seq = Arc::new(std::sync::atomic::AtomicU64::new(
+        recipient_entries.last().map_or(0, |entry| entry.seq),
+    ));
     let item_allocator = Arc::new(RecipientItemAllocator::from_addresses(
         recipient_items.snapshot().keys().cloned(),
     ));
@@ -229,6 +253,8 @@ pub async fn serve(
         cards: config.cards,
         transparency: config.transparency,
         recipient_items,
+        recipient_items_seq,
+        recipient_items_fold: Arc::new(tokio::sync::Mutex::new(())),
         item_allocator,
         policy: config.policy,
         workspace: Arc::new(config.workspace),
@@ -729,6 +755,19 @@ async fn dispatch(
         "message/send" => message_send(state, caller, &params, echo, notification).await,
         "tasks/get" => tasks_get(state, caller, &params, echo).await,
         "tasks/cancel" => tasks_cancel(state, caller, &params, echo).await,
+        // Story 19.16b AC1(a) — the fourth arm, additive and namespaced (`A20`,
+        // NFR68). ⛔ `params` is deliberately unread: `AD-1826`'s decided half
+        // says a receiver **ignores** unknown fields on a JSON-RPC verb's
+        // payload, and the read takes no parameter at all — a `peerId`
+        // parameter would be the cross-peer enumeration oracle
+        // `ADR-17-4a-01` R21 forbids (AC1(c)).
+        //
+        // A notification carries no response, so the refresh — a whole-journal
+        // read — would run for an answer nobody reads, and a credential-less
+        // loopback caller could burn the fold for free (19.16b review). The
+        // ADR R22 204 stands; nothing else changes.
+        super::ITEMS_LIST_METHOD if notification => Ok(serde_json::Value::Null),
+        super::ITEMS_LIST_METHOD => items_list(state, caller).await,
         _ => Err(JsonRpcErrorResponse::new(
             echo,
             CODE_METHOD_NOT_FOUND,
@@ -1185,15 +1224,22 @@ async fn launch(
         alias: None,
         content: text.clone(),
     };
-    if let Err(error) = state.transparency.record_room_event(received.clone()).await {
-        tracing::error!(%error, task = %task.id, "refusing A2A task: recipient item was not durable");
-        task.fail_without_execution(UNRECORDED_ACCEPT_DETAIL).await;
-        if let Some(record) = pending.as_ref() {
-            remove_pending_task(state, record).await;
+    // The fold lock (19.16b review): the durable append and the in-place
+    // `apply` must be atomic against the read-side refresh's load +
+    // `replace_from` + watermark store, or a snapshot loaded before this
+    // append can land after the apply and erase the just-accepted item.
+    {
+        let _fold_guard = state.recipient_items_fold.lock().await;
+        if let Err(error) = state.transparency.record_room_event(received.clone()).await {
+            tracing::error!(%error, task = %task.id, "refusing A2A task: recipient item was not durable");
+            task.fail_without_execution(UNRECORDED_ACCEPT_DETAIL).await;
+            if let Some(record) = pending.as_ref() {
+                remove_pending_task(state, record).await;
+            }
+            return Err(error.to_string());
         }
-        return Err(error.to_string());
+        state.recipient_items.apply(&received);
     }
-    state.recipient_items.apply(&received);
     task.set_item_address(address).await;
 
     // ── AC1 fail-closed keystone ────────────────────────────────────────────
@@ -1412,6 +1458,135 @@ async fn tasks_cancel(
             tracing::error!(%error, task = %task.id, "withholding unjournaled A2A result");
             JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, "Internal error")
         })
+}
+
+// ── x-rustain-items/list ────────────────────────────────────────────────────
+
+/// Serve the calling principal's own recipient-item set (Story 19.16b, AC1).
+///
+/// # The three properties this verb exists to hold
+///
+/// **Per peer, never per item** (`AD-1822`): the result is the caller's *set*,
+/// so a sender reads every recipient item it caused on this host in one call.
+/// ⛔ `tasks/get` is the anti-pattern — per item, and it journals twice.
+///
+/// **Side-effect free** (`AD-1822`: *"reading acknowledgement state is not
+/// itself an acknowledgement, and never marks anything"*). ⛔ Nothing here
+/// writes: the only journal traffic is the read-side re-fold below, and the
+/// keystone ratchet is journal-length equality across N calls.
+///
+/// **The principal filter runs FIRST, the tombstone classification second**
+/// (`A22`). The address comes from the authenticated caller through
+/// [`SubmitterKey::pseudonymous_peer_id`], exactly as
+/// `ItemAddress::from_a2a_ingress` minted it — ⛔ never from a request
+/// parameter. Classifying a tombstone before filtering would answer *"that id
+/// exists but is not yours"* and reconstitute the cross-peer enumeration
+/// oracle `ADR-17-4a-01` R21 kills; another principal's removed item is
+/// **absent**, byte-identical to an id that never existed.
+///
+/// ⛔ `journal_order` never reaches the wire (AC1(f)): it is *not* stable
+/// across the cold-fold and live-apply assignment schemes, so a leaked number
+/// makes two honest hosts disagree. The serialized `ordinal` is a dense
+/// per-peer arrival index derived at render time, which is also
+/// `DF-18-3a-b`'s host-minted, peer-byte-free discriminator.
+async fn items_list(
+    state: &ServerState,
+    caller: &Caller,
+) -> Result<serde_json::Value, JsonRpcErrorResponse> {
+    refresh_recipient_items(state).await;
+    let principal =
+        crate::domain::models::ItemPrincipal::A2aPseudonym(caller.key.pseudonymous_peer_id());
+    let items = state
+        .recipient_items
+        .find_by_principal(&principal)
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, item)| {
+            // The wire stays three-state (`AC1(e)`): the tag is a bare string
+            // and the predecessor fact rides as an ADDITIVE sibling field only
+            // when it exists — ⛔ never a fifth state, never a widened token.
+            let mut row = serde_json::json!({
+                "itemId": item.address.item().as_str(),
+                "task": item.task,
+                "state": item.state.wire_name(),
+                "ordinal": ordinal,
+            });
+            if item.state.acknowledged_before_removal() == Some(true) {
+                row["acknowledgedBeforeRemoval"] = serde_json::Value::Bool(true);
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "items": items,
+        // Story 19.16b AC2(c) — fail-closed on authority, fail-LOUD on
+        // legibility. On a loopback bind `authenticate` returns
+        // every local caller is one principal. That is accurate (they all
+        // already run code on this machine) and it buys the read nothing to
+        // refuse it — but a board that renders per-recipient attribution over
+        // a collapsed principal would claim precision the substrate does not
+        // have. One rule, keyed off the trust the caller already carries; ⛔ no
+        // second code path, and ⛔ never only in a log.
+        "principalCollapsed": matches!(caller.trust, SubmitterTrust::Loopback),
+    }))
+}
+
+/// Re-fold `recipient_items` from the durable journal when it has grown.
+///
+/// The in-memory projection is applied in place by exactly one writer — the
+/// inbound `message/send` ingress. Every other recipient-item act (`/team
+/// ack`, `/team remove`) arrives on the daemon socket and lands in the durable
+/// journal, which this process does not otherwise re-read until the next
+/// `serve`. Without this, the cross-host read would report `received` for an
+/// item acknowledged hours ago, and `FR165`'s whole sentence — *"a sender can
+/// observe each recipient's acknowledgement state"* — would be false on a
+/// long-lived host.
+///
+/// ⛔ Not a write: `load_entries` is the same read-only reader `serve` uses.
+/// The `seq` watermark makes a read with no new rows cost one O(1) tail probe
+/// and no fold, mirroring the shipped `ConsentGate::refresh_projection`. A
+/// load failure keeps the cached fold and warns — an unavailable journal must
+/// not turn a read into an error the sender cannot act on.
+///
+/// 19.16b review hardening, two parts:
+/// - **Probe before loading.** `latest_seq` is the journal's chunked tail
+///   read; a read with no new rows parses nothing. Before this, every served
+///   read whole-file-parsed the journal under the shared flock.
+/// - **Serialize against the ingress.** The load + `replace_from` + store
+///   critical section takes `recipient_items_fold`, the same lock the ingress
+///   holds across its append + `apply`, so a refresh can neither erase a
+///   just-applied item nor strand the watermark ahead of the fold.
+async fn refresh_recipient_items(state: &ServerState) {
+    use std::sync::atomic::Ordering;
+
+    let latest = match state.transparency.latest_seq().await {
+        Ok(latest) => latest,
+        Err(error) => {
+            tracing::warn!(%error, "recipient-item projection refresh failed; serving cached fold");
+            return;
+        }
+    };
+    if latest <= state.recipient_items_seq.load(Ordering::Acquire) {
+        return;
+    }
+    let _fold_guard = state.recipient_items_fold.lock().await;
+    // Re-check under the lock: a concurrent refresh may have folded past
+    // `latest` while we waited.
+    if latest <= state.recipient_items_seq.load(Ordering::Acquire) {
+        return;
+    }
+    let entries = match state.transparency.load_entries().await {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(%error, "recipient-item projection refresh failed; serving cached fold");
+            return;
+        }
+    };
+    let max_seq = entries.last().map_or(0, |entry| entry.seq);
+    if max_seq > state.recipient_items_seq.load(Ordering::Acquire) {
+        state.recipient_items.replace_from(&entries);
+        state.recipient_items_seq.store(max_seq, Ordering::Release);
+    }
 }
 
 // ── projection helpers ──────────────────────────────────────────────────────

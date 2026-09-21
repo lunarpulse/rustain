@@ -2805,11 +2805,11 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
     let recovered = replayed
         .find_by_id(durable_item_id)
         .expect("recipient item survives restart");
-    assert_eq!(
-        recovered.state,
-        rustain::domain::models::RecipientItemState::Received,
-        "restart reconciliation cannot impersonate the deliberate human acknowledgement"
-    );
+    assert!(matches!(
+        &recovered.state,
+        rustain::domain::models::RecipientItemState::Received { content, .. }
+            if content == "survive the restart"
+    ));
 
     // AC6: restart reconciliation routes the recovered wait through a terminal
     // transition, which clears the durable wait stamp instead of rendering a
@@ -3434,4 +3434,234 @@ async fn ac3_one_bus_slot_and_the_peer_path_honours_the_installed_policy() {
         "the MustReport operational refusal must release exactly once"
     );
     cancel.cancel();
+}
+
+// ── [19.16b AC4] a restart must not re-bind an orphan task to a tombstone ───
+
+/// Story 19.16b AC4 — the routed defect
+/// (`DF-19-16C-TOMBSTONE-BINDS-ON-RESTART`): after a restart, an orphaned
+/// inbound task whose item the recipient removed must NOT re-bind to the
+/// tombstone, and the removed id must NOT be republished through the
+/// task-metadata carrier as if the item were live.
+///
+/// **Front door (Rule 2):** the real restart path — a second `serve` over the
+/// same journal, whose `reconcile_after_restart` runs before the router
+/// accepts anything. ⛔ *"Call `find_by_task` directly"* is a listed mutant and
+/// is proven separately, at the policy layer, in
+/// `tests/conformance_19_16b_board.rs`.
+///
+/// **Mutant → RED:** drop the state predicate from `find_by_task` — the
+/// removed id reappears in `result.metadata["x-rustain-item-id"]`.
+///
+/// **Positive control:** the sibling
+/// `a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason` above
+/// drives the byte-identical scenario with a **live** item and asserts the
+/// carrier DOES republish it — so "the id is absent" here is not the trivial
+/// consequence of a carrier that never populates.
+#[tokio::test]
+async fn ac4_a_restart_never_rebinds_an_orphaned_task_to_a_removed_item() {
+    use rustain::adapters::a2a::exec::{INBOUND_SUBAGENT_TYPE, SubmitterKey, mint_inbound_node_id};
+    use rustain::domain::models::{AgentMetrics, CapabilityTokenId, Op};
+    use rustain::infrastructure::subagent::{AgentHandle, MailboxBudget};
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let keys = tempfile::tempdir().expect("keys");
+    let ws = workspace.path().to_path_buf();
+    let (domain_tx, _domain_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let journal = Arc::new(NodeJournal::open_workspace(&ws).await.expect("journal"));
+
+    // ── Process #1: an item is minted for an in-flight task, the recipient
+    //    removes it, and then the host dies. ──
+    let task_id = "orphaned-by-restart";
+    let submitter = SubmitterKey::loopback();
+    let node_id = mint_inbound_node_id(&submitter, task_id);
+    let removed_item_id = "ri_removed_before_restart";
+    let removed_address = rustain::domain::models::ItemAddress::from_a2a_ingress(
+        submitter.pseudonymous_peer_id(),
+        rustain::domain::models::ItemId::from_replay(removed_item_id),
+    );
+    let room = NodeRoomJournal::new(journal.clone(), Some(domain_tx.clone()));
+    rustain::domain::ports::RoomJournal::record_event(
+        &room,
+        rustain::domain::models::RoomEvent::RecipientItemReceived {
+            address: removed_address.clone(),
+            task: task_id.to_owned(),
+            alias: None,
+            content: "content the recipient later disposed of".to_owned(),
+        },
+    )
+    .await
+    .expect("recipient item is durable before removal");
+    rustain::domain::ports::RoomJournal::record_event(
+        &room,
+        rustain::domain::models::RoomEvent::RecipientItemRemoved {
+            address: removed_address,
+        },
+    )
+    .await
+    .expect("the removal is durable before process loss");
+    {
+        let tree = NodeTree::with_event_tx(
+            domain_tx.clone(),
+            Arc::new(|| chrono::Utc::now().timestamp_millis()),
+        )
+        .with_journal(journal.clone())
+        .with_host_binding(rustain::infrastructure::subagent::current_host_binding(&ws));
+        let (command_tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (status_tx, _) = tokio::sync::watch::channel(NodeState::Created);
+        let (_, metrics_rx) = tokio::sync::watch::channel(AgentMetrics::default());
+        tree.register_peer(
+            node_id.clone(),
+            AgentHandle {
+                agent_id: node_id.clone(),
+                token: CapabilityTokenId::nil(),
+                command_tx,
+                cancel_token: CancellationToken::new(),
+                depth: 0,
+                subagent_type: INBOUND_SUBAGENT_TYPE.into(),
+                spawned_at: 0,
+                status: status_tx,
+                metrics: metrics_rx,
+                isolated: false,
+                mailbox_budget: MailboxBudget::new(),
+            },
+        )
+        .await
+        .expect("register");
+        tree.set_state(&node_id, NodeState::Running).await;
+        // …and the process vanishes here.
+        let _ = Op::Kill;
+    }
+
+    // ── Process #2: the real recovery fold, then the real `serve`. ──
+    let tree = NodeTree::with_event_tx(
+        domain_tx.clone(),
+        Arc::new(|| chrono::Utc::now().timestamp_millis()),
+    )
+    .with_journal(journal.clone())
+    .with_host_binding(rustain::infrastructure::subagent::current_host_binding(&ws));
+    let singleton = rustain::infrastructure::subagent::DaemonSingletonLock::try_acquire(&ws)
+        .await
+        .expect("singleton");
+    let _recovery = rustain::infrastructure::subagent::NodeRecovery::reconcile(
+        &journal,
+        &tree,
+        &singleton,
+        &rustain::infrastructure::subagent::current_host_id(&ws),
+    )
+    .await
+    .expect("reconcile");
+    assert!(
+        tree.list()
+            .await
+            .iter()
+            .any(|entry| entry.agent_id == node_id && !entry.current_status.is_terminal()),
+        "control: recovery must restore the in-flight node in a NON-terminal \
+         state, otherwise `reconcile_after_restart` never runs and this test \
+         proves nothing"
+    );
+
+    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+        rustain::infrastructure::paths::sessions_dir(&ws),
+        ws.clone(),
+    ));
+    let core = {
+        let ws = ws.clone();
+        let storage = storage.clone();
+        Arc::new(DaemonCore::new(
+            ws.clone(),
+            Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(NoOpMemory),
+            storage.clone(),
+            Arc::new(NoOpSecurity),
+            Arc::new(NoOpPersona),
+            Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
+            Box::new(move || {
+                Ok(build_runtime(
+                    Arc::new(ScriptedProvider {
+                        chunks: answer_chunks(ANSWER),
+                        gate: None,
+                    }),
+                    storage.clone(),
+                    &ws,
+                ))
+            }),
+        ))
+    };
+    let server = auto_response_server(
+        core,
+        Arc::new(Mutex::new(Conversation {
+            id: "tombstone-restart".to_owned(),
+            ..Conversation::default()
+        })),
+        domain_tx.clone(),
+        tree.clone(),
+    );
+    let signer = IdentityKeyStore::new(keys.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: Some(server as Arc<dyn InboundPeerRuntime>),
+            transparency: Arc::new(
+                TransparencySink::new(Arc::new(NodeRoomJournal::new(
+                    journal.clone(),
+                    Some(domain_tx),
+                )))
+                .with_reader(journal.clone()),
+            ),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: ws,
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+
+    let client = reqwest::Client::new();
+    let endpoint = format!("http://{addr}/");
+    let value = rpc(
+        &client,
+        &endpoint,
+        &task_body(1, "tasks/get", task_id),
+        None,
+    )
+    .await;
+    assert_eq!(
+        value["result"]["status"]["state"], "failed",
+        "control: the orphan still resolves `failed`, so reconciliation ran: {value}"
+    );
+    assert!(
+        value["result"]["metadata"]
+            .get("x-rustain-item-id")
+            .is_none(),
+        "a restart must not republish a REMOVED item's id through the \
+         task-metadata carrier — that presents a disposed item to the sender \
+         as live: {value}"
+    );
+
+    // …and the tombstone is still there, readable by the host that owns it:
+    // the predicate is at the READ, never at the fold (`AD-1827`).
+    let replayed = rustain::adapters::policy::JournalRecipientItemProjection::from_entries(
+        &journal.load().await.expect("journal reload after restart"),
+    );
+    assert_eq!(
+        replayed.find_by_id(removed_item_id).map(|item| item.state),
+        Some(rustain::domain::models::RecipientItemState::Removed {
+            acknowledged_before: false
+        }),
+        "the fold keeps the tombstone; only the re-bind refuses it"
+    );
+
+    cancel.cancel();
+    let _ = tokio::time::timeout(BUDGET, http).await;
+    drop(keys);
+    drop(workspace);
 }

@@ -6258,6 +6258,24 @@ pub async fn run(
                             }
                         }
                     }
+                    // Story 19.16b — the board is a VIEW: replace the stable
+                    // `team-board` block, ⛔ never stack a fresh notice and
+                    // ⛔ never route through the turn-fatal Warning path.
+                    AppEvent::TeamBoardReady { conversation_id: board_conv_id, message: board_msg } => {
+                        if board_conv_id == conversation.id {
+                            crate::adapters::tui::handlers::team_command::show_team_board(
+                                &mut state, board_msg,
+                            );
+                        } else if let Some(tab) = tab_manager.find_by_conversation_mut(&board_conv_id) {
+                            // A background tab's board must survive the switch.
+                            crate::adapters::tui::handlers::notice::store_background_notice(
+                                tab,
+                                crate::domain::models::NoticeLevel::Advisory,
+                                board_msg,
+                            );
+                            state.needs_redraw = true;
+                        }
+                    }
                     AppEvent::ApprovalRuntimeEventBridged { event } => {
                         use crate::domain::services::approval_runtime::ApprovalRuntimeEvent;
                         match event {

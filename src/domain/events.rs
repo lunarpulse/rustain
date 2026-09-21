@@ -136,6 +136,17 @@ pub enum AppEvent {
         text: String,
         synthetic: bool,
     },
+
+    /// The Act 1 distribution board finished assembling (Story 19.16b). A
+    /// dedicated view event — not a `SystemNotice` — because the board is a
+    /// **view with a refresh verb**: the TUI must REPLACE its stable
+    /// `team-board` block rather than stack a fresh dismissible notice, and it
+    /// must never take the turn-fatal Warning path an `Advisory` notice
+    /// routes through.
+    TeamBoardReady {
+        conversation_id: ConversationId,
+        message: String,
+    },
     /// Bridge event: a `ToolCallTransition` has been received on the broadcast
     /// channel and should be forwarded to the event loop for TUI/state updates.
     ToolCallTransitionBridged {

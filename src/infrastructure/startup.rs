@@ -1894,6 +1894,7 @@ pub async fn run() -> Result<()> {
                             Some(domain_tx.clone()),
                         ),
                     ),
+                    node_journal.clone(),
                     domain_tx.clone(),
                 )?);
                 egress.install(composite);

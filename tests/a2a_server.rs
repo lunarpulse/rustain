@@ -1250,3 +1250,1103 @@ async fn ac5_peer_deliveries_are_durable_and_fold_into_transparency() {
         "the real journal file must contain the consent-refusal record: {raw}"
     );
 }
+
+// ── Story 19.16b · the cross-host acknowledgement read verb ─────────────────
+
+/// Seed one recipient item and drive it to `state` on the durable journal.
+///
+/// ⛔ A fixture seeder, never a bypass: it writes the same `RoomEvent`s the
+/// ingress and the daemon's `/team ack` / `/team remove` rails write, and the
+/// verb under test still enters through `build_router` → `dispatch` (Rule 2).
+async fn seed_item(
+    room: &dyn RoomJournal,
+    principal_key: &rustain::adapters::a2a::exec::SubmitterKey,
+    item_id: &str,
+    task: &str,
+    state: rustain::domain::models::RecipientItemState,
+) {
+    use rustain::domain::models::{ItemAddress, ItemId, RecipientItemState, RoomEvent};
+
+    let address = ItemAddress::from_a2a_ingress(
+        principal_key.pseudonymous_peer_id(),
+        ItemId::from_replay(item_id),
+    );
+    room.record_event(RoomEvent::RecipientItemReceived {
+        address: address.clone(),
+        task: task.to_owned(),
+        alias: None,
+        content: format!("content for {item_id}"),
+    })
+    .await
+    .expect("seed the recipient item");
+    match state {
+        RecipientItemState::Received { .. } => {}
+        RecipientItemState::Acknowledged { .. } => {
+            room.record_event(RoomEvent::RecipientItemAcknowledged {
+                address,
+                alias: None,
+            })
+            .await
+            .expect("seed the acknowledgement");
+        }
+        RecipientItemState::Removed { .. } => {
+            room.record_event(RoomEvent::RecipientItemRemoved { address })
+                .await
+                .expect("seed the removal");
+        }
+        _ => unreachable!("RecipientItemState is three states (AD-1827)"),
+    }
+}
+
+/// Story 19.16b AC1 — `x-rustain-items/list` serves the calling principal's own
+/// set through the real front door, with a tombstone that is present-and-marked
+/// and another principal's items byte-identically absent.
+///
+/// Front door: `rpc` → the real axum router → `dispatch`.
+/// **Mutant → RED:** call `items_list` directly instead of going through
+/// `dispatch` — the `-32601` → served transition goes unproven.
+/// **Mutant → RED:** omit removed items from the set.
+/// **Mutant → RED:** classify the tombstone BEFORE filtering by principal — B's
+/// removed id would appear for caller A and reconstitute the enumeration
+/// oracle `ADR-17-4a-01` R21 kills.
+/// **Mutant → RED:** serialize the raw `journal_order`.
+/// **Mutant → RED:** reject an unknown payload field (`AD-1826`'s decided half).
+/// **Mutant → RED:** drop the collapsed-principal disclosure.
+///
+/// ⚠ **What this half CANNOT prove (`A13`):** the harness binds `127.0.0.1`, so
+/// `authenticate` never consults a credential and every caller is the loopback
+/// principal. The *credential → principal* mapping is proven at the projection
+/// layer instead (`tests/conformance_19_16b_board.rs`), exactly as the shipped
+/// precedent at `a2a_server_exec.rs:1850` writes it. What this half DOES prove
+/// on the wire is that the filter is by **principal**: the seeded credential-B
+/// items belong to a different `ItemPrincipal` and never appear.
+#[tokio::test]
+async fn ac1_the_read_verb_serves_only_the_callers_own_set_through_the_real_front_door() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::domain::models::RecipientItemState;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
+
+    let caller = SubmitterKey::loopback();
+    let other = SubmitterKey::from_api_key("credential-b");
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_mine_live",
+        "task-live",
+        RecipientItemState::Received {
+            content: String::new(),
+        },
+    )
+    .await;
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_mine_acked",
+        "task-acked",
+        RecipientItemState::Acknowledged {
+            content: String::new(),
+        },
+    )
+    .await;
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_mine_gone",
+        "task-gone",
+        RecipientItemState::Removed {
+            acknowledged_before: false,
+        },
+    )
+    .await;
+    seed_item(
+        room.as_ref(),
+        &other,
+        "ri_theirs_gone",
+        "task-theirs",
+        RecipientItemState::Removed {
+            acknowledged_before: false,
+        },
+    )
+    .await;
+    // AC3(e) wire pin: an item acknowledged and THEN removed keeps both facts
+    // on the wire — `state: "removed"` (⛔ three states, never a fifth) plus
+    // the ADDITIVE `acknowledgedBeforeRemoval` sibling. Seeded event-by-event
+    // because `seed_item`'s one-shot states cannot express the sequence.
+    {
+        use rustain::domain::models::{ItemAddress, ItemId, RoomEvent};
+        let acked_gone = ItemAddress::from_a2a_ingress(
+            caller.pseudonymous_peer_id(),
+            ItemId::from_replay("ri_mine_acked_gone"),
+        );
+        room.record_event(RoomEvent::RecipientItemReceived {
+            address: acked_gone.clone(),
+            task: "task-acked-gone".to_owned(),
+            alias: None,
+            content: "content".to_owned(),
+        })
+        .await
+        .expect("seed received");
+        room.record_event(RoomEvent::RecipientItemAcknowledged {
+            address: acked_gone.clone(),
+            alias: None,
+        })
+        .await
+        .expect("seed acknowledged");
+        room.record_event(RoomEvent::RecipientItemRemoved {
+            address: acked_gone,
+        })
+        .await
+        .expect("seed removed");
+    }
+
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            transparency: Arc::new(TransparencySink::new(room).with_reader(journal.clone())),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+    let client = reqwest::Client::new();
+
+    // AC5(a): a forward-compatible extra payload key is IGNORED, not refused.
+    let response = rpc(
+        &client,
+        &endpoint,
+        1,
+        "x-rustain-items/list",
+        serde_json::json!({ "aFieldFromANewerBuild": 7 }),
+    )
+    .await;
+    assert!(
+        response.get("error").is_none(),
+        "an unknown payload field must be ignored, never refused: {response}"
+    );
+    let items = response["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the read returns the caller's SET: {response}"));
+
+    let ids: Vec<&str> = items
+        .iter()
+        .map(|item| item["itemId"].as_str().expect("item id"))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "ri_mine_live",
+            "ri_mine_acked",
+            "ri_mine_gone",
+            "ri_mine_acked_gone",
+        ],
+        "the set is the caller's own items in arrival order: {response}"
+    );
+
+    // AC1(e): the tombstone is present-and-marked, in the RESULT, not an error.
+    let states: std::collections::HashMap<&str, &str> = items
+        .iter()
+        .map(|item| {
+            (
+                item["itemId"].as_str().expect("item id"),
+                item["state"].as_str().expect("item state"),
+            )
+        })
+        .collect();
+    assert_eq!(states["ri_mine_gone"], "removed");
+    // Positive control: the mapper is not answering "removed" for everything —
+    // an acknowledgement performed on the OTHER rail reaches this read.
+    assert_eq!(states["ri_mine_acked"], "acknowledged");
+    assert_eq!(states["ri_mine_live"], "received");
+    assert_eq!(
+        states["ri_mine_acked_gone"], "removed",
+        "⛔ the wire stays three-state: ack-then-removed is `removed`, never a fifth state"
+    );
+    let ids: Vec<&str> = items
+        .iter()
+        .map(|item| item["itemId"].as_str().expect("item id"))
+        .collect();
+    let acked_gone = &items[ids
+        .iter()
+        .position(|id| *id == "ri_mine_acked_gone")
+        .expect("the ack-then-removed item is on the wire")];
+    assert_eq!(acked_gone["acknowledgedBeforeRemoval"], true);
+    let bare_gone = &items[ids
+        .iter()
+        .position(|id| *id == "ri_mine_gone")
+        .expect("the bare-removed item is on the wire")];
+    assert!(
+        bare_gone.get("acknowledgedBeforeRemoval").is_none(),
+        "the sibling field is ADDITIVE — absent when there was no acknowledgement"
+    );
+
+    // AC1(e)/`A22`: another principal's REMOVED item is absent, byte-identically
+    // to an id that never existed.
+    let raw = response.to_string();
+    assert!(
+        !raw.contains("ri_theirs_gone"),
+        "filter by principal FIRST: a tombstone-before-filter handler leaks a \
+         `removed` row for an id the caller does not own — the enumeration \
+         oracle `A3` exists to kill: {raw}"
+    );
+
+    // AC1(f): the fold-scheme-dependent number never reaches the wire.
+    assert!(
+        !raw.contains("journalOrder") && !raw.contains("journal_order"),
+        "`journal_order` is not stable across the two assignment schemes: {raw}"
+    );
+    assert_eq!(items[0]["ordinal"], 0, "a dense per-peer arrival ordinal");
+    assert_eq!(items[2]["ordinal"], 2);
+
+    // AC2(c): on this loopback bind the collapse is DISCLOSED, not refused.
+    assert_eq!(
+        response["result"]["principalCollapsed"], true,
+        "a loopback bind never consults a credential, so the board must be told \
+         these rows are every local caller's: {response}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16b AC1(d) — reading acknowledgement state is not itself an
+/// acknowledgement: N reads leave the journal byte-count and row-count exactly
+/// where they were.
+///
+/// **Ratchet (Rule 4):** journal-length equality across N reads — structural,
+/// ⛔ never a timing window.
+/// **Mutant → RED:** add a `StatusQueried`-style `transparency.record(..)` to
+/// the handler, the way the adjacent `tasks/get` does twice over.
+/// **Positive control:** the shipped
+/// `ac4_working_poll_records_status_query_without_disclosure_but_completed_fetch_records_both`
+/// in this same file proves the journal counter CAN move on a served read —
+/// without it, "the count did not change" is green from birth.
+#[tokio::test]
+async fn ac1_repeated_reads_of_the_acknowledgement_set_never_touch_the_journal() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::domain::models::RecipientItemState;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_read_me",
+        "task-read",
+        RecipientItemState::Received {
+            content: String::new(),
+        },
+    )
+    .await;
+
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            transparency: Arc::new(TransparencySink::new(room).with_reader(journal.clone())),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+    let client = reqwest::Client::new();
+
+    let before = journal.load().await.expect("load journal").len();
+    for id in 1..=4 {
+        let response = rpc(
+            &client,
+            &endpoint,
+            id,
+            "x-rustain-items/list",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            response["result"]["items"].as_array().expect("items").len(),
+            1,
+            "control: every read actually served the set, so the ratchet below \
+             is measuring a read that happened: {response}"
+        );
+    }
+    let after = journal.load().await.expect("load journal").len();
+    assert_eq!(
+        before, after,
+        "reading acknowledgement state is not itself an acknowledgement, and \
+         never marks anything (AD-1822)"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16b AC1 — an acknowledgement performed on the **daemon** rail
+/// becomes visible to the **cross-host** read without restarting the host.
+///
+/// `FR165`'s only sentence for this story is *"a sender can observe each
+/// recipient's acknowledgement state"*. The served projection has exactly one
+/// in-place writer — the inbound `message/send` ingress — while `/team ack`
+/// and `/team remove` travel the daemon socket and land in the durable
+/// journal. Without a read-side re-fold the verb would answer `received`
+/// forever and `FR165` would be false on any host that has not restarted.
+///
+/// **Mutant → RED:** delete the `refresh_recipient_items` call from the
+/// handler. The first read still passes (the startup fold saw the item) and
+/// the second read answers `received` for an acknowledged item.
+/// **Positive control:** the first read is asserted `received`, so the second
+/// read's `acknowledged` is a transition this call observed and not a state
+/// the harness seeded.
+#[tokio::test]
+async fn ac1_an_acknowledgement_written_after_startup_is_visible_without_a_restart() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::domain::models::{ItemAddress, ItemId, RecipientItemState, RoomEvent};
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
+
+    let caller = SubmitterKey::loopback();
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_acked_later",
+        "task-later",
+        RecipientItemState::Received {
+            content: String::new(),
+        },
+    )
+    .await;
+
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            transparency: Arc::new(
+                TransparencySink::new(room.clone()).with_reader(journal.clone()),
+            ),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+    let client = reqwest::Client::new();
+
+    // Positive control: before the operator acts, the read says `received`.
+    let before = rpc(
+        &client,
+        &endpoint,
+        1,
+        "x-rustain-items/list",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        before["result"]["items"][0]["state"], "received",
+        "control: the read starts from the un-acknowledged state: {before}"
+    );
+
+    // The operator acknowledges on the OTHER rail — durable journal only; the
+    // served projection is never told.
+    room.record_event(RoomEvent::RecipientItemAcknowledged {
+        address: ItemAddress::from_a2a_ingress(
+            caller.pseudonymous_peer_id(),
+            ItemId::from_replay("ri_acked_later"),
+        ),
+        alias: None,
+    })
+    .await
+    .expect("the acknowledgement is durable");
+
+    let after = rpc(
+        &client,
+        &endpoint,
+        2,
+        "x-rustain-items/list",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        after["result"]["items"][0]["state"], "acknowledged",
+        "the sender must observe the acknowledgement without a host restart: {after}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16b AC1(g) — **Rule 1: the trait method's first non-test caller is
+/// real, and this keystone reaches the served arm THROUGH the shipped client.**
+///
+/// `A2aTaskTransport::list_items` is a trait change with eight implementors.
+/// Seven are doubles; the one that matters is `TaskClient`, whose production
+/// caller is the Act 1 board's per-peer read (`a2a::board::read_peer`, reached
+/// from `transparency_bridge::team_command`'s `/team board` arm — a
+/// non-`#[cfg(test)]` path). ⛔ A caller **count** or a source **grep** would
+/// be satisfied by a dead implementation; this drives the real
+/// `A2aClientAdapter::post_jsonrpc` against the real axum router and asserts
+/// the behaviour only the wired path produces.
+///
+/// **Mutant → RED:** point `TaskClient::list_items` at any other method name —
+/// the peer answers `-32601` and the transport returns `A2aError::JsonRpc`,
+/// which is exactly what the board renders as `⚠ unreachable`.
+#[tokio::test]
+async fn ac1_the_client_transport_method_reaches_the_served_arm_over_a_real_socket() {
+    use rustain::adapters::a2a::client::A2aClientAdapter;
+    use rustain::adapters::a2a::driver::TaskClient;
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::adapters::a2a::lifecycle::A2aTaskTransport;
+    use rustain::domain::models::{A2aPeerSource, A2aPeerSpec, RecipientItemState, RedactedUrl};
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_over_the_wire",
+        "task-wire",
+        RecipientItemState::Acknowledged {
+            content: String::new(),
+        },
+    )
+    .await;
+
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            transparency: Arc::new(TransparencySink::new(room).with_reader(journal.clone())),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+
+    // The SHIPPED client, not a hand-built request: `A2aClientAdapter` owns the
+    // credential attachment, the anchor handling and the JSON-RPC envelope.
+    let peer = A2aPeerSpec::new(
+        "board-peer",
+        RedactedUrl::from(endpoint.clone()),
+        A2aPeerSource::Workspace,
+    );
+    let adapter = Arc::new(A2aClientAdapter::new(&peer, None).expect("client adapter"));
+    let transport = TaskClient::new(adapter, endpoint);
+
+    let result = transport
+        .list_items()
+        .await
+        .expect("the peer serves the read verb the client asks for");
+    assert_eq!(
+        result["items"][0]["itemId"], "ri_over_the_wire",
+        "the trait method must reach the served dispatch arm: {result}"
+    );
+    assert_eq!(
+        result["items"][0]["state"], "acknowledged",
+        "…and carry the acknowledgement state the board renders: {result}"
+    );
+    assert_eq!(
+        result["principalCollapsed"], true,
+        "…including the legibility disclosure the board is required to show"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+// ── Story 19.16b review · the board's aggregation path (collect_board) ──────
+
+/// A real sender-side egress over the given roster: the PRODUCTION compose
+/// front door (`A2aEgress::compose` → `runtime()`), the same one the daemon
+/// installs — ⛔ never a hand-built runtime (Rule 2 for the board half).
+///
+/// The caller seeds the sender journal (`RemoteEnvelopeDispatched` rows) and
+/// the peer's own journal before collecting; card slots settle event-driven
+/// (no sleep, no poll) through the compose-spawned boot fetches.
+async fn board_egress(
+    peers: Vec<rustain::domain::models::A2aPeerSpec>,
+    journal: Arc<rustain::infrastructure::subagent::NodeJournal>,
+    room: Arc<dyn RoomJournal>,
+) -> rustain::adapters::a2a::egress::A2aEgress {
+    let (event_tx, _event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let egress = rustain::adapters::a2a::egress::A2aEgress::compose(
+        peers,
+        NodeTree::new(),
+        room,
+        journal,
+        event_tx,
+    )
+    .expect("compose the sender egress");
+    tokio::time::timeout(Duration::from_secs(10), egress.await_cards_settled())
+        .await
+        .expect("boot card fetches settle");
+    egress
+}
+
+/// Story 19.16b AC3(b2) — a dead roster peer renders `⚠ unreachable`, ⛔ never
+/// `✗ declined`: *"a host being down is not a person saying no"* (`:236`).
+///
+/// **The production mapping site is `collect_board`'s `Err(())` arm** — the
+/// M10 mutation recipe's actual target. The unit test pins the token table;
+/// THIS keystone drives the mapping through the real egress, a real closed
+/// port, and a real live peer, so mutating the arm to `Declined` turns it RED
+/// where the receipt's first run could not reach.
+///
+/// **Mutant → RED:** map `Err(())` to `BoardOutcome::Declined` in
+/// `collect_board` — the `⚠` assertion fails on the dead peer's row.
+#[tokio::test]
+async fn ac3b2_an_unreachable_roster_peer_renders_warned_never_declined() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::domain::models::RecipientItemState;
+
+    // The live peer: a real serve() holding one of this sender's items.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_board_live",
+        "task-board-live",
+        RecipientItemState::Received {
+            content: String::new(),
+        },
+    )
+    .await;
+    // …and the sender durably dispatched that task to this peer (`AC3(g)`).
+    rustain::domain::ports::RoomJournal::record_event(
+        room.as_ref(),
+        rustain::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+            peer: rustain::domain::models::a2a_peer_spec::alias_pseudonym("board-live"),
+            task: Some("task-board-live".to_owned()),
+            bytes: 8,
+        },
+    )
+    .await
+    .expect("seed the dispatched row");
+
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            transparency: Arc::new(
+                TransparencySink::new(room.clone()).with_reader(journal.clone()),
+            ),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+
+    // The dead peer: a port that answers nothing.
+    let dead = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind dead listener");
+        let addr = listener.local_addr().expect("dead address");
+        drop(listener);
+        addr
+    };
+
+    let live_peer = rustain::domain::models::A2aPeerSpec::new(
+        "board-live",
+        rustain::domain::models::RedactedUrl::from(endpoint),
+        rustain::domain::models::A2aPeerSource::Workspace,
+    );
+    let dead_peer = rustain::domain::models::A2aPeerSpec::new(
+        "board-dead",
+        rustain::domain::models::RedactedUrl::from(format!("http://{dead}/")),
+        rustain::domain::models::A2aPeerSource::Workspace,
+    );
+    let egress = board_egress(vec![dead_peer, live_peer], journal, room).await;
+
+    let view =
+        rustain::adapters::a2a::board::collect_board(egress.runtime(), std::time::Instant::now())
+            .await
+            .expect("the first refresh is admitted");
+    let rendered = rustain::adapters::a2a::board::render_board(&view);
+
+    assert!(
+        rendered.contains("⚠ board-dead"),
+        "the dead roster peer is warned about, in the ratified token: {rendered}"
+    );
+    assert!(
+        !rendered.contains("declined") && !rendered.contains("✗"),
+        "a host being down is not a person saying no (`UX-DR-TM-02:236`): {rendered}"
+    );
+    assert!(
+        rendered.contains("board-live"),
+        "positive control: the live peer's read landed and its row rendered: {rendered}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16b AC3(b) — the board is assembled from REMOTE reads, ⛔ never
+/// from the local projection (`A21`): the sender's local journal holds what
+/// it RECEIVED (an inbound item from a third peer), never what it sent, so a
+/// local-projection build renders the board inverted — or empty.
+///
+/// **Mutant → RED:** build the board from the host's own
+/// `JournalRecipientItemProjection` — the row set below stops matching (the
+/// remote peer's row vanishes and/or the inbound item's principal leaks in).
+///
+/// **Positive control:** the inbound item this host holds is real and folded
+/// — and its id appears NOWHERE on the board.
+#[tokio::test]
+async fn ac3_the_board_is_assembled_from_remote_reads_not_the_local_projection() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::domain::models::RecipientItemState;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
+
+    // The INBOUND item: what a THIRD peer sent to this host. The local
+    // projection folds it; the board must never render it as outbound.
+    let third_party = SubmitterKey::from_api_key("credential-third-party");
+    seed_item(
+        room.as_ref(),
+        &third_party,
+        "ri_inbound_from_third",
+        "task-inbound",
+        RecipientItemState::Received {
+            content: String::new(),
+        },
+    )
+    .await;
+    // Positive control: the local projection really holds it.
+    assert!(
+        rustain::adapters::policy::JournalRecipientItemProjection::from_entries(
+            &journal.load().await.expect("load journal")
+        )
+        .find_by_id("ri_inbound_from_third")
+        .is_some(),
+        "control: the local fold holds the inbound item the board must not show"
+    );
+
+    // The REMOTE item: the live peer's copy of what this sender dispatched.
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_board_sent",
+        "task-board-sent",
+        RecipientItemState::Acknowledged {
+            content: String::new(),
+        },
+    )
+    .await;
+    rustain::domain::ports::RoomJournal::record_event(
+        room.as_ref(),
+        rustain::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+            peer: rustain::domain::models::a2a_peer_spec::alias_pseudonym("board-remote"),
+            task: Some("task-board-sent".to_owned()),
+            bytes: 8,
+        },
+    )
+    .await
+    .expect("seed the dispatched row");
+
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            transparency: Arc::new(
+                TransparencySink::new(room.clone()).with_reader(journal.clone()),
+            ),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+
+    let peer = rustain::domain::models::A2aPeerSpec::new(
+        "board-remote",
+        rustain::domain::models::RedactedUrl::from(endpoint),
+        rustain::domain::models::A2aPeerSource::Workspace,
+    );
+    let egress = board_egress(vec![peer], journal, room).await;
+
+    let view =
+        rustain::adapters::a2a::board::collect_board(egress.runtime(), std::time::Instant::now())
+            .await
+            .expect("the first refresh is admitted");
+    let rendered = rustain::adapters::a2a::board::render_board(&view);
+
+    assert_eq!(
+        view.rows.len(),
+        1,
+        "exactly the remote peer's row — assembled from the remote read: {rendered}"
+    );
+    assert!(
+        rendered.contains("✓ board-remote"),
+        "the dispatched item's acknowledgement is what the REMOTE read reports: {rendered}"
+    );
+    assert!(
+        !rendered.contains("ri_inbound_from_third") && !rendered.contains("task-inbound"),
+        "the host's own inbound item is not this sender's outbound fan-out — the board \
+         inverted (`A21`): {rendered}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16b AC3(g) — under a collapsed principal (this loopback harness),
+/// the peer's set mixes every local caller's items; the row answers for THIS
+/// sender's dispatched task, not the peer's newest bag.
+///
+/// **Mutant → RED:** drop the task correlation from `parse_peer_reply` — the
+/// newest item overall (someone else's acknowledged send) wins the row and it
+/// renders `✓` instead of `●`.
+#[tokio::test]
+async fn ac3g_the_board_row_answers_for_the_dispatched_task_not_the_newest_bag() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::domain::models::RecipientItemState;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
+
+    // Two items under the SAME (loopback) principal on the peer: another
+    // local's acknowledged send, newest; ours, plain received.
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_other_local",
+        "task-other-local",
+        RecipientItemState::Acknowledged {
+            content: String::new(),
+        },
+    )
+    .await;
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_ours",
+        "task-ours",
+        RecipientItemState::Received {
+            content: String::new(),
+        },
+    )
+    .await;
+    // The sender durably dispatched ONLY task-ours to this peer.
+    rustain::domain::ports::RoomJournal::record_event(
+        room.as_ref(),
+        rustain::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+            peer: rustain::domain::models::a2a_peer_spec::alias_pseudonym("board-ours"),
+            task: Some("task-ours".to_owned()),
+            bytes: 8,
+        },
+    )
+    .await
+    .expect("seed the dispatched row");
+
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            transparency: Arc::new(
+                TransparencySink::new(room.clone()).with_reader(journal.clone()),
+            ),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+
+    let peer = rustain::domain::models::A2aPeerSpec::new(
+        "board-ours",
+        rustain::domain::models::RedactedUrl::from(endpoint),
+        rustain::domain::models::A2aPeerSource::Workspace,
+    );
+    let egress = board_egress(vec![peer], journal, room).await;
+
+    let view =
+        rustain::adapters::a2a::board::collect_board(egress.runtime(), std::time::Instant::now())
+            .await
+            .expect("the first refresh is admitted");
+    let rendered = rustain::adapters::a2a::board::render_board(&view);
+
+    assert_eq!(view.rows.len(), 1, "{rendered}");
+    assert!(
+        rendered.contains("● board-ours"),
+        "the row reports OUR dispatched item (`received`), not the newest bag's \
+         `acknowledged` belonging to another local caller: {rendered}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16b AC2(c) — on a loopback bind the read SERVES and the board
+/// DISCLOSES the collapse, ⛔ never only in a log.
+///
+/// **Mutant → RED:** drop the disclosure (or accumulate it from peers that
+/// contribute no row and render it unconditionally — the unit test pins the
+/// conditional; this pins the presence, from a real loopback peer that
+/// contributed a real row).
+#[tokio::test]
+async fn ac2c_the_board_carries_the_collapse_disclosure_from_a_loopback_peer() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::domain::models::RecipientItemState;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let (domain_tx, _domain_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let room: Arc<dyn RoomJournal> =
+        Arc::new(NodeRoomJournal::new(journal.clone(), Some(domain_tx)));
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_collapse",
+        "task-collapse",
+        RecipientItemState::Received {
+            content: String::new(),
+        },
+    )
+    .await;
+    rustain::domain::ports::RoomJournal::record_event(
+        room.as_ref(),
+        rustain::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+            peer: rustain::domain::models::a2a_peer_spec::alias_pseudonym("board-loop"),
+            task: Some("task-collapse".to_owned()),
+            bytes: 8,
+        },
+    )
+    .await
+    .expect("seed the dispatched row");
+
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            transparency: Arc::new(
+                TransparencySink::new(room.clone()).with_reader(journal.clone()),
+            ),
+            policy: A2aAdmissionPolicy::Allow,
+            workspace: workspace.path().to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+
+    let peer = rustain::domain::models::A2aPeerSpec::new(
+        "board-loop",
+        rustain::domain::models::RedactedUrl::from(endpoint),
+        rustain::domain::models::A2aPeerSource::Workspace,
+    );
+    let egress = board_egress(vec![peer], journal, room).await;
+
+    let view =
+        rustain::adapters::a2a::board::collect_board(egress.runtime(), std::time::Instant::now())
+            .await
+            .expect("the first refresh is admitted");
+    let rendered = rustain::adapters::a2a::board::render_board(&view);
+
+    assert!(
+        view.principal_collapsed,
+        "the loopback peer's reply carries the collapse, and the row it produced \
+         accumulates it: {rendered}"
+    );
+    assert!(
+        rendered.contains(rustain::adapters::a2a::board::COLLAPSED_PRINCIPAL_DISCLOSURE),
+        "the disclosure renders ON the board, never only in a log: {rendered}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}

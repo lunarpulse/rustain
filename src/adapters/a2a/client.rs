@@ -166,7 +166,6 @@ pub struct A2aClientAdapter {
     card: tokio::sync::RwLock<CardSlot>,
     #[cfg(any(test, feature = "test-instrumentation"))]
     trust_record: Vec<TrustStepKind>,
-    #[cfg(any(test, feature = "test-instrumentation"))]
     settled: tokio::sync::watch::Sender<bool>,
 }
 
@@ -246,7 +245,6 @@ impl A2aClientAdapter {
         // `refresh_agent_card` ran, so the "a refresh never overwrites
         // AnchorRefused(Unloadable)" invariant was never actually exercised —
         // caught by mutant M22, which stayed GREEN against it.
-        #[cfg(any(test, feature = "test-instrumentation"))]
         let settled = tokio::sync::watch::Sender::new(false);
 
         Ok(Self {
@@ -259,7 +257,6 @@ impl A2aClientAdapter {
             card: tokio::sync::RwLock::new(slot),
             #[cfg(any(test, feature = "test-instrumentation"))]
             trust_record,
-            #[cfg(any(test, feature = "test-instrumentation"))]
             settled,
         })
     }
@@ -310,7 +307,6 @@ impl A2aClientAdapter {
     /// `A2aCatalogChanged` only on success — so a test has no event to wait on.
     /// ⛔ Not a sleep and not a poll loop: wrap the call in
     /// `tokio::time::timeout` so a hang becomes a failure.
-    #[cfg(any(test, feature = "test-instrumentation"))]
     pub async fn await_settled(&self) {
         let mut rx = self.settled.subscribe();
         let _ = rx.wait_for(|settled| *settled).await;
@@ -327,7 +323,6 @@ impl A2aClientAdapter {
     }
 
     fn mark_settled(&self) {
-        #[cfg(any(test, feature = "test-instrumentation"))]
         // `watch::Sender::send` DROPS the value when no receiver exists (it
         // returns `Err` without storing), so a boot refresh that finishes before
         // the first `await_settled()` subscription would be lost and the late

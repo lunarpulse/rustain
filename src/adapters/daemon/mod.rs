@@ -423,6 +423,7 @@ async fn run_daemon_foreground(
                     Some(domain_tx.clone()),
                 ),
             ),
+            node_journal.clone(),
             domain_tx.clone(),
         )
         .map_err(|error| anyhow::anyhow!("composing daemon A2A egress: {error}"))?,

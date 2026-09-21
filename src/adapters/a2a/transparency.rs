@@ -174,6 +174,16 @@ impl TransparencySink {
         }
     }
 
+    /// The journal's last valid `seq` — the O(1) chunked tail read
+    /// (`RoomJournalReader::latest_seq`), so a refresh with no new rows
+    /// parses nothing (19.16b review).
+    pub async fn latest_seq(&self) -> Result<u64, RoomJournalError> {
+        match &self.reader {
+            Some(reader) => reader.latest_seq().await,
+            None => Ok(0),
+        }
+    }
+
     /// Append an already-formed room event through the same durable-first seam.
     pub async fn record_room_event(&self, event: RoomEvent) -> Result<(), RoomJournalError> {
         let Some(journal) = &self.journal else {

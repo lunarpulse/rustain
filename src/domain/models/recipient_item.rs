@@ -93,33 +93,69 @@ impl ItemAddress {
 /// already tolerate a state they do not know. The one exhaustive `match` is
 /// the legality table in `next_item_state` over `(state, act)`
 /// (`adapters/policy/recipient_item.rs`), same crate.
+///
+/// The payload lives **inside** the state (19.16b review, paying
+/// `DF-19-16C-ITEM-VIEW-FIELD-COUNT`'s prescribed fix): `content` moves in,
+/// which makes the old `content: None ⟺ Removed` invariant unrepresentable
+/// instead of asserted, and `Removed` carries the **pre-removal
+/// acknowledgement** so the board can render a removed-after-ack item at its
+/// last sender-visible outcome (`A22`) without a second writer of that fact
+/// beside the state (`AD-1827`). The cost, recorded in the DF, is `Copy`.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecipientItemState {
-    Received,
-    Acknowledged,
+    Received {
+        content: String,
+    },
+    Acknowledged {
+        content: String,
+    },
     /// The recipient disposed of their own copy (FR165). **Terminal**: no act
-    /// leaves it, from either predecessor, and the projection does not retain
-    /// which one it came from — that fact lives in the journal and the
-    /// `/team log` ledger. The entry itself is **kept**, because an absent
-    /// entry is byte-identically "not found" and AD-1822 requires a tombstone
-    /// distinct from one.
-    Removed,
+    /// leaves it, from either predecessor. The entry itself is **kept**,
+    /// because an absent entry is byte-identically "not found" and AD-1822
+    /// requires a tombstone distinct from one. `acknowledged_before` records
+    /// which predecessor the tombstone came from — the one fact
+    /// `DF-19-16B-TOMBSTONE-LOSES-ACK-PREDECESSOR` needed the read to keep.
+    Removed {
+        acknowledged_before: bool,
+    },
+}
+
+impl RecipientItemState {
+    /// The stable wire tag (`AC1(e)` pins `state ∈ {received, acknowledged,
+    /// removed}` as a bare string). The payload never reaches the wire through
+    /// this name; it is projected field-by-field by the serving verb.
+    #[must_use]
+    pub const fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Received { .. } => "received",
+            Self::Acknowledged { .. } => "acknowledged",
+            Self::Removed { .. } => "removed",
+        }
+    }
+
+    /// `Some(true)` exactly when this tombstone came from `Acknowledged` —
+    /// the predecessor fact the board renders (`A22`). `None` while live.
+    #[must_use]
+    pub const fn acknowledged_before_removal(&self) -> Option<bool> {
+        match self {
+            Self::Removed {
+                acknowledged_before,
+            } => Some(*acknowledged_before),
+            Self::Received { .. } | Self::Acknowledged { .. } => None,
+        }
+    }
 }
 
 /// Content and state reconstructed solely from durable recipient-item events.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecipientItemView {
     pub address: ItemAddress,
     pub task: String,
     pub alias: Option<String>,
-    /// Message content, or `None` once the recipient removed the item.
-    ///
-    /// `content.is_none()` ⟺ `state == RecipientItemState::Removed`, enforced
-    /// at the fold's single join point. Never `Some(String::new())` for a
-    /// removal: an empty content is a genuinely empty message.
-    pub content: Option<String>,
+    /// The content lives **inside** [`RecipientItemState`]
+    /// (`DF-19-16C-ITEM-VIEW-FIELD-COUNT`'s fix): a removal replaces the
+    /// variant and the content goes with it — unrepresentable, not asserted.
     pub state: RecipientItemState,
     /// Fold order of the creating `RecipientItemReceived` event. An ordering
     /// aid for ambiguous task lookups (a resent `messageId` produces one item
@@ -131,7 +167,6 @@ pub struct RecipientItemView {
     /// `apply` uses `max(existing) + 1`, so a cross-scheme comparison must
     /// exclude this field. Both are monotonic in append order, so every
     /// ordering consumer agrees regardless.
-    #[serde(default)]
     pub journal_order: u64,
 }
 

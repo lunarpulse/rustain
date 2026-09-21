@@ -1594,7 +1594,7 @@ impl AttachServer {
             .await;
             return None;
         };
-        match next_item_state(item.state, act) {
+        match next_item_state(&item.state, act) {
             ItemActOutcome::Applied(_) => Some((item, Arc::clone(journal))),
             // Already there: the shipped silence, preserved exactly.
             ItemActOutcome::Idempotent => None,
@@ -4847,10 +4847,10 @@ mod tests {
         crate::adapters::policy::recipient_item::reset_recipient_item_transition_count();
         let projection =
             crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
-        assert_eq!(
+        assert!(matches!(
             projection.get(&address).unwrap().state,
-            crate::domain::models::RecipientItemState::Acknowledged
-        );
+            crate::domain::models::RecipientItemState::Acknowledged { .. }
+        ));
         assert_eq!(
             crate::adapters::policy::recipient_item::recipient_item_transition_count(),
             1,
@@ -4970,19 +4970,17 @@ mod tests {
         let tombstone = projection
             .find_by_id("ri_removed")
             .expect("the projection RETAINS the entry — a tombstone, not an absence");
-        assert_eq!(
+        assert!(matches!(
             tombstone.state,
-            crate::domain::models::RecipientItemState::Removed
-        );
-        assert_eq!(tombstone.content, None);
+            crate::domain::models::RecipientItemState::Removed { .. }
+        ));
 
         // Positive control: removal is scoped to its target.
         let untouched = projection.find_by_id("ri_untouched").expect("still there");
-        assert_eq!(
+        assert!(matches!(
             untouched.state,
-            crate::domain::models::RecipientItemState::Received
-        );
-        assert_eq!(untouched.content.as_deref(), Some("still here"));
+            crate::domain::models::RecipientItemState::Received { content, .. } if content == "still here"
+        ));
         assert!(
             frames.try_recv().is_err(),
             "a legal removal is silent — no frame, exactly like the shipped acknowledge path"
@@ -5219,15 +5217,14 @@ mod tests {
         let sender_task = "ri_disposed-sender-task";
 
         // Positive control: there IS something to dispose of.
-        assert_eq!(
+        assert!(matches!(
             recipient_items(journal.as_ref())
                 .await
                 .find_by_id("ri_disposed")
                 .unwrap()
-                .content
-                .as_deref(),
-            Some(PAYLOAD)
-        );
+                .state,
+            crate::domain::models::RecipientItemState::Received { content, .. } if content == PAYLOAD
+        ));
         let before = rendered_surfaces(journal.as_ref()).await;
         for (surface, text) in &before {
             assert!(
@@ -5248,15 +5245,14 @@ mod tests {
             )
             .await;
 
-        assert_eq!(
+        assert!(matches!(
             recipient_items(journal.as_ref())
                 .await
                 .find_by_id("ri_disposed")
                 .unwrap()
-                .content,
-            None,
-            "a removed message and a genuinely empty one must never be one state"
-        );
+                .state,
+            crate::domain::models::RecipientItemState::Removed { .. }
+        ));
         for (surface, text) in rendered_surfaces(journal.as_ref()).await {
             assert!(
                 text.contains("ri_disposed removed — its content is no longer shown here"),
@@ -5517,10 +5513,10 @@ mod tests {
         let before =
             crate::adapters::policy::JournalRecipientItemProjection::from_entries(&before_entries);
         let tombstone = before.find_by_id(&item_id).expect("tombstone");
-        assert_eq!(
+        assert!(matches!(
             tombstone.state,
-            crate::domain::models::RecipientItemState::Removed
-        );
+            crate::domain::models::RecipientItemState::Removed { .. }
+        ));
         // AC1(e): the removed id stays claimed. The a2a server seeds its
         // allocator's `claimed_ids` from exactly this snapshot's keys
         // (adapters/a2a/server.rs:220-222), and the in-crate collision tests
@@ -5573,13 +5569,10 @@ mod tests {
         let recovered = after
             .find_by_id(&item_id)
             .expect("the tombstone is recovered by folding the journal");
-        assert_eq!(
+        assert!(matches!(
             recovered.state,
-            crate::domain::models::RecipientItemState::Removed,
-            "restart reconciliation neither removes nor resurrects — a restart is not a \
-             deliberate human act"
-        );
-        assert_eq!(recovered.content, None);
+            crate::domain::models::RecipientItemState::Removed { .. }
+        ));
 
         // The comparison contract, stated: both sides are COLD folds
         // (`from_entries`) of the same durable stream, so every field —

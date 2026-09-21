@@ -121,8 +121,13 @@ fn recipient_item_fold_replays_acknowledgement_and_is_idempotent() {
 
     let projection = JournalRecipientItemProjection::from_entries(&entries);
     let item = projection.get(&address).expect("received item folds");
-    assert_eq!(item.state, RecipientItemState::Acknowledged);
-    assert_eq!(item.content.as_deref(), Some("durable content"));
+    assert!(matches!(
+        item.state,
+        RecipientItemState::Acknowledged {
+            content,
+            ..
+        } if content == "durable content"
+    ));
 
     let replayed = JournalRecipientItemProjection::from_entries(&entries);
     assert_eq!(projection.snapshot(), replayed.snapshot());
@@ -146,10 +151,10 @@ fn replacing_from_the_journal_discards_an_in_memory_divergence() {
         address: address.clone(),
         alias: None,
     });
-    assert_eq!(
+    assert!(matches!(
         projection.get(&address).unwrap().state,
-        RecipientItemState::Acknowledged
-    );
+        RecipientItemState::Acknowledged { .. }
+    ));
 
     projection.replace_from(&entries);
     assert_eq!(

@@ -597,7 +597,12 @@ enum AttachedTeamLine {
 fn attached_team_line(text: &str) -> AttachedTeamLine {
     use crate::adapters::tui::handlers::team_command::{TeamCommandArgs, parse_team_command};
 
-    let Some(arg) = text.strip_prefix("/team ") else {
+    // `DF-19-16C` review bullet (deferred-work.md `/team` leading-whitespace
+    // bypass), paid here because this story touches the intercept table: the
+    // classifier used to read the RAW composer buffer, so a pasted
+    // `" /team remove ri_x"` failed `strip_prefix`, classified `PassThrough`,
+    // and submitted a destructive verb to the model as an ordinary turn.
+    let Some(arg) = text.trim_start().strip_prefix("/team ") else {
         return AttachedTeamLine::PassThrough;
     };
     match parse_team_command(Some(arg)) {
@@ -609,6 +614,22 @@ fn attached_team_line(text: &str) -> AttachedTeamLine {
         Ok(TeamCommandArgs::Remove { item_id }) => {
             AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { item_id })
         }
+        // Story 19.16b AC3(h)1 — ⛔ NOT a fall-through. The board reads every
+        // configured peer over this session's OWN A2A egress, and an attached
+        // session holds none: `AttachServer` is composed without an
+        // `A2aDelegationRuntime` (the daemon installs its egress on the
+        // capability composite, never on the attach server). Falling through
+        // would turn `/team board` into an LLM prompt — exactly what happened
+        // to `log`, `trust`, `status` and `send`. Refuse aloud instead, and
+        // say where the verb does work.
+        // ⚠ Sized for the 1.5 s single-line status flash `Refused` routes to
+        // (19.16b review): the actionable clause must survive a narrow
+        // terminal, so the explanation lives in the comment, not the flash.
+        Ok(TeamCommandArgs::Board) => AttachedTeamLine::Refused(
+            "'/team board' needs this session's own A2A egress — run it in a non-attached \
+             session."
+                .to_owned(),
+        ),
         // Other `/team` verbs keep their pre-existing fall-through.
         Ok(_) => AttachedTeamLine::PassThrough,
         Err(error) => AttachedTeamLine::Refused(error),
@@ -1842,6 +1863,61 @@ mod tests {
         ));
         assert!(matches!(
             attached_team_line("tell me about /team remove"),
+            AttachedTeamLine::PassThrough
+        ));
+    }
+
+    /// Story 19.16b AC3(h)1 — `/team board` is REFUSED ALOUD on the attached
+    /// rail, ⛔ never a model prompt.
+    ///
+    /// The board reads every configured A2A peer over this session's own
+    /// egress and an attached session holds none, so there is no frame to
+    /// send; the one thing that must not happen is the shipped failure mode —
+    /// falling through to `driver.submit` and becoming an LLM turn, *"exactly
+    /// what happened to `log`, `trust`, `status` and `send`."*
+    ///
+    /// Mutant → RED: delete the `Board` arm — the line classifies as
+    /// `PassThrough` and the operator's board request is typed at the model.
+    #[test]
+    fn an_attached_team_board_is_refused_aloud_and_never_becomes_a_model_prompt() {
+        let AttachedTeamLine::Refused(reason) = attached_team_line("/team board") else {
+            panic!("`/team board` must be consumed and explained, never submitted");
+        };
+        assert!(reason.contains("/team board"), "{reason}");
+        assert!(
+            reason.contains("non-attached"),
+            "the refusal must say where the verb DOES work: {reason}"
+        );
+        // Control: an unrelated verb keeps its pre-existing fall-through, so
+        // the arm above is a named refusal and not a blanket one.
+        assert!(matches!(
+            attached_team_line("/team status"),
+            AttachedTeamLine::PassThrough
+        ));
+    }
+
+    /// `DF-19-16C` review bullet — a pasted leading space must not smuggle a
+    /// destructive `/team` verb past the intercept table into the model.
+    ///
+    /// Mutant → RED: classify the raw buffer again (drop `trim_start`).
+    #[test]
+    fn a_leading_space_no_longer_turns_an_intercepted_team_verb_into_a_model_turn() {
+        assert!(
+            matches!(
+                attached_team_line("  /team remove ri_x"),
+                AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { .. })
+            ),
+            "a pasted leading space used to fail `strip_prefix`, classify \
+             PassThrough, and submit the removal to the model as a turn"
+        );
+        assert!(matches!(
+            attached_team_line("\t/team ack ri_x"),
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
+        // Control: trimming the LEADING whitespace must not start matching
+        // `/team` mid-sentence.
+        assert!(matches!(
+            attached_team_line("please run /team remove ri_x"),
             AttachedTeamLine::PassThrough
         ));
     }

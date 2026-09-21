@@ -29,6 +29,7 @@ impl A2aEgress {
         peers: Vec<A2aPeerSpec>,
         node_tree: NodeTree,
         journal: Arc<dyn RoomJournal>,
+        journal_reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
         event_tx: UnboundedSender<AppEvent>,
     ) -> Result<Self> {
         let mut bindings = Vec::with_capacity(peers.len());
@@ -42,7 +43,8 @@ impl A2aEgress {
         let provider = Arc::new(A2aProvider::new(bindings));
         let runtime = Arc::new(
             A2aDelegationRuntime::new(node_tree, journal, event_tx.clone())
-                .with_peer_bindings(provider.peer_bindings()),
+                .with_peer_bindings(provider.peer_bindings())
+                .with_journal_reader(journal_reader),
         );
         provider.set_delegation_runtime(runtime.clone());
 
@@ -88,6 +90,16 @@ impl A2aEgress {
     pub fn runtime(&self) -> &Arc<A2aDelegationRuntime> {
         &self.runtime
     }
+
+    /// Await every boot card fetch's **completion** (not its success) — the
+    /// `settled` signal, event-driven, so a test or caller never sleeps or
+    /// polls (Story 19.16b review: the board keystones need the slots to have
+    /// left `Pending` before `collect_board` reads them).
+    pub async fn await_cards_settled(&self) {
+        for (_, client) in self.provider.peer_bindings().iter() {
+            client.await_settled().await;
+        }
+    }
 }
 
 /// Story 19.14 `AC3` — a configured anchor is the **sole** trust for that peer,
@@ -126,6 +138,19 @@ mod trust_anchor_tests {
         }
     }
 
+    #[async_trait]
+    impl crate::domain::ports::RoomJournalReader for AcceptingJournal {
+        async fn load_entries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::JournalEntry>, RoomJournalError> {
+            Ok(Vec::new())
+        }
+
+        async fn latest_seq(&self) -> Result<u64, RoomJournalError> {
+            Ok(0)
+        }
+    }
+
     fn peer(alias: &str, origin: &str, anchor: Option<std::path::PathBuf>) -> A2aPeerSpec {
         A2aPeerSpec::new(alias, RedactedUrl::from(origin), A2aPeerSource::Workspace)
             .with_ca_cert(anchor)
@@ -138,9 +163,14 @@ mod trust_anchor_tests {
     /// timeout turns a hang into a failure instead of a hang.
     async fn composed(peers: Vec<A2aPeerSpec>) -> A2aEgress {
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let egress =
-            A2aEgress::compose(peers, NodeTree::new(), Arc::new(AcceptingJournal), event_tx)
-                .expect("compose must not fail for an unloadable anchor or an unset variable");
+        let egress = A2aEgress::compose(
+            peers,
+            NodeTree::new(),
+            Arc::new(AcceptingJournal),
+            Arc::new(AcceptingJournal),
+            event_tx,
+        )
+        .expect("compose must not fail for an unloadable anchor or an unset variable");
         for (_, client) in egress.provider().peer_bindings().iter() {
             tokio::time::timeout(SETTLE, client.await_settled())
                 .await

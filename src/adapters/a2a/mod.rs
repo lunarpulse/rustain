@@ -7,6 +7,15 @@
 pub(crate) const MESSAGE_TYPE_METADATA_KEY: &str = "x-rustain-message-type";
 #[cfg(feature = "a2a")]
 pub const RECIPIENT_ITEM_METADATA_KEY: &str = "x-rustain-item-id";
+/// Story 19.16b `AC1(a)` / `A20` — the cross-host acknowledgement read verb.
+///
+/// Namespaced, because `message` and `tasks` are A2A **spec** nouns while
+/// `items` is ours: an `items/*` method minted by a future A2A revision would
+/// collide and we would have no namespace argument left. One constant, read by
+/// both the served dispatch arm and the client transport, so a one-side
+/// respelling cannot compile silently.
+#[cfg(feature = "a2a")]
+pub const ITEMS_LIST_METHOD: &str = "x-rustain-items/list";
 
 pub mod config;
 
@@ -14,6 +23,8 @@ pub mod config;
 pub mod admission;
 #[cfg(feature = "a2a")]
 pub mod auth;
+#[cfg(feature = "a2a")]
+pub mod board;
 #[cfg(feature = "a2a")]
 pub mod card;
 #[cfg(feature = "a2a")]

@@ -108,6 +108,15 @@ pub trait A2aTaskTransport: Send + Sync {
     -> Result<serde_json::Value, A2aError>;
     async fn tasks_get(&self, task_id: &str) -> Result<serde_json::Value, A2aError>;
     async fn tasks_cancel(&self, task_id: &str) -> Result<serde_json::Value, A2aError>;
+
+    /// Read this caller's own recipient-item set on the peer (Story 19.16b
+    /// `AC1`, `x-rustain-items/list`).
+    ///
+    /// ⛔ **Deliberately not defaulted.** Eight types implement this trait and
+    /// a default body would let seven of them silently answer for a seam they
+    /// never exercise; the compile error is the point. The first non-test
+    /// caller is the Act 1 board's refresh ([`super::board::collect_board`]).
+    async fn list_items(&self) -> Result<serde_json::Value, A2aError>;
 }
 
 /// Bounded poll configuration. `max_status_updates` mirrors the domain
@@ -322,6 +331,9 @@ mod tests {
             }
             Ok(serde_json::json!({"kind":"task","id":task_id,"status":{"state":"canceled"}}))
         }
+        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
+            unreachable!("the task lifecycle never reads the recipient-item set")
+        }
     }
 
     fn fast_config() -> PollConfig {
@@ -331,6 +343,7 @@ mod tests {
             max_status_updates: 64,
         }
     }
+
     #[tokio::test]
     async fn drives_submitted_working_completed_to_terminal() {
         let transport = ScriptedTransport::new(&["submitted", "working", "completed"]);

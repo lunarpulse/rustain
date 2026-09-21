@@ -796,7 +796,10 @@ pub fn fold_transparency<'a>(
 /// Row filter shared by every transparency renderer.
 ///
 /// Grammar: `direction=inbound|outbound|unknown`,
-/// `kind=accepted|refused|dispatched|awaiting-approval|status-query|disclosed|room-role-granted|room-role-revoked|unknown`,
+/// `kind=<label>` for any value [`TransparencyKind::label`] renders — every
+/// rendered kind is nameable, which is what Story 19.16b closed
+/// (`DF-19-16C-UNFILTERABLE-TRANSPARENCY-KINDS`); the parser's own refusal
+/// lists the set,
 /// `peer=<substring>`, or a bare substring matched against the whole row.
 /// `direction` and `kind` may appear once; repeated peer and bare-text terms
 /// are ANDed.
@@ -867,14 +870,25 @@ impl TransparencyFilter {
                         "item-received" => TransparencyKind::RecipientItemReceived,
                         "item-acknowledged" => TransparencyKind::RecipientItemAcknowledged,
                         "item-removed" => TransparencyKind::RecipientItemRemoved,
+                        // `DF-19-16C-UNFILTERABLE-TRANSPARENCY-KINDS`, paid by
+                        // Story 19.16b: these four RENDER but could not be
+                        // named in `kind=`. ⛔ Not "fixed" by tabulating
+                        // `glyph()`/`label()` — a runtime table cannot be
+                        // compile-forced, and 19.16c removed both wildcards
+                        // there precisely so an omission is a compile error.
+                        "consent-granted" => TransparencyKind::ConsentGranted,
+                        "consent-revoked" => TransparencyKind::ConsentRevoked,
+                        "surfaced" => TransparencyKind::InteractionSurfaced,
+                        "digest-flushed" => TransparencyKind::DigestFlushed,
                         "unknown" => TransparencyKind::Unknown,
                         _ => {
                             return Err(format!(
                                 "unknown kind `{value}` — valid: accepted, refused, dispatched, \
-                                 awaiting-approval, status-query, disclosed, room-role-granted, \
-                                 room-role-revoked, transport-admission, peer-frame, \
-                                 peer-equivocated, item-received, item-acknowledged, \
-                                 item-removed, unknown"
+                                 awaiting-approval, status-query, disclosed, consent-granted, \
+                                 consent-revoked, room-role-granted, room-role-revoked, \
+                                 transport-admission, peer-frame, peer-equivocated, \
+                                 item-received, item-acknowledged, item-removed, surfaced, \
+                                 digest-flushed, unknown"
                             ));
                         }
                     }));

@@ -212,9 +212,11 @@ async fn egress_composition_exposes_a_cached_peer_and_its_same_delegation_runtim
     let workspace = tempfile::tempdir().unwrap();
     let journal = Arc::new(NodeJournal::open_workspace(workspace.path()).await.unwrap());
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let room: Arc<dyn RoomJournal> =
-        Arc::new(NodeRoomJournal::new(journal, Some(event_tx.clone())));
-    let egress = A2aEgress::compose(vec![peer], NodeTree::new(), room, event_tx).unwrap();
+    let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(
+        journal.clone(),
+        Some(event_tx.clone()),
+    ));
+    let egress = A2aEgress::compose(vec![peer], NodeTree::new(), room, journal, event_tx).unwrap();
     let composite = composite();
     egress.install(&composite);
 
@@ -249,9 +251,11 @@ async fn egress_composition_with_no_peers_exposes_no_a2a_capabilities() {
     let workspace = tempfile::tempdir().unwrap();
     let journal = Arc::new(NodeJournal::open_workspace(workspace.path()).await.unwrap());
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let room: Arc<dyn RoomJournal> =
-        Arc::new(NodeRoomJournal::new(journal, Some(event_tx.clone())));
-    let egress = A2aEgress::compose(Vec::new(), NodeTree::new(), room, event_tx).unwrap();
+    let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(
+        journal.clone(),
+        Some(event_tx.clone()),
+    ));
+    let egress = A2aEgress::compose(Vec::new(), NodeTree::new(), room, journal, event_tx).unwrap();
     let composite = composite();
     egress.install(&composite);
     composite.populate_registry().await.unwrap();

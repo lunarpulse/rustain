@@ -99,6 +99,18 @@ impl A2aTaskTransport for TaskClient {
         );
         self.client.post_jsonrpc(&self.endpoint, &request).await
     }
+
+    async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
+        // ⛔ No parameters: the served verb derives the principal from the
+        // authenticated caller, and a `peerId` parameter would be the
+        // cross-peer enumeration oracle `ADR-17-4a-01` R21 forbids.
+        let request = JsonRpcRequest::new(
+            self.next_id(),
+            super::ITEMS_LIST_METHOD,
+            serde_json::json!({}),
+        );
+        self.client.post_jsonrpc(&self.endpoint, &request).await
+    }
 }
 
 /// Typed failure surface of a delegation attempt.
@@ -159,6 +171,29 @@ pub struct A2aDelegationRuntime {
     event_tx: mpsc::UnboundedSender<AppEvent>,
     peer_bindings: A2aPeerBindings,
     journal_failure_latch: Arc<JournalFailureLatch>,
+    /// Last admitted Act 1 board refresh (Story 19.16b `AC5(d)`).
+    ///
+    /// Held on the runtime rather than a UI state so the stated poll floor
+    /// binds every rail that can reach the egress, not just the one that
+    /// happens to render.
+    ///
+    /// ⚠ Deliberately `std::sync`, not `tokio::sync`: the critical section is
+    /// a compare and a store on one `Option<Instant>`, it is ⛔ never held
+    /// across an `.await`, and an async lock would force
+    /// [`Self::admit_board_refresh`] to be `async` — which would make the
+    /// deterministic ratchet that proves the bound an async test for no gain.
+    board_refresh_gate: Arc<std::sync::Mutex<Option<std::time::Instant>>>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: one compare + one store, never across `.await`; process-architecture.md §1.2
+    /// Read side of the same journal, for the board's dispatch-ledger probe
+    /// (19.16b `AC3(g)`). `RoomJournal` itself is write-only by design, so
+    /// the reader is injected beside it — `None` degrades the board to
+    /// uncorrelated rows, never to no rows.
+    journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>>,
+    /// Held for the DURATION of one board fan-out (19.16b review). The gate
+    /// above rate-limits admission starts; this refuses admission while a
+    /// collect is still running, so repeated `/team board` cannot stack
+    /// overlapping N-peer read storms whose notices land out of order.
+    /// `tokio::sync` because the guard spans remote reads (`.await`).
+    board_in_flight: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Serializes the running failure count with its notification. Concurrent
@@ -190,7 +225,20 @@ impl A2aDelegationRuntime {
             event_tx,
             peer_bindings: Arc::from([]),
             journal_failure_latch: Arc::new(JournalFailureLatch::new()),
+            board_refresh_gate: Arc::new(std::sync::Mutex::new(None)), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: see the field declaration; process-architecture.md §1.2
+            journal_reader: None,
+            board_in_flight: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+    /// Supply the journal's read side for the board's dispatch-ledger probe
+    /// (19.16b `AC3(g)`). Optional: without it the board degrades to
+    /// uncorrelated rows rather than reporting nothing.
+    pub(crate) fn with_journal_reader(
+        mut self,
+        reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
+    ) -> Self {
+        self.journal_reader = Some(reader);
+        self
     }
     pub(crate) fn with_peer_bindings(mut self, peer_bindings: A2aPeerBindings) -> Self {
         self.peer_bindings = peer_bindings;
@@ -215,6 +263,37 @@ impl A2aDelegationRuntime {
             .collect::<Vec<_>>();
         ids.sort_unstable();
         ids
+    }
+
+    /// Admit one Act 1 board refresh, or refuse it with the time left on the
+    /// stated floor (Story 19.16b `AC5(d)`).
+    ///
+    /// ⛔ **A design bound, never a latency claim.** It says how often this
+    /// host is willing to poll its peers; it says nothing about how fast an
+    /// acknowledgement arrives, and `NFR64`'s 2 s is not re-armed by it.
+    ///
+    /// `now` is a parameter, not a `Instant::now()` call inside, so the bound
+    /// is proven by a deterministic ratchet rather than a sleep: correct code
+    /// refuses `t0 + 100ms` and admits `t0 + floor` with no timing window.
+    pub(crate) fn admit_board_refresh(
+        &self,
+        now: std::time::Instant,
+        floor: std::time::Duration,
+    ) -> Result<(), super::board::RefreshTooSoon> {
+        let mut last = self
+            .board_refresh_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = *last {
+            let elapsed = now.saturating_duration_since(previous);
+            if elapsed < floor {
+                return Err(super::board::RefreshTooSoon {
+                    remaining: floor - elapsed,
+                });
+            }
+        }
+        *last = Some(now);
+        Ok(())
     }
 
     /// Journal a send refused by a **retained** anchor cause (`A22` item 5).
@@ -242,6 +321,64 @@ impl A2aDelegationRuntime {
             task: None,
         })
         .await
+    }
+
+    /// Claim the board fan-out slot, or fail when one is already running
+    /// (19.16b review). The returned guard is held for the whole collect and
+    /// dropped when it finishes, so a second `/team board` issued while the
+    /// first still reads is refused with the same `RefreshTooSoon` shape the
+    /// poll floor uses — ⛔ never stacked, never silently queued.
+    pub(crate) fn begin_board_collect(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, super::board::RefreshTooSoon> {
+        Arc::clone(&self.board_in_flight)
+            .try_lock_owned()
+            .map_err(|_| super::board::RefreshTooSoon {
+                remaining: super::board::board_refresh_floor(),
+            })
+    }
+
+    /// The sender-side dispatch ledger, read once per board refresh: peer →
+    /// the task ids this host durably dispatched (`RemoteEnvelopeDispatched`,
+    /// journaled before the POST, keyed by the peer's resolved identity).
+    /// This is the correlation half of Story 19.16b `AC3(g)` — the board's
+    /// rows answer for **this sender's** sends, which is the only truthful
+    /// attribution under a collapsed principal (where the peer's set mixes
+    /// every local caller's items).
+    ///
+    /// `None` means no reader is injected or the ledger could not be read:
+    /// the caller must then degrade to the uncorrelated read rather than
+    /// report nothing.
+    pub(crate) async fn dispatched_tasks_by_peer(
+        &self,
+    ) -> Option<std::collections::HashMap<String, std::collections::HashSet<String>>> {
+        use std::collections::{HashMap, HashSet};
+
+        let reader = self.journal_reader.as_ref()?;
+        let entries = match reader.load_entries().await {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(%error, "dispatch ledger unreadable; board degrades to uncorrelated rows");
+                return None;
+            }
+        };
+        let mut dispatched: HashMap<String, HashSet<String>> = HashMap::new();
+        for entry in &entries {
+            if let crate::domain::models::JournalRecord::Room(
+                crate::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+                    peer,
+                    task: Some(task),
+                    ..
+                },
+            ) = &entry.record
+            {
+                dispatched
+                    .entry(peer.as_str().to_owned())
+                    .or_default()
+                    .insert(task.clone());
+            }
+        }
+        Some(dispatched)
     }
 
     /// Delegate one task to a discovered peer and drive it to terminal.
@@ -998,6 +1135,9 @@ mod tests {
             self.cancels.lock().push(task_id.to_owned());
             Ok(serde_json::json!({"kind":"task","id":task_id,"status":{"state":"canceled"}}))
         }
+        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
+            Ok(serde_json::json!({ "items": [], "principalCollapsed": false }))
+        }
     }
 
     struct DeadTransport;
@@ -1017,6 +1157,10 @@ mod tests {
 
         async fn tasks_cancel(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
             panic!("transport failure must not cancel")
+        }
+
+        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
+            Err(A2aError::Request("connection refused".to_owned()))
         }
     }
 
@@ -1090,6 +1234,9 @@ mod tests {
         async fn tasks_cancel(&self, task_id: &str) -> Result<serde_json::Value, A2aError> {
             self.script.tasks_cancel(task_id).await
         }
+        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
+            self.script.list_items().await
+        }
     }
 
     fn counting_runtime() -> (
@@ -1126,6 +1273,49 @@ mod tests {
             event_tx: tx.clone(),
         });
         (A2aDelegationRuntime::new(tree.clone(), room, tx), tree, rx)
+    }
+
+    /// Story 19.16b AC5(d) — the board's stated poll ceiling is ENFORCED on
+    /// the configured interval.
+    ///
+    /// ⛔ **A design bound, never an NFR64 latency claim, and never tested as
+    /// one** (`amendment:163`): nothing here measures a round trip, and
+    /// `prd.md:2604`'s 2 s is not re-armed. The number is the shipped
+    /// substrate's own `PollConfig::default().interval`, ⛔ not invented.
+    ///
+    /// **Ratchet (Rule 4):** `now` is injected, so the bound is proven by a
+    /// deterministic step — ⛔ never a `sleep` or a timing window.
+    ///
+    /// **Mutant → RED:** drop the elapsed check (the mid-floor refresh is
+    /// admitted), or seed the gate as already-admitted (the first refresh is
+    /// refused).
+    #[test]
+    fn the_board_refresh_floor_is_enforced_on_the_configured_poll_interval() {
+        use crate::adapters::a2a::board::board_refresh_floor;
+
+        let (rt, _tree, _rx) = runtime();
+        let floor = board_refresh_floor();
+        assert_eq!(
+            floor,
+            super::super::lifecycle::PollConfig::default().interval,
+            "the ceiling is DERIVED from the shipped substrate, not invented"
+        );
+        let t0 = std::time::Instant::now();
+
+        assert!(
+            rt.admit_board_refresh(t0, floor).is_ok(),
+            "positive control: a first refresh is admitted, so the refusal \
+             below is a bound and not a permanently closed door"
+        );
+        let refused = rt
+            .admit_board_refresh(t0 + floor / 5, floor)
+            .expect_err("a refresh inside the stated floor is refused");
+        assert!(refused.remaining > std::time::Duration::ZERO);
+        assert!(refused.remaining < floor);
+        assert!(
+            rt.admit_board_refresh(t0 + floor, floor).is_ok(),
+            "once the floor has elapsed the board refreshes again"
+        );
     }
     async fn wait_for_peer_node(tree: &NodeTree) -> AgentId {
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -1345,6 +1535,9 @@ mod tests {
             }
             async fn tasks_cancel(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
                 Ok(serde_json::json!({}))
+            }
+            async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
+                unreachable!("a refusal keystone never reads the recipient-item set")
             }
         }
         let error = rt
@@ -1780,6 +1973,9 @@ mod tests {
         async fn tasks_cancel(&self, task_id: &str) -> Result<serde_json::Value, A2aError> {
             Ok(serde_json::json!({"kind":"task","id":task_id,"status":{"state":"canceled"}}))
         }
+        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
+            unreachable!("the hostile-id keystone never reads the recipient-item set")
+        }
     }
 
     /// AC8 — the outbound sink, entered through the production front door
@@ -1941,6 +2137,9 @@ mod tests {
             Err(A2aError::Request("unreachable".to_owned()))
         }
         async fn tasks_cancel(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
+            Err(A2aError::Request("unreachable".to_owned()))
+        }
+        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
             Err(A2aError::Request("unreachable".to_owned()))
         }
     }

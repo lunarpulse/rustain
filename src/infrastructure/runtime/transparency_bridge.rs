@@ -336,6 +336,70 @@ pub(crate) async fn team_command(
         }
     };
     match command {
+        // Story 19.16b AC3 — the DEFAULT rail, and the only one that holds the
+        // A2A egress this verb needs. ⛔ Not a silent `=> {}`: this match is
+        // compile-forced over `TeamCommandArgs`, and a swallowed board would
+        // leave the operator believing no recipient has acknowledged when in
+        // fact nothing was ever asked.
+        TeamCommandArgs::Board => {
+            #[cfg(feature = "a2a")]
+            {
+                let Some(runtime) = app_state.a2a_send.clone() else {
+                    // ⛔ Not `emit_team_warning`: Warning is turn-fatal
+                    // (`NoticeLevel::is_turn_fatal`), and this arm's own rule
+                    // is that a board refusal must never abort an unrelated
+                    // streaming turn (19.16b review). The refusal renders in
+                    // the same stable block the board itself uses.
+                    handler::show_team_board(
+                        state,
+                        "· no A2A send runtime is configured for this session, so there is \
+                         no roster to read the board from."
+                            .to_owned(),
+                    );
+                    return;
+                };
+                let event_bus = app_state.event_bus.clone();
+                let conversation_id = conversation_id.to_owned();
+                // Session-scoped like `/team send` (19.16b review): a board
+                // issued against unresponsive peers must not keep its task
+                // and sockets alive past the session, then emit a notice for
+                // a conversation that is gone.
+                let cancel = app_state.session_cancel.child_token();
+                // Spawned, never awaited inline: the board is N concurrent
+                // remote reads and the event loop must not stall on peer
+                // timeouts. The result arrives as a `TeamBoardReady` view
+                // event, which replaces the stable `team-board` block —
+                // ⛔ never a stacked dismissible notice, ⛔ never a
+                // turn-fatal Warning.
+                tokio::spawn(async move {
+                    let message = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return,
+                        assembled = crate::adapters::a2a::board::collect_board(
+                            &runtime,
+                            std::time::Instant::now(),
+                        ) => match assembled {
+                            Ok(view) => crate::adapters::a2a::board::render_board(&view),
+                            Err(refusal) => {
+                                crate::adapters::a2a::board::render_refresh_refusal(refusal)
+                            }
+                        }
+                    };
+                    let _ =
+                        event_bus.emit_domain(crate::domain::events::AppEvent::TeamBoardReady {
+                            conversation_id,
+                            message,
+                        });
+                });
+            }
+            #[cfg(not(feature = "a2a"))]
+            handler::show_team_board(
+                state,
+                "· `/team board` needs the `a2a` feature; this build was compiled without \
+                 it."
+                .to_owned(),
+            );
+        }
         TeamCommandArgs::Send { peer, text } => {
             #[cfg(feature = "a2a")]
             {
@@ -1003,6 +1067,19 @@ mod credential_tests {
         }
     }
 
+    #[async_trait]
+    impl crate::domain::ports::RoomJournalReader for RecordingJournal {
+        async fn load_entries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::JournalEntry>, RoomJournalError> {
+            Ok(Vec::new())
+        }
+
+        async fn latest_seq(&self) -> Result<u64, RoomJournalError> {
+            Ok(0)
+        }
+    }
+
     /// ⚠ Edition 2024 makes `set_var` `unsafe` and it is process-global, so every
     /// test here owns a UNIQUE variable name and runs `#[serial]`.
     fn export(name: &str, value: &str) {
@@ -1029,6 +1106,7 @@ mod credential_tests {
                 peers,
                 NodeTree::new(),
                 journal.clone() as Arc<dyn RoomJournal>,
+                journal.clone(),
                 event_tx,
             )
             .expect("compose must survive an unset variable and an unloadable anchor");
