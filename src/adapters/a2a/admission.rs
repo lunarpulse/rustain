@@ -89,10 +89,7 @@ pub fn admit(
             // `trust` is named so an operator reading a peer's transcript can
             // tell "your key was fine, the policy said no" apart from "your key
             // was wrong" — the latter never reaches this function at all.
-            let credential = match trust {
-                SubmitterTrust::Loopback => "loopback",
-                SubmitterTrust::ApiKey => "api-key",
-            };
+            let credential = credential_label(trust);
             AdmissionVerdict::Reject {
                 reason: format!(
                     "inbound A2A task acceptance is disabled by policy \
@@ -102,6 +99,47 @@ pub fn admit(
         }
         A2aAdmissionPolicy::Ask => AdmissionVerdict::AcceptPendingApproval,
         A2aAdmissionPolicy::Allow => AdmissionVerdict::Accept,
+    }
+}
+
+/// Decide whether a peer may retract an item on this host (Story 19.16d,
+/// `AC1(g)`). Pure, like [`admit`], and consulted **before** the retract
+/// touches the fold or the journal (NFR70).
+///
+/// - `deny` refuses: an operator who set it to shut out a peer must not find
+///   that peer can still write to their journal.
+/// - `ask` refuses too, naming why: the shipped approval rail is task-shaped
+///   end to end (a pending task record, `auth-required`, a watcher) and a
+///   retract has no task. ⛔ Never silently treated as `allow`.
+/// - `allow` admits.
+///
+/// There is no capability gate: a retract writes only the journal, which a
+/// discovery-only endpoint has too. `Err` carries the reason, disclosed
+/// verbatim to the caller, so it names the policy and never host state.
+///
+/// # Errors
+///
+/// Returns the refusal reason under `deny` and `ask`.
+pub fn admit_item_retract(policy: A2aAdmissionPolicy, trust: SubmitterTrust) -> Result<(), String> {
+    let credential = credential_label(trust);
+    match policy {
+        A2aAdmissionPolicy::Deny => Err(format!(
+            "inbound A2A item retraction is disabled by policy (`server.admission` = \
+             \"deny\"); credential accepted: {credential}"
+        )),
+        A2aAdmissionPolicy::Ask => Err(format!(
+            "inbound A2A item retraction is disabled by policy (`server.admission` = \
+             \"ask\"): the ask policy has no approval shape for a non-task verb; credential \
+             accepted: {credential}"
+        )),
+        A2aAdmissionPolicy::Allow => Ok(()),
+    }
+}
+
+fn credential_label(trust: SubmitterTrust) -> &'static str {
+    match trust {
+        SubmitterTrust::Loopback => "loopback",
+        SubmitterTrust::ApiKey => "api-key",
     }
 }
 

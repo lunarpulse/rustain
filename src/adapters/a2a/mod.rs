@@ -16,6 +16,13 @@ pub const RECIPIENT_ITEM_METADATA_KEY: &str = "x-rustain-item-id";
 /// respelling cannot compile silently.
 #[cfg(feature = "a2a")]
 pub const ITEMS_LIST_METHOD: &str = "x-rustain-items/list";
+/// Story 19.16d `AC1(a)` — the cross-host retract write verb, served by the
+/// **recipient** host. Namespaced for the same reason as
+/// [`ITEMS_LIST_METHOD`], and one constant for the same reason: the served
+/// dispatch arm reads it here, and `19-16f`'s client transport must read the
+/// same constant so a one-side respelling cannot compile silently.
+#[cfg(feature = "a2a")]
+pub const ITEMS_RETRACT_METHOD: &str = "x-rustain-items/retract";
 
 pub mod config;
 

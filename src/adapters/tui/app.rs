@@ -5863,6 +5863,7 @@ mod tests {
             task: Some(format!("task-{seq}")),
             summary: summary.to_owned(),
             provenance: None,
+            principal_collapsed: false,
         };
         let mut state = TuiState::new(160, 40);
         state.focus = FocusState::Sidebar {

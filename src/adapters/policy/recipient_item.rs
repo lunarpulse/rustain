@@ -161,6 +161,8 @@ impl JournalRecipientItemProjection {
     ///
     /// ⛔ **The principal filter is the whole authorization boundary** and it
     /// runs before any caller classifies a tombstone (`A22`): another
+    /// principal's removed item is absent, byte-identical to an id that never
+    /// existed.
     ///
     /// ⚠ Removals are **retained** here, unlike [`Self::find_by_task`]: this is
     /// the read that has to report a tombstone (`AD-1822`), not the read that
@@ -302,6 +304,7 @@ fn transition_recipient_item(
                         content: content.clone(),
                     },
                     journal_order: order,
+                    retracted_at_ms: None,
                 });
         }
         // The legality verdict gates the WHOLE arm, never just the state
@@ -331,6 +334,29 @@ fn transition_recipient_item(
                 item.state = next;
             }
         }
+        // Story 19.16d `AC3(b)` — ⛔ NOT compile-forced: `RoomEvent` is
+        // `#[non_exhaustive]` with `#[serde(other)] Unrecognized`, so without
+        // this arm a journalled retract folds to nothing on every cold
+        // re-fold and the mark never survives a restart (`AD-1828`'s Rule
+        // names "its retract mark" among the facts that must).
+        //
+        // The mark is an orthogonal axis: ⛔ `item.state` is never touched
+        // (`AD-1827`'s single writer). `mark_retracted` is the one expression
+        // of the rule — first mark wins, a tombstone is never marked — so the
+        // served verb's decision and every replay agree by construction.
+        //
+        // ⛔ Deliberately absent from the `ITEM_TRANSITION_COUNT` matcher
+        // above: that counter's contract is *item-state transitions*, and a
+        // retract writes no state.
+        RoomEvent::RecipientItemRetracted {
+            address,
+            retracted_at_ms,
+            ..
+        } => {
+            if let Some(item) = items.get_mut(address) {
+                item.mark_retracted(*retracted_at_ms);
+            }
+        }
         _ => {}
     }
 }
@@ -342,7 +368,8 @@ fn touched_item_address(event: &RoomEvent) -> Option<&ItemAddress> {
     match event {
         RoomEvent::RecipientItemReceived { address, .. }
         | RoomEvent::RecipientItemAcknowledged { address, .. }
-        | RoomEvent::RecipientItemRemoved { address } => Some(address),
+        | RoomEvent::RecipientItemRemoved { address }
+        | RoomEvent::RecipientItemRetracted { address, .. } => Some(address),
         _ => None,
     }
 }

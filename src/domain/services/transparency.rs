@@ -161,6 +161,24 @@ pub enum TransparencyKind {
     /// set) is recorded on the `glyph()` arm below, directly beside the
     /// practice it departs from — read them together.
     RecipientItemRemoved,
+    /// The **sender** retracted an item on this, the recipient's, host (Story
+    /// 19.16d, FR94-b): a peer-triggered mark on an item it sent, written by
+    /// the served `x-rustain-items/retract` verb.
+    ///
+    /// ⛔ Distinct from [`Self::RecipientItemRemoved`]: removal is the
+    /// recipient disposing of their own copy, retraction is the sender marking
+    /// their own content — opposite acts by opposite parties
+    /// (`…addendum-team-messaging.md:116`, *"three acts … never collapsed"*).
+    /// ⛔ And NOT the same-host `AutoResponseRetracted` omission: that one
+    /// renders no row because `fold_transparency` overlays it onto a prior
+    /// `Disclosed` row keyed on `target_seq`, and a recipient-item retract has
+    /// neither — omitting this kind would make the retract invisible on every
+    /// face.
+    ///
+    /// Touch points paid: this variant, `glyph()`, `label()`, the
+    /// `transparency_row` arm, the `kind=` parse arm **and** its valid-kinds
+    /// string, and coverage.
+    RecipientItemRetracted,
     /// Interaction became visible in the audit spine before interruption routing.
     InteractionSurfaced,
     /// A batch of prior digest-tier interactions was shown to the operator.
@@ -205,6 +223,12 @@ impl TransparencyKind {
             // the ownership set never shares a cell with a transparency row,
             // and `●` is refused because its shipped meaning is *in flight*.
             Self::RecipientItemRemoved => "⊘",
+            // ⇠ (U+21E0), ratified by the 2026-09-21 `/bmad-ux` pass
+            // (`ux-Analysis-2026-09-21/DESIGN.md` § Do's and Don'ts): the
+            // mirror of `⇢ disclosed`, because a retract is `Disclosed`'s
+            // inverse in the shipped fold. Unused by every other kind and by
+            // the ownership glyph set. ⛔ Never rendered without its label.
+            Self::RecipientItemRetracted => "⇠",
             Self::InteractionSurfaced => "!",
             Self::DigestFlushed => "≋",
             // No wildcard: a kind added without a glyph must not quietly
@@ -233,6 +257,7 @@ impl TransparencyKind {
             Self::RecipientItemReceived => "item-received",
             Self::RecipientItemAcknowledged => "item-acknowledged",
             Self::RecipientItemRemoved => "item-removed",
+            Self::RecipientItemRetracted => "item-retracted",
             Self::InteractionSurfaced => "surfaced",
             Self::DigestFlushed => "digest-flushed",
             // No wildcard: a kind added without a label must not print
@@ -263,6 +288,13 @@ pub struct TransparencyRow {
     /// Decision-time source snapshot; `None` only for non-interaction rows and
     /// journals written before this event family existed.
     pub provenance: Option<crate::domain::models::InteractionPolicySnapshot>,
+    /// `true` only on a recipient-item retract row whose caller reached this
+    /// host over a loopback bind, where every local caller is one principal
+    /// (Story 19.16d, owner answer 2: the collapse disclosure is durable, not
+    /// only a response body). Rendered by the JSONL export as an additive
+    /// `principalCollapsed` key, emitted only when `true`. ⛔ A legibility
+    /// statement about attribution, never a claim about who acted.
+    pub principal_collapsed: bool,
 }
 
 impl TransparencyRow {
@@ -598,6 +630,27 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
                     .unwrap_or_default()
             ),
         ),
+        // Story 19.16d `AC5(a)` — the recipient's own authoritative row for a
+        // cross-host retract. ⛔ NOT the `AutoResponseRetracted` omission just
+        // below: that one is sound only because `fold_transparency` overlays
+        // it onto a prior `Disclosed` row keyed on `target_seq`, and a
+        // recipient-item retract has neither, so omitting this arm would make
+        // it vanish from `/team log`, the `Ctrl+X, L` panel, `rustain team log`
+        // and the `--json` export alike.
+        //
+        // Inbound, like `RecipientItemReceived`: the act arrived from the
+        // peer. The summary is the ratified string (`ux-Analysis-2026-09-21`,
+        // `EXPERIENCE.md` § Voice) and names the host-minted item id and the
+        // act, ⛔ nothing else — zero peer-chosen bytes, and ⛔ never
+        // "deleted", "erased", "purged", "scrubbed" or "no copy remains": the
+        // item and its journal line both stand, marked.
+        RoomEvent::RecipientItemRetracted { address, .. } => (
+            TransparencyKind::RecipientItemRetracted,
+            Direction::Inbound,
+            item_principal_label(address.principal()),
+            Some(address.item().as_str().to_owned()),
+            format!("the sender retracted item {}", address.item().as_str()),
+        ),
         // Retractions mutate the prior projected row in `fold_transparency`;
         // they never create a second visible row.
         RoomEvent::AutoResponseRetracted { .. } => return None,
@@ -630,16 +683,31 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         // `ADR-18-3a-d-01` D1 forbids claiming.
         //
         // The cost of changing any of this is the reason it is a decision: a
-        // new `TransparencyKind` is a six-touch-point change and would move
-        // both hard-pinned `== 7` fixtures in `tests/conformance_transparency.rs`.
-        // Precedent for omission: `AutoResponseRetracted` above.
+        // new `TransparencyKind` pays six touch points — the variant, `glyph()`,
+        // `label()`, this arm, the `kind=` parse arm and its valid-kinds
+        // string — plus a fixture that exercises it. ⚠ Corrected by Story
+        // 19.16d: adding a kind does NOT by itself move the two `== 7` pins in
+        // `tests/conformance_transparency.rs` — both pin the fixture JOURNAL,
+        // so they move only when a fixture line is added deliberately.
+        //
+        // ⛔ `AutoResponseRetracted` above is an omission precedent ONLY for a
+        // record the fold overlays onto an existing row. A record with no
+        // overlay target that returns `None` here vanishes from every face.
         _ => return None,
+    };
+    let (retracted_at_ms, principal_collapsed) = match event {
+        RoomEvent::RecipientItemRetracted {
+            retracted_at_ms,
+            principal_collapsed,
+            ..
+        } => (Some(*retracted_at_ms), *principal_collapsed),
+        _ => (None, false),
     };
     Some(TransparencyRow {
         seq: entry.seq,
         recorded_at_ms,
         direction,
-        retracted_at_ms: None,
+        retracted_at_ms,
         kind,
         // The peer id is host-derived (a SHA-256 pseudonym), but sanitizing it
         // costs nothing and keeps the invariant "no row field is unsanitized".
@@ -647,6 +715,7 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         task: task.map(|id| sanitize_disclosable(&id, MAX_PEER_ID_BYTES)),
         summary: sanitize_disclosable(&summary, MAX_SUMMARY_BYTES),
         provenance,
+        principal_collapsed,
     })
 }
 
@@ -870,6 +939,7 @@ impl TransparencyFilter {
                         "item-received" => TransparencyKind::RecipientItemReceived,
                         "item-acknowledged" => TransparencyKind::RecipientItemAcknowledged,
                         "item-removed" => TransparencyKind::RecipientItemRemoved,
+                        "item-retracted" => TransparencyKind::RecipientItemRetracted,
                         // `DF-19-16C-UNFILTERABLE-TRANSPARENCY-KINDS`, paid by
                         // Story 19.16b: these four RENDER but could not be
                         // named in `kind=`. ⛔ Not "fixed" by tabulating
@@ -887,8 +957,8 @@ impl TransparencyFilter {
                                  awaiting-approval, status-query, disclosed, consent-granted, \
                                  consent-revoked, room-role-granted, room-role-revoked, \
                                  transport-admission, peer-frame, peer-equivocated, \
-                                 item-received, item-acknowledged, item-removed, surfaced, \
-                                 digest-flushed, unknown"
+                                 item-received, item-acknowledged, item-removed, \
+                                 item-retracted, surfaced, digest-flushed, unknown"
                             ));
                         }
                     }));
@@ -933,7 +1003,7 @@ impl TransparencyFilter {
 pub fn render_export(rows: &[TransparencyRow]) -> String {
     let mut out = String::new();
     for row in rows {
-        let value = serde_json::json!({
+        let mut value = serde_json::json!({
             "seq": row.seq,
             "recordedAtMs": row.recorded_at_ms,
             "direction": row.direction.label(),
@@ -949,6 +1019,20 @@ pub fn render_export(rows: &[TransparencyRow]) -> String {
             ),
             "structural_replay": STRUCTURAL_REPLAY_CLAIM,
         });
+        // Story 19.16d `AC5(d)` (owner: EXPAND) — the retract mark reaches the
+        // export, read from the one field every face reads. ⛔ Additive and
+        // optional, the `acknowledgedBeforeRemoval` discipline: emitted only
+        // when present, never `null` on every unmarked row — which would
+        // rewrite every existing line and break the byte-identical re-export
+        // this function's doc promises for an unchanged journal.
+        if let Some(retracted_at_ms) = row.retracted_at_ms {
+            value["retractedAtMs"] = serde_json::Value::from(retracted_at_ms);
+        }
+        // Owner answer 2: the loopback collapse is durable on the recipient's
+        // ledger, not only in a response body. Same additive discipline.
+        if row.principal_collapsed {
+            value["principalCollapsed"] = serde_json::Value::Bool(true);
+        }
         out.push_str(&value.to_string());
         out.push('\n');
     }
@@ -1323,6 +1407,48 @@ mod tests {
         assert!(row.one_line().contains("[retracted 2023-11-14 22:14:20Z]"));
     }
 
+    /// Story 19.16d AC5(d) (owner: EXPAND) — the retract mark reaches the JSONL
+    /// export, and ONLY where it exists: an unmarked row's line is byte-for-byte
+    /// what it was, which is what keeps a re-export of an unchanged journal
+    /// byte-identical.
+    ///
+    /// **Mutant → RED:** emit `retractedAtMs` unconditionally (`null` on every
+    /// unmarked row), or drop it from the marked row.
+    #[test]
+    fn the_retract_mark_reaches_the_export_only_where_it_exists() {
+        let disclosure = room_entry(
+            1,
+            1_700_000_000_000,
+            RoomEvent::PeerDisclosure {
+                peer: Some(peer()),
+                node: AgentId::from_validated("peer-response-node"),
+                task: Some("remote-task".to_owned()),
+                disclosed_bytes: 42,
+            },
+        );
+        let unmarked = fold_transparency([&disclosure]);
+        let before = render_export(&unmarked);
+        assert!(
+            !before.contains("retractedAtMs"),
+            "an unmarked row carries no key at all: {before}"
+        );
+
+        let retract = room_entry(
+            2,
+            1_700_000_060_000,
+            RoomEvent::AutoResponseRetracted {
+                target_seq: 1,
+                retracted_at_ms: 1_700_000_060_000,
+            },
+        );
+        let marked = fold_transparency([&disclosure, &retract]);
+        let after = render_export(&marked);
+        assert!(
+            after.contains("\"retractedAtMs\":1700000060000"),
+            "the marked row carries the same stamp `one_line()` renders: {after}"
+        );
+    }
+
     #[test]
     fn retract_fold_ignores_non_disclosure_target() {
         let entries = [
@@ -1615,6 +1741,7 @@ mod tests {
                 task: None,
                 summary: "room role changed".to_owned(),
                 provenance: None,
+                principal_collapsed: false,
             };
             let spec = format!("kind={}", kind.label());
             assert!(
@@ -1638,6 +1765,7 @@ mod tests {
             task: Some("task-a".to_owned()),
             summary: "accepted".to_owned(),
             provenance: None,
+            principal_collapsed: false,
         };
         for spec in ["", " \t", "peer=", "direction=", "kind="] {
             assert!(

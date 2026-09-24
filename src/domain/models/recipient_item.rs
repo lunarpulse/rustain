@@ -168,6 +168,72 @@ pub struct RecipientItemView {
     /// exclude this field. Both are monotonic in append order, so every
     /// ordering consumer agrees regardless.
     pub journal_order: u64,
+    /// The sender's retract mark (FR94-b, Story 19.16d): the **recipient
+    /// host's** clock at the moment it journalled the `RecipientItemRetracted`
+    /// record, or `None` while unmarked. ⛔ Never sender-supplied.
+    ///
+    /// An axis **orthogonal** to [`Self::state`], by totality rather than by
+    /// precedent: all six `state × retracted` combinations are reachable facts
+    /// in either order (the sender marks their content, the recipient takes it
+    /// on or disposes of their copy, independently), so there is no invalid
+    /// pair for the state payload to absorb and ⛔ folding the mark into
+    /// [`RecipientItemState`] would make `AD-1827`'s single-writer state axis
+    /// carry a second party's act. `Option<i64>` is the house shape for a mark
+    /// (`ChatMessage.retracted_at_ms`, `TransparencyRow.retracted_at_ms`); ⛔
+    /// never a bare `retracted: bool`, which would lose *when*.
+    ///
+    /// ⚠ The one ordering the axes do constrain is the tombstone:
+    /// [`Self::retract_outcome`] refuses a retract on `Removed`, so
+    /// retract-then-remove keeps the mark on the tombstone while
+    /// remove-then-retract never carries one — observably different, which is
+    /// honest.
+    pub retracted_at_ms: Option<i64>,
+}
+
+/// What the retract predicate says about one item. The retract is its own
+/// two-cell predicate on the orthogonal axis, ⛔ not a third act in the
+/// `next_item_state` table (`AD-1827`: the item-state legality table stays
+/// 2 acts × 3 states).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetractOutcome {
+    /// Unmarked and still held: journal the mark.
+    Mark,
+    /// Already marked: no second append and no word — the first mark wins.
+    /// ⚠ The same-host `RetractionError::AlreadyRetracted` refuses instead,
+    /// because a local keypress on a spent control is an operator error while
+    /// a repeated wire call is an ordinary retry.
+    AlreadyMarked,
+    /// A tombstone (`RecipientItemState::Removed`, terminal): refused aloud,
+    /// exactly as both sibling acts are refused there. Marking it would write
+    /// a mark on a copy the recipient no longer shows.
+    RefusedRemoved,
+}
+
+impl RecipientItemView {
+    /// The retract predicate — the **one** place the already-marked and the
+    /// tombstone rules live. The served verb consults it before journalling;
+    /// the fold applies it through [`Self::mark_retracted`] on every replay.
+    #[must_use]
+    pub fn retract_outcome(&self) -> RetractOutcome {
+        if matches!(self.state, RecipientItemState::Removed { .. }) {
+            RetractOutcome::RefusedRemoved
+        } else if self.retracted_at_ms.is_some() {
+            RetractOutcome::AlreadyMarked
+        } else {
+            RetractOutcome::Mark
+        }
+    }
+
+    /// Apply a journalled retract mark. `false` when [`Self::retract_outcome`]
+    /// is not [`RetractOutcome::Mark`] — first mark wins, and a tombstone is
+    /// never marked. ⛔ Never touches `state` (`AD-1827`).
+    pub fn mark_retracted(&mut self, at_ms: i64) -> bool {
+        if self.retract_outcome() != RetractOutcome::Mark {
+            return false;
+        }
+        self.retracted_at_ms = Some(at_ms);
+        true
+    }
 }
 
 /// A minted id collided with an address already present in durable history.

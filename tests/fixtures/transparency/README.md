@@ -60,6 +60,7 @@ persisted `direction`, and persisted original `task` values:
 | 5 | `admission_deferred`, `a2a-inbound-approval:` | derived inbound | awaiting-approval |
 | 6 | `admission_deferred`, `a2a-status-query:` | derived inbound | status-query |
 | 7 | unmapped future event tag | unknown | unknown |
+| 8 | `recipient_item_retracted` (appended by Story 19.16d; `principal_collapsed: true`) | derived inbound | item-retracted |
 
 The export keystone asserts every row's `(seq, kind, direction, task)` before
 it checks deletion/corruption regeneration. Dropping an envelope arm,

@@ -232,7 +232,7 @@ pub use plan::{
 };
 pub use recipient_item::{
     ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, RecipientItemAllocator,
-    RecipientItemState, RecipientItemView,
+    RecipientItemState, RecipientItemView, RetractOutcome,
 };
 pub use redacted_url::RedactedUrl;
 #[allow(unused_imports)]

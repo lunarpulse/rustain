@@ -446,6 +446,7 @@ mod tests {
             task: Some("t-1".to_owned()),
             summary: "peer reported terminal state failed".to_owned(),
             provenance: None,
+            principal_collapsed: false,
         }
     }
 

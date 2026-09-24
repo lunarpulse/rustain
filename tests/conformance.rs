@@ -880,6 +880,7 @@ fn the_removal_transparency_glyph_is_unique_among_shipped_kinds() {
         TransparencyKind::PeerEquivocated,
         TransparencyKind::RecipientItemReceived,
         TransparencyKind::RecipientItemAcknowledged,
+        TransparencyKind::RecipientItemRetracted,
         TransparencyKind::InteractionSurfaced,
         TransparencyKind::DigestFlushed,
         TransparencyKind::Unknown,
@@ -903,6 +904,64 @@ fn the_removal_transparency_glyph_is_unique_among_shipped_kinds() {
             .expect_err("an unknown kind is still refused");
     assert!(rejected.contains("item-removed"), "{rejected}");
     let _ = filter;
+}
+
+/// Story 19.16d AC5(a) — the retract kind's glyph collides with nothing, tested
+/// with the NEW kind as the subject.
+///
+/// ⛔ Adding `RecipientItemRetracted` to the removal test's array above proves
+/// only `⊘ ≠ ⇠`, because that test's subject is pinned to the removal kind; a
+/// retract glyph colliding with, say, `⊙` would pass it green. ⛔ Still scoped,
+/// never global: `✓` is double-booked (`Accepted` + `RecipientItemAcknowledged`)
+/// and a whole-enum check would be RED on arrival.
+#[test]
+fn the_retract_transparency_glyph_is_unique_among_shipped_kinds() {
+    use rustain::domain::services::transparency::{TransparencyFilter, TransparencyKind};
+
+    let retract = TransparencyKind::RecipientItemRetracted;
+    assert_eq!(
+        retract.glyph(),
+        "⇠",
+        "the ratified glyph (ux-Analysis-2026-09-21)"
+    );
+    assert_eq!(retract.label(), "item-retracted");
+
+    for other in [
+        TransparencyKind::Accepted,
+        TransparencyKind::Rejected,
+        TransparencyKind::Dispatched,
+        TransparencyKind::AwaitingApproval,
+        TransparencyKind::StatusQueried,
+        TransparencyKind::Disclosed,
+        TransparencyKind::ConsentGranted,
+        TransparencyKind::ConsentRevoked,
+        TransparencyKind::RoomRoleGranted,
+        TransparencyKind::RoomRoleRevoked,
+        TransparencyKind::TransportAdmission,
+        TransparencyKind::PeerFrameAttempted,
+        TransparencyKind::PeerEquivocated,
+        TransparencyKind::RecipientItemReceived,
+        TransparencyKind::RecipientItemAcknowledged,
+        TransparencyKind::RecipientItemRemoved,
+        TransparencyKind::InteractionSurfaced,
+        TransparencyKind::DigestFlushed,
+        TransparencyKind::Unknown,
+    ] {
+        assert_ne!(
+            retract.glyph(),
+            other.glyph(),
+            "a shared glyph makes two decisions one row in a monochrome ledger: {} vs {}",
+            retract.label(),
+            other.label()
+        );
+    }
+
+    // Filterable by the label it renders, and named in the refusal's list.
+    TransparencyFilter::parse("kind=item-retracted")
+        .expect("the new kind is accepted by the filter grammar");
+    let rejected = TransparencyFilter::parse("kind=item-withdrawn")
+        .expect_err("an unknown kind is still refused");
+    assert!(rejected.contains("item-retracted"), "{rejected}");
 }
 
 /// AC-3 handler-count + information-scent invariants. Verifies:

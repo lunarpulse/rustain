@@ -18,11 +18,25 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
             address: address.clone(),
             alias: None,
         },
-        RoomEvent::RecipientItemRemoved { address },
+        RoomEvent::RecipientItemRemoved {
+            address: address.clone(),
+        },
+        // Story 19.16d AC3(a) — the retract fact class joins the family.
+        RoomEvent::RecipientItemRetracted {
+            address,
+            retracted_at_ms: 1_700_000_000_000,
+            principal_collapsed: true,
+        },
     ];
 
     for event in events {
         let encoded = serde_json::to_value(&event).expect("event serializes");
+        if matches!(event, RoomEvent::RecipientItemRetracted { .. }) {
+            // The durable tag other builds and the pinned transparency fixture
+            // name. ⛔ A respelling would round-trip in THIS build and fall
+            // into `Unrecognized` in every journal written before it.
+            assert_eq!(encoded["event"], "recipient_item_retracted", "{encoded}");
+        }
         let decoded: RoomEvent = serde_json::from_value(encoded).expect("event replays");
         assert!(
             matches!(
@@ -30,9 +44,11 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
                 RoomEvent::RecipientItemReceived { .. }
                     | RoomEvent::RecipientItemAcknowledged { .. }
                     | RoomEvent::RecipientItemRemoved { .. }
+                    | RoomEvent::RecipientItemRetracted { .. }
             ),
             "the new event family must not be swallowed by RoomEvent::Unrecognized"
         );
+        assert_eq!(decoded, event, "every field survives the round trip");
     }
 }
 

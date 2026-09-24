@@ -48,8 +48,15 @@ pub(crate) fn visible_slice(total: usize, offset: usize, height: usize) -> (usiz
 /// The sidebar is ~35 columns at the minimum width, and the peer id is a
 /// 64-char hash. Putting the hash before the verdict meant "refused" was the
 /// first thing the cut removed — the panel rendered, and told you nothing.
-/// Order: direction + kind (glyph AND word, monochrome rule) → time → peer →
-/// summary.
+/// Order: direction + kind (glyph AND word, monochrome rule) → retract mark →
+/// time → peer → summary.
+///
+/// Story 19.16d `AC5(d)` (owner: EXPAND) — the `retracted_at_ms` mark goes
+/// **beside the kind**, where truncation reaches it last. ⛔ Never appended
+/// after the peer hash: this ordering exists so truncation eats the hash and
+/// spares the verdict, and a mark cut first is a mark that is not there. The
+/// form and width are `one_line()`'s (`[retracted {full timestamp}]`) — one
+/// source, three faces, ⛔ no face restyles it.
 fn row_line(row: &TransparencyRow, width: usize, theme: &Theme, selected: bool) -> Line<'static> {
     let time = match row.recorded_at_ms {
         Some(ms) => format_unix_millis(ms),
@@ -57,11 +64,15 @@ fn row_line(row: &TransparencyRow, width: usize, theme: &Theme, selected: bool) 
         // audit log is worse than an admitted gap.
         None => "—".to_owned(),
     };
+    let mark = row.retracted_at_ms.map_or_else(String::new, |ms| {
+        format!(" [retracted {}]", format_unix_millis(ms))
+    });
     let text = format!(
-        "{}{} {} {} · {} · {} · {}",
+        "{}{} {}{} {} · {} · {} · {}",
         row.direction.glyph(),
         row.kind.glyph(),
         row.kind.label(),
+        mark,
         row.direction.label(),
         time,
         truncate_to_width(&row.peer, 12),
@@ -314,6 +325,7 @@ mod tests {
             task: Some("t-1".to_owned()),
             summary: "refused by policy".to_owned(),
             provenance: None,
+            principal_collapsed: false,
         }
     }
 
@@ -344,6 +356,64 @@ mod tests {
             .collect();
         assert!(text.contains('←') && text.contains("inbound"), "{text}");
         assert!(text.contains('✗'), "{text}");
+    }
+
+    /// Story 19.16d AC5(d) (owner: EXPAND) — the `Ctrl+X, L` panel renders the
+    /// retract mark, read from `retracted_at_ms`, BESIDE THE KIND: ahead of the
+    /// time and the peer hash, so the panel's own truncation reaches it last.
+    /// Driven through `render`, the panel's front door, into a real buffer.
+    ///
+    /// **Mutant → RED (`M22`):** revert the panel's mark read — the marked row
+    /// renders no `[retracted …]`.
+    /// **Positive control:** the unmarked row renders no mark, so the assertion
+    /// is reading the field rather than a constant.
+    #[test]
+    fn a_retracted_row_renders_its_mark_beside_the_kind_and_an_unmarked_row_none() {
+        let mut marked = row(1, Some(1_700_000_000_000));
+        marked.kind = TransparencyKind::Disclosed;
+        marked.summary = "disclosed 42 bytes".to_owned();
+        marked.retracted_at_ms = Some(1_700_000_060_000);
+        let unmarked = row(2, Some(1_700_000_000_000));
+        let mut state = TransparencyPanelState::default();
+        state.apply_read(vec![marked, unmarked], 10);
+
+        let area = Rect::new(0, 0, 140, 10);
+        let mut buf = Buffer::empty(area);
+        render(
+            area,
+            &mut buf,
+            &mut state,
+            0,
+            &crate::domain::models::FocusState::Input,
+            &theme(),
+        );
+        let lines: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf.cell((x, y)).map_or(" ", |cell| cell.symbol()))
+                    .collect()
+            })
+            .collect();
+
+        let marked_line = lines
+            .iter()
+            .find(|line| line.contains("disclosed 42 bytes"))
+            .unwrap_or_else(|| panic!("the marked row renders: {lines:#?}"));
+        let mark = marked_line
+            .find("[retracted 2023-11-14 22:14:20Z]")
+            .unwrap_or_else(|| panic!("the mark renders on the panel: {marked_line}"));
+        let kind = marked_line.find("disclosed").expect("the kind label");
+        let peer = marked_line.find("peer-a").expect("the peer");
+        assert!(
+            kind < mark && mark < peer,
+            "the mark sits beside the kind, ahead of the peer hash: {marked_line}"
+        );
+
+        let unmarked_line = lines
+            .iter()
+            .find(|line| line.contains("refused by policy"))
+            .unwrap_or_else(|| panic!("the unmarked row renders: {lines:#?}"));
+        assert!(!unmarked_line.contains("[retracted"), "{unmarked_line}");
     }
 
     #[test]

@@ -35,7 +35,7 @@ use rustain::domain::models::{PinnedKey, PinnedKeyAlgorithm, TrustTier};
 use rustain::domain::ports::{
     AgentMessageBus, DeliveryPolicy, EffectiveDeliveryPolicy, InboundApprovalTicket,
     InboundPeerError, InboundPeerRuntime, InboundPeerTask, PeerInteractionRecorder,
-    RelationshipDeliveryPolicy, RoomJournal,
+    RelationshipDeliveryPolicy, RoomJournal, RoomJournalReader,
 };
 use rustain::domain::services::transparency::{TransparencyKind, fold_transparency};
 use rustain::infrastructure::agent_message_bus::LocalMessageBus;
@@ -217,6 +217,59 @@ impl RoomJournal for BrokenRoomJournal {
         Err(rustain::domain::ports::RoomJournalError::Append(
             "disk full".to_owned(),
         ))
+    }
+}
+
+struct BlockingRetractJournal {
+    inner: Arc<dyn RoomJournal>,
+    append_started: Arc<Notify>,
+    resume_append: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl RoomJournal for BlockingRetractJournal {
+    async fn record_event(
+        &self,
+        event: rustain::domain::models::RoomEvent,
+    ) -> Result<(), rustain::domain::ports::RoomJournalError> {
+        if matches!(
+            event,
+            rustain::domain::models::RoomEvent::RecipientItemRetracted { .. }
+        ) {
+            self.append_started.notify_one();
+            self.resume_append.notified().await;
+        }
+        self.inner.record_event(event).await
+    }
+}
+
+struct ToggleFailingReader {
+    inner: Arc<NodeJournal>,
+    /// 0 = healthy, 1 = tail probe fails, 2 = full load fails.
+    failure_mode: Arc<std::sync::atomic::AtomicU8>,
+}
+
+#[async_trait::async_trait]
+impl RoomJournalReader for ToggleFailingReader {
+    async fn load_entries(
+        &self,
+    ) -> Result<Vec<rustain::domain::models::JournalEntry>, rustain::domain::ports::RoomJournalError>
+    {
+        if self.failure_mode.load(std::sync::atomic::Ordering::SeqCst) == 2 {
+            return Err(rustain::domain::ports::RoomJournalError::Read(
+                "injected read failure".to_owned(),
+            ));
+        }
+        RoomJournalReader::load_entries(self.inner.as_ref()).await
+    }
+
+    async fn latest_seq(&self) -> Result<u64, rustain::domain::ports::RoomJournalError> {
+        if self.failure_mode.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+            return Err(rustain::domain::ports::RoomJournalError::Read(
+                "injected tail failure".to_owned(),
+            ));
+        }
+        RoomJournalReader::latest_seq(self.inner.as_ref()).await
     }
 }
 
@@ -2345,6 +2398,882 @@ async fn ac2c_the_board_carries_the_collapse_disclosure_from_a_loopback_peer() {
     assert!(
         rendered.contains(rustain::adapters::a2a::board::COLLAPSED_PRINCIPAL_DISCLOSURE),
         "the disclosure renders ON the board, never only in a log: {rendered}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+// ── Story 19.16d · the cross-host retract target ────────────────────────────
+//
+// ⚠ **What this half CANNOT prove, stated rather than hidden (`19-16b A13`).**
+// Every harness here binds `127.0.0.1`, and `authenticate` returns
+// `SubmitterKey::loopback()` before the api-key branch on a loopback bind, so
+// on this wire every caller is ONE principal. The wire therefore proves the
+// front door, the principal's *source* (the authenticated caller, never a
+// parameter) and the byte-identity of not-yours versus never-existed against
+// a SECOND principal seeded directly into the journal. That two configured
+// credentials are two principals is proven where it is decided — the
+// projection — in `tests/conformance_19_16d_retract.rs`, the shipped
+// `a2a_server_exec.rs` precedent's split.
+
+/// A real journal on a temp workspace, with the room writer the ingress and
+/// the daemon rails both use.
+async fn retract_room() -> (tempfile::TempDir, Arc<NodeJournal>, Arc<dyn RoomJournal>) {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open real node journal"),
+    );
+    let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(journal.clone(), None));
+    (workspace, journal, room)
+}
+
+/// Serve the real router over a real loopback socket. `sink` is the journal
+/// the server appends through; the ordinary reader is the real journal, so a
+/// `BrokenRoomJournal` sink still serves a fold of the seeded items.
+async fn serve_retract_host(
+    workspace: &std::path::Path,
+    journal: Arc<NodeJournal>,
+    sink: Arc<dyn RoomJournal>,
+    policy: A2aAdmissionPolicy,
+) -> (
+    String,
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tempfile::TempDir,
+) {
+    serve_retract_host_with_reader(workspace, journal, sink, policy).await
+}
+
+async fn serve_retract_host_with_reader(
+    workspace: &std::path::Path,
+    reader: Arc<dyn RoomJournalReader>,
+    sink: Arc<dyn RoomJournal>,
+    policy: A2aAdmissionPolicy,
+) -> (
+    String,
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tempfile::TempDir,
+) {
+    let key_dir = tempfile::tempdir().expect("identity directory");
+    let signer = IdentityKeyStore::new(key_dir.path())
+        .load_or_generate()
+        .expect("identity");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let endpoint = format!(
+        "http://{}/",
+        listener.local_addr().expect("listener address")
+    );
+    let cancel = CancellationToken::new();
+    let http = tokio::spawn(serve(
+        listener,
+        ServeConfig {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer,
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            transparency: Arc::new(TransparencySink::new(sink).with_reader(reader)),
+            policy,
+            workspace: workspace.to_path_buf(),
+            advertised_host: None,
+            cards: Arc::new(SignedCardCache::new()),
+        },
+        cancel.child_token(),
+    ));
+    (endpoint, cancel, http, key_dir)
+}
+
+/// Every `RecipientItemRetracted` record in the durable journal, in order.
+async fn retract_records(journal: &NodeJournal) -> Vec<rustain::domain::models::RoomEvent> {
+    use rustain::domain::models::{JournalRecord, RoomEvent};
+    journal
+        .load()
+        .await
+        .expect("load journal")
+        .into_iter()
+        .filter_map(|entry| match entry.record {
+            JournalRecord::Room(event @ RoomEvent::RecipientItemRetracted { .. }) => Some(event),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn journal_len(journal: &NodeJournal) -> usize {
+    journal.load().await.expect("load journal").len()
+}
+
+/// One item's row from `x-rustain-items/list`, read through the front door.
+async fn listed_item(
+    client: &reqwest::Client,
+    endpoint: &str,
+    id: u64,
+    item_id: &str,
+) -> serde_json::Value {
+    let response = rpc(
+        client,
+        endpoint,
+        id,
+        "x-rustain-items/list",
+        serde_json::json!({}),
+    )
+    .await;
+    response["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the read returns a set: {response}"))
+        .iter()
+        .find(|item| item["itemId"] == item_id)
+        .cloned()
+        .unwrap_or_else(|| panic!("{item_id} is in the caller's set: {response}"))
+}
+
+fn received_item() -> rustain::domain::models::RecipientItemState {
+    rustain::domain::models::RecipientItemState::Received {
+        content: String::new(),
+    }
+}
+
+/// Story 19.16d AC1(a)/(c), AC2(c), AC4(a), AC5(a) — the retract lands through
+/// the real front door on the caller's OWN item, and every face agrees.
+///
+/// Front door: `rpc` → the real axum router → `authenticate` → `dispatch`'s
+/// fifth arm. ⛔ `items_retract` is private, so the bypass is unavailable.
+///
+/// **Mutant → RED (`M01`):** respell the SERVED arm's method string — the
+/// canonical `x-rustain-items/retract` answers `-32601`.
+/// **Mutant → RED (`M04`):** reject an unknown payload key — the retract
+/// carrying `aFieldFromANewerBuild` is refused instead of landing.
+/// **Mutant → RED (`M12`):** carry the mark as a fifth `state` — the list
+/// stops answering `received` for the retracted item.
+/// **Positive control (`M12`):** the un-retracted sibling carries NO
+/// `retractedAtMs` key at all.
+/// **Mutant → RED (`M09`):** drop the collapse disclosure — the loopback
+/// caller's response, and the durable record's export line, stop carrying it.
+/// **Mutant → RED (`M15`):** delete the `transparency_row` arm — the folded
+/// ledger has no `item-retracted` row.
+#[tokio::test]
+async fn ac1_a_retract_marks_the_callers_own_item_through_the_real_front_door() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::domain::models::RoomEvent;
+    use rustain::domain::services::transparency::render_export;
+
+    let (workspace, journal, room) = retract_room().await;
+    let caller = SubmitterKey::loopback();
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_mine",
+        "task-mine",
+        received_item(),
+    )
+    .await;
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_kept",
+        "task-kept",
+        received_item(),
+    )
+    .await;
+    let (endpoint, cancel, http, _keys) = serve_retract_host(
+        workspace.path(),
+        journal.clone(),
+        room.clone(),
+        A2aAdmissionPolicy::Allow,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let response = rpc(
+        &client,
+        &endpoint,
+        1,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_mine", "aFieldFromANewerBuild": 7 }),
+    )
+    .await;
+    let result = response.get("result").unwrap_or_else(|| {
+        panic!("the served arm answers, and an unknown field is ignored: {response}")
+    });
+    assert_eq!(result["itemId"], "ri_mine");
+    assert_eq!(result["alreadyRetracted"], false, "{response}");
+    let stamp = result["retractedAtMs"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("the recipient host minted a stamp: {response}"));
+    assert!(
+        stamp > 0,
+        "a real wall-clock stamp, never the 0 sentinel: {response}"
+    );
+    assert_eq!(
+        result["principalCollapsed"], true,
+        "a loopback caller is every local caller — the write must say so: {response}"
+    );
+
+    // AC4(a): the list reports the mark as an ADDITIVE sibling, `state` untouched.
+    let marked = listed_item(&client, &endpoint, 2, "ri_mine").await;
+    assert_eq!(
+        marked["state"], "received",
+        "⛔ never a fifth state: {marked}"
+    );
+    assert_eq!(marked["retractedAtMs"], stamp, "{marked}");
+    let kept = listed_item(&client, &endpoint, 3, "ri_kept").await;
+    assert!(
+        kept.get("retractedAtMs").is_none(),
+        "positive control: an un-retracted item carries no mark key at all: {kept}"
+    );
+
+    // The durable record: host-minted, one line, with the collapse persisted.
+    let records = retract_records(&journal).await;
+    assert_eq!(records.len(), 1, "{records:?}");
+    let RoomEvent::RecipientItemRetracted {
+        address,
+        retracted_at_ms,
+        principal_collapsed,
+    } = &records[0]
+    else {
+        unreachable!("filtered to retract records");
+    };
+    assert_eq!(address.item().as_str(), "ri_mine");
+    assert_eq!(*retracted_at_ms, stamp);
+    assert!(
+        *principal_collapsed,
+        "the collapse is a durable fact, not only a response body"
+    );
+
+    // AC5(a): the ledger renders the retract as its own row on every face.
+    let rows = fold_transparency(&journal.load().await.expect("load journal"));
+    let row = rows
+        .iter()
+        .find(|row| row.kind == TransparencyKind::RecipientItemRetracted)
+        .unwrap_or_else(|| panic!("the retract has a ledger row: {rows:?}"));
+    assert_eq!(row.summary, "the sender retracted item ri_mine");
+    assert_eq!(
+        row.retracted_at_ms,
+        Some(stamp),
+        "the event's host-minted stamp reaches the one row field every ledger face reads"
+    );
+    assert!(
+        row.one_line().contains("⇠ item-retracted"),
+        "{}",
+        row.one_line()
+    );
+    let export = render_export(std::slice::from_ref(row));
+    assert!(
+        export.contains("\"principalCollapsed\":true"),
+        "the durable collapse reaches the export: {export}"
+    );
+    assert!(
+        export.contains(&format!("\"retractedAtMs\":{stamp}")),
+        "the retract mark reaches the export: {export}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16d AC1(c)/(d) — the principal comes from the authenticated caller
+/// and nothing else, and not-yours is byte-identical to never-existed.
+///
+/// A second principal's item is seeded straight into the journal (the wire
+/// cannot mint one — every loopback caller is one principal).
+///
+/// **Mutant → RED (`M03`/`M06`):** move the principal derivation out of the
+/// `dispatch` arm and read it from `params` — the forged `principal` below
+/// names credential-B's pseudonym and B's item gets marked.
+/// **Positive control (`M03`):** the caller's own item IS retracted, so the
+/// check discriminates rather than refusing everything.
+/// **Mutant → RED (`M05`):** a second error construction for "not yours" — the
+/// two serialized responses stop being equal.
+#[tokio::test]
+async fn ac1d_not_yours_is_byte_identical_to_never_existed_and_no_parameter_names_the_principal() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+
+    let (workspace, journal, room) = retract_room().await;
+    let caller = SubmitterKey::loopback();
+    let other = SubmitterKey::from_api_key("credential-b");
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_mine",
+        "task-mine",
+        received_item(),
+    )
+    .await;
+    seed_item(
+        room.as_ref(),
+        &other,
+        "ri_theirs",
+        "task-theirs",
+        received_item(),
+    )
+    .await;
+    let (endpoint, cancel, http, _keys) = serve_retract_host(
+        workspace.path(),
+        journal.clone(),
+        room.clone(),
+        A2aAdmissionPolicy::Allow,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // The SAME JSON-RPC id in both probes, so the echoed id cannot mask a
+    // difference (`a2a_server_exec.rs` byte-identity idiom).
+    let forged_principal = other.pseudonymous_peer_id().as_str().to_owned();
+    let theirs = rpc(
+        &client,
+        &endpoint,
+        7,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_theirs", "principal": forged_principal }),
+    )
+    .await;
+    let fabricated = rpc(
+        &client,
+        &endpoint,
+        7,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_never_minted", "principal": forged_principal }),
+    )
+    .await;
+    assert_eq!(
+        serde_json::to_string(&theirs).unwrap(),
+        serde_json::to_string(&fabricated).unwrap(),
+        "a foreign principal's real item must answer byte-identically to an id that never \
+         existed (ADR-17-4a-01 R21)"
+    );
+    assert_eq!(theirs["error"]["code"], CODE_TASK_NOT_FOUND, "{theirs}");
+    assert!(
+        retract_records(&journal).await.is_empty(),
+        "a forged `principal` parameter must not reach another principal's item"
+    );
+
+    // Positive control: the caller's own item is retractable.
+    let mine = rpc(
+        &client,
+        &endpoint,
+        8,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_mine" }),
+    )
+    .await;
+    assert!(mine.get("result").is_some(), "{mine}");
+    assert_eq!(retract_records(&journal).await.len(), 1);
+
+    // A malformed request is a different operator fact from an unaddressable
+    // item: ⛔ never `ITEM_NOT_FOUND` for an absent or empty id.
+    for params in [serde_json::json!({}), serde_json::json!({ "itemId": "" })] {
+        let malformed = rpc(&client, &endpoint, 9, "x-rustain-items/retract", params).await;
+        assert_eq!(
+            malformed["error"]["code"], CODE_INVALID_PARAMS,
+            "{malformed}"
+        );
+    }
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16d AC1(b) (`P3`) — a retract NOTIFICATION is refused with
+/// `-32600` and writes nothing, because its collapse disclosure rides the
+/// response and a 204 would make it undeliverable by the caller's choice.
+///
+/// ⛔ Not through `rpc()`, which always sends an id: a raw POST with no `id`.
+/// **Mutant → RED (`M02`):** accept the notification and perform the write —
+/// the answer becomes a 204 and the list shows the item marked.
+/// **Positive control:** the identical body WITH an id marks the item.
+#[tokio::test]
+async fn ac1b_a_retract_notification_is_refused_aloud_and_writes_nothing() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+
+    let (workspace, journal, room) = retract_room().await;
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_note",
+        "task-note",
+        received_item(),
+    )
+    .await;
+    let (endpoint, cancel, http, _keys) = serve_retract_host(
+        workspace.path(),
+        journal.clone(),
+        room.clone(),
+        A2aAdmissionPolicy::Allow,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let notification = client
+        .post(&endpoint)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "x-rustain-items/retract",
+            "params": { "itemId": "ri_note" },
+        }))
+        .send()
+        .await
+        .expect("real listener response");
+    assert_eq!(
+        notification.status(),
+        reqwest::StatusCode::OK,
+        "⛔ never the silent 204 a write's disclosure cannot ride"
+    );
+    let body: serde_json::Value = notification.json().await.expect("a JSON-RPC error body");
+    assert_eq!(body["error"]["code"], CODE_INVALID_REQUEST, "{body}");
+    let unmarked = listed_item(&client, &endpoint, 1, "ri_note").await;
+    assert!(unmarked.get("retractedAtMs").is_none(), "{unmarked}");
+    assert!(retract_records(&journal).await.is_empty());
+
+    let call = rpc(
+        &client,
+        &endpoint,
+        2,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_note" }),
+    )
+    .await;
+    assert!(call.get("result").is_some(), "positive control: {call}");
+    let marked = listed_item(&client, &endpoint, 3, "ri_note").await;
+    assert!(marked.get("retractedAtMs").is_some(), "{marked}");
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16d AC1(e) — idempotent on the live states (no second append, no
+/// word), refused on a tombstone (`Q3`) — including a tombstone written on the
+/// OTHER rail after startup, which this host's fold has not yet seen.
+///
+/// **Ratchet (Rule 4):** journal length is EQUAL across N retracts after the
+/// first. **Positive control (REQUIRED):** the first retract adds exactly one.
+/// **Mutant → RED (`M07`):** append on every call.
+/// **Mutant → RED:** decide on the cached fold without catching it up inside
+/// the critical section — the daemon-rail removal is invisible and the
+/// tombstone gets marked instead of refused.
+#[tokio::test]
+async fn ac1e_a_retract_is_idempotent_while_live_and_refused_on_a_tombstone() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::adapters::a2a::jsonrpc::CODE_ITEM_REMOVED;
+    use rustain::domain::models::{ItemAddress, ItemId, RecipientItemState, RoomEvent};
+
+    let (workspace, journal, room) = retract_room().await;
+    let caller = SubmitterKey::loopback();
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_twice",
+        "task-twice",
+        received_item(),
+    )
+    .await;
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_gone",
+        "task-gone",
+        RecipientItemState::Removed {
+            acknowledged_before: false,
+        },
+    )
+    .await;
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_later",
+        "task-later",
+        received_item(),
+    )
+    .await;
+    let (endpoint, cancel, http, _keys) = serve_retract_host(
+        workspace.path(),
+        journal.clone(),
+        room.clone(),
+        A2aAdmissionPolicy::Allow,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let before = journal_len(&journal).await;
+    let first = rpc(
+        &client,
+        &endpoint,
+        1,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_twice" }),
+    )
+    .await;
+    assert_eq!(first["result"]["alreadyRetracted"], false, "{first}");
+    assert_eq!(
+        journal_len(&journal).await,
+        before + 1,
+        "positive control: the first retract appends exactly one record"
+    );
+    let after_first = journal_len(&journal).await;
+    for id in 2..=4 {
+        let again = rpc(
+            &client,
+            &endpoint,
+            id,
+            "x-rustain-items/retract",
+            serde_json::json!({ "itemId": "ri_twice" }),
+        )
+        .await;
+        assert_eq!(again["result"]["alreadyRetracted"], true, "{again}");
+        assert_eq!(
+            again["result"]["retractedAtMs"], first["result"]["retractedAtMs"],
+            "the first mark wins: {again}"
+        );
+    }
+    assert_eq!(
+        journal_len(&journal).await,
+        after_first,
+        "an already-marked item appends nothing"
+    );
+
+    // A tombstone refuses aloud — and ⛔ not as `ITEM_NOT_FOUND`.
+    let tombstone = rpc(
+        &client,
+        &endpoint,
+        5,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_gone" }),
+    )
+    .await;
+    assert_eq!(tombstone["error"]["code"], CODE_ITEM_REMOVED, "{tombstone}");
+
+    // The operator removes `ri_later` on the daemon rail AFTER startup: the
+    // record reaches the journal, never this host's in-memory fold.
+    room.record_event(RoomEvent::RecipientItemRemoved {
+        address: ItemAddress::from_a2a_ingress(
+            caller.pseudonymous_peer_id(),
+            ItemId::from_replay("ri_later"),
+        ),
+    })
+    .await
+    .expect("daemon-rail removal");
+    let late = rpc(
+        &client,
+        &endpoint,
+        6,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_later" }),
+    )
+    .await;
+    assert_eq!(
+        late["error"]["code"], CODE_ITEM_REMOVED,
+        "a removal on the other rail must be seen before the retract decides (Q3): {late}"
+    );
+    assert_eq!(
+        retract_records(&journal).await.len(),
+        1,
+        "neither tombstone was marked"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// A daemon-rail removal can append after the retract caught its projection up
+/// but before the retract record lands. The reply must follow durable order,
+/// not the stale in-memory decision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ac3f_an_interleaved_removal_is_refolded_before_retract_answers() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::adapters::a2a::jsonrpc::CODE_ITEM_REMOVED;
+    use rustain::domain::models::{ItemAddress, ItemId, RoomEvent};
+
+    let (workspace, journal, room) = retract_room().await;
+    let caller = SubmitterKey::loopback();
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_interleaved",
+        "task-interleaved",
+        received_item(),
+    )
+    .await;
+
+    let append_started = Arc::new(Notify::new());
+    let resume_append = Arc::new(Notify::new());
+    let blocking_sink: Arc<dyn RoomJournal> = Arc::new(BlockingRetractJournal {
+        inner: room.clone(),
+        append_started: append_started.clone(),
+        resume_append: resume_append.clone(),
+    });
+    let (endpoint, cancel, http, _keys) = serve_retract_host(
+        workspace.path(),
+        journal.clone(),
+        blocking_sink,
+        A2aAdmissionPolicy::Allow,
+    )
+    .await;
+
+    let request = {
+        let endpoint = endpoint.clone();
+        tokio::spawn(async move {
+            rpc(
+                &reqwest::Client::new(),
+                &endpoint,
+                1,
+                "x-rustain-items/retract",
+                serde_json::json!({ "itemId": "ri_interleaved" }),
+            )
+            .await
+        })
+    };
+    append_started.notified().await;
+    room.record_event(RoomEvent::RecipientItemRemoved {
+        address: ItemAddress::from_a2a_ingress(
+            caller.pseudonymous_peer_id(),
+            ItemId::from_replay("ri_interleaved"),
+        ),
+    })
+    .await
+    .expect("daemon-rail removal");
+    resume_append.notify_one();
+
+    let response = request.await.expect("retract request");
+    assert_eq!(
+        response["error"]["code"], CODE_ITEM_REMOVED,
+        "the durable removal precedes the retract record, so the tombstone refuses the mark: \
+         {response}"
+    );
+    let item = listed_item(&reqwest::Client::new(), &endpoint, 2, "ri_interleaved").await;
+    assert!(
+        item.get("retractedAtMs").is_none(),
+        "the in-memory view agrees with cold replay: {item}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// A write may use a cached fold only after proving it is current. A failed
+/// tail probe or growth fold refuses before append instead of reporting a mark
+/// that replay may reject.
+#[tokio::test]
+async fn ac3f_journal_refresh_failures_refuse_before_append() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::adapters::a2a::jsonrpc::CODE_INTERNAL_ERROR;
+    use rustain::domain::models::RoomEvent;
+
+    for failure_mode in [1, 2] {
+        let (workspace, journal, room) = retract_room().await;
+        seed_item(
+            room.as_ref(),
+            &SubmitterKey::loopback(),
+            "ri_stale",
+            "task-stale",
+            received_item(),
+        )
+        .await;
+        let mode = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let reader: Arc<dyn RoomJournalReader> = Arc::new(ToggleFailingReader {
+            inner: journal.clone(),
+            failure_mode: mode.clone(),
+        });
+        let (endpoint, cancel, http, _keys) = serve_retract_host_with_reader(
+            workspace.path(),
+            reader,
+            room.clone(),
+            A2aAdmissionPolicy::Allow,
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let _ = listed_item(&client, &endpoint, 1, "ri_stale").await;
+        if failure_mode == 2 {
+            room.record_event(RoomEvent::Unrecognized)
+                .await
+                .expect("grow journal beyond the projection watermark");
+        }
+        let before = journal_len(&journal).await;
+        mode.store(failure_mode, std::sync::atomic::Ordering::SeqCst);
+
+        let response = rpc(
+            &client,
+            &endpoint,
+            2,
+            "x-rustain-items/retract",
+            serde_json::json!({ "itemId": "ri_stale" }),
+        )
+        .await;
+        assert_eq!(
+            response["error"]["code"], CODE_INTERNAL_ERROR,
+            "a mutating decision cannot use a stale cached projection (mode {failure_mode}): \
+             {response}"
+        );
+        assert_eq!(
+            journal_len(&journal).await,
+            before,
+            "a failed refresh refuses before appending a retract (mode {failure_mode})"
+        );
+
+        cancel.cancel();
+        http.await.expect("server task").expect("server shutdown");
+    }
+}
+
+/// Story 19.16d AC1(e)/AC3(f) (`P4`) — N PARALLEL retracts of one item append
+/// EXACTLY ONE record. The sequential ratchet above is green under every
+/// interleaving; this one holds only because decide + append + apply share
+/// one critical section.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ac3f_parallel_retracts_of_one_item_append_exactly_one_record() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+
+    let (workspace, journal, room) = retract_room().await;
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_race",
+        "task-race",
+        received_item(),
+    )
+    .await;
+    let (endpoint, cancel, http, _keys) = serve_retract_host(
+        workspace.path(),
+        journal.clone(),
+        room.clone(),
+        A2aAdmissionPolicy::Allow,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let calls = (0..16u64).map(|id| {
+        let client = client.clone();
+        let endpoint = endpoint.clone();
+        tokio::spawn(async move {
+            rpc(
+                &client,
+                &endpoint,
+                id,
+                "x-rustain-items/retract",
+                serde_json::json!({ "itemId": "ri_race" }),
+            )
+            .await
+        })
+    });
+    let responses = futures::future::join_all(calls).await;
+    let landed = responses
+        .iter()
+        .map(|response| response.as_ref().expect("retract task"))
+        .filter(|response| response["result"]["alreadyRetracted"] == false)
+        .count();
+    assert_eq!(landed, 1, "exactly one call landed the mark: {responses:?}");
+    assert_eq!(
+        retract_records(&journal).await.len(),
+        1,
+        "N parallel retracts of one item append exactly one record"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16d AC1(g) (`P8`, `Q2`) — the write consults the admission core.
+/// `deny` (the default) refuses; `ask` refuses too, naming why; neither
+/// touches the journal, and the refusal is ⛔ not `ITEM_NOT_FOUND`.
+///
+/// **Mutant → RED (`M21`):** drop the policy consult — both hosts mark the
+/// item. **Positive control:** under `allow` the same retract lands
+/// (`ac1_a_retract_marks_the_callers_own_item_through_the_real_front_door`),
+/// and the shipped `the_default_policy_refuses` proves the policy path fires.
+#[tokio::test]
+async fn ac1g_deny_and_ask_refuse_the_retract_before_any_mutation() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::adapters::a2a::jsonrpc::CODE_REFUSED_BY_POLICY;
+
+    for (policy, cause) in [
+        (A2aAdmissionPolicy::default(), "\"deny\""),
+        (
+            A2aAdmissionPolicy::Ask,
+            "the ask policy has no approval shape for a non-task verb",
+        ),
+    ] {
+        let (workspace, journal, room) = retract_room().await;
+        seed_item(
+            room.as_ref(),
+            &SubmitterKey::loopback(),
+            "ri_policy",
+            "task-policy",
+            received_item(),
+        )
+        .await;
+        let (endpoint, cancel, http, _keys) =
+            serve_retract_host(workspace.path(), journal.clone(), room.clone(), policy).await;
+        let client = reqwest::Client::new();
+
+        let refused = rpc(
+            &client,
+            &endpoint,
+            1,
+            "x-rustain-items/retract",
+            serde_json::json!({ "itemId": "ri_policy" }),
+        )
+        .await;
+        assert_eq!(
+            refused["error"]["code"], CODE_REFUSED_BY_POLICY,
+            "{refused}"
+        );
+        let message = refused["error"]["message"].as_str().expect("a reason");
+        assert!(
+            message.contains("disabled by policy") && message.contains(cause),
+            "{policy:?}: the refusal names the policy and its cause: {message}"
+        );
+        assert!(retract_records(&journal).await.is_empty(), "{policy:?}");
+        let item = listed_item(&client, &endpoint, 2, "ri_policy").await;
+        assert!(item.get("retractedAtMs").is_none(), "{policy:?}: {item}");
+
+        cancel.cancel();
+        http.await.expect("server task").expect("server shutdown");
+    }
+}
+
+/// Story 19.16d AC3(f) — journal first, fail closed. A journal that cannot
+/// append refuses the retract and leaves the item unmarked.
+///
+/// **Mutant → RED (`M11`):** apply before journalling, or ignore the append
+/// error — the list shows the item marked with no durable record behind it.
+#[tokio::test]
+async fn ac3f_a_journal_that_cannot_append_fails_the_retract_closed() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::adapters::a2a::jsonrpc::CODE_INTERNAL_ERROR;
+
+    let (workspace, journal, room) = retract_room().await;
+    seed_item(
+        room.as_ref(),
+        &SubmitterKey::loopback(),
+        "ri_disk",
+        "task-disk",
+        received_item(),
+    )
+    .await;
+    let (endpoint, cancel, http, _keys) = serve_retract_host(
+        workspace.path(),
+        journal.clone(),
+        Arc::new(BrokenRoomJournal),
+        A2aAdmissionPolicy::Allow,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let refused = rpc(
+        &client,
+        &endpoint,
+        1,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_disk" }),
+    )
+    .await;
+    assert_eq!(refused["error"]["code"], CODE_INTERNAL_ERROR, "{refused}");
+    let item = listed_item(&client, &endpoint, 2, "ri_disk").await;
+    assert!(
+        item.get("retractedAtMs").is_none(),
+        "a mark with no durable record behind it is a lie the next restart erases: {item}"
     );
 
     cancel.cancel();

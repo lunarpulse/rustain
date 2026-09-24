@@ -295,7 +295,10 @@ fn the_legacy_fixture_projects_every_disclosable_variant_and_nothing_else() {
 #[test]
 fn current_fixture_pins_every_projected_variant_and_both_persisted_directions() {
     let entries = current_fixture_entries();
-    assert_eq!(entries.len(), 7, "current fixture must be populated");
+    // 7 → 8 (Story 19.16d): seq 8 is a `recipient_item_retracted` record, the
+    // fixture entry that exercises the new `item-retracted` kind. Moved
+    // deliberately — a kind addition alone does not move this pin.
+    assert_eq!(entries.len(), 8, "current fixture must be populated");
     assert!(
         entries.iter().all(JournalEntry::has_timestamp),
         "current fixture must carry nonlegacy timestamps"
@@ -370,8 +373,41 @@ fn current_fixture_pins_every_projected_variant_and_both_persisted_directions() 
                 Some("queried-task"),
             ),
             (7, TransparencyKind::Unknown, Direction::Unknown, None),
+            (
+                8,
+                TransparencyKind::RecipientItemRetracted,
+                Direction::Inbound,
+                Some("ri_fixture_retracted"),
+            ),
         ]
     );
+
+    // Story 19.16d AC5(a)/(b): the retract row names the host-minted item id
+    // and the act, nothing else, and its durable collapse reaches the export as
+    // an additive key — while every other row's line stays byte-identical
+    // (neither `principalCollapsed` nor `retractedAtMs` appears on them).
+    assert_eq!(
+        rows[7].summary,
+        "the sender retracted item ri_fixture_retracted"
+    );
+    let export = render_export(&rows);
+    let lines: Vec<&str> = export.lines().collect();
+    assert!(
+        lines[7].contains("\"principalCollapsed\":true"),
+        "{}",
+        lines[7]
+    );
+    assert!(
+        lines[7].contains("\"retractedAtMs\":1700000000007"),
+        "{}",
+        lines[7]
+    );
+    for line in &lines[..7] {
+        assert!(
+            !line.contains("principalCollapsed") && !line.contains("retractedAtMs"),
+            "the additive keys appear only where they are true: {line}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -391,13 +427,13 @@ async fn the_export_regenerates_byte_identically_after_deletion_and_corruption()
         "the export must report the snapshot's unfiltered row count"
     );
     assert_eq!(
-        first.rows, 7,
+        first.rows, 8,
         "the export must carry the current fixture's rows"
     );
     let good = std::fs::read(&first.path).expect("export exists");
     assert_eq!(
         good.iter().filter(|byte| **byte == b'\n').count(),
-        7,
+        8,
         "one JSON line per row"
     );
     for line in String::from_utf8(good.clone()).unwrap().lines() {

@@ -879,6 +879,48 @@ pub enum RoomEvent {
     RecipientItemRemoved {
         address: ItemAddress,
     },
+    /// The **sender** marked their own previously-sent content as retracted
+    /// (FR94-b, NFR64's cross-host clause) — the third fact class
+    /// [`Self::RecipientItemRemoved`]'s doc pre-blessed. Written on the
+    /// **recipient** host by the served `x-rustain-items/retract` verb (Story
+    /// 19.16d), which is its only production writer.
+    ///
+    /// ⛔ Marks, never erases (`AD-1815`, extended cross-host by 19.16d): the
+    /// journal line and the item's content both stand; only the mark changes.
+    /// ⛔ No `direction` field: nothing is destroyed at the emit boundary
+    /// (the rule [`Self::RemoteEnvelopeRejected`]'s field exists under), so
+    /// the direction is derived from the variant like its three siblings.
+    /// ⛔ Every byte is host-minted: the address from the authenticated
+    /// caller's principal and the recipient's own item id, the stamp and the
+    /// collapse flag from this host — no peer-chosen value enters the record.
+    RecipientItemRetracted {
+        address: ItemAddress,
+        /// 🔴 **The RECIPIENT HOST mints this from its own clock at append
+        /// time.** ⛔ Never sender-supplied: the item id is the verb's only
+        /// wire parameter, and a peer-chosen millisecond would be a peer byte
+        /// in the recipient's durable record.
+        ///
+        /// ⛔ **No `0` sentinel**: the `AutoResponseRetracted` `0 ⇒
+        /// recorded_at_ms` convention lives in `fold_transparency`, which
+        /// iterates `JournalEntry`; the recipient-item fold has no entry in
+        /// scope (`from_entries` passes an index, `apply` a bare event), so it
+        /// cannot perform that fallback without making cold-fold and live-apply
+        /// disagree. The recipient always mints a real stamp, so `0` is
+        /// reachable only from a forged or clock-broken record and surfaces
+        /// honestly as `Some(0)`. `#[serde(default)]` is for forward
+        /// compatibility only.
+        #[serde(default)]
+        retracted_at_ms: i64,
+        /// Whether the caller reached this host over a loopback bind, where
+        /// every local caller is one principal (`SubmitterTrust::Loopback`).
+        /// The same predicate the verb's `principalCollapsed` response field
+        /// carries, persisted so the disclosure is a durable fact on the
+        /// recipient's ledger rather than only a response body a caller can
+        /// decline to read (owner answer 2, 2026-09-21). ⛔ A legibility
+        /// statement about attribution, never a claim about who acted.
+        #[serde(default)]
+        principal_collapsed: bool,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -1293,7 +1335,8 @@ impl OrchestrationRoom {
             // not folded into the orchestration node read model.
             | RoomEvent::RecipientItemReceived { .. }
             | RoomEvent::RecipientItemAcknowledged { .. }
-            | RoomEvent::RecipientItemRemoved { .. } => {}
+            | RoomEvent::RecipientItemRemoved { .. }
+            | RoomEvent::RecipientItemRetracted { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

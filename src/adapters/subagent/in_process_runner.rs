@@ -8030,6 +8030,17 @@ mod tests {
                 RoomEvent::RecipientItemRemoved { address } => {
                     lines.push(format!("journal RecipientItemRemoved address={address:?}"));
                 }
+                RoomEvent::RecipientItemRetracted {
+                    address,
+                    retracted_at_ms,
+                    principal_collapsed,
+                } => {
+                    lines.push(format!(
+                        "journal RecipientItemRetracted address={address:?} \
+                         retracted_at_ms={retracted_at_ms} \
+                         principal_collapsed={principal_collapsed}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

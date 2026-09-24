@@ -63,6 +63,11 @@ pub(crate) struct AutoResponseRetractionPlan {
 pub(crate) enum RetractionError {
     DifferentHost,
     NotAgentComposed,
+    /// ⚠ Refused aloud, while the cross-host `x-rustain-items/retract` answers
+    /// an already-marked item with success and no second append (Story 19.16d,
+    /// `RetractOutcome::AlreadyMarked`): a local keypress on a spent control is
+    /// an operator error worth telling, a repeated wire call is an ordinary
+    /// retry. Same first-mark-wins rule, two front doors.
     AlreadyRetracted,
     InvalidTarget,
 }

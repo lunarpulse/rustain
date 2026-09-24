@@ -29,6 +29,18 @@ pub const CODE_METHOD_NOT_FOUND: i64 = -32601;
 pub const CODE_INTERNAL_ERROR: i64 = -32603;
 /// A2A "Task not found" — `tasks/get`/`tasks/cancel` on an unknown id.
 pub const CODE_TASK_NOT_FOUND: i64 = -32001;
+/// Story 19.16d — this host's admission policy refused an `x-rustain-items/*`
+/// write (`server.admission` is `deny`, or `ask`, which has no approval shape
+/// for a non-task verb). ⛔ Distinct from [`CODE_TASK_NOT_FOUND`]: a policy
+/// refusal is not an addressing failure and leaks no ownership. Chosen clear
+/// of the A2A spec's `-32001`–`-32007` because the verb is rustain-namespaced.
+pub const CODE_REFUSED_BY_POLICY: i64 = -32040;
+/// Story 19.16d — the caller owns the addressed item, and the recipient has
+/// already removed it (a tombstone). ⛔ Distinct from [`CODE_TASK_NOT_FOUND`]:
+/// ownership is already proven, so folding the two would lie to the owner
+/// while protecting nobody, and `AD-1822` requires a tombstone to differ from
+/// not-found.
+pub const CODE_ITEM_REMOVED: i64 = -32041;
 
 /// A JSON-RPC 2.0 request. `id` is a monotonic correlation key that the response
 /// must echo. `params` is pre-built A2A payload JSON.

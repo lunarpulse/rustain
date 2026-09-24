@@ -155,6 +155,7 @@ jobs:
             --test a2a_trust_registry \
             --test conformance \
             --test conformance_17_2a_node_journal \
+            --test conformance_19_16d_retract \
             --test conformance_a2a_architecture \
             --test conformance_18_3c_response_modes \
             --test conformance_18_3a_c_artifacts \

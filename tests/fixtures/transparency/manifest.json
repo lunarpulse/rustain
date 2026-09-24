@@ -8,10 +8,11 @@
     }
   },
   "FIXTURE_room_journal_current_18_2.jsonl": {
-    "sha256": "e7a166f50d8cca65573a474abfe94351fdd3cfd27abb450af7a0ac739fcbe6a6",
+    "sha256": "d9c1a5f4e3233e8841eb835b39c0b41c7dd32f1d60dbbe2855be45c2dde5adc2",
     "provenance": {
-      "shape_of": "Story 18.2 current JournalEntry with persisted direction and task",
+      "shape_of": "Story 18.2 current JournalEntry with persisted direction and task; seq 8 appended by Story 19.16d (recipient_item_retracted)",
       "authored": "2026-07-27",
+      "amended": "2026-09-24",
       "story": "18.2"
     }
   }

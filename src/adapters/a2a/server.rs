@@ -14,7 +14,10 @@
 //!         ─▶ JSON-RPC dispatch
 //!             ├─ message/send  ─▶ admit()  ─▶ register_peer ─▶ drive turn
 //!             ├─ tasks/get     ─▶ submitter-scoped lookup ─▶ projection
-//!             └─ tasks/cancel  ─▶ submitter-scoped lookup ─▶ CancellationToken
+//!             ├─ tasks/cancel  ─▶ submitter-scoped lookup ─▶ CancellationToken
+//!             ├─ x-rustain-items/list    ─▶ principal-scoped read (19.16b)
+//!             └─ x-rustain-items/retract ─▶ admit_item_retract ─▶ principal-
+//!                                           scoped mark, journal first (19.16d)
 //! ```
 //!
 //! # JSON-RPC 2.0 profile (AC6b / R8) — declared, narrow, enforced
@@ -26,6 +29,11 @@
 //!   the method runs and the server answers `204 No Content` with no body, as
 //!   the spec requires. An absent `id` and an explicit `"id": null` are
 //!   distinguished — the previous cut collapsed both onto `Value::Null`.
+//!   ⚠ **One method refuses the notification form** (Story 19.16d `P3`):
+//!   `x-rustain-items/retract` is a write whose collapse disclosure rides the
+//!   response, so a notification of it answers `-32600` and writes nothing —
+//!   a write whose disclosure rides the response must not be answerable with
+//!   an empty 204.
 //! * **An explicit `"id": null`** is rejected with `-32600`. It is legal but
 //!   discouraged, and accepting it would make a notification and a null-id call
 //!   indistinguishable in every response we emit.
@@ -52,13 +60,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::domain::models::{
-    AppConfig, CapabilityRegistry, PeerId, RapTaskState, RecipientItemAllocator, RoomEvent,
-    SemanticMessageType,
+    AppConfig, CapabilityRegistry, ItemAddress, ItemId, PeerId, RapTaskState,
+    RecipientItemAllocator, RetractOutcome, RoomEvent, SemanticMessageType,
 };
 use crate::domain::ports::{InboundApprovalTicket, InboundPeerRuntime, InboundPeerTask};
 
 use super::admission::{
     A2aAdmissionPolicy, AdmissionRequest, AdmissionVerdict, SubmitterTrust, admit,
+    admit_item_retract,
 };
 use super::auth::{
     A2aServerAuth, A2aServerSecurity, API_KEY_HEADER, AuthOutcome, BindDecision, BindEvidence,
@@ -72,8 +81,9 @@ use super::exec::{
     mint_inbound_node_id, parse_inbound_node_id, project_node_to_rap,
 };
 use super::jsonrpc::{
-    CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND,
-    CODE_PARSE_ERROR, CODE_TASK_NOT_FOUND, JsonRpcErrorResponse, JsonRpcResponse,
+    CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_ITEM_REMOVED,
+    CODE_METHOD_NOT_FOUND, CODE_PARSE_ERROR, CODE_REFUSED_BY_POLICY, CODE_TASK_NOT_FOUND,
+    JsonRpcErrorResponse, JsonRpcResponse,
 };
 use super::projection::{RemotePeerViewer, RoomProjection};
 use super::transparency::{InboundOutcome, TransparencySink};
@@ -87,6 +97,23 @@ const PENDING_TASK_FILE: &str = "a2a-pending.json";
 
 /// The one message a non-owner or unknown task id ever receives.
 const TASK_NOT_FOUND: &str = "Task not found";
+
+/// Story 19.16d `AC1(d)` — the one message a retract naming another
+/// principal's item, or an id that never existed, ever receives. One
+/// constant, emitted from one `JsonRpcErrorResponse::new` site with
+/// `CODE_TASK_NOT_FOUND`, so the two are byte-identical by construction
+/// (`ADR-17-4a-01` R21). ⛔ `TASK_NOT_FOUND`'s noun is wrong for an item.
+const ITEM_NOT_FOUND: &str = "Item not found";
+
+/// Story 19.16d `Q3` — the caller's own item is a tombstone. ⛔ Not
+/// `ITEM_NOT_FOUND`: ownership is already proven, and a tombstone must be
+/// distinguishable from not-found (`AD-1822`). ⛔ Never "deleted".
+const ITEM_REMOVED: &str = "Item already removed by its recipient; nothing was marked";
+
+/// Story 19.16d `P3` — why a retract notification is refused.
+const RETRACT_NOTIFICATION_REFUSED: &str = "x-rustain-items/retract is not accepted as a \
+     notification by this server's profile; send it with a string or number id so its result \
+     can be returned";
 
 pub use super::auth::BindDecision as ServerBindDecision;
 
@@ -661,6 +688,21 @@ async fn handle_jsonrpc(
     match parse_envelope(&body) {
         Err(response) => json_response(&response, StatusCode::OK),
         Ok(Envelope::Notification { method, params }) => {
+            // Story 19.16d `P3` — the one method that refuses the notification
+            // form. A retract is a write whose collapse disclosure
+            // (`principalCollapsed`) rides the response; answered as a 204,
+            // the disclosure would be undeliverable by the caller's choice.
+            // ⛔ Refused BEFORE `dispatch`, so nothing is written.
+            if method == super::ITEMS_RETRACT_METHOD {
+                return json_response(
+                    &JsonRpcErrorResponse::new(
+                        serde_json::Value::Null,
+                        CODE_INVALID_REQUEST,
+                        RETRACT_NOTIFICATION_REFUSED,
+                    ),
+                    StatusCode::OK,
+                );
+            }
             // Spec: a notification receives no response. Run it for effect and
             // answer 204 — the previous cut returned an HTTP-200 `-32600`.
             let _ = dispatch(&state, &caller, &method, params, None).await;
@@ -768,6 +810,14 @@ async fn dispatch(
         // ADR R22 204 stands; nothing else changes.
         super::ITEMS_LIST_METHOD if notification => Ok(serde_json::Value::Null),
         super::ITEMS_LIST_METHOD => items_list(state, caller).await,
+        // Story 19.16d AC1(a) — the fifth arm, a write. ⚠ A notification never
+        // reaches it: `handle_jsonrpc` refuses that form first (`P3`). The
+        // principal is derived HERE from the authenticated caller and handed
+        // down; ⛔ nothing in `params` can name it (`AC1(c)`, R21).
+        super::ITEMS_RETRACT_METHOD => {
+            let principal = caller.key.pseudonymous_peer_id();
+            items_retract(state, principal, caller.trust, &params, echo).await
+        }
         _ => Err(JsonRpcErrorResponse::new(
             echo,
             CODE_METHOD_NOT_FOUND,
@@ -1514,6 +1564,13 @@ async fn items_list(
             if item.state.acknowledged_before_removal() == Some(true) {
                 row["acknowledgedBeforeRemoval"] = serde_json::Value::Bool(true);
             }
+            // Story 19.16d AC4(a) — the retract mark, the same ADDITIVE
+            // discipline: emitted only when present, and ⛔ `state` untouched.
+            // A new `state` token would be WITHHELD by every 19.16b board
+            // (`parse_peer_reply` names three states and withholds the rest).
+            if let Some(retracted_at_ms) = item.retracted_at_ms {
+                row["retractedAtMs"] = serde_json::Value::from(retracted_at_ms);
+            }
             row
         })
         .collect::<Vec<_>>();
@@ -1521,14 +1578,203 @@ async fn items_list(
         "items": items,
         // Story 19.16b AC2(c) — fail-closed on authority, fail-LOUD on
         // legibility. On a loopback bind `authenticate` returns
-        // every local caller is one principal. That is accurate (they all
+        // `SubmitterKey::loopback()` for every caller, so every local caller is
+        // one principal. That is accurate (they all
         // already run code on this machine) and it buys the read nothing to
         // refuse it — but a board that renders per-recipient attribution over
         // a collapsed principal would claim precision the substrate does not
         // have. One rule, keyed off the trust the caller already carries; ⛔ no
         // second code path, and ⛔ never only in a log.
-        "principalCollapsed": matches!(caller.trust, SubmitterTrust::Loopback),
+        "principalCollapsed": principal_collapsed(caller.trust),
     }))
+}
+
+/// Story 19.16b AC2(c) / 19.16d AC2(c) — the collapse disclosure's one rule,
+/// read by the list's response, the retract's response and the retract's
+/// durable record alike. `true` exactly when the caller reached this host over
+/// a loopback bind, where `authenticate` answers `SubmitterKey::loopback()`
+/// for everyone. ⛔ A legibility statement about attribution, never a claim
+/// about who acted; ⛔ no second code path computes it.
+fn principal_collapsed(trust: SubmitterTrust) -> bool {
+    matches!(trust, SubmitterTrust::Loopback)
+}
+
+// ── x-rustain-items/retract ─────────────────────────────────────────────────
+
+/// Mark the calling principal's own item as retracted by its sender (Story
+/// 19.16d, AC1–AC3). The recipient host's half of `DF-18-4-CROSSHOST-RETRACT`.
+///
+/// # What it guarantees, in order
+///
+/// 1. **The item id is the only parameter** (`AC1(c)`), hand-read from the
+///    `Value` — ⛔ no closed schema, so an unknown field from a newer build is
+///    ignored (`AD-1826`). The principal arrives from `dispatch`, derived from
+///    the authenticated caller; ⛔ nothing in `params` can name it.
+/// 2. **Authority before any mutation** (`AC1(g)`, NFR70): the pure
+///    `admit_item_retract` refuses under `deny` and `ask` before the fold or
+///    the journal is touched.
+/// 3. **Not-yours is byte-identical to never-existed** (`AC1(d)`, R21): the
+///    lookup is by the full `(principal, item)` address, and both misses leave
+///    through ONE `JsonRpcErrorResponse::new` site with ONE message.
+/// 4. **Lookup first, refresh only on a miss, then ONE critical section**
+///    (`P4`): an unowned or fabricated id costs the O(1) tail probe and never
+///    takes the fold lock; an owned id takes it once for decide + append +
+///    apply, so N concurrent retracts of one item append exactly one record.
+///    ⚠ Inside the section the fold is caught up to the journal first (the
+///    lock-held half of the refresh, which never re-takes the non-reentrant
+///    lock): without it an operator's `/team remove` — journalled on the
+///    daemon rail, invisible to this fold until the next refresh — would let a
+///    retract mark a tombstone `Q3` rules must refuse.
+/// 5. **Journal first, fail closed** (`AD-1827`, `AD-1803`): the durable
+///    record is appended before the in-memory `apply`; an append failure
+///    refuses and leaves the item unmarked.
+/// 6. **Idempotent on the live states, refused on a tombstone** (`AC1(e)`,
+///    `Q3`), both decided by `RecipientItemView::retract_outcome` — the one
+///    expression of the rule the fold also applies.
+///
+/// ⛔ Private, and reachable only through `dispatch`: a test cannot call it
+/// directly, which keeps the front-door bypass structurally unavailable
+/// (Rule 2).
+async fn items_retract(
+    state: &ServerState,
+    principal: PeerId,
+    trust: SubmitterTrust,
+    params: &serde_json::Value,
+    echo: serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcErrorResponse> {
+    use std::sync::atomic::Ordering;
+
+    let item_id = params
+        .get("itemId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params")
+        })?;
+    admit_item_retract(state.policy, trust).map_err(|reason| {
+        JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason)
+    })?;
+
+    let address = ItemAddress::from_a2a_ingress(principal, ItemId::from_replay(item_id));
+    let not_found = || JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, ITEM_NOT_FOUND);
+    let internal_error =
+        || JsonRpcErrorResponse::new(echo.clone(), CODE_INTERNAL_ERROR, "Internal error");
+
+    if state.recipient_items.get(&address).is_none() {
+        if !refresh_recipient_items(state).await {
+            return Err(internal_error());
+        }
+        if state.recipient_items.get(&address).is_none() {
+            return Err(not_found());
+        }
+    }
+
+    let fold_guard = state.recipient_items_fold.lock().await;
+    let Some(latest) = probe_journal_tail(state).await else {
+        return Err(internal_error());
+    };
+    if !fold_journal_growth(state, &fold_guard, latest).await {
+        return Err(internal_error());
+    }
+    let item = state.recipient_items.get(&address).ok_or_else(not_found)?;
+    let collapsed = principal_collapsed(trust);
+    let retracted_at_ms = match item.retract_outcome() {
+        RetractOutcome::Mark => wall_now_ms(),
+        RetractOutcome::AlreadyMarked => {
+            return Ok(retract_result(
+                item_id,
+                item.retracted_at_ms,
+                true,
+                collapsed,
+            ));
+        }
+        RetractOutcome::RefusedRemoved => {
+            return Err(JsonRpcErrorResponse::new(
+                echo.clone(),
+                CODE_ITEM_REMOVED,
+                ITEM_REMOVED,
+            ));
+        }
+    };
+    let retracted = RoomEvent::RecipientItemRetracted {
+        address: address.clone(),
+        retracted_at_ms,
+        principal_collapsed: collapsed,
+    };
+    let watermark = state.recipient_items_seq.load(Ordering::Acquire);
+    if let Err(error) = state
+        .transparency
+        .record_room_event(retracted.clone())
+        .await
+    {
+        tracing::error!(%error, "refusing an A2A item retract: its record could not be journaled");
+        return Err(internal_error());
+    }
+
+    // The daemon rail and another process append without taking
+    // `recipient_items_fold`. Apply in place only when the retract is provably
+    // the journal's sole new line. Otherwise replay the durable order before
+    // answering: a removal immediately before this record must refuse the
+    // mark, while a removal immediately after it preserves the landed mark.
+    let Some(appended) = watermark.checked_add(1) else {
+        return Err(internal_error());
+    };
+    let Some(latest) = probe_journal_tail(state).await else {
+        return Err(internal_error());
+    };
+    if latest == appended {
+        state.recipient_items.apply(&retracted);
+        state.recipient_items_seq.store(appended, Ordering::Release);
+    } else if !fold_journal_growth(state, &fold_guard, latest).await {
+        return Err(internal_error());
+    }
+
+    let item = state
+        .recipient_items
+        .get(&address)
+        .ok_or_else(internal_error)?;
+    let persisted_at_ms = item.retracted_at_ms;
+    let persisted_outcome = item.retract_outcome();
+    drop(fold_guard);
+    match persisted_at_ms {
+        Some(stamp) => Ok(retract_result(
+            item_id,
+            Some(stamp),
+            stamp != retracted_at_ms,
+            collapsed,
+        )),
+        None if persisted_outcome == RetractOutcome::RefusedRemoved => Err(
+            JsonRpcErrorResponse::new(echo.clone(), CODE_ITEM_REMOVED, ITEM_REMOVED),
+        ),
+        None => Err(internal_error()),
+    }
+}
+
+/// The retract's success payload. `alreadyRetracted` tells a repeated call
+/// from the one that landed the mark (the sender renders them differently);
+/// `principalCollapsed` is the same disclosure the list carries.
+fn retract_result(
+    item_id: &str,
+    retracted_at_ms: Option<i64>,
+    already_retracted: bool,
+    principal_collapsed: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "itemId": item_id,
+        "retractedAtMs": retracted_at_ms,
+        "alreadyRetracted": already_retracted,
+        "principalCollapsed": principal_collapsed,
+    })
+}
+
+/// This host's wall clock, the only source of a retract's stamp (⛔ never the
+/// sender's). A pre-epoch clock yields `0`, which the fold keeps as `Some(0)`.
+fn wall_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Re-fold `recipient_items` from the durable journal when it has grown.
@@ -1545,8 +1791,9 @@ async fn items_list(
 /// ⛔ Not a write: `load_entries` is the same read-only reader `serve` uses.
 /// The `seq` watermark makes a read with no new rows cost one O(1) tail probe
 /// and no fold, mirroring the shipped `ConsentGate::refresh_projection`. A
-/// load failure keeps the cached fold and warns — an unavailable journal must
-/// not turn a read into an error the sender cannot act on.
+/// load failure keeps the cached fold and warns for reads; callers performing
+/// a write use the return value to fail closed instead of deciding on stale
+/// state.
 ///
 /// 19.16b review hardening, two parts:
 /// - **Probe before loading.** `latest_seq` is the journal's chunked tail
@@ -1556,30 +1803,63 @@ async fn items_list(
 ///   critical section takes `recipient_items_fold`, the same lock the ingress
 ///   holds across its append + `apply`, so a refresh can neither erase a
 ///   just-applied item nor strand the watermark ahead of the fold.
-async fn refresh_recipient_items(state: &ServerState) {
+///
+/// Returns whether the projection is authoritative through the observed
+/// journal head.
+async fn refresh_recipient_items(state: &ServerState) -> bool {
     use std::sync::atomic::Ordering;
 
-    let latest = match state.transparency.latest_seq().await {
-        Ok(latest) => latest,
-        Err(error) => {
-            tracing::warn!(%error, "recipient-item projection refresh failed; serving cached fold");
-            return;
-        }
+    let Some(latest) = probe_journal_tail(state).await else {
+        return false;
     };
     if latest <= state.recipient_items_seq.load(Ordering::Acquire) {
-        return;
+        return true;
     }
-    let _fold_guard = state.recipient_items_fold.lock().await;
+    let fold_guard = state.recipient_items_fold.lock().await;
+    fold_journal_growth(state, &fold_guard, latest).await
+}
+
+/// The journal's last valid `seq`, or `None` — warned — when the tail probe
+/// fails. Read-only callers may serve the cached fold; mutating callers must
+/// fail closed.
+async fn probe_journal_tail(state: &ServerState) -> Option<u64> {
+    match state.transparency.latest_seq().await {
+        Ok(latest) => Some(latest),
+        Err(error) => {
+            tracing::warn!(%error, "recipient-item projection refresh failed; serving cached fold");
+            None
+        }
+    }
+}
+
+/// The lock-held half of [`refresh_recipient_items`]: re-fold when the journal
+/// has grown past the watermark.
+///
+/// Takes the held `recipient_items_fold` guard as a witness and never locks
+/// it: the mutex is a non-reentrant `tokio::sync::Mutex`, and this split is
+/// what lets `items_retract` catch its fold up **inside** its own critical
+/// section without the self-deadlock Story 19.16d `P4` measured (a hang that
+/// only appears once the journal has grown, and that would also wedge
+/// `message/send`'s ingress, which takes the same lock).
+///
+/// Returns whether the projection reached at least `latest`.
+async fn fold_journal_growth(
+    state: &ServerState,
+    _held: &tokio::sync::MutexGuard<'_, ()>,
+    latest: u64,
+) -> bool {
+    use std::sync::atomic::Ordering;
+
     // Re-check under the lock: a concurrent refresh may have folded past
     // `latest` while we waited.
     if latest <= state.recipient_items_seq.load(Ordering::Acquire) {
-        return;
+        return true;
     }
     let entries = match state.transparency.load_entries().await {
         Ok(entries) => entries,
         Err(error) => {
             tracing::warn!(%error, "recipient-item projection refresh failed; serving cached fold");
-            return;
+            return false;
         }
     };
     let max_seq = entries.last().map_or(0, |entry| entry.seq);
@@ -1587,6 +1867,7 @@ async fn refresh_recipient_items(state: &ServerState) {
         state.recipient_items.replace_from(&entries);
         state.recipient_items_seq.store(max_seq, Ordering::Release);
     }
+    state.recipient_items_seq.load(Ordering::Acquire) >= latest
 }
 
 // ── projection helpers ──────────────────────────────────────────────────────
@@ -1712,6 +1993,44 @@ pub async fn run(
     result
 }
 
+/// Story 19.16d `Q1` (owner answer 2+4 = A) — the retract's ownership check is
+/// principal equality, and off loopback the principal is a digest of the
+/// **presented key**: nothing binds a key to a peer, and `verify` cannot say
+/// which configured key matched. ⛔ A legibility statement, never a security
+/// claim; the real control is `server.admission` (`AC1(g)`).
+const CREDENTIAL_SCOPED_RETRACT_DISCLOSURE: &str = "A2A item retraction: ownership is \
+     credential-scoped, not peer-scoped — every caller presenting a configured API key is one \
+     principal, so where peers share a key any of them can retract items another sent. A \
+     shared-key deployment is unsafe for this write; keep `server.admission` at \"deny\" (the \
+     default) there.";
+
+/// Story 19.16d `P7` (owner answer 5 = A: accept, state, file, WARN — ⛔ never
+/// refuse). The same design seen from the other side: rotation to a distinct
+/// key mints a new principal.
+const KEY_ROTATION_ORPHANS_RETRACT_WARNING: &str = "A2A item retraction: more than one API key \
+     is configured, and an item belongs to the key it was sent with — a peer that rotates to \
+     another key can no longer retract the items it sent under the old one.";
+
+/// The startup lines `run_inner` emits for the retract's ownership posture.
+/// Pure, so the posture → disclosure mapping is provable without a socket.
+fn retract_ownership_disclosures(auth: Option<&A2aServerAuth>) -> Vec<&'static str> {
+    match auth {
+        None => Vec::new(),
+        Some(A2aServerAuth::ApiKey { keys }) => {
+            let mut lines = vec![CREDENTIAL_SCOPED_RETRACT_DISCLOSURE];
+            let has_distinct_rotation_key = keys.first().is_some_and(|first| {
+                keys[1..]
+                    .iter()
+                    .any(|candidate| candidate.expose_secret() != first.expose_secret())
+            });
+            if has_distinct_rotation_key {
+                lines.push(KEY_ROTATION_ORPHANS_RETRACT_WARNING);
+            }
+            lines
+        }
+    }
+}
+
 async fn run_inner(
     addr: String,
     app_config: AppConfig,
@@ -1767,6 +2086,9 @@ async fn run_inner(
         }
         Some(A2aServerAuth::ApiKey { keys })
     };
+    for line in retract_ownership_disclosures(auth.as_ref()) {
+        tracing::warn!("{line}");
+    }
     let tls = match server_config
         .as_ref()
         .and_then(|config| config.tls.as_ref())
@@ -2018,6 +2340,67 @@ mod tests {
                 adr.contains(claim),
                 "ADR-17-4a-01 must state {claim:?} — the enforced profile and the ADR have drifted"
             );
+        }
+    }
+
+    /// Story 19.16d AC2(c) — the collapse disclosure's one rule, with both
+    /// `SubmitterTrust` values (`P13.3`/`Q5`: the in-crate positive control
+    /// for `M09`). The wire can only ever produce `Loopback`; this is where the
+    /// `ApiKey` branch is proven to answer `false`, so the flag discriminates
+    /// rather than saying "collapsed" to everyone.
+    #[test]
+    fn the_collapse_disclosure_is_present_on_loopback_and_absent_behind_a_key() {
+        assert!(principal_collapsed(SubmitterTrust::Loopback));
+        assert!(!principal_collapsed(SubmitterTrust::ApiKey));
+    }
+
+    /// Story 19.16d `Q1` + owner answer 5 — the startup posture lines: none
+    /// without inbound keys, the credential-scoping disclosure with any key,
+    /// and the rotation warning only when more than one distinct key value is
+    /// configured (⛔ a warning, never a refusal). ⛔ The wording ceiling binds
+    /// both.
+    #[test]
+    fn the_retract_ownership_disclosure_follows_the_configured_key_set() {
+        let keys = |count: usize| A2aServerAuth::ApiKey {
+            keys: (0..count)
+                .map(|index| format!("key-{index}").into())
+                .collect(),
+        };
+        assert!(retract_ownership_disclosures(None).is_empty());
+        assert_eq!(
+            retract_ownership_disclosures(Some(&keys(1))),
+            vec![CREDENTIAL_SCOPED_RETRACT_DISCLOSURE]
+        );
+        let duplicate_names_same_value = A2aServerAuth::ApiKey {
+            keys: vec!["same-key".into(), "same-key".into()],
+        };
+        assert_eq!(
+            retract_ownership_disclosures(Some(&duplicate_names_same_value)),
+            vec![CREDENTIAL_SCOPED_RETRACT_DISCLOSURE],
+            "two configured names resolving to one credential do not create a rotation boundary"
+        );
+        assert_eq!(
+            retract_ownership_disclosures(Some(&keys(2))),
+            vec![
+                CREDENTIAL_SCOPED_RETRACT_DISCLOSURE,
+                KEY_ROTATION_ORPHANS_RETRACT_WARNING
+            ]
+        );
+        for line in [
+            CREDENTIAL_SCOPED_RETRACT_DISCLOSURE,
+            KEY_ROTATION_ORPHANS_RETRACT_WARNING,
+        ] {
+            let lower = line.to_ascii_lowercase();
+            for banned in [
+                "authenticated",
+                "tamper",
+                "signed",
+                "audit",
+                "proof",
+                "evidence",
+            ] {
+                assert!(!lower.contains(banned), "{banned:?} in {line:?}");
+            }
         }
     }
 }
