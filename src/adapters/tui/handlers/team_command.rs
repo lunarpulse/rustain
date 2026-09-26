@@ -44,6 +44,10 @@ pub struct TeamLogInput {
     /// presented block contributes exactly this boundary — never a later
     /// observed head.
     pub snapshot_max_seq: u64,
+    /// Story 19.16h — the durable seen preference's reset revision, loaded
+    /// **before** these rows were read; `None` when it was untrusted or could
+    /// not be loaded (the projection's revision is used instead).
+    pub reset_revision: Option<u64>,
     /// Story 19.16g — the client presenting the block.
     pub rail: LogRail,
 }
@@ -350,7 +354,9 @@ pub(crate) fn team_command(
             .is_none()
             .then_some(crate::domain::models::LogVisitCandidate {
                 seen_through: input.snapshot_max_seq,
-                reset_revision: state.log_awareness.reset_revision,
+                reset_revision: input
+                    .reset_revision
+                    .unwrap_or(state.log_awareness.reset_revision),
             });
     out
 }
@@ -860,6 +866,7 @@ mod tests {
                 divergence: None,
                 export: None,
                 snapshot_max_seq: 0,
+                reset_revision: None,
                 rail: LogRail::Standalone,
             },
         );
@@ -883,6 +890,7 @@ mod tests {
                 divergence: Some("sequence gap: expected 2, found 3".to_owned()),
                 export: None,
                 snapshot_max_seq: 1,
+                reset_revision: None,
                 rail: LogRail::Standalone,
             },
         );
@@ -909,6 +917,7 @@ mod tests {
                     divergence: None,
                     export: None,
                     snapshot_max_seq: 1,
+                    reset_revision: None,
                     rail: LogRail::Standalone,
                 },
             );

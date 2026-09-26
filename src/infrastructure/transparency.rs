@@ -53,6 +53,13 @@ impl TransparencyService {
         Self { reader, workspace }
     }
 
+    /// The workspace this service reads and exports for (Story 19.16h: the
+    /// log-visit binding loads the same workspace's seen preference).
+    #[must_use]
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
     /// Where an export would be written.
     ///
     /// # Errors

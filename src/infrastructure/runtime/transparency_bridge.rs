@@ -38,11 +38,14 @@ pub(crate) async fn refresh_panel(app_state: &AppState, state: &mut TuiState) {
         state.transparency_panel.pending_visit = None;
         return;
     };
+    // Story 19.16h: resolved BEFORE the read (see `durable_reset_revision`).
+    let revision = durable_reset_revision(service).await;
     match service.report().await {
         Ok(report) => {
             let now = chrono::Utc::now().timestamp_millis();
             // Story 19.16g: bound to THIS report, not a later head.
-            state.transparency_panel.pending_visit = Some(visit_candidate(&report.rows, state));
+            state.transparency_panel.pending_visit =
+                Some(visit_candidate(&report.rows, revision, state));
             state.transparency_panel.apply_report(report, now);
         }
         Err(error) => {
@@ -54,15 +57,41 @@ pub(crate) async fn refresh_panel(app_state: &AppState, state: &mut TuiState) {
 }
 
 /// Story 19.16g — the seen-through boundary a freshly read report would
-/// contribute once presented: its maximum row `seq`, bound to the local reset
-/// revision in effect at read time.
+/// contribute once presented: its maximum row `seq`, bound to the reset
+/// revision loaded before the read (Story 19.16h), or to the observer's
+/// projection when that load was not trusted.
 fn visit_candidate(
     rows: &[TransparencyRow],
+    revision: Option<u64>,
     state: &TuiState,
 ) -> crate::domain::models::LogVisitCandidate {
     crate::domain::models::LogVisitCandidate {
         seen_through: rows.iter().map(|row| row.seq).max().unwrap_or(0),
-        reset_revision: state.log_awareness.reset_revision,
+        reset_revision: revision.unwrap_or(state.log_awareness.reset_revision),
+    }
+}
+
+/// Story 19.16h — the reset revision a log read about to start belongs to:
+/// the durable seen preference, loaded **before** the journal read. The
+/// observer's projection lags a fresh start and another client's confirmed
+/// reset, and a visit bound to it is rejected as `Stale`. Order is the
+/// soundness argument: a reset is confirmed only after the replacement
+/// journal exists, so a load that sees it precedes a read of the new
+/// journal, while a reset confirmed after the load leaves the candidate on
+/// the older revision — rejected, never old rows labelled with the new one.
+///
+/// `None` when the preference is untrusted or the load failed; the caller
+/// then binds the projection (19.16g behavior).
+async fn durable_reset_revision(
+    service: &crate::infrastructure::transparency::TransparencyService,
+) -> Option<u64> {
+    use crate::infrastructure::transparency_awareness::{SeenLoad, SeenStore};
+
+    let store = SeenStore::for_workspace(service.workspace());
+    match tokio::task::spawn_blocking(move || store.load()).await {
+        Ok(SeenLoad::Valid(boundary)) => Some(boundary.reset_revision),
+        Ok(SeenLoad::Missing) => Some(0),
+        Ok(SeenLoad::Untrusted(_)) | Err(_) => None,
     }
 }
 
@@ -171,10 +200,18 @@ pub(crate) async fn team_log_input_from(
         divergence,
         export: None,
         snapshot_max_seq: 0,
+        reset_revision: None,
         rail,
     };
     let Some(service) = service else {
         return failed(NO_JOURNAL.to_owned(), None);
+    };
+    // Filtered views cannot contribute a visit; load only for an unfiltered
+    // read, and always BEFORE that read (Story 19.16h).
+    let reset_revision = if args.filter.is_none() {
+        durable_reset_revision(service).await
+    } else {
+        None
     };
     let report = match service.report().await {
         Ok(report) => report,
@@ -203,6 +240,7 @@ pub(crate) async fn team_log_input_from(
         divergence,
         export,
         snapshot_max_seq: report.rows.iter().map(|row| row.seq).max().unwrap_or(0),
+        reset_revision,
         rail,
     }
 }
@@ -2657,9 +2695,9 @@ mod log_awareness_tests {
     use ratatui::layout::Rect;
 
     use super::*;
-    use crate::adapters::tui::state::{LogAwareness, TabRenderState};
+    use crate::adapters::tui::state::{LogAwareness, LogAwarenessView, TabRenderState};
     use crate::adapters::tui::widgets::chat_pane;
-    use crate::domain::models::{Conversation, StreamingState};
+    use crate::domain::models::{Conversation, LogVisitCandidate, StreamingState};
     use crate::infrastructure::transparency_awareness::test_support::append_rows;
     use crate::infrastructure::transparency_awareness::{
         LogAwarenessObserver, SeenBoundary, SeenLoad, SeenStore,
@@ -2795,6 +2833,92 @@ mod log_awareness_tests {
 
     fn stored(workspace: &std::path::Path) -> SeenLoad {
         SeenStore::for_workspace(workspace).load()
+    }
+
+    fn valid(seen_seq: u64, reset_revision: u64) -> SeenLoad {
+        SeenLoad::Valid(SeenBoundary {
+            seen_seq,
+            reset_revision,
+        })
+    }
+
+    /// Story 19.16h — replace the journal with a shorter history of `rows`
+    /// rows (the K11 fixture's replacement).
+    async fn replace_journal(workspace: &std::path::Path, rows: usize) {
+        let rooms = workspace.join(".rustain/rooms");
+        for entry in std::fs::read_dir(&rooms).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        append_rows(workspace, rows).await;
+    }
+
+    /// Story 19.16h — another local client, with its own production
+    /// observer, notices the shorter journal and confirms the reset under the
+    /// preference lock. Returns the revision it persisted.
+    async fn reset_by_another_client(workspace: &std::path::Path, rows: usize) -> u64 {
+        replace_journal(workspace, rows).await;
+        let mut view = LogAwarenessView::default();
+        let mut other = LogAwarenessObserver::for_workspace(workspace);
+        let t0 = Instant::now();
+        for second in 0..2 {
+            other.tick_at(t0 + Duration::from_secs(second), &mut view);
+            other.settle(&mut view).await;
+        }
+        let SeenLoad::Valid(boundary) = stored(workspace) else {
+            panic!("the other client left no valid preference");
+        };
+        assert_eq!(boundary.seen_seq, 0, "the other client confirmed a reset");
+        assert_eq!(view.reset_revision, boundary.reset_revision);
+        boundary.reset_revision
+    }
+
+    /// Story 19.16h — some fresh client reads and presents the whole current
+    /// log after observing it, persisting its head as the boundary.
+    async fn visit_elsewhere(workspace: &std::path::Path) {
+        let mut other = Client::launch(workspace);
+        other.poll().await;
+        other.slash("log").await;
+        other.draw_chat(20, 0);
+        assert_eq!(other.poll().await, LogAwareness::Hidden);
+    }
+
+    /// Story 19.16h K03 — a reader whose read is overtaken by a reset: inside
+    /// `load_entries` it replaces the journal with two rows and confirms the
+    /// reset through the real `SeenStore`, then returns the OLD rows it had
+    /// already read — rows whose maximum `seq` fits the new head.
+    struct ResetDuringRead {
+        workspace: std::path::PathBuf,
+        old: Vec<crate::domain::models::JournalEntry>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::RoomJournalReader for ResetDuringRead {
+        async fn load_entries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::JournalEntry>, crate::domain::ports::RoomJournalError>
+        {
+            replace_journal(&self.workspace, 2).await;
+            let journal =
+                crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                    &self.workspace,
+                );
+            let confirmed = SeenStore::for_workspace(&self.workspace)
+                .confirm_reset(|| {
+                    journal
+                        .probe_blocking()
+                        .map(|probe| probe.head)
+                        .map_err(|error| error.to_string())
+                })
+                .unwrap();
+            assert!(
+                matches!(
+                    confirmed,
+                    crate::infrastructure::transparency_awareness::ResetConfirmation::Reset(_)
+                ),
+                "the reset really confirmed during the read: {confirmed:?}"
+            );
+            Ok(self.old.clone())
+        }
     }
 
     #[tokio::test]
@@ -2999,5 +3123,203 @@ mod log_awareness_tests {
                 reset_revision: 0
             })
         );
+    }
+
+    #[tokio::test]
+    async fn a_stale_revision_visit_from_the_current_journal_still_clears() {
+        // Story 19.16h K01 / M01: the durable revision, loaded before the
+        // read, binds the visit — never the observer's lagging projection.
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        append_rows(ws, 5).await;
+        visit_elsewhere(ws).await;
+        assert_eq!(stored(ws), valid(5, 0));
+        assert_eq!(reset_by_another_client(ws, 2).await, 1);
+
+        // W1 — startup: the sidecar is at revision 1 and a fresh client
+        // presents a visit before its observer completed any observation.
+        // (a) standalone `/team log`.
+        let mut client = Client::launch(ws);
+        client.slash("log").await;
+        client.draw_chat(20, 0);
+        assert_eq!(client.observer.jobs_started(), 0, "not yet observed");
+        assert_eq!(client.state.log_awareness.reset_revision, 0, "stale");
+        assert_eq!(client.poll().await, LogAwareness::Hidden);
+        assert_eq!(stored(ws), valid(2, 1));
+        // (b) the panel.
+        append_rows(ws, 1).await;
+        let mut client = Client::launch(ws);
+        open_panel(&client.app_state, &mut client.state).await;
+        client.draw_panel(20);
+        assert_eq!(client.observer.jobs_started(), 0, "not yet observed");
+        assert_eq!(client.poll().await, LogAwareness::Hidden);
+        assert_eq!(stored(ws), valid(3, 1));
+        // (c) the attached client's local `/team log`.
+        append_rows(ws, 1).await;
+        let mut client = Client::launch(ws);
+        let service = client.app_state.transparency.clone().unwrap();
+        let notices = attached_team_log(&service, &mut client.state, &TeamLogArgs::default()).await;
+        assert!(notices.is_empty(), "{notices:?}");
+        client.draw_chat(20, 0);
+        assert_eq!(client.observer.jobs_started(), 0, "not yet observed");
+        assert_eq!(client.poll().await, LogAwareness::Hidden);
+        assert_eq!(stored(ws), valid(4, 1));
+
+        // W2 — cross-client: A observes revision 1 and idles; B replaces the
+        // journal and confirms revision 2; A reads and presents before its
+        // next observation.
+        let mut a = Client::launch(ws);
+        assert_eq!(a.poll().await, LogAwareness::Hidden);
+        append_rows(ws, 3).await;
+        assert_eq!(a.poll().await, LogAwareness::Unseen(3));
+        a.slash("log").await;
+        a.draw_chat(20, 0);
+        assert_eq!(a.poll().await, LogAwareness::Hidden);
+        assert_eq!(stored(ws), valid(7, 1));
+        assert_eq!(reset_by_another_client(ws, 2).await, 2);
+        assert_eq!(a.state.log_awareness.reset_revision, 1, "A lags B");
+        a.slash("log").await;
+        a.draw_chat(20, 0);
+        assert_eq!(a.poll().await, LogAwareness::Hidden);
+        assert_eq!(stored(ws), valid(2, 2));
+        assert_eq!(a.state.log_awareness.reset_revision, 2, "A adopted it");
+        // Only genuinely newer rows count afterwards.
+        append_rows(ws, 1).await;
+        assert_eq!(a.poll().await, LogAwareness::Unseen(1));
+        // The same window on the panel.
+        assert_eq!(reset_by_another_client(ws, 1).await, 3);
+        assert_eq!(a.state.log_awareness.reset_revision, 2, "A lags B");
+        open_panel(&a.app_state, &mut a.state).await;
+        a.draw_panel(20);
+        assert_eq!(a.poll().await, LogAwareness::Hidden);
+        assert_eq!(stored(ws), valid(1, 3));
+    }
+
+    #[tokio::test]
+    async fn a_candidate_bound_before_a_reset_never_clears_after_it() {
+        // Story 19.16h K02 / M03 — the K11 counterexample: candidates read
+        // against the OLD journal at head 2, the boundary later raised to
+        // 5, the journal replaced by 2 rows and the reset confirmed. Each
+        // candidate's `seen_through` fits the new head; none may clear.
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        append_rows(ws, 2).await;
+        let mut a = Client::launch(ws);
+        assert_eq!(a.poll().await, LogAwareness::Unseen(2));
+        let old = LogVisitCandidate {
+            seen_through: 2,
+            reset_revision: 0,
+        };
+
+        // (1) A `team-log` visit parked with its tab (the two fields
+        // `event_loop::save_active_tab` moves).
+        a.slash("log").await;
+        let parked_blocks = std::mem::take(&mut a.state.feedback_blocks);
+        let parked_visit = a.state.pending_log_visit.take();
+        assert_eq!(parked_visit, Some(old));
+        // (2) A panel visit parked because the panel had no body space.
+        open_panel(&a.app_state, &mut a.state).await;
+        a.draw_panel(2);
+        assert_eq!(a.state.transparency_panel.pending_visit, Some(old));
+        // (3) An observer visit retained across a failed save: the durable
+        // head cannot be read under the preference lock.
+        a.slash("log").await;
+        let journal = ws.join(".rustain/rooms").join(format!(
+            "room-{}.jsonl",
+            crate::infrastructure::paths::workspace_hash(ws)
+        ));
+        let moved = journal.with_extension("moved");
+        std::fs::rename(&journal, &moved).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        a.draw_chat(20, 0);
+        assert_eq!(a.poll().await, LogAwareness::Unavailable);
+        assert_eq!(stored(ws), SeenLoad::Missing, "the save failed");
+        std::fs::remove_dir(&journal).unwrap();
+        std::fs::rename(&moved, &journal).unwrap();
+
+        // The journal grows to 5, another client's visit stores 5, then the
+        // journal is replaced by 2 rows and another client confirms.
+        append_rows(ws, 3).await;
+        visit_elsewhere(ws).await;
+        assert_eq!(stored(ws), valid(5, 0));
+        assert_eq!(reset_by_another_client(ws, 2).await, 1);
+
+        // (3) is retried first: `Stale`, drained, nothing persisted.
+        assert_eq!(a.poll().await, LogAwareness::Unseen(2));
+        assert_eq!(stored(ws), valid(0, 1));
+        // (1) The tab comes back and presents its block.
+        a.state.feedback_blocks = parked_blocks;
+        a.state.pending_log_visit = parked_visit;
+        a.draw_chat(20, 0);
+        assert_eq!(a.poll().await, LogAwareness::Unseen(2));
+        assert_eq!(stored(ws), valid(0, 1));
+        // (2) The panel finally gets body space.
+        a.draw_panel(20);
+        assert_eq!(a.poll().await, LogAwareness::Unseen(2));
+        assert_eq!(stored(ws), valid(0, 1));
+
+        // Positive control: a read made now matches the stored revision and
+        // commits.
+        a.slash("log").await;
+        a.draw_chat(20, 0);
+        assert_eq!(a.poll().await, LogAwareness::Hidden);
+        assert_eq!(stored(ws), valid(2, 1));
+    }
+
+    #[tokio::test]
+    async fn a_reset_confirmed_during_the_read_leaves_the_candidate_stale() {
+        // Story 19.16h K03 / M02: the revision is loaded BEFORE the read, so
+        // a reset confirmed while the read runs leaves the candidate on the
+        // pre-read revision — never old rows labelled with the new one.
+        use crate::domain::ports::RoomJournalReader as _;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        append_rows(ws, 2).await;
+        let old =
+            crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                ws,
+            )
+            .load_entries()
+            .await
+            .unwrap();
+        let reader = Arc::new(ResetDuringRead {
+            workspace: ws.to_path_buf(),
+            old,
+        });
+
+        let mut revision = 0;
+        for surface in ["team log", "panel"] {
+            append_rows(ws, 3).await;
+            visit_elsewhere(ws).await;
+            let SeenLoad::Valid(before) = stored(ws) else {
+                panic!("{surface}: no stored boundary");
+            };
+            assert_eq!(before.reset_revision, revision, "{surface}");
+            assert!(before.seen_seq > 2, "{surface}: a reset can confirm");
+
+            let mut client = Client::launch(ws);
+            client.app_state.transparency = Some(Arc::new(
+                crate::infrastructure::transparency::TransparencyService::new(
+                    reader.clone(),
+                    ws.to_path_buf(),
+                ),
+            ));
+            assert_eq!(client.poll().await, LogAwareness::Hidden, "{surface}");
+            if surface == "panel" {
+                open_panel(&client.app_state, &mut client.state).await;
+                client.draw_panel(20);
+            } else {
+                client.slash("log").await;
+                client.draw_chat(20, 0);
+            }
+            revision += 1;
+            assert_eq!(client.poll().await, LogAwareness::Unseen(2), "{surface}");
+            assert_eq!(
+                stored(ws),
+                valid(0, revision),
+                "{surface}: nothing persisted"
+            );
+        }
     }
 }
