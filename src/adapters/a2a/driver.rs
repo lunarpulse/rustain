@@ -70,6 +70,56 @@ impl TaskClient {
     fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// Read this caller's own recipient-item set on the peer (Story 19.16b
+    /// `AC1`, [`super::ITEMS_LIST_METHOD`]).
+    ///
+    /// On the **inherent** impl, not [`A2aTaskTransport`] (Story 19.16f
+    /// `AC2`, `P11`): both production callers — the board's per-peer read
+    /// ([`super::board::collect_board`]) and the retract's confirm-time preview
+    /// ([`super::send::preview_item_retract`]) — hold the concrete type, and a
+    /// trait method made seven doubles answer for a seam they never exercised.
+    pub async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
+        // ⛔ No parameters: the served verb derives the principal from the
+        // authenticated caller, and a `peerId` parameter would be the
+        // cross-peer enumeration oracle `ADR-17-4a-01` R21 forbids.
+        let request = JsonRpcRequest::new(
+            self.next_id(),
+            super::ITEMS_LIST_METHOD,
+            serde_json::json!({}),
+        );
+        self.client.post_jsonrpc(&self.endpoint, &request).await
+    }
+
+    /// Mark one item on the peer's host as retracted by its sender (Story
+    /// 19.16f `AC2`; the served verb is Story 19.16d's
+    /// [`super::ITEMS_RETRACT_METHOD`]). The sole production caller is the
+    /// accepted retract card's dispatch ([`super::send::retract_item_on_peer`]).
+    ///
+    /// Params are `{"itemId"}` and nothing else — the principal is the
+    /// authenticated caller's, derived server-side. The request carries an
+    /// `id` (`next_id`): the served arm refuses the notification form with
+    /// `-32600`, because a write whose answer nobody reads is a write nobody
+    /// can be told the outcome of. `before_send` runs after every deterministic
+    /// no-I/O refusal, immediately before the request can leave this host.
+    pub async fn retract_item<F, Fut>(
+        &self,
+        item_id: &str,
+        before_send: F,
+    ) -> Result<serde_json::Value, A2aError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let request = JsonRpcRequest::new(
+            self.next_id(),
+            super::ITEMS_RETRACT_METHOD,
+            serde_json::json!({ "itemId": item_id }),
+        );
+        self.client
+            .post_jsonrpc_after(&self.endpoint, &request, before_send)
+            .await
+    }
 }
 
 #[async_trait]
@@ -96,18 +146,6 @@ impl A2aTaskTransport for TaskClient {
             self.next_id(),
             "tasks/cancel",
             serde_json::json!({ "id": task_id }),
-        );
-        self.client.post_jsonrpc(&self.endpoint, &request).await
-    }
-
-    async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
-        // ⛔ No parameters: the served verb derives the principal from the
-        // authenticated caller, and a `peerId` parameter would be the
-        // cross-peer enumeration oracle `ADR-17-4a-01` R21 forbids.
-        let request = JsonRpcRequest::new(
-            self.next_id(),
-            super::ITEMS_LIST_METHOD,
-            serde_json::json!({}),
         );
         self.client.post_jsonrpc(&self.endpoint, &request).await
     }
@@ -194,6 +232,11 @@ pub struct A2aDelegationRuntime {
     /// overlapping N-peer read storms whose notices land out of order.
     /// `tokio::sync` because the guard spans remote reads (`.await`).
     board_in_flight: Arc<tokio::sync::Mutex<()>>,
+    /// The last board this runtime assembled (Story 19.16f `AC10(d)`): a
+    /// landed retract re-renders it with the recipient's mark applied, ⛔
+    /// never by a second fan-out (the refresh floor would refuse one, and a
+    /// retract is not a board read).
+    last_board: Arc<tokio::sync::Mutex<Option<super::board::BoardView>>>,
 }
 
 /// Serializes the running failure count with its notification. Concurrent
@@ -228,6 +271,7 @@ impl A2aDelegationRuntime {
             board_refresh_gate: Arc::new(std::sync::Mutex::new(None)), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: see the field declaration; process-architecture.md §1.2
             journal_reader: None,
             board_in_flight: Arc::new(tokio::sync::Mutex::new(())),
+            last_board: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
     /// Supply the journal's read side for the board's dispatch-ledger probe
@@ -323,6 +367,71 @@ impl A2aDelegationRuntime {
         .await
     }
 
+    /// Remember the board just assembled (Story 19.16f `AC10(d)`).
+    pub(crate) async fn remember_board(&self, view: super::board::BoardView) {
+        *self.last_board.lock().await = Some(view);
+    }
+
+    /// Apply a landed retract's mark to the remembered board and return the
+    /// updated view, or `None` when no board was assembled this session or
+    /// the item is not on it (then nothing re-renders).
+    pub(crate) async fn mark_board_item_retracted(
+        &self,
+        peer: &str,
+        item_id: &str,
+        retracted_at_ms: i64,
+    ) -> Option<super::board::BoardView> {
+        let mut last = self.last_board.lock().await;
+        let view = last.as_mut()?;
+        super::board::apply_retract_mark(view, peer, item_id, retracted_at_ms).then(|| view.clone())
+    }
+
+    /// Journal one item-retract dispatch (Story 19.16f `AC5`, owner gate item
+    /// 4 = B): the shipped `RemoteEnvelopeDispatched` with its additive `act`
+    /// discriminator, durable **before** the POST. `item` is peer-minted text,
+    /// stripped on write. Goes through `emit_room`, so a journal failure is
+    /// latched exactly as the send path latches it.
+    pub(crate) async fn journal_item_retract_dispatch(
+        &self,
+        spec: &A2aPeerSpec,
+        task: Option<&str>,
+        item: &str,
+        bytes: usize,
+    ) {
+        let _ = self
+            .emit_room(RoomEvent::RemoteEnvelopeDispatched {
+                peer: spec.resolved_identity(),
+                task: task.map(|task| sanitize_disclosable(task, MAX_PEER_ID_BYTES)),
+                bytes,
+                act: crate::domain::models::DispatchAct::ItemRetract {
+                    item: sanitize_disclosable(item, MAX_PEER_ID_BYTES),
+                },
+            })
+            .await;
+    }
+
+    /// Journal a retract whose outcome PROVES nothing was marked (Story
+    /// 19.16f `AC5(a)`). ⛔ Never called for a landed, already-marked or
+    /// unknown outcome: a rejection for a write that may have landed is a
+    /// false claim.
+    pub(crate) async fn journal_item_retract_refusal(
+        &self,
+        spec: &A2aPeerSpec,
+        task: Option<&str>,
+        detail: &str,
+    ) {
+        let _ = self
+            .emit_room(RoomEvent::RemoteEnvelopeRejected {
+                peer: spec.resolved_identity(),
+                reason: RejectReason::Policy {
+                    detail: sanitize_disclosable(detail, MAX_SUMMARY_BYTES),
+                },
+                direction: Direction::Outbound,
+                task: task.map(|task| sanitize_disclosable(task, MAX_PEER_ID_BYTES)),
+            })
+            .await;
+    }
+
     /// Claim the board fan-out slot, or fail when one is already running
     /// (19.16b review). The returned guard is held for the whole collect and
     /// dropped when it finishes, so a second `/team board` issued while the
@@ -368,6 +477,10 @@ impl A2aDelegationRuntime {
                 crate::domain::models::RoomEvent::RemoteEnvelopeDispatched {
                     peer,
                     task: Some(task),
+                    // Story 19.16f `AC5(b)`: a retract row carries the item's
+                    // task but dispatched no task — it must not widen the
+                    // board's correlation set.
+                    act: crate::domain::models::DispatchAct::Task,
                     ..
                 },
             ) = &entry.record
@@ -427,6 +540,7 @@ impl A2aDelegationRuntime {
             peer: peer.clone(),
             task: submitted_task.clone(),
             bytes: submitted_bytes,
+            act: crate::domain::models::DispatchAct::Task,
         })
         .await?;
 
@@ -1135,9 +1249,6 @@ mod tests {
             self.cancels.lock().push(task_id.to_owned());
             Ok(serde_json::json!({"kind":"task","id":task_id,"status":{"state":"canceled"}}))
         }
-        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
-            Ok(serde_json::json!({ "items": [], "principalCollapsed": false }))
-        }
     }
 
     struct DeadTransport;
@@ -1157,10 +1268,6 @@ mod tests {
 
         async fn tasks_cancel(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
             panic!("transport failure must not cancel")
-        }
-
-        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
-            Err(A2aError::Request("connection refused".to_owned()))
         }
     }
 
@@ -1233,9 +1340,6 @@ mod tests {
         }
         async fn tasks_cancel(&self, task_id: &str) -> Result<serde_json::Value, A2aError> {
             self.script.tasks_cancel(task_id).await
-        }
-        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
-            self.script.list_items().await
         }
     }
 
@@ -1536,9 +1640,6 @@ mod tests {
             async fn tasks_cancel(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
                 Ok(serde_json::json!({}))
             }
-            async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
-                unreachable!("a refusal keystone never reads the recipient-item set")
-            }
         }
         let error = rt
             .delegate_inner(
@@ -1720,6 +1821,34 @@ mod tests {
         let recorded_task = recorded_task.expect("the refusal has canonical task correlation");
         assert_eq!(recorded_task, disclosable_task_id(&raw_task_id));
         assert!(recorded_task.len() <= MAX_PEER_ID_BYTES);
+    }
+
+    #[tokio::test]
+    async fn retract_journal_rows_bound_and_strip_the_peer_supplied_task() {
+        let (rt, _tree, mut rx) = runtime();
+        let peer = spec("jun-dev", false);
+        let raw_task = format!("task\n{}", "x".repeat(MAX_PEER_ID_BYTES + 10));
+
+        rt.journal_item_retract_dispatch(&peer, Some(&raw_task), "ri_x", 17)
+            .await;
+        rt.journal_item_retract_refusal(&peer, Some(&raw_task), "item retract refused: test")
+            .await;
+
+        let tasks: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| {
+                let AppEvent::DomainEvent(DomainEventPayload::Room(event)) = event else {
+                    return None;
+                };
+                match event {
+                    RoomEvent::RemoteEnvelopeDispatched { task, .. }
+                    | RoomEvent::RemoteEnvelopeRejected { task, .. } => task,
+                    _ => None,
+                }
+            })
+            .collect();
+        let expected = sanitize_disclosable(&raw_task, MAX_PEER_ID_BYTES);
+        assert_eq!(tasks, vec![expected.clone(), expected]);
+        assert!(!tasks[0].contains('\n'));
     }
 
     #[tokio::test]
@@ -1973,9 +2102,6 @@ mod tests {
         async fn tasks_cancel(&self, task_id: &str) -> Result<serde_json::Value, A2aError> {
             Ok(serde_json::json!({"kind":"task","id":task_id,"status":{"state":"canceled"}}))
         }
-        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
-            unreachable!("the hostile-id keystone never reads the recipient-item set")
-        }
     }
 
     /// AC8 — the outbound sink, entered through the production front door
@@ -2137,9 +2263,6 @@ mod tests {
             Err(A2aError::Request("unreachable".to_owned()))
         }
         async fn tasks_cancel(&self, _task_id: &str) -> Result<serde_json::Value, A2aError> {
-            Err(A2aError::Request("unreachable".to_owned()))
-        }
-        async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
             Err(A2aError::Request("unreachable".to_owned()))
         }
     }

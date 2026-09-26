@@ -141,6 +141,12 @@ pub enum A2aError {
     UnsafeUrl { reason: String },
     #[error("A2A request failed: {0}")]
     Request(String),
+    /// The connection was never established (`reqwest::Error::is_connect`),
+    /// so no request byte reached the peer — the one transport failure that
+    /// **proves** a write did not land (Story 19.16f `F5`). ⛔ The Display is
+    /// byte-identical to [`Self::Request`]'s, so no rendered refusal changes.
+    #[error("A2A request failed: {0}")]
+    Connect(String),
     #[error("A2A peer returned HTTP {status}")]
     HttpStatus { status: u16 },
     #[error("A2A redirect is invalid: {0}")]

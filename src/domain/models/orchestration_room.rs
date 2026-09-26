@@ -393,6 +393,34 @@ pub enum PeerFrameAttemptOutcome {
     Unknown,
 }
 
+/// What one `RoomEvent::RemoteEnvelopeDispatched` row dispatched (Story
+/// 19.16f `AC5`, owner gate item 4 = B).
+///
+/// An additive discriminator on the shipped sender row rather than a new
+/// variant: a retract is still one outbound JSON-RPC write to one configured
+/// peer, durable before its POST, so it shares the dispatch/rejection pair.
+/// ⛔ Without it a retract would fold as `task dispatched to peer` — a false
+/// ledger line recording a second dispatch of the original task.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum DispatchAct {
+    /// An A2A `message/send` task — every row written before 19.16f.
+    #[default]
+    Task,
+    /// An `x-rustain-items/retract` of one recipient-minted item on the peer's
+    /// host. `item` is peer-minted text, stripped and bounded on write.
+    ItemRetract { item: String },
+}
+
+impl DispatchAct {
+    /// `true` for the pre-19.16f act. Skipped on write, so a task dispatch
+    /// row stays byte-identical to every line written before the field.
+    #[must_use]
+    pub fn is_task(&self) -> bool {
+        matches!(self, Self::Task)
+    }
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
@@ -451,6 +479,11 @@ pub enum RoomEvent {
         peer: PeerId,
         task: Option<String>,
         bytes: usize,
+        /// What was dispatched (Story 19.16f `AC5`, owner gate item 4 = B).
+        /// ⛔ `#[serde(default)]` is load-bearing: every journal line written
+        /// before this field existed replays as [`DispatchAct::Task`].
+        #[serde(default, skip_serializing_if = "DispatchAct::is_task")]
+        act: DispatchAct,
     },
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.

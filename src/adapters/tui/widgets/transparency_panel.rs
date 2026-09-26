@@ -97,6 +97,16 @@ pub fn render(
     theme: &Theme,
 ) {
     Clear.render(area, buf);
+    // Story 19.16g: eligibility is judged against the view actually painted.
+    // A nonempty search makes this a filtered view, so the open's candidate
+    // is discarded — only a fresh unfiltered open may advance the boundary.
+    if state
+        .search
+        .as_deref()
+        .is_some_and(|search| !search.is_empty())
+    {
+        state.pending_visit = None;
+    }
 
     let is_focused = matches!(
         focus,
@@ -274,6 +284,11 @@ pub fn render(
     drop(rows);
     if list_area.height > 0 {
         state.acknowledge_rendered_boundary();
+        // Story 19.16g: painted with body space. Presented only if the whole
+        // draw then completes (`TuiState::log_visits_presented`).
+        if let Some(visit) = state.pending_visit.take() {
+            state.painted_visit = Some(visit);
+        }
     }
     if let Some(index) = newer_chrome_index {
         body[index] = if state.newer_entries == 0 {

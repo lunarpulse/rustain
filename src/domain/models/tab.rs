@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::models::SessionMeta;
 use crate::domain::models::conversation::{Conversation, generate_conversation_id};
-use crate::domain::models::notice::FeedbackBlock;
+use crate::domain::models::notice::{FeedbackBlock, LogVisitCandidate};
 use crate::domain::models::session::{SessionManager, SessionState};
 use crate::domain::models::stream::StreamingState;
 use crate::domain::models::view_state::ViewState;
@@ -46,6 +46,10 @@ pub struct TabState {
     pub focused_tool_id: Option<String>,
     pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
     pub active_feedback_id: Option<String>,
+    /// Story 19.16g — the unpresented seen-through boundary of this tab's
+    /// `team-log` block. Moves with the block, so an inactive tab's visit is
+    /// committed only when that tab actually presents it.
+    pub pending_log_visit: Option<LogVisitCandidate>,
     pub total_content_height: usize,
     pub pending_anchor: Option<usize>,
     pub turn_queue: TurnQueue,
@@ -126,6 +130,7 @@ impl TabState {
             focused_tool_id: None,
             feedback_blocks: BTreeMap::new(),
             active_feedback_id: None,
+            pending_log_visit: None,
             total_content_height: 0,
             pending_anchor: None,
             turn_queue: TurnQueue::default(),
@@ -197,6 +202,7 @@ impl TabState {
             focused_tool_id: None,
             feedback_blocks: BTreeMap::new(),
             active_feedback_id: None,
+            pending_log_visit: None,
             total_content_height: 0,
             pending_anchor: None,
             turn_queue: TurnQueue::default(),

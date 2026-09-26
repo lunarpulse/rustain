@@ -560,13 +560,171 @@ impl WorkspaceJournalReader {
         let (entries, _, _) = parse_journal(&self.path)?;
         Ok(flatten_batches(entries))
     }
+
+    /// Story 19.16g — the cheap head probe **with** the identity of the file
+    /// it read. Never creates the journal or its lock; a missing journal is
+    /// the empty history (`head == 0`, no stamp).
+    ///
+    /// The head is the tail reader's last valid line, so a malformed suffix
+    /// makes this probe not worst-case O(1), and an interior defect is
+    /// invisible to it — which is why callers compare the stamp as well.
+    ///
+    /// # Errors
+    ///
+    /// I/O failure, or an unlocked legacy journal that changed mid-read.
+    pub fn probe_blocking(&self) -> Result<JournalProbe, JournalError> {
+        let Some(mut observed) = self.open_observed()? else {
+            return Ok(JournalProbe::default());
+        };
+        let len = observed.before.len;
+        let head = latest_valid_seq_in(&mut observed.file, len)?;
+        let stamp = observed.finish()?;
+        Ok(JournalProbe {
+            head,
+            stamp: Some(stamp),
+        })
+    }
+
+    /// Story 19.16g — one full structural read, returning the entries with
+    /// the head and file stamp **of this read**: never a separately probed
+    /// later head, so an older snapshot is never labelled with a newer file
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`RoomJournalReader::load_entries`] refuses (corrupt
+    /// interior line, unsupported schema, sequence gap), plus an unlocked
+    /// legacy journal that changed mid-read.
+    ///
+    /// [`RoomJournalReader::load_entries`]: crate::domain::ports::RoomJournalReader::load_entries
+    pub fn snapshot_blocking(&self) -> Result<JournalSnapshot, JournalError> {
+        let Some(mut observed) = self.open_observed()? else {
+            return Ok(JournalSnapshot::default());
+        };
+        let mut bytes = Vec::new();
+        observed.file.read_to_end(&mut bytes)?;
+        let stamp = observed.finish()?;
+        let (entries, _, _) = parse_entries(&bytes)?;
+        let head = entries.last().map_or(0, |entry| entry.seq);
+        Ok(JournalSnapshot {
+            entries: flatten_batches(entries),
+            head,
+            stamp: Some(stamp),
+        })
+    }
+
+    /// Open the journal and bracket the read: the writers' existing shared
+    /// lock when its sidecar exists; otherwise (a legacy journal) a
+    /// before/after metadata comparison in [`ObservedJournal::finish`].
+    fn open_observed(&self) -> Result<Option<ObservedJournal>, JournalError> {
+        let file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let lock = FileLock::acquire_existing_shared(&self.lock_path)?;
+        let before = JournalFileStamp::of(&file.metadata()?);
+        Ok(Some(ObservedJournal { file, lock, before }))
+    }
+}
+
+/// Story 19.16g — identity and metadata of the journal file one read
+/// observed. Detects ordinary same-head rewrites (a changed row, an interior
+/// corruption, a replaced file); it is **not** an integrity claim — a
+/// same-size rewrite within the filesystem's timestamp granularity, or a
+/// malicious same-size, same-timestamp one, is outside the unsigned
+/// journal's guarantees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JournalFileStamp {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified_ns: i128,
+    changed_ns: i128,
+}
+
+impl JournalFileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        let nanos = |time: std::io::Result<std::time::SystemTime>| {
+            time.ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(-1, |elapsed| elapsed.as_nanos() as i128)
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                len: metadata.len(),
+                modified_ns: nanos(metadata.modified()),
+                changed_ns: i128::from(metadata.ctime()) * 1_000_000_000
+                    + i128::from(metadata.ctime_nsec()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                device: 0,
+                inode: 0,
+                len: metadata.len(),
+                modified_ns: nanos(metadata.modified()),
+                changed_ns: 0,
+            }
+        }
+    }
+}
+
+/// The head a cheap tail probe saw, with the file it came from. `stamp` is
+/// `None` only for a missing journal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JournalProbe {
+    pub head: u64,
+    pub stamp: Option<JournalFileStamp>,
+}
+
+/// One completed full read: its entries plus the head and stamp **of that
+/// read**.
+#[derive(Clone, Debug, Default)]
+pub struct JournalSnapshot {
+    pub entries: Vec<JournalEntry>,
+    pub head: u64,
+    pub stamp: Option<JournalFileStamp>,
+}
+
+struct ObservedJournal {
+    file: std::fs::File,
+    lock: Option<FileLock>,
+    before: JournalFileStamp,
+}
+
+impl ObservedJournal {
+    /// Close the read bracket. Under the writers' shared lock the file cannot
+    /// change; an unlocked legacy read is accepted only when the metadata
+    /// before and after agree.
+    fn finish(self) -> Result<JournalFileStamp, JournalError> {
+        if self.lock.is_none() {
+            let after = JournalFileStamp::of(&self.file.metadata()?);
+            if after != self.before {
+                return Err(JournalError::Io(std::io::Error::other(
+                    "the journal changed during an unlocked read; retry",
+                )));
+            }
+        }
+        Ok(self.before)
+    }
 }
 
 fn latest_valid_seq(path: &Path) -> Result<u64, JournalError> {
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    latest_valid_seq_in(&mut file, len)
+}
+
+fn latest_valid_seq_in(file: &mut std::fs::File, len: u64) -> Result<u64, JournalError> {
     const CHUNK_BYTES: u64 = 8 * 1024;
 
-    let mut file = std::fs::File::open(path)?;
-    let mut position = file.metadata()?.len();
+    let mut position = len;
     let mut suffix = Vec::new();
 
     while position > 0 {

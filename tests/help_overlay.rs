@@ -404,6 +404,7 @@ fn test_status_bar_renders_hint() {
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
         })
         .unwrap();
@@ -467,6 +468,7 @@ fn test_status_bar_no_hint_when_none() {
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
         })
         .unwrap();

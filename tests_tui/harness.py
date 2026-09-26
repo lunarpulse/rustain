@@ -147,6 +147,10 @@ class RustainTUI:
     isolated without mutating ``os.environ`` (xdist-safe).
     """
 
+    extra_args: list[str] | None = None
+    """Arguments appended after the binary (and ``--new``), e.g.
+    ``["daemon", "attach"]`` to drive the daemon-attached client."""
+
     _child: pexpect.spawn | None = field(default=None, init=False, repr=False)
     _tmpdir: tempfile.TemporaryDirectory | None = field(
         default=None, init=False, repr=False
@@ -227,6 +231,8 @@ class RustainTUI:
         args = [str(self._binary)]
         if self.fresh:
             args.append("--new")
+        if self.extra_args:
+            args.extend(self.extra_args)
 
         # Initialize pyte virtual terminal — use Stream (str) since pexpect
         # is configured with encoding="utf-8" which returns str, not bytes.

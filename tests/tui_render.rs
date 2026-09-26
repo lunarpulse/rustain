@@ -76,7 +76,8 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     DensityMode::Focus,
                 false,
                     None,
-                );
+                rustain::adapters::tui::state::LogAwareness::Hidden,
+);
                 input_box::render(
                     frame,
                     app_layout.input_area,

@@ -131,6 +131,11 @@ pub enum InputAction {
     PeerAddConfirm,
     /// Story 18.4b (AC3): cancel the pending `/peer add`. Writes nothing.
     PeerAddDecline,
+    /// Story 19.16f (AC4): accept the ARMED `/team retract` card — the only
+    /// path to the cross-host write. Never produced by a disarmed card.
+    TeamRetractConfirm,
+    /// Story 19.16f (AC4): cancel the `/team retract` card. Sends nothing.
+    TeamRetractDecline,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -805,6 +810,23 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         return match c {
             'y' => InputAction::PeerAddConfirm,
             'n' => InputAction::PeerAddDecline,
+            _ => InputAction::Consumed,
+        };
+    }
+
+    // Story 19.16f (AC4): `/team retract` confirm key intercept — the PeerAdd
+    // shape (slot AND focus, its own two keys, every other key consumed) plus
+    // the card's own `armed` flag. ⛔ On a disarmed card `y` is `Consumed`,
+    // never `Ignored` (which would fall through into the input buffer), and
+    // never the confirm: the confirm-time read did not verify the item, or it
+    // is already removed on the peer's host.
+    if let Some(pending) = state.pending_team_retract.as_ref()
+        && state.focus
+            == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract))
+    {
+        return match c {
+            'y' if pending.armed => InputAction::TeamRetractConfirm,
+            'n' => InputAction::TeamRetractDecline,
             _ => InputAction::Consumed,
         };
     }
@@ -2090,6 +2112,14 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                     == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd))
             {
                 return InputAction::PeerAddDecline;
+            }
+            // Story 19.16f (AC4): Esc on the `/team retract` card → cancel,
+            // armed or not. The card paints `[n] Cancel (Esc)`.
+            if state.pending_team_retract.is_some()
+                && state.focus
+                    == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract))
+            {
+                return InputAction::TeamRetractDecline;
             }
             // Story 10.5: Esc on delegation card → cancel plan at this task
             if state.pending_delegation_card.is_some() {
@@ -4238,6 +4268,11 @@ mod tests {
             Row {
                 label: "Confirmation(PeerAdd) (no special-key interceptor)",
                 setup: confirmation(ConfirmationType::PeerAdd),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Confirmation(TeamRetract) (Esc-only interceptor)",
+                setup: confirmation(ConfirmationType::TeamRetract),
                 expect: CtrlQRowExpectation::Quit,
             },
             // ── Documented Skips: the overlay handler owns the keyboard and

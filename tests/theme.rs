@@ -425,6 +425,7 @@ fn test_tui_renders_with_theme_colors() {
                     rustain::domain::models::visual::DensityMode::Focus,
                     false,
                     None,
+                    rustain::adapters::tui::state::LogAwareness::Hidden,
                 );
             }
         })

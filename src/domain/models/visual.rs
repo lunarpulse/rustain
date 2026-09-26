@@ -175,6 +175,12 @@ pub enum ConfirmationType {
     /// through the apply card's key table, which is consulted mode-blind and
     /// would hand this surface an unpainted `y` that rebinds a pin.
     PeerAdd,
+    /// Confirm `/team retract`: mark one item on a peer's host as retracted
+    /// by its sender (Story 19.16f `AC4`). ⛔ Wired by hand in BOTH key paths
+    /// (`handle_char`, `handle_special_key`): no exhaustive `match` over this
+    /// enum exists, so an unwired variant is zero compile errors and the
+    /// overlay wildcard would swallow every key (`DF-154`, `DF-181`).
+    TeamRetract,
 }
 
 /// Overlay types for modal focus targets.

@@ -188,7 +188,8 @@ pub use node_journal::{
 #[allow(unused_imports)]
 pub use node_state::{NodeState, NodeStateError};
 pub use notice::{
-    FeedbackAction, FeedbackBlock, FeedbackLevel, NoticeLevel, RetryState, StatusState, next_delay,
+    FeedbackAction, FeedbackBlock, FeedbackLevel, LogVisitCandidate, NoticeLevel, RetryState,
+    StatusState, next_delay,
 };
 #[allow(unused_imports)]
 pub use orchestration::{
@@ -198,10 +199,10 @@ pub use orchestration::{
 };
 #[allow(unused_imports)]
 pub use orchestration_room::{
-    ApplyOutcome, ApplyState, ApprovalView, Direction, HostBinding, NodeView, OperatorApplyFinding,
-    OrchestrationRoom, OrchestrationRoomId, PeerAdmissionOutcome, PeerFrameAttemptOutcome,
-    RejectReason, RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution,
-    WaveId, WaveOutcome, WaveView,
+    ApplyOutcome, ApplyState, ApprovalView, Direction, DispatchAct, HostBinding, NodeView,
+    OperatorApplyFinding, OrchestrationRoom, OrchestrationRoomId, PeerAdmissionOutcome,
+    PeerFrameAttemptOutcome, RejectReason, RemoteRejectionView, ReviewVerdict, RoomEvent,
+    RoomIdError, TicketResolution, WaveId, WaveOutcome, WaveView,
 };
 #[allow(unused_imports)]
 pub use p2p_peer_spec::{P2pConfigState, P2pPeerSpec};

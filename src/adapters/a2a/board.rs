@@ -50,7 +50,7 @@ use futures::future::join_all;
 use super::client::CardSlot;
 use super::driver::{A2aDelegationRuntime, TaskClient};
 use super::endpoint::resolve_jsonrpc_endpoint;
-use super::lifecycle::{A2aTaskTransport, PollConfig};
+use super::lifecycle::PollConfig;
 
 /// One recipient's own outcome, from `UX-DR-TM-02`'s ratified state set.
 ///
@@ -112,7 +112,74 @@ impl BoardOutcome {
 pub struct BoardRow {
     pub peer: String,
     pub outcome: BoardOutcome,
+    /// The per-item picker rows beneath the outcome row (Story 19.16f `AC1`):
+    /// every **correlated** item this peer listed, in arrival order. A detail
+    /// level beneath the outcome — ⛔ never a fifth outcome token. Empty for an
+    /// unreachable peer and for a peer holding nothing of ours.
+    pub items: Vec<BoardItem>,
 }
+
+/// One item on the peer's host, as the peer listed it (Story 19.16f `AC1`).
+///
+/// Exists so the operator can **copy an item id** into `/team retract`: the
+/// id is host-minted on the recipient and is otherwise reachable nowhere on
+/// the sender. Fields hold the wire values raw; the render is the single
+/// sanitize point (`AD-1824`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoardItem {
+    /// The recipient-minted `itemId`. ⛔ Peer text.
+    pub item_id: String,
+    /// The item's `task` — the sender's own `messageId` round-tripped, but a
+    /// peer that returns a different string makes it peer text.
+    pub task: Option<String>,
+    pub state: BoardItemState,
+    /// The server's **0-based** arrival index (`ordinal`).
+    pub ordinal: u64,
+    /// When the sender's retract was recorded on the recipient's host
+    /// (Story 19.16d) — the first sender-side reader of `retractedAtMs`.
+    pub retracted_at_ms: Option<i64>,
+}
+
+/// An item's state word, from the closed set the read verb serves. ⛔ Matched,
+/// never echoed: an unnameable state withholds the item row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoardItemState {
+    Received,
+    Acknowledged,
+    Removed,
+}
+
+impl BoardItemState {
+    /// Parse the wire word, or `None` for a state this build cannot name.
+    #[must_use]
+    pub fn from_wire(word: &str) -> Option<Self> {
+        match word {
+            "received" => Some(Self::Received),
+            "acknowledged" => Some(Self::Acknowledged),
+            "removed" => Some(Self::Removed),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::Acknowledged => "acknowledged",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+/// Most per-item rows rendered under one peer in-chat (Story 19.16f `AC1`).
+///
+/// A separate constant from `team_command::MAX_INCHAT_ROWS` (20): a log is
+/// read, a picker is **searched** for one id. "Most recent" = highest
+/// `ordinal`. The cut is stated, and its overflow line names the one surface
+/// that lifts it — `/team board <peer-id>`, which renders one peer uncapped.
+/// Lives beside the render that applies it: this module is the a2a adapter's
+/// renderer and imports nothing from the TUI.
+pub const MAX_INCHAT_ITEM_ROWS: usize = 60;
 
 /// The assembled board.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -138,6 +205,10 @@ pub struct BoardView {
     /// is configured at all" — two states an operator must not have to guess
     /// apart.
     pub peers_consulted: usize,
+    /// `true` when the board was narrowed to one roster peer
+    /// (`/team board <peer-id>`, Story 19.16f `AC9`): its item rows render
+    /// **uncapped** — the escape hatch the capped overflow line names.
+    pub narrowed: bool,
 }
 
 /// The board's stated poll floor, refused when a refresh arrives inside it.
@@ -176,15 +247,55 @@ pub async fn collect_board(
     runtime: &A2aDelegationRuntime,
     now: Instant,
 ) -> Result<BoardView, RefreshTooSoon> {
+    collect(runtime, runtime.known_peer_ids(), false, now).await
+}
+
+/// Why a narrowed board (`/team board <peer-id>`) was not collected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeerBoardRefusal {
+    /// The same floor / in-flight refusal the full board renders.
+    TooSoon(RefreshTooSoon),
+    /// `<peer-id>` names no configured A2A roster peer. ⛔ Decided before the
+    /// guards: no network call, and the refresh floor is not consumed.
+    UnknownPeer { peer: String, known: Vec<String> },
+}
+
+/// Assemble the board for **one** roster peer, its item rows uncapped
+/// (Story 19.16f `AC9`, owner gate item 3 = C) — the escape hatch the capped
+/// board's overflow line names. Same guards as [`collect_board`]: one
+/// narrowed read is still a board refresh.
+pub async fn collect_peer_board(
+    runtime: &A2aDelegationRuntime,
+    peer_id: &str,
+    now: Instant,
+) -> Result<BoardView, PeerBoardRefusal> {
+    let known = runtime.known_peer_ids();
+    if !known.iter().any(|known| known == peer_id) {
+        return Err(PeerBoardRefusal::UnknownPeer {
+            peer: peer_id.to_owned(),
+            known,
+        });
+    }
+    collect(runtime, vec![peer_id.to_owned()], true, now)
+        .await
+        .map_err(PeerBoardRefusal::TooSoon)
+}
+
+async fn collect(
+    runtime: &A2aDelegationRuntime,
+    peers: Vec<String>,
+    narrowed: bool,
+    now: Instant,
+) -> Result<BoardView, RefreshTooSoon> {
     // In-flight first, so a rate refusal never consumes the fan-out slot and
     // a stacked collect never starts.
     let _in_flight = runtime.begin_board_collect()?;
     runtime.admit_board_refresh(now, board_refresh_floor())?;
 
-    let peers = runtime.known_peer_ids();
     let dispatched = runtime.dispatched_tasks_by_peer().await;
     let mut view = BoardView {
         peers_consulted: peers.len(),
+        narrowed,
         ..BoardView::default()
     };
     let replies = join_all(
@@ -204,6 +315,7 @@ pub async fn collect_board(
                     view.rows.push(BoardRow {
                         peer: peer.clone(),
                         outcome,
+                        items: reply.items,
                     });
                 }
                 // The peer answered and holds a state this build cannot name;
@@ -216,9 +328,13 @@ pub async fn collect_board(
             Err(()) => view.rows.push(BoardRow {
                 peer: peer.clone(),
                 outcome: BoardOutcome::Unreachable,
+                items: Vec::new(),
             }),
         }
     }
+    // The last rendered view, so a landed retract can re-render the board
+    // with its mark WITHOUT a second fan-out (Story 19.16f `AC10(d)`).
+    runtime.remember_board(view.clone()).await;
     Ok(view)
 }
 
@@ -226,6 +342,7 @@ pub async fn collect_board(
 /// ours; `Some(None)` means its newest item carries an unnameable state.
 struct PeerReply {
     outcome: Option<Option<BoardOutcome>>,
+    items: Vec<BoardItem>,
     principal_collapsed: bool,
 }
 
@@ -258,6 +375,7 @@ async fn read_peer(
             Ok(outcome) => outcome,
             Err(()) => return Err(()),
         },
+        items: parse_peer_items(&result, dispatched_for_peer.as_ref()),
         principal_collapsed: collapse_flag(&result),
     })
 }
@@ -296,17 +414,7 @@ fn parse_peer_reply(
     let Some(items) = result.get("items").and_then(serde_json::Value::as_array) else {
         return Err(());
     };
-    let candidates: Vec<&serde_json::Value> = match dispatched {
-        Some(dispatched) => items
-            .iter()
-            .filter(|item| {
-                item.get("task")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|task| dispatched.contains(task))
-            })
-            .collect(),
-        None => items.iter().collect(),
-    };
+    let candidates = correlated(items, dispatched);
     let Some(newest) = candidates.into_iter().max_by_key(|item| {
         item.get("ordinal")
             .and_then(serde_json::Value::as_u64)
@@ -332,6 +440,169 @@ fn parse_peer_reply(
             _ => None,
         },
     ))
+}
+
+/// The items this sender dispatched (`AC3(g)`): an item whose `task` is in
+/// the sender's own durable dispatch ledger. `dispatched == None` (an
+/// unreadable ledger) degrades to every item — the shipped degrade, never
+/// nothing. Shared by the outcome row and the per-item rows, so the two can
+/// never answer for different sets.
+fn correlated<'a>(
+    items: &'a [serde_json::Value],
+    dispatched: Option<&HashSet<String>>,
+) -> Vec<&'a serde_json::Value> {
+    match dispatched {
+        Some(dispatched) => items
+            .iter()
+            .filter(|item| {
+                item.get("task")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|task| dispatched.contains(task))
+            })
+            .collect(),
+        None => items.iter().collect(),
+    }
+}
+
+/// The per-item picker rows (Story 19.16f `AC1`): every **correlated** item
+/// the peer listed, in arrival order. The first production reader of the
+/// wire's `itemId` and of 19.16d's `retractedAtMs`.
+///
+/// ⚠ An item with no string `itemId`, or whose state this build cannot name,
+/// is withheld: a row the operator cannot act on, or one that would widen the
+/// closed state set, is not a picker row.
+fn parse_peer_items(
+    result: &serde_json::Value,
+    dispatched: Option<&HashSet<String>>,
+) -> Vec<BoardItem> {
+    let Some(items) = result.get("items").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<BoardItem> = correlated(items, dispatched)
+        .into_iter()
+        .filter_map(|item| {
+            Some(BoardItem {
+                item_id: item.get("itemId")?.as_str()?.to_owned(),
+                task: item
+                    .get("task")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                state: BoardItemState::from_wire(item.get("state")?.as_str()?)?,
+                ordinal: item
+                    .get("ordinal")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                // Absent (not null) on the list when unretracted.
+                retracted_at_ms: item
+                    .get("retractedAtMs")
+                    .and_then(serde_json::Value::as_i64),
+            })
+        })
+        .collect();
+    rows.sort_by_key(|item| item.ordinal);
+    rows
+}
+
+/// `HH:MM` of a retract mark, in UTC, computed from the time-of-day rather
+/// than sliced from a rendered year whose width is not bounded.
+#[must_use]
+pub fn mark_clock(retracted_at_ms: i64) -> String {
+    let seconds = retracted_at_ms.div_euclid(1_000).rem_euclid(86_400);
+    format!("{:02}:{:02}", seconds / 3_600, (seconds % 3_600) / 60)
+}
+
+/// One picker row, in the ratified grammar (`DESIGN.md` `board-item-row`):
+/// `    item {id} · arrival {n} · task {task} · {state}[ · [retracted HH:MM]]`.
+///
+/// 🔴 The single sanitize point for peer text on this path (`AD-1824`,
+/// Story 19.16f `F12`): the in-chat block now keeps `'\n'` as structure, so an
+/// `itemId` or `task` carrying a newline would forge a second picker row.
+/// `sanitize_disclosable` drops every control character and bounds the field
+/// with a visible `…[truncated]` marker.
+#[must_use]
+pub fn render_item_row(item: &BoardItem) -> String {
+    use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+
+    // `ordinal` is the server's 0-based arrival index; the ratified grammar
+    // counts arrivals from 1.
+    let mut row = format!(
+        "    item {} · arrival {}",
+        sanitize_disclosable(&item.item_id, MAX_PEER_ID_BYTES),
+        item.ordinal.saturating_add(1)
+    );
+    if let Some(task) = &item.task {
+        row.push_str(" · task ");
+        row.push_str(&sanitize_disclosable(task, MAX_PEER_ID_BYTES));
+    }
+    row.push_str(" · ");
+    row.push_str(item.state.word());
+    if let Some(ms) = item.retracted_at_ms {
+        row.push_str(&format!(" · [retracted {}]", mark_clock(ms)));
+    }
+    row
+}
+
+/// The item rows beneath one outcome row. Capped at
+/// [`MAX_INCHAT_ITEM_ROWS`] most recent unless the board is narrowed to this
+/// one peer; the cut is stated, and `{M}` is the number of correlated items
+/// for this peer BEFORE the cap (never the rendered count, which would read
+/// "the 60 most recent of 60").
+fn render_item_rows(out: &mut String, row: &BoardRow, narrowed: bool) {
+    let total = row.items.len();
+    let skipped = if narrowed {
+        0
+    } else {
+        total.saturating_sub(MAX_INCHAT_ITEM_ROWS)
+    };
+    if skipped > 0 {
+        out.push_str(&format!(
+            "    · showing the {MAX_INCHAT_ITEM_ROWS} most recent of {total} items for this \
+             peer — narrow with '/team board <peer-id>'\n"
+        ));
+    }
+    for item in row.items.iter().skip(skipped) {
+        out.push_str(&render_item_row(item));
+        out.push('\n');
+    }
+}
+
+/// Apply a landed retract's mark to one item of a remembered view (Story
+/// 19.16f `AC10(d)`). Returns whether an item matched.
+pub(crate) fn apply_retract_mark(
+    view: &mut BoardView,
+    peer: &str,
+    item_id: &str,
+    retracted_at_ms: i64,
+) -> bool {
+    view.rows
+        .iter_mut()
+        .filter(|row| row.peer == peer)
+        .flat_map(|row| row.items.iter_mut())
+        .find(|item| item.item_id == item_id)
+        .map(|item| {
+            item.retracted_at_ms.get_or_insert(retracted_at_ms);
+        })
+        .is_some()
+}
+
+/// Rendered when `/team board <peer-id>` names no roster peer.
+#[must_use]
+pub fn render_peer_board_refusal(refusal: &PeerBoardRefusal) -> String {
+    match refusal {
+        PeerBoardRefusal::TooSoon(refusal) => render_refresh_refusal(*refusal),
+        PeerBoardRefusal::UnknownPeer { peer, known } => format!(
+            "· no configured A2A peer is named '{}' — configured: {}.",
+            crate::domain::services::transparency::sanitize_disclosable(
+                peer,
+                crate::domain::services::transparency::MAX_PEER_ID_BYTES
+            ),
+            if known.is_empty() {
+                "none".to_owned()
+            } else {
+                known.join(", ")
+            }
+        ),
+    }
 }
 
 /// The one operator render. Story 19.21 composes the Act-1 scene; this is the
@@ -376,6 +647,7 @@ pub fn render_board(view: &BoardView) -> String {
             row.peer,
             row.outcome.label(),
         ));
+        render_item_rows(&mut out, row, view.narrowed);
     }
     if view.unnameable > 0 {
         out.push_str(&format!(
@@ -574,6 +846,7 @@ mod tests {
             principal_collapsed: false,
             unnameable: 1,
             peers_consulted: 1,
+            narrowed: false,
         };
         let rendered = render_board(&view);
         assert!(
@@ -605,19 +878,23 @@ mod tests {
                 BoardRow {
                     peer: "jun-dev".to_owned(),
                     outcome: BoardOutcome::Acknowledged,
+                    items: Vec::new(),
                 },
                 BoardRow {
                     peer: "tom-dev".to_owned(),
                     outcome: BoardOutcome::Delivered,
+                    items: Vec::new(),
                 },
                 BoardRow {
                     peer: "nina-ux".to_owned(),
                     outcome: BoardOutcome::Unreachable,
+                    items: Vec::new(),
                 },
             ],
             principal_collapsed: false,
             unnameable: 0,
             peers_consulted: 3,
+            narrowed: false,
         };
         let rendered = render_board(&view);
 
@@ -644,6 +921,7 @@ mod tests {
             principal_collapsed: false,
             unnameable: 1,
             peers_consulted: 1,
+            narrowed: false,
         };
         let withheld_render = render_board(&withheld);
         assert!(
@@ -663,12 +941,14 @@ mod tests {
         let row = BoardRow {
             peer: "jun-dev".to_owned(),
             outcome: BoardOutcome::Acknowledged,
+            items: Vec::new(),
         };
         let collapsed = render_board(&BoardView {
             rows: vec![row.clone()],
             principal_collapsed: true,
             unnameable: 0,
             peers_consulted: 1,
+            narrowed: false,
         });
         assert!(
             collapsed.contains(COLLAPSED_PRINCIPAL_DISCLOSURE),
@@ -680,6 +960,7 @@ mod tests {
             principal_collapsed: false,
             unnameable: 0,
             peers_consulted: 1,
+            narrowed: false,
         });
         assert!(
             !separated.contains(COLLAPSED_PRINCIPAL_DISCLOSURE),
@@ -692,6 +973,7 @@ mod tests {
             principal_collapsed: true,
             unnameable: 0,
             peers_consulted: 1,
+            narrowed: false,
         });
         assert!(
             collapsed_empty.contains(COLLAPSED_PRINCIPAL_DISCLOSURE),
@@ -717,10 +999,12 @@ mod tests {
             rows: vec![BoardRow {
                 peer: "nina-ux".to_owned(),
                 outcome: BoardOutcome::Unreachable,
+                items: Vec::new(),
             }],
             principal_collapsed: false,
             unnameable: 0,
             peers_consulted: 1,
+            narrowed: false,
         });
         assert!(rendered.contains("⚠ nina-ux"), "{rendered}");
         assert!(!rendered.contains("declined"), "{rendered}");
@@ -744,5 +1028,166 @@ mod tests {
         labels.sort_unstable();
         labels.dedup();
         assert_eq!(labels.len(), all.len());
+    }
+
+    // ── Story 19.16f · the per-item picker rows ─────────────────────────────
+
+    fn view_with(items: Vec<BoardItem>) -> BoardView {
+        BoardView {
+            rows: vec![BoardRow {
+                peer: "jun-dev".to_owned(),
+                outcome: BoardOutcome::Delivered,
+                items,
+            }],
+            principal_collapsed: false,
+            unnameable: 0,
+            peers_consulted: 1,
+            narrowed: false,
+        }
+    }
+
+    fn item(item_id: &str, ordinal: u64) -> BoardItem {
+        BoardItem {
+            item_id: item_id.to_owned(),
+            task: Some("task-7f2a".to_owned()),
+            state: BoardItemState::Received,
+            ordinal,
+            retracted_at_ms: None,
+        }
+    }
+
+    /// Story 19.16f AC1(a) — the item id is REACHABLE: the board carries a
+    /// line an `itemId` can be copied from, in the ratified grammar, with the
+    /// 0-based `ordinal` rendered as `arrival 1`.
+    ///
+    /// **Mutant `M01` → RED:** render the outcome row only. **Positive
+    /// control:** a peer holding no correlated items renders its outcome row
+    /// and no item row.
+    #[test]
+    fn the_board_carries_a_copyable_item_row_under_its_outcome_row() {
+        let reply = serde_json::json!({
+            "items": [{
+                "itemId": "ri_V1St", "task": "task-7f2a", "state": "acknowledged",
+                "ordinal": 0, "retractedAtMs": 1_700_000_000_000_i64,
+            }],
+        });
+        let items = parse_peer_items(&reply, None);
+        let rendered = render_board(&view_with(items));
+        assert!(
+            rendered.contains(
+                "  ● jun-dev  delivered\n    item ri_V1St · arrival 1 · task task-7f2a · \
+                 acknowledged · [retracted 22:13]\n"
+            ),
+            "{rendered}"
+        );
+
+        let empty = render_board(&view_with(Vec::new()));
+        assert!(empty.contains("● jun-dev  delivered"), "{empty}");
+        assert!(!empty.contains("    item "), "{empty}");
+    }
+
+    #[test]
+    fn retract_clock_does_not_depend_on_the_rendered_year_width() {
+        assert_eq!(mark_clock(253_402_300_800_000), "00:00");
+        assert_eq!(mark_clock(-60_000), "23:59");
+    }
+    /// Story 19.16f AC1(a) — item rows answer for THIS sender's dispatches,
+    /// through the same correlation as the outcome row.
+    ///
+    /// **Mutant `M18` → RED:** drop the correlation filter for item rows.
+    /// **Positive control:** an unreadable ledger degrades to every item.
+    #[test]
+    fn item_rows_are_correlated_to_the_senders_own_dispatches() {
+        let ours: HashSet<String> = std::iter::once("task-A".to_owned()).collect();
+        let reply = serde_json::json!({
+            "items": [
+                { "itemId": "ri_a", "task": "task-A", "state": "received", "ordinal": 0 },
+                { "itemId": "ri_b", "task": "task-B", "state": "received", "ordinal": 1 },
+            ],
+        });
+        let correlated = parse_peer_items(&reply, Some(&ours));
+        assert_eq!(
+            correlated
+                .iter()
+                .map(|i| i.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ri_a"]
+        );
+        let degraded = parse_peer_items(&reply, None);
+        assert_eq!(degraded.len(), 2, "the shipped degrade, never nothing");
+    }
+
+    /// Story 19.16f `F12` — every peer-sourced field is single-line sanitized
+    /// at the render, because the in-chat block now keeps `'\n'` as structure.
+    ///
+    /// **Mutant `M19` → RED:** render `itemId` raw — the forged newline makes
+    /// a second picker row, and a 10 KB id renders unbounded. **Positive
+    /// control:** a clean id renders unchanged.
+    #[test]
+    fn a_peer_cannot_forge_a_picker_row_or_flood_the_block() {
+        let forged = item(
+            "ri_a\n    item ri_forged · arrival 9 · task x · received",
+            0,
+        );
+        let rendered = render_board(&view_with(vec![forged]));
+        let item_rows = rendered
+            .lines()
+            .filter(|line| line.starts_with("    item "))
+            .count();
+        assert_eq!(item_rows, 1, "{rendered}");
+
+        let huge = render_item_row(&item(&"x".repeat(10 * 1024), 0));
+        let id = huge
+            .strip_prefix("    item ")
+            .and_then(|rest| rest.split(" · arrival").next())
+            .expect("row grammar");
+        assert!(id.ends_with("…[truncated]"), "{id}");
+        assert!(id.len() <= 256 + "…[truncated]".len(), "{}", id.len());
+
+        assert_eq!(
+            render_item_row(&item("ri_clean", 0)),
+            "    item ri_clean · arrival 1 · task task-7f2a · received"
+        );
+    }
+
+    /// Story 19.16f AC1(b) — the cap keeps the highest ordinals, states the
+    /// cut with `{M}` = the correlated count BEFORE the cap, and a narrowed
+    /// board lifts it.
+    #[test]
+    fn the_picker_cap_keeps_the_most_recent_and_states_the_pre_cap_count() {
+        let items: Vec<BoardItem> = (0..61).map(|n| item(&format!("ri_{n:02}"), n)).collect();
+        let capped = render_board(&view_with(items.clone()));
+        assert!(
+            capped.contains(
+                "· showing the 60 most recent of 61 items for this peer — narrow with \
+                 '/team board <peer-id>'"
+            ),
+            "{capped}"
+        );
+        assert!(!capped.contains("item ri_00 "), "{capped}");
+        assert!(capped.contains("item ri_60 · arrival 61"), "{capped}");
+        let mut narrowed = view_with(items);
+        narrowed.narrowed = true;
+        let narrowed = render_board(&narrowed);
+        assert!(narrowed.contains("item ri_00 · arrival 1"), "{narrowed}");
+        assert!(!narrowed.contains("most recent"), "{narrowed}");
+    }
+
+    /// Story 19.16f AC6(a) — ⛔ `M07` is `No mutant:` (`P10`): the retract
+    /// ships zero lines of token mapping. Positive control (i): an item that
+    /// carries `retractedAtMs` still renders its outcome as `● delivered` — a
+    /// retract changes no outcome; the item still exists.
+    #[test]
+    fn a_retracted_item_keeps_its_outcome_token() {
+        let reply = serde_json::json!({
+            "items": [{
+                "itemId": "ri_a", "task": "t", "state": "received", "ordinal": 0,
+                "retractedAtMs": 1_700_000_000_000_i64,
+            }],
+        });
+        assert_eq!(
+            parse_peer_reply(&reply, None),
+            Ok(Some(Some(BoardOutcome::Delivered)))
+        );
     }
 }

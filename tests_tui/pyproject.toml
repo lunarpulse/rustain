@@ -65,6 +65,7 @@ markers = [
     "story_19_7: Story 19-7 — Deterministic scene provider + journey-capture harness",
     "story_19_9: Story 19-9 — J0/J2 capture; the scene provider's OpenAI-compat wire arm",
     "story_19_10: Story 19-10 — J3 Marco capture; the request log's `skills` field",
+    "story_19_16g: Story 19-16g — passive `log: N` transparency reminder (standalone + attached)",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest

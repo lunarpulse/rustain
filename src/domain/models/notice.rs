@@ -150,6 +150,21 @@ pub struct FeedbackBlock {
     pub actions: Vec<FeedbackAction>,
 }
 
+/// Story 19.16g — the seen-through boundary one transparency-log view would
+/// contribute **once it is actually presented**.
+///
+/// Bound to the exact snapshot the view was read from (`seen_through` is
+/// that report's maximum row `seq`) and to the local reset revision in effect
+/// when it was read — never to a later observed head. It travels with the
+/// view that can be presented (the panel, or the `team-log` block and its
+/// tab) and is consumed once. A local reminder boundary: not an
+/// acknowledgement, not a receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogVisitCandidate {
+    pub seen_through: u64,
+    pub reset_revision: u64,
+}
+
 impl StatusState {
     /// Render the status state as a display string for the status bar.
     pub fn display_text(&self) -> String {

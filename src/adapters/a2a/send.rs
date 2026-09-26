@@ -1,6 +1,7 @@
 //! Outbound A2A text-send core used by human-facing command surfaces.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio_util::sync::CancellationToken;
 
@@ -218,6 +219,287 @@ fn first_text_part(parts: Option<&serde_json::Value>) -> Option<String> {
 
 fn outbound_message(text: &str) -> serde_json::Value {
     build_message(&serde_json::json!({ "message": text }))
+}
+
+// ── Story 19.16f · the cross-host retract, the sender's half ────────────────
+//
+// The served verb is Story 19.16d's; this side SPEAKS its contract and defines
+// none of it. ⛔ One peer, resolved by name — never a roster fan-out (`M09`):
+// the item id is only meaningful on the host that minted it.
+
+/// Why a retract — or its confirm-time read — sent nothing: the single-peer
+/// resolution failed before any request existed. Typed end to end, ⛔ never
+/// `board::read_peer`'s `Err(())` collapse.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RetractNotSent {
+    /// `peer` names no configured A2A roster peer.
+    UnknownPeer { known: Vec<String> },
+    /// The peer's card is not cached (boot discovery pending or failed).
+    CardNotCached,
+    /// The boot card GET refused the peer's certificate or its anchor could
+    /// not load (`A22`) — rendered as its ratified sentence.
+    AnchorRefused(A2aError),
+    /// The cached card names no usable JSON-RPC endpoint.
+    Endpoint(A2aError),
+}
+
+/// A retract answer that is not a success, classified on the **variant** —
+/// ⛔ never a `Display` string match (`F2`, `F5`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RetractRefusal {
+    /// `-32041`: the recipient already removed the item (a tombstone).
+    Tombstone,
+    /// `-32040`: the peer's admission policy refused the write.
+    RefusedByPolicy,
+    /// `-32001`: no item this credential can address — byte-identical
+    /// whether it never existed or is another principal's (R21).
+    NotFound,
+    /// `-32601`: a build without the verb.
+    OldBuild,
+    /// `-32602`/`-32600`: the peer refused the request's shape.
+    Malformed,
+    /// [`A2aError::Connect`]: no request byte reached the peer.
+    CouldNotReach,
+    /// A credential or anchor refusal, carried as its ratified sentence
+    /// (`A2aError`'s Display, `AD-1823`).
+    Credential(String),
+    /// No usable answer — `-32603`, a transport error after send, a non-2xx
+    /// other than 401/403, a shapeless success, or anything unnamed. ⚠ The
+    /// recipient journals the mark BEFORE it can still answer `-32603`, so
+    /// whether the item was marked is genuinely unknown.
+    Unknown,
+}
+
+impl RetractRefusal {
+    /// Classify one failed answer. The fallback is [`Self::Unknown`]: an error
+    /// this build cannot name must never be rendered as "nothing was marked".
+    #[must_use]
+    pub fn classify(error: &A2aError) -> Self {
+        use super::jsonrpc::{CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, JsonRpcErrorKind};
+
+        match error {
+            A2aError::JsonRpc { code, .. } => match JsonRpcErrorKind::classify(*code) {
+                JsonRpcErrorKind::ItemRemoved => Self::Tombstone,
+                JsonRpcErrorKind::RefusedByPolicy => Self::RefusedByPolicy,
+                JsonRpcErrorKind::TaskNotFound => Self::NotFound,
+                JsonRpcErrorKind::MethodNotFound => Self::OldBuild,
+                JsonRpcErrorKind::Other(CODE_INVALID_PARAMS | CODE_INVALID_REQUEST) => {
+                    Self::Malformed
+                }
+                _ => Self::Unknown,
+            },
+            A2aError::Connect(_) => Self::CouldNotReach,
+            // Pre-POST (origin, env, anchor) or the auth layer's 401/403
+            // (`status_error`), which answers before `dispatch` runs.
+            A2aError::CredentialMissing { .. }
+            | A2aError::CredentialRejected { .. }
+            | A2aError::CredentialOutOfScope { .. }
+            | A2aError::AnchorValidationFailed { .. }
+            | A2aError::CaCertUnloadable { .. } => Self::Credential(error.to_string()),
+            _ => Self::Unknown,
+        }
+    }
+
+    /// `true` only when the answer PROVES nothing was marked (`AC5(a)`).
+    #[must_use]
+    pub fn proves_unmarked(&self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+
+    /// The cause half of the sender's rejection row. Locally minted except
+    /// the credential sentence, which is ratified and already alias-only.
+    fn ledger_cause(&self) -> String {
+        match self {
+            Self::Tombstone => "already removed by its recipient".to_owned(),
+            Self::RefusedByPolicy => "refused by the peer's policy".to_owned(),
+            Self::NotFound => "the peer has no item this host can address".to_owned(),
+            Self::OldBuild => "the peer runs a build without the retract verb".to_owned(),
+            Self::Malformed => "the peer refused the request as malformed".to_owned(),
+            Self::CouldNotReach => "could not reach the peer".to_owned(),
+            Self::Credential(sentence) => sentence.clone(),
+            Self::Unknown => "no usable answer".to_owned(),
+        }
+    }
+}
+
+/// One item as the peer listed it at confirm time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewedItem {
+    pub item_id: String,
+    pub task: Option<String>,
+    pub state: super::board::BoardItemState,
+    pub retracted_at_ms: Option<i64>,
+}
+
+/// The confirm-time read (Story 19.16f `AC4(c)`).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RetractPreview {
+    Found(PreviewedItem),
+    /// The peer lists no item with this id for this credential.
+    NotFound,
+    /// The read did not resolve: the card renders DISARMED, naming the cause.
+    Unverified(RetractRefusal),
+    NotSent(RetractNotSent),
+}
+
+/// An accepted retract's answer (Story 19.16f `AC10(c)`).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RetractOutcome {
+    Landed {
+        retracted_at_ms: Option<i64>,
+    },
+    /// The recipient's mark already existed; the fold is idempotent, the
+    /// operator's answer is not (`F7`).
+    AlreadyRetracted {
+        retracted_at_ms: Option<i64>,
+    },
+    Refused(RetractRefusal),
+    NotSent(RetractNotSent),
+}
+
+/// Resolve ONE roster peer in `send_text`'s order: binding → card slot →
+/// endpoint → transport.
+async fn resolve_retract_peer(
+    runtime: &A2aDelegationRuntime,
+    peer_id: &str,
+) -> Result<(crate::domain::models::A2aPeerSpec, TaskClient), RetractNotSent> {
+    let (spec, client) =
+        runtime
+            .peer_binding(peer_id)
+            .ok_or_else(|| RetractNotSent::UnknownPeer {
+                known: runtime.known_peer_ids(),
+            })?;
+    let card = match client.card_slot().await {
+        CardSlot::Ready(card, _trust) => card,
+        CardSlot::AnchorRefused(cause) => {
+            return Err(RetractNotSent::AnchorRefused(anchor_error(
+                &spec.id, &cause,
+            )));
+        }
+        CardSlot::Pending | CardSlot::Unavailable => return Err(RetractNotSent::CardNotCached),
+    };
+    let endpoint = resolve_jsonrpc_endpoint(&card).map_err(RetractNotSent::Endpoint)?;
+    Ok((spec, TaskClient::new(client, endpoint.url().to_owned())))
+}
+
+/// Read the one addressed item from the peer's own list, at confirm time.
+///
+/// ⛔ **Uncorrelated**: the verb's scope is the credential, not this host's
+/// dispatch ledger, so the card previews whatever the retract would address.
+/// ⛔ Never a cached board render. Does not touch the board's refresh floor
+/// or its in-flight slot — it is one single-peer read, not a board.
+pub async fn preview_item_retract(
+    runtime: &A2aDelegationRuntime,
+    peer_id: &str,
+    item_id: &str,
+) -> RetractPreview {
+    let (_spec, transport) = match resolve_retract_peer(runtime, peer_id).await {
+        Ok(resolved) => resolved,
+        Err(not_sent) => return RetractPreview::NotSent(not_sent),
+    };
+    let result = match transport.list_items().await {
+        Ok(result) => result,
+        Err(error) => return RetractPreview::Unverified(RetractRefusal::classify(&error)),
+    };
+    let Some(items) = result.get("items").and_then(serde_json::Value::as_array) else {
+        return RetractPreview::Unverified(RetractRefusal::Unknown);
+    };
+    let Some(item) = items
+        .iter()
+        .find(|item| item.get("itemId").and_then(serde_json::Value::as_str) == Some(item_id))
+    else {
+        return RetractPreview::NotFound;
+    };
+    // A state this build cannot name is an unverified state: the card must
+    // not arm on a read it cannot interpret.
+    let Some(state) = item
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .and_then(super::board::BoardItemState::from_wire)
+    else {
+        return RetractPreview::Unverified(RetractRefusal::Unknown);
+    };
+    RetractPreview::Found(PreviewedItem {
+        item_id: item_id.to_owned(),
+        task: item
+            .get("task")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        state,
+        retracted_at_ms: item
+            .get("retractedAtMs")
+            .and_then(serde_json::Value::as_i64),
+    })
+}
+
+/// Dispatch one accepted retract (Story 19.16f `AC2`, `AC5`, `AC10`).
+///
+/// Order is the invariant: resolve → journal the dispatch row (durable
+/// **before** the POST; `M20`) → POST → classify on the variant → journal a
+/// rejection row **only** when the answer proves nothing was marked. A
+/// resolution failure sent nothing and journals nothing.
+pub async fn retract_item_on_peer(
+    runtime: &A2aDelegationRuntime,
+    peer_id: &str,
+    item_id: &str,
+    task: Option<String>,
+) -> RetractOutcome {
+    let (spec, transport) = match resolve_retract_peer(runtime, peer_id).await {
+        Ok(resolved) => resolved,
+        Err(not_sent) => return RetractOutcome::NotSent(not_sent),
+    };
+    let bytes = serde_json::json!({ "itemId": item_id }).to_string().len();
+    let request_started = AtomicBool::new(false);
+    let outcome = match transport
+        .retract_item(item_id, || async {
+            runtime
+                .journal_item_retract_dispatch(&spec, task.as_deref(), item_id, bytes)
+                .await;
+            request_started.store(true, Ordering::Relaxed);
+        })
+        .await
+    {
+        Ok(result) => retract_success(&result),
+        Err(error) => RetractOutcome::Refused(RetractRefusal::classify(&error)),
+    };
+    if request_started.load(Ordering::Relaxed)
+        && let RetractOutcome::Refused(refusal) = &outcome
+        && refusal.proves_unmarked()
+    {
+        runtime
+            .journal_item_retract_refusal(
+                &spec,
+                task.as_deref(),
+                &format!("item retract refused: {}", refusal.ledger_cause()),
+            )
+            .await;
+    }
+    outcome
+}
+
+/// Read the served success shape. `retractedAtMs` is `null`-when-`None` on
+/// this response (absent-not-null on the list): both parse to `None`. A
+/// success without `alreadyRetracted` is a shape this client cannot read —
+/// **unknown**, never landed.
+fn retract_success(result: &serde_json::Value) -> RetractOutcome {
+    let Some(already) = result
+        .get("alreadyRetracted")
+        .and_then(serde_json::Value::as_bool)
+    else {
+        return RetractOutcome::Refused(RetractRefusal::Unknown);
+    };
+    let retracted_at_ms = result
+        .get("retractedAtMs")
+        .and_then(serde_json::Value::as_i64);
+    if already {
+        RetractOutcome::AlreadyRetracted { retracted_at_ms }
+    } else {
+        RetractOutcome::Landed { retracted_at_ms }
+    }
 }
 
 #[cfg(test)]

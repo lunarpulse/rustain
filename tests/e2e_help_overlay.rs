@@ -462,6 +462,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
         })
         .unwrap();

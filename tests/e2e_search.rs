@@ -98,6 +98,7 @@ fn render_once(
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
     terminal
         .draw(|frame| {
@@ -456,6 +457,7 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
     terminal
         .draw(|frame| {
@@ -556,6 +558,7 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
     // This render call must succeed and the focused ordinal lookup in
     // chat_pane::render_with_search must compute ordinal == 1 for this

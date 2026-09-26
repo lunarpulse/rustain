@@ -165,6 +165,10 @@ pub(crate) enum RpcAnswer {
     Completed,
     /// A bare HTTP status — 401/403 is the credential verdict under test.
     Status(u16),
+    /// A correlated JSON-RPC error object with this code (Story 19.16f: the
+    /// codes the real server cannot be driven to answer for a served verb,
+    /// e.g. `-32601` from an older build).
+    JsonRpcError(i64),
 }
 
 struct FixtureState {
@@ -409,6 +413,16 @@ where
                 "application/json",
                 r#"{"detail":"FIXTURE-SERVER-TEXT"}"#,
             ),
+            RpcAnswer::JsonRpcError(code) => http_response(
+                200,
+                "application/json",
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id(&body),
+                    "error": { "code": code, "message": "fixture" },
+                })
+                .to_string(),
+            ),
         }
     } else {
         http_response(404, "text/plain", "")
@@ -420,11 +434,15 @@ where
 }
 
 /// A terminal task, correlated with the request's own JSON-RPC id.
-fn completed_task(request_body: &str) -> serde_json::Value {
-    let id = serde_json::from_str::<serde_json::Value>(request_body)
+fn request_id(request_body: &str) -> u64 {
+    serde_json::from_str::<serde_json::Value>(request_body)
         .ok()
         .and_then(|value| value.get("id").and_then(serde_json::Value::as_u64))
-        .unwrap_or(1);
+        .unwrap_or(1)
+}
+
+fn completed_task(request_body: &str) -> serde_json::Value {
+    let id = request_id(request_body);
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,

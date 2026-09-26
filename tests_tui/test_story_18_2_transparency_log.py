@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import BINARY, PROJECT_ROOT, RustainTUI
+from harness import PROJECT_ROOT, RustainTUI, _resolve_binary
 from keys import CTRL_X
 
 
@@ -192,12 +192,16 @@ def test_help_advertises_the_transparency_log(tui_monitor: RustainTUI):
 def tui_with_journal(build_binary):
     """A monitor-density TUI whose workspace already has A2A records.
 
-    Seeded by running the real ``rustain team log`` once (which creates the
-    room file) and then writing the pinned pre-18.2 fixture into it. That makes
-    this the only test that exercises the whole composition chain in a real
-    binary: ``AppState.transparency`` → ``RoomJournalReader`` → the domain fold
-    → the widget. Without it the composition-root wiring has no end-to-end
-    proof, and a wiring hole is precisely the class ``DF-CR-14-3a-1`` names.
+    Seeded explicitly (``DF-19-13-TRANSPARENCY-FIXTURE-NO-JOURNAL``, repaired
+    by Story 19.16g): the read-only ``rustain team log`` observer never creates
+    a journal, so a first TUI run — whose writer composition
+    (``NodeJournal::open_workspace``) creates the room journal — makes the
+    file, and the pinned pre-18.2 fixture is written into it before the TUI
+    under test starts. That makes this the only test that exercises the whole
+    composition chain in a real binary: ``AppState.transparency`` →
+    ``RoomJournalReader`` → the domain fold → the widget. Without it the
+    composition-root wiring has no end-to-end proof, and a wiring hole is
+    precisely the class ``DF-CR-14-3a-1`` names.
     """
     fixture = (
         PROJECT_ROOT
@@ -214,16 +218,20 @@ def tui_with_journal(build_binary):
         '[layout]\ndensity_mode = "monitor"\n'
     )
 
-    # `team log` opens the room journal, which creates it. Then seed it.
+    # The read-only CLI must NOT have created anything.
     subprocess.run(
-        [str(BINARY), "team", "log"],
+        [str(_resolve_binary()[0]), "team", "log"],
         cwd=str(ws),
         capture_output=True,
         check=True,
         timeout=60,
     )
+    assert not (config_dir / "rooms").exists(), "a read-only observer creates no journal"
+    # The writer composition creates exactly one room journal; seed it.
+    with RustainTUI(fresh=True, build=False, workspace=ws):
+        pass
     rooms = sorted((config_dir / "rooms").glob("*.jsonl"))
-    assert rooms, "`rustain team log` must have created the room journal"
+    assert len(rooms) == 1, f"the TUI's writer must create one room journal: {rooms}"
     rooms[0].write_bytes(fixture.read_bytes())
 
     harness = RustainTUI(fresh=True, build=False, workspace=ws)

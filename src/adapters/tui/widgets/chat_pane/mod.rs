@@ -48,6 +48,10 @@ pub struct RenderResult {
     pub user_message_boundaries: Vec<usize>,
     /// Tool block id at the top of the viewport (for focus/keyboard interaction).
     pub focused_tool_id: Option<String>,
+    /// Story 19.16g — ids of the feedback blocks that intersect the rendered
+    /// chat viewport this frame. A block merely inserted, or scrolled wholly
+    /// offscreen, or drawn into a zero-height pane, is absent.
+    pub visible_feedback_ids: Vec<String>,
 }
 
 /// Compute the `scroll_offset` value needed to bring `target_message_idx`
@@ -1552,6 +1556,7 @@ fn render_with_search_impl(
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
 
     // Empty state: no messages, no open turn, no streaming, no feedback blocks
@@ -2241,6 +2246,7 @@ fn render_with_search_impl(
     }
 
     // Feedback blocks at bottom
+    let mut visible_feedback_ids: Vec<String> = Vec::new();
     if !feedback_blocks.is_empty() {
         if line_offset > 0 {
             let spacing_end = line_offset + spacing;
@@ -2262,6 +2268,9 @@ fn render_with_search_impl(
             let fb_height = fb_lines.len();
             let fb_end = line_offset + fb_height;
             if fb_end > visible_start && line_offset < visible_end {
+                if fb_height > 0 {
+                    visible_feedback_ids.push(fb.id.clone());
+                }
                 for (j, line) in fb_lines.into_iter().enumerate() {
                     let abs_line = line_offset + j;
                     if abs_line >= visible_start && abs_line < visible_end {
@@ -2323,6 +2332,7 @@ fn render_with_search_impl(
         message_boundaries,
         user_message_boundaries,
         focused_tool_id,
+        visible_feedback_ids,
     }
 }
 

@@ -96,6 +96,7 @@ fn render_status_bar_ml(
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
         })
         .unwrap();
@@ -329,6 +330,7 @@ fn test_status_bar_shows_active_agent() {
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
         })
         .unwrap();
@@ -381,6 +383,7 @@ fn test_status_bar_hides_agent_when_none() {
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
         })
         .unwrap();
@@ -433,6 +436,7 @@ fn test_status_bar_agent_name_truncated() {
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
         })
         .unwrap();

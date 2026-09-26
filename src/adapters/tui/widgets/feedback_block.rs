@@ -109,26 +109,41 @@ pub fn render_feedback_lines(
     lines
 }
 
-/// Simple word-wrapping for message text.
+/// Word-wrapping for message text that keeps the message's line structure.
+///
+/// Each logical line (split on `'\n'`) is laid out independently: one that
+/// fits is kept verbatim (its leading-space run and its column spacing are
+/// layout — `/team board`'s peer and item rows are built from them); one
+/// that does not fit word-wraps with its leading-space run on its first
+/// visual line only. Continuation lines carry only the renderer's own 2-cell
+/// indent. Widths count bytes, as before.
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![text.to_string()];
-    }
     let mut lines = Vec::new();
-    let mut current_line = String::new();
-
-    for word in text.split_whitespace() {
-        if current_line.is_empty() {
-            current_line = word.to_string();
-        } else if current_line.len() + 1 + word.len() > max_width {
-            lines.push(current_line);
-            current_line = word.to_string();
-        } else {
-            current_line.push(' ');
-            current_line.push_str(word);
+    for logical in text.lines() {
+        let logical = logical.trim_end();
+        if max_width == 0 || logical.len() <= max_width {
+            lines.push(logical.to_string());
+            continue;
         }
-    }
-    if !current_line.is_empty() {
+        let body = logical.trim_start_matches(' ');
+        let indent = &logical[..logical.len() - body.len()];
+        let mut current_line = String::new();
+        let mut first = true;
+        for word in body.split_whitespace() {
+            if current_line.is_empty() {
+                if first {
+                    current_line.push_str(indent);
+                }
+                current_line.push_str(word);
+            } else if current_line.len() + 1 + word.len() > max_width {
+                lines.push(std::mem::take(&mut current_line));
+                current_line.push_str(word);
+            } else {
+                current_line.push(' ');
+                current_line.push_str(word);
+            }
+            first = false;
+        }
         lines.push(current_line);
     }
     if lines.is_empty() {
@@ -259,5 +274,63 @@ mod tests {
             "all action chips should use chord-prefix: {}",
             last_line_text
         );
+    }
+
+    fn message_texts(block: &FeedbackBlock, width: u16) -> Vec<String> {
+        render_feedback_lines(block, width, &test_theme())
+            .iter()
+            .map(|line| {
+                // Drop the border+symbol (or continuation indent) prefix spans
+                // and the right border: keep only the message span.
+                line.spans[2].content.to_string()
+            })
+            .collect()
+    }
+
+    fn info(message: &str) -> FeedbackBlock {
+        FeedbackBlock {
+            id: "info-structured".to_string(),
+            level: FeedbackLevel::Info,
+            message: message.to_string(),
+            actions: vec![],
+        }
+    }
+
+    #[test]
+    fn a_multi_line_info_block_keeps_one_visual_line_per_logical_line() {
+        let block = info("  ● jun-dev  delivered\n  ● ana  pending\n  ● bo  unknown");
+        let texts = message_texts(&block, 120);
+        assert_eq!(
+            texts.len(),
+            3,
+            "each logical line is its own row: {texts:?}"
+        );
+        assert_eq!(texts[1], "  ● ana  pending");
+    }
+
+    #[test]
+    fn each_logical_line_keeps_its_leading_space_run() {
+        let block = info("  ● jun-dev  delivered\n    item ri_a · arrival 1 · task t · received");
+        let texts = message_texts(&block, 120);
+        assert_eq!(texts[1], "    item ri_a · arrival 1 · task t · received");
+    }
+
+    #[test]
+    fn an_indented_line_that_wraps_keeps_its_indent_only_on_its_first_visual_line() {
+        let block = info("    item ri_abcdef · arrival 1 · task task-7f2a · received");
+        // overhead = 2 + 2 + 0 + 2 = 6 ⇒ 30 cells of text.
+        let texts = message_texts(&block, 36);
+        assert!(texts.len() > 1, "{texts:?}");
+        assert!(texts[0].starts_with("    item"), "{texts:?}");
+        assert!(
+            !texts[1].starts_with(' '),
+            "a continuation carries the renderer's 2-cell indent, never the row's: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_line_message_still_renders_as_one_line() {
+        let texts = message_texts(&info("Session restarted"), 120);
+        assert_eq!(texts, vec!["Session restarted".to_string()]);
     }
 }

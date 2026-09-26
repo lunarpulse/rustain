@@ -41,6 +41,33 @@ pub struct AttachInfo {
     pub channel_count: usize,
 }
 
+/// Story 19.16g — the passive transparency-log reminder rendered at the right
+/// edge of the status bar. Identity-free by construction: a bounded count or
+/// an unavailable mark, never a peer, item, or event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogAwareness {
+    /// Nothing unseen, or nothing observed yet: no segment and no separator.
+    #[default]
+    Hidden,
+    /// Rows above the durable seen-through boundary (always > 0).
+    Unseen(usize),
+    /// Observation or persistence is unavailable or stale: `log: ?`, never an
+    /// apparently current zero.
+    Unavailable,
+}
+
+/// Story 19.16g — the TUI-side value state of the reminder. The
+/// infrastructure observer writes `display` and `reset_revision`; a
+/// successful draw pushes presented visits into `presented`. No I/O here.
+#[derive(Debug, Default)]
+pub struct LogAwarenessView {
+    pub display: LogAwareness,
+    /// The local reset revision a newly read log view is bound to.
+    pub reset_revision: u64,
+    /// Visits actually presented by a completed draw, awaiting persistence.
+    pub presented: Vec<crate::domain::models::LogVisitCandidate>,
+}
+
 /// Pending permission request awaiting user response.
 pub struct PendingPermission {
     pub id: RequestId,
@@ -217,6 +244,28 @@ pub struct PendingPeerAdd {
     /// The resolution path then writes **only** the address: no pin, no
     /// admission record, and no first-contact trust decision is re-run.
     pub reach_refresh: bool,
+    pub prior_focus: crate::domain::models::FocusState,
+}
+
+/// The `/team retract` decision card awaiting `[y]`/`[n]` (Story 19.16f `AC4`).
+///
+/// Raised only by the preview-ready event, from a confirm-time read of the
+/// peer's own list — ⛔ never from a cached board render. `armed == false`
+/// (the read did not resolve, or the item is already removed on the peer's
+/// host) means `y` dispatches nothing; `n`/`Esc` always cancel, and
+/// cancelling is free — nothing was sent.
+#[derive(Debug, Clone)]
+pub struct PendingTeamRetract {
+    pub conversation_id: String,
+    /// The roster alias.
+    pub peer: String,
+    /// The id the operator typed.
+    pub item_id: String,
+    /// The item's task as the peer listed it — the sender's ledger rows carry it.
+    pub task: Option<String>,
+    /// The rendered card body.
+    pub card: String,
+    pub armed: bool,
     pub prior_focus: crate::domain::models::FocusState,
 }
 
@@ -1371,6 +1420,13 @@ pub struct TransparencyPanelState {
     pub search_active: bool,
     /// Expanded row (`Enter` drill-down), by `seq`.
     pub drill_seq: Option<u64>,
+    /// Story 19.16g — the unpainted seen-through boundary of the report this
+    /// panel read on open. Distinct from `acknowledged_seq` (viewport-scoped):
+    /// consumed once, and discarded if a nonempty search is painted.
+    pub pending_visit: Option<crate::domain::models::LogVisitCandidate>,
+    /// A visit painted by the current frame; presented only once the draw
+    /// completes (`TuiState::log_visits_presented`).
+    pub painted_visit: Option<crate::domain::models::LogVisitCandidate>,
 }
 
 impl TransparencyPanelState {
@@ -2533,6 +2589,11 @@ pub struct TuiState {
     pub usage_panel: UsagePanelState,
     /// Transparency Log panel state (Ctrl+X, L) (Story 18.2 AC5).
     pub transparency_panel: TransparencyPanelState,
+    /// Story 19.16g — the transparency-log reminder's value state.
+    pub log_awareness: LogAwarenessView,
+    /// Story 19.16g — the active tab's unpresented `team-log` visit (saved
+    /// and restored with the tab's feedback blocks).
+    pub pending_log_visit: Option<crate::domain::models::LogVisitCandidate>,
     /// Durable room viewer panel state (Ctrl+X, R / `/room`) (Story 18.3a AC1).
     pub room_panel: RoomPanelState,
     /// Durable artifact list panel state (Ctrl+X, E / `/artifacts`) (Story
@@ -2659,6 +2720,8 @@ pub struct TuiState {
     /// slot on purpose — see [`PendingPeerAdd`] for why the apply card's
     /// mode-blind key table must not be borrowed for a pin.
     pub pending_peer_add: Option<PendingPeerAdd>,
+    /// Story 19.16f `AC4`: the cross-host retract decision card, if raised.
+    pub pending_team_retract: Option<PendingTeamRetract>,
     /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
     /// when the event arrives while a stream is still active. Dispatched
     /// after the stream completes (TurnComplete handler).
@@ -2722,6 +2785,33 @@ pub struct TuiState {
 }
 
 impl TuiState {
+    /// Story 19.16g — before a draw: a panel visit painted by a frame that
+    /// never completed was not presented, so it returns to pending (unless a
+    /// newer read already replaced it).
+    pub fn restore_unflushed_log_visits(&mut self) {
+        if let Some(visit) = self.transparency_panel.painted_visit.take() {
+            self.transparency_panel.pending_visit.get_or_insert(visit);
+        }
+    }
+
+    /// Story 19.16g — after a **successful** draw: hand the visits this frame
+    /// actually presented to the persistence shell. The panel's visit counts
+    /// only if the widget painted it with body space; the `team-log` visit
+    /// only if its block intersected the rendered chat viewport. Each visit
+    /// is consumed once, so rerendering cannot acknowledge later rows.
+    pub fn log_visits_presented(&mut self, visible_feedback_ids: &[String]) {
+        if let Some(visit) = self.transparency_panel.painted_visit.take() {
+            self.log_awareness.presented.push(visit);
+        }
+        if visible_feedback_ids
+            .iter()
+            .any(|id| id == crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID)
+            && let Some(visit) = self.pending_log_visit.take()
+        {
+            self.log_awareness.presented.push(visit);
+        }
+    }
+
     /// D-B (AI-12.3): true while a `/fanout` wave is in flight (spawned but not
     /// yet delivered or cancelled). DERIVED from `active_wave_id` — never a
     /// shadow boolean. Gates the Ctrl-C wave-cancel branch so a completed
@@ -2949,6 +3039,8 @@ impl TuiState {
             active_profile: None,
             usage_panel: UsagePanelState::new(),
             transparency_panel: TransparencyPanelState::default(),
+            log_awareness: LogAwarenessView::default(),
+            pending_log_visit: None,
             room_panel: RoomPanelState::default(),
             artifacts_panel: ArtifactsPanelState::default(),
             daily_budget: None,
@@ -2992,6 +3084,7 @@ impl TuiState {
             pending_forget_card: None,
             pending_artifact_card: None,
             pending_peer_add: None,
+            pending_team_retract: None,
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,

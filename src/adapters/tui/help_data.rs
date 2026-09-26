@@ -248,7 +248,7 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "/team log",
-                    description: "A2A transparency log (also Ctrl+X, L)",
+                    description: "A2A transparency log (also Ctrl+X, L); an unfiltered, displayed visit clears the `log: N` reminder — not an acknowledgement",
                     available: true,
                 },
                 HelpBinding {

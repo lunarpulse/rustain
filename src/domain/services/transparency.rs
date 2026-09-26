@@ -389,12 +389,26 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         _ => None,
     };
     let (kind, direction, peer, task, summary) = match event {
-        RoomEvent::RemoteEnvelopeDispatched { peer, task, bytes } => (
+        RoomEvent::RemoteEnvelopeDispatched {
+            peer,
+            task,
+            bytes,
+            act,
+        } => (
             TransparencyKind::Dispatched,
             Direction::Outbound,
             peer.as_str().to_owned(),
             task.clone(),
-            format!("task dispatched to peer ({bytes} bytes)"),
+            match act {
+                crate::domain::models::DispatchAct::Task => {
+                    format!("task dispatched to peer ({bytes} bytes)")
+                }
+                // Story 19.16f `AC5(b)`: a retract is one outbound write of
+                // its own, ⛔ never a second dispatch of the item's task.
+                crate::domain::models::DispatchAct::ItemRetract { item } => {
+                    format!("item retract sent to peer ({bytes} bytes) — item {item}")
+                }
+            },
         ),
         RoomEvent::RemoteEnvelopeAccepted {
             peer,
@@ -1339,6 +1353,7 @@ mod tests {
                 peer: peer(),
                 task: Some("sender-message-1".to_owned()),
                 bytes: "Καλημέρα 🌕".len(),
+                act: crate::domain::models::DispatchAct::Task,
             },
         );
         let row = transparency_row(&entry).expect("dispatch projects");
@@ -1844,6 +1859,49 @@ mod tests {
         assert_eq!(
             format_unix_millis(1_700_000_000_000),
             "2023-11-14 22:13:20Z"
+        );
+    }
+
+    /// Story 19.16f AC5(b) — every journal line written before `act` existed
+    /// still replays, as a task dispatch with its byte-identical summary; a
+    /// new task row serializes without the field; and a retract row folds to
+    /// its own summary, never "task dispatched".
+    ///
+    /// **Mutant `M21` → RED:** delete `#[serde(default)]` from `act` — the
+    /// pre-change line no longer deserializes. **Positive control:** a line
+    /// WITH `act: item_retract` folds to the retract summary.
+    #[test]
+    fn a_pre_change_dispatch_line_replays_as_a_task_and_a_retract_row_says_what_it_sent() {
+        use crate::domain::models::DispatchAct;
+
+        let peer_json = serde_json::to_string(&peer()).expect("peer id serializes");
+        let literal = format!(
+            r#"{{"event":"remote_envelope_dispatched","peer":{peer_json},"task":"t-1","bytes":4}}"#
+        );
+        let event: RoomEvent =
+            serde_json::from_str(&literal).expect("a pre-19.16f dispatch line still replays");
+        let RoomEvent::RemoteEnvelopeDispatched { act, .. } = &event else {
+            panic!("{event:?}");
+        };
+        assert_eq!(*act, DispatchAct::Task);
+        let row =
+            transparency_row(&room_entry(1, 1_700_000_000_000, event.clone())).expect("projects");
+        assert_eq!(row.summary, "task dispatched to peer (4 bytes)");
+        assert_eq!(
+            serde_json::to_string(&event).expect("serializes"),
+            literal,
+            "a task row is written byte-identically to every line before the field"
+        );
+
+        let retract = format!(
+            r#"{{"event":"remote_envelope_dispatched","peer":{peer_json},"task":"t-1","bytes":17,"act":{{"kind":"item_retract","item":"ri_x"}}}}"#
+        );
+        let event: RoomEvent = serde_json::from_str(&retract).expect("retract row");
+        let row = transparency_row(&room_entry(2, 1_700_000_000_000, event)).expect("projects");
+        assert_eq!(row.kind, TransparencyKind::Dispatched);
+        assert_eq!(
+            row.summary,
+            "item retract sent to peer (17 bytes) — item ri_x"
         );
     }
 }

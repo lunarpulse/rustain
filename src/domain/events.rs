@@ -147,6 +147,22 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         message: String,
     },
+    /// The confirm-time read behind `/team retract` finished (Story 19.16f
+    /// `AC4(c)`): raise the decision card, or render the one sentence that
+    /// replaces it. Produced only by the rail-3 preview spawn.
+    TeamRetractPreviewReady {
+        conversation_id: ConversationId,
+        preview: TeamRetractPreview,
+    },
+    /// An accepted retract's answer arrived (Story 19.16f `AC10`): replace the
+    /// stable `team-retract` block, and — after a landed retract — the board
+    /// re-rendered from its remembered view. Produced only by the dispatch
+    /// spawn.
+    TeamRetractAnswered {
+        conversation_id: ConversationId,
+        message: String,
+        board: Option<String>,
+    },
     /// Bridge event: a `ToolCallTransition` has been received on the broadcast
     /// channel and should be forwarded to the event loop for TUI/state updates.
     ToolCallTransitionBridged {
@@ -447,6 +463,32 @@ pub enum CapabilityEvent {
         old: crate::domain::models::capability_registry::RegisteredCapability,
         new: Box<crate::domain::models::capability_registry::RegisteredCapability>,
     },
+}
+
+/// The confirm-time read behind `/team retract` (Story 19.16f `AC4(c)`),
+/// already rendered: the card to raise, or the one sentence that replaces it
+/// (not found, unknown peer, not sent). Plain data — the a2a adapter decides,
+/// the TUI raises.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamRetractPreview {
+    Card(TeamRetractCard),
+    Answer(String),
+}
+
+/// One retract decision card (Story 19.16f `AC4`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamRetractCard {
+    /// The roster alias (`A2aPeerSpec::id`) — ⛔ never a person-shaped name.
+    pub peer: String,
+    /// The id the operator typed; the dispatch addresses exactly this.
+    pub item_id: String,
+    /// The item's `task` as the peer listed it, for the sender's ledger rows.
+    pub task: Option<String>,
+    /// The card body, one logical line per `'\n'`; the line builder wraps.
+    pub body: String,
+    /// `false` when the confirm-time read did not resolve, or the item is
+    /// already removed: `[y]` then dispatches nothing (owner ruling; `F9`).
+    pub armed: bool,
 }
 
 /// Event wrapping a tool execution result.

@@ -23,7 +23,13 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board | /team ack <item-id> | /team remove <item-id> | /team send <peer-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [<peer-id>] | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send <peer-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+
+/// Three verbs retract three different objects (`…addendum-team-messaging.md:116`),
+/// so every refusal of one names the others **by object** (Story 19.16f
+/// `AC3(d)`).
+const THREE_RETRACTS: &str = "'/team retract' marks an item on a peer's host; '/team remove' \
+     removes your own received item on this host; Ctrl+X retracts this host's auto-sent message.";
 
 /// What the dispatch arm already did on the caller's behalf.
 pub struct TeamLogInput {
@@ -33,6 +39,32 @@ pub struct TeamLogInput {
     pub divergence: Option<String>,
     /// Export result for the exact unfiltered report snapshot.
     pub export: Option<Result<TransparencyExport, String>>,
+    /// Story 19.16g — the maximum row `seq` of the **unfiltered** report
+    /// these rows came from (0 when nothing was read). An unfiltered,
+    /// presented block contributes exactly this boundary — never a later
+    /// observed head.
+    pub snapshot_max_seq: u64,
+    /// Story 19.16g — the client presenting the block.
+    pub rail: LogRail,
+}
+
+/// Story 19.16g — which client presents the in-chat log. Only the access
+/// guidance differs: the attached client has no `Ctrl+X, L` (its `Ctrl+X`
+/// already retracts an auto-sent message), so it names the full CLI reader
+/// alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogRail {
+    Standalone,
+    Attached,
+}
+
+impl LogRail {
+    fn full_readers(self) -> &'static str {
+        match self {
+            Self::Standalone => "`rustain team log` or Ctrl+X, L for all",
+            Self::Attached => "`rustain team log` for all",
+        }
+    }
 }
 
 /// Parse the `log` tail. Mirrors `forget_command::parse_forget_query`'s
@@ -48,8 +80,12 @@ pub struct TeamLogArgs {
 pub enum TeamCommandArgs {
     Log(TeamLogArgs),
     /// Act 1's distribution board (Story 19.16b, `UX-DR-TM-02`): one
-    /// `x-rustain-items/list` read per configured A2A roster peer.
-    Board,
+    /// `x-rustain-items/list` read per configured A2A roster peer — or, with a
+    /// `<peer-id>`, that one roster peer with its item rows uncapped (Story
+    /// 19.16f `AC9`).
+    Board {
+        peer: Option<String>,
+    },
     Send {
         peer: String,
         text: String,
@@ -58,6 +94,13 @@ pub enum TeamCommandArgs {
         item_id: String,
     },
     Remove {
+        item_id: String,
+    },
+    /// Story 19.16f: mark one item on ONE peer's host as retracted by its
+    /// sender. Two tokens, like `send`: the id is only meaningful on the host
+    /// that minted it, so the peer is never inferred and ⛔ never fanned out.
+    Retract {
+        peer: String,
         item_id: String,
     },
     Trust,
@@ -72,13 +115,27 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
     let verb = tokens.next().unwrap_or("log");
     match verb {
         "board" => {
+            let peer = tokens.next().map(str::to_owned);
             if tokens.next().is_some() {
                 return Err(format!(
-                    "'/team board' reads every configured A2A peer and takes no arguments. \
-                     Use: {USAGE}"
+                    "'/team board' reads every configured A2A peer, or one named peer: it takes \
+                     at most one peer id. Use: {USAGE}"
                 ));
             }
-            Ok(TeamCommandArgs::Board)
+            Ok(TeamCommandArgs::Board { peer })
+        }
+        "retract" => {
+            let (Some(peer), Some(item_id), None) = (tokens.next(), tokens.next(), tokens.next())
+            else {
+                return Err(format!(
+                    "'/team retract' takes exactly a peer id and an item id. {THREE_RETRACTS} \
+                     Use: {USAGE}"
+                ));
+            };
+            Ok(TeamCommandArgs::Retract {
+                peer: peer.to_owned(),
+                item_id: item_id.to_owned(),
+            })
         }
         "send" => {
             let peer = tokens
@@ -109,12 +166,13 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
             })
         }
         "remove" => {
-            let item_id = tokens
-                .next()
-                .ok_or_else(|| format!("Missing item id after '/team remove'. Use: {USAGE}"))?;
+            let item_id = tokens.next().ok_or_else(|| {
+                format!("Missing item id after '/team remove'. {THREE_RETRACTS} Use: {USAGE}")
+            })?;
             if tokens.next().is_some() {
                 return Err(format!(
-                    "Expected exactly one item id after '/team remove'. Use: {USAGE}"
+                    "Expected exactly one item id after '/team remove'. {THREE_RETRACTS} \
+                     Use: {USAGE}"
                 ));
             }
             Ok(TeamCommandArgs::Remove {
@@ -278,17 +336,28 @@ pub(crate) fn team_command(
         crate::domain::models::FeedbackBlock {
             id: TEAM_LOG_BLOCK_ID.to_owned(),
             level: crate::domain::models::FeedbackLevel::Info,
-            message: render_rows(&rows, args.json),
+            message: render_rows(&rows, args.json, input.rail),
             actions: Vec::new(),
         },
     );
     state.active_feedback_id = Some(TEAM_LOG_BLOCK_ID.to_owned());
+    // Story 19.16g: the visit travels with the block it replaced — a newer
+    // command discards the older, unpresented one, and a filtered view is
+    // never a full visit. `TuiState::log_visits_presented` consumes it only
+    // once the block intersects a successfully drawn chat viewport.
+    state.pending_log_visit =
+        args.filter
+            .is_none()
+            .then_some(crate::domain::models::LogVisitCandidate {
+                seen_through: input.snapshot_max_seq,
+                reset_revision: state.log_awareness.reset_revision,
+            });
     out
 }
 
 /// The shared rendering. `--json` emits one machine-readable object per line —
 /// byte-identical to the export body, because it *is* the export body.
-pub fn render_rows(rows: &[TransparencyRow], json: bool) -> String {
+pub fn render_rows(rows: &[TransparencyRow], json: bool, rail: LogRail) -> String {
     if json {
         return crate::domain::services::transparency::render_export(rows);
     }
@@ -299,9 +368,9 @@ pub fn render_rows(rows: &[TransparencyRow], json: bool) -> String {
     let skipped = rows.len().saturating_sub(MAX_INCHAT_ROWS);
     if skipped > 0 {
         out.push_str(&format!(
-            "· showing the {MAX_INCHAT_ROWS} most recent of {} rows — \
-             `rustain team log` or Ctrl+X, L for all\n",
-            rows.len()
+            "· showing the {MAX_INCHAT_ROWS} most recent of {} rows — {}\n",
+            rows.len(),
+            rail.full_readers()
         ));
     }
     for row in rows.iter().skip(skipped) {
@@ -429,6 +498,98 @@ pub(crate) fn show_team_board(state: &mut TuiState, message: String) {
     state.needs_redraw = true;
 }
 
+/// Stable id for the retract's outcome block (Story 19.16f `AC10`): one block
+/// for EVERY rail-3 retract answer — `sending…`, not found, not sent, and each
+/// dispatch outcome — replaced on every update. ⛔ Never a stacked `wfb-N`,
+/// ⛔ never `Warning`, ⛔ never a `SystemNotice`.
+pub const TEAM_RETRACT_BLOCK_ID: &str = "team-retract";
+
+/// The outcome block's in-flight form (`F8`): the board's ratified pre-outcome
+/// shape — two leading spaces, no token.
+pub const TEAM_RETRACT_SENDING: &str = "  sending…";
+
+/// Replace the stable `team-retract` block, at Info level, keyless.
+pub fn show_team_retract(state: &mut TuiState, message: String) {
+    state.feedback_blocks.insert(
+        TEAM_RETRACT_BLOCK_ID.to_owned(),
+        crate::domain::models::FeedbackBlock {
+            id: TEAM_RETRACT_BLOCK_ID.to_owned(),
+            level: crate::domain::models::FeedbackLevel::Info,
+            message,
+            actions: Vec::new(),
+        },
+    );
+    state.active_feedback_id = Some(TEAM_RETRACT_BLOCK_ID.to_owned());
+    state.needs_redraw = true;
+}
+
+/// The preview-ready handler (Story 19.16f `AC4(c)`): raise the decision
+/// card from the confirm-time read, or render the sentence that replaces it.
+///
+/// The only production constructor of [`PendingTeamRetract`], and the only
+/// writer of `ConfirmationType::TeamRetract` focus. A card already awaiting an
+/// answer is never replaced by a newer read: the operator answers the card on
+/// screen, and the newer command's result says so.
+pub fn open_team_retract_card(
+    state: &mut TuiState,
+    conversation_id: &str,
+    preview: crate::domain::events::TeamRetractPreview,
+) {
+    use crate::domain::events::TeamRetractPreview;
+    use crate::domain::models::visual::{ConfirmationType, OverlayType};
+
+    let card = match preview {
+        TeamRetractPreview::Answer(message) => return show_team_retract(state, message),
+        TeamRetractPreview::Card(card) => card,
+    };
+    if state.pending_team_retract.is_some() {
+        return show_team_retract(
+            state,
+            "A retract is already awaiting your answer. Nothing was sent for this one.".to_owned(),
+        );
+    }
+    if matches!(
+        state.focus,
+        crate::domain::models::FocusState::Overlay(OverlayType::Confirmation(_))
+    ) {
+        return show_team_retract(
+            state,
+            "Another confirmation is already awaiting your answer. Nothing was sent for this one."
+                .to_owned(),
+        );
+    }
+    state.pending_team_retract = Some(crate::adapters::tui::state::PendingTeamRetract {
+        conversation_id: conversation_id.to_owned(),
+        peer: card.peer,
+        item_id: card.item_id,
+        task: card.task,
+        card: card.body,
+        armed: card.armed,
+        prior_focus: state.focus.clone(),
+    });
+    state.focus = crate::domain::models::FocusState::Overlay(OverlayType::Confirmation(
+        ConfirmationType::TeamRetract,
+    ));
+    state.needs_redraw = true;
+}
+
+/// Resolve the retract card: take the slot, restore focus, and return it only
+/// when accepted **and armed** (Story 19.16f `AC4(b)`, `AC10(b)`).
+///
+/// Taking the slot is the double-press guard: a second `y` finds no slot, so
+/// it can never reach a second dispatch. The key path already refuses `y` on a
+/// disarmed card; this refuses it again at the one place a dispatch is
+/// decided.
+pub fn resolve_team_retract_card(
+    state: &mut TuiState,
+    accept: bool,
+) -> Option<crate::adapters::tui::state::PendingTeamRetract> {
+    let pending = state.pending_team_retract.take()?;
+    state.focus = pending.prior_focus.clone();
+    state.needs_redraw = true;
+    (accept && pending.armed).then_some(pending)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,18 +630,58 @@ mod tests {
     /// `Unknown /team subcommand`, and on the attached rail that difference is
     /// the gap between a refusal and an LLM prompt.
     #[test]
-    fn board_is_a_named_verb_that_takes_no_arguments() {
+    ///
+    /// Story 19.16f `AC9` (owner gate item 3 = C) REWRITES the shipped
+    /// "takes no arguments" refusal: one `<peer-id>` narrows the board to that
+    /// roster peer — the escape hatch the capped picker's overflow line names.
+    /// Two tokens still refuse.
+    fn board_is_a_named_verb_that_takes_at_most_one_peer_id() {
         assert_eq!(
             parse_team_command(Some("board")),
-            Ok(TeamCommandArgs::Board)
+            Ok(TeamCommandArgs::Board { peer: None })
         );
-        let error = parse_team_command(Some("board jun-dev"))
-            .expect_err("the board reads the whole roster; a peer argument is a mistake");
+        assert_eq!(
+            parse_team_command(Some("board jun-dev")),
+            Ok(TeamCommandArgs::Board {
+                peer: Some("jun-dev".to_owned())
+            })
+        );
+        let error = parse_team_command(Some("board jun-dev tom-dev"))
+            .expect_err("one narrowed peer, never a peer list");
         assert!(error.contains("/team board"), "{error}");
         assert!(
-            USAGE.contains("/team board"),
+            USAGE.contains("/team board [<peer-id>]"),
             "every parser refusal names the verb set verbatim: {USAGE}"
         );
+    }
+
+    /// Story 19.16f `AC3(b)(d)` — two tokens exactly; every refusal reprints
+    /// `USAGE`, and names the other two retracts by object.
+    ///
+    /// Mutant `M04`(i) → RED: omit `retract` from `USAGE`.
+    #[test]
+    fn retract_takes_exactly_a_peer_and_an_item_and_refusals_name_the_three_retracts() {
+        assert_eq!(
+            parse_team_command(Some("retract jun-dev ri_x")),
+            Ok(TeamCommandArgs::Retract {
+                peer: "jun-dev".to_owned(),
+                item_id: "ri_x".to_owned(),
+            })
+        );
+        for malformed in ["retract", "retract jun-dev", "retract jun-dev ri_x extra"] {
+            let error = parse_team_command(Some(malformed)).expect_err(malformed);
+            assert!(error.contains(USAGE), "{malformed}: {error}");
+            assert!(
+                error.contains("'/team remove'") && error.contains("Ctrl+X"),
+                "{malformed}: {error}"
+            );
+        }
+        assert!(
+            USAGE.contains("/team retract <peer-id> <item-id>"),
+            "the verb set names the retract: {USAGE}"
+        );
+        let remove = parse_team_command(Some("remove")).expect_err("missing id");
+        assert!(remove.contains("'/team retract'"), "{remove}");
     }
 
     #[test]
@@ -615,7 +816,7 @@ mod tests {
     fn json_output_is_the_export_body_byte_for_byte() {
         let rows = vec![row(1), row(2)];
         assert_eq!(
-            render_rows(&rows, true),
+            render_rows(&rows, true, LogRail::Standalone),
             crate::domain::services::transparency::render_export(&rows),
             "the two faces must not have two renderers"
         );
@@ -623,7 +824,7 @@ mod tests {
 
     #[test]
     fn text_output_states_the_scoped_integrity_claim() {
-        let text = render_rows(&[row(1)], false);
+        let text = render_rows(&[row(1)], false, LogRail::Standalone);
         // Bind to the CONSTANTS, not to a copy of their prose. Story 18.2's
         // review replaced the old "not cryptographically tamper-evident"
         // wording with the scoped structural-replay claim but left this test
@@ -643,8 +844,8 @@ mod tests {
 
     #[test]
     fn an_empty_log_says_so_rather_than_rendering_a_blank() {
-        assert!(render_rows(&[], false).contains("no A2A interactions"));
-        assert_eq!(render_rows(&[], true), "");
+        assert!(render_rows(&[], false, LogRail::Standalone).contains("no A2A interactions"));
+        assert_eq!(render_rows(&[], true, LogRail::Standalone), "");
     }
 
     #[test]
@@ -658,6 +859,8 @@ mod tests {
                 rows: Err("disk on fire".to_owned()),
                 divergence: None,
                 export: None,
+                snapshot_max_seq: 0,
+                rail: LogRail::Standalone,
             },
         );
         assert_eq!(events.len(), 1);
@@ -679,6 +882,8 @@ mod tests {
                 rows: Ok(vec![row(1)]),
                 divergence: Some("sequence gap: expected 2, found 3".to_owned()),
                 export: None,
+                snapshot_max_seq: 1,
+                rail: LogRail::Standalone,
             },
         );
         // The divergence warning rides the bus (Warning DOES reach the
@@ -703,6 +908,8 @@ mod tests {
                     rows: Ok(vec![row(1)]),
                     divergence: None,
                     export: None,
+                    snapshot_max_seq: 1,
+                    rail: LogRail::Standalone,
                 },
             );
         }
@@ -714,14 +921,27 @@ mod tests {
     }
 
     #[test]
-    fn an_over_long_log_states_its_own_truncation() {
+    fn an_over_long_log_states_its_own_truncation_and_a_rail_true_full_reader() {
         let rows: Vec<TransparencyRow> = (1..=MAX_INCHAT_ROWS as u64 + 5).map(row).collect();
-        let text = render_rows(&rows, false);
+        let text = render_rows(&rows, false, LogRail::Standalone);
         assert!(
             text.contains(&format!("most recent of {} rows", rows.len())),
             "silent truncation is a lie with good intentions: {text}"
         );
         assert!(text.contains("Ctrl+X, L"), "the full surface must be named");
+        // Story 19.16g: the attached client has no `Ctrl+X, L` — its Ctrl+X
+        // retracts an auto-sent message — so it names only the full reader,
+        // and keeps the same explicit truncation disclosure.
+        let attached = render_rows(&rows, false, LogRail::Attached);
+        assert!(
+            attached.contains(&format!("most recent of {} rows", rows.len())),
+            "{attached}"
+        );
+        assert!(
+            attached.contains("`rustain team log` for all"),
+            "{attached}"
+        );
+        assert!(!attached.contains("Ctrl+X"), "{attached}");
     }
 
     #[test]
@@ -806,5 +1026,37 @@ mod tests {
         assert!(status.contains("alice"), "{status}");
         // D2: journaled grants are source-annotated.
         assert!(status.contains("trusted (journaled)"), "{status}");
+    }
+
+    #[test]
+    fn an_async_retract_preview_does_not_steal_an_existing_confirmation() {
+        use crate::domain::events::{TeamRetractCard, TeamRetractPreview};
+        use crate::domain::models::FocusState;
+        use crate::domain::models::visual::{ConfirmationType, OverlayType};
+
+        let mut state = TuiState::new(80, 24);
+        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd));
+
+        open_team_retract_card(
+            &mut state,
+            "conv",
+            TeamRetractPreview::Card(TeamRetractCard {
+                peer: "jun-dev".to_owned(),
+                item_id: "ri_x".to_owned(),
+                task: Some("task-x".to_owned()),
+                body: "card".to_owned(),
+                armed: true,
+            }),
+        );
+
+        assert!(state.pending_team_retract.is_none());
+        assert!(matches!(
+            state.focus,
+            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd))
+        ));
+        assert_eq!(
+            state.feedback_blocks[TEAM_RETRACT_BLOCK_ID].message,
+            "Another confirmation is already awaiting your answer. Nothing was sent for this one."
+        );
     }
 }

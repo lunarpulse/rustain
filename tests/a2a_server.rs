@@ -1802,14 +1802,15 @@ async fn ac1_an_acknowledgement_written_after_startup_is_visible_without_a_resta
     http.await.expect("server task").expect("server shutdown");
 }
 
-/// Story 19.16b AC1(g) — **Rule 1: the trait method's first non-test caller is
+/// Story 19.16b AC1(g) — **Rule 1: the client method's first non-test caller is
 /// real, and this keystone reaches the served arm THROUGH the shipped client.**
 ///
-/// `A2aTaskTransport::list_items` is a trait change with eight implementors.
-/// Seven are doubles; the one that matters is `TaskClient`, whose production
-/// caller is the Act 1 board's per-peer read (`a2a::board::read_peer`, reached
-/// from `transparency_bridge::team_command`'s `/team board` arm — a
-/// non-`#[cfg(test)]` path). ⛔ A caller **count** or a source **grep** would
+/// `TaskClient::list_items` lives on the inherent impl (Story 19.16f `AC2`
+/// re-homed it off `A2aTaskTransport`, deleting the seven double bodies that
+/// answered for it). Its production callers are the Act 1 board's per-peer
+/// read (`a2a::board::read_peer`, reached from
+/// `transparency_bridge::team_command`'s `/team board` arm) and the retract's
+/// confirm-time preview. ⛔ A caller **count** or a source **grep** would
 /// be satisfied by a dead implementation; this drives the real
 /// `A2aClientAdapter::post_jsonrpc` against the real axum router and asserts
 /// the behaviour only the wired path produces.
@@ -1822,7 +1823,6 @@ async fn ac1_the_client_transport_method_reaches_the_served_arm_over_a_real_sock
     use rustain::adapters::a2a::client::A2aClientAdapter;
     use rustain::adapters::a2a::driver::TaskClient;
     use rustain::adapters::a2a::exec::SubmitterKey;
-    use rustain::adapters::a2a::lifecycle::A2aTaskTransport;
     use rustain::domain::models::{A2aPeerSource, A2aPeerSpec, RecipientItemState, RedactedUrl};
 
     let workspace = tempfile::tempdir().expect("workspace");
@@ -1980,6 +1980,7 @@ async fn ac3b2_an_unreachable_roster_peer_renders_warned_never_declined() {
             peer: rustain::domain::models::a2a_peer_spec::alias_pseudonym("board-live"),
             task: Some("task-board-live".to_owned()),
             bytes: 8,
+            act: rustain::domain::models::DispatchAct::Task,
         },
     )
     .await
@@ -2127,6 +2128,7 @@ async fn ac3_the_board_is_assembled_from_remote_reads_not_the_local_projection()
             peer: rustain::domain::models::a2a_peer_spec::alias_pseudonym("board-remote"),
             task: Some("task-board-sent".to_owned()),
             bytes: 8,
+            act: rustain::domain::models::DispatchAct::Task,
         },
     )
     .await
@@ -2246,6 +2248,7 @@ async fn ac3g_the_board_row_answers_for_the_dispatched_task_not_the_newest_bag()
             peer: rustain::domain::models::a2a_peer_spec::alias_pseudonym("board-ours"),
             task: Some("task-ours".to_owned()),
             bytes: 8,
+            act: rustain::domain::models::DispatchAct::Task,
         },
     )
     .await
@@ -2343,6 +2346,7 @@ async fn ac2c_the_board_carries_the_collapse_disclosure_from_a_loopback_peer() {
             peer: rustain::domain::models::a2a_peer_spec::alias_pseudonym("board-loop"),
             task: Some("task-collapse".to_owned()),
             bytes: 8,
+            act: rustain::domain::models::DispatchAct::Task,
         },
     )
     .await
@@ -3274,6 +3278,118 @@ async fn ac3f_a_journal_that_cannot_append_fails_the_retract_closed() {
     assert!(
         item.get("retractedAtMs").is_none(),
         "a mark with no durable record behind it is a lie the next restart erases: {item}"
+    );
+
+    cancel.cancel();
+    http.await.expect("server task").expect("server shutdown");
+}
+
+/// Story 19.16g — the recipient learns a retract happened. A retract served
+/// through the real front door (19.16d's `x-rustain-items/retract`) lands in
+/// the recipient's durable journal; a client whose log was never opened, whose
+/// observer started BEFORE the retract, discovers it at its next scheduled
+/// observation and renders it in the real status bar — with no daemon event,
+/// no subscription and no push. This is the sender/recipient-boundary half;
+/// the PTY scenario proves the rendered surface separately.
+///
+/// **Mutant → RED (`M04`, observer half):** a tick that never starts an
+/// observation leaves the reminder hidden after the served retract.
+#[tokio::test]
+async fn story_19_16g_a_served_retract_reaches_a_closed_log_reminder() {
+    use rustain::adapters::a2a::exec::SubmitterKey;
+    use rustain::adapters::tui::state::{LogAwareness, LogAwarenessView};
+    use rustain::infrastructure::transparency_awareness::LogAwarenessObserver;
+
+    let (workspace, journal, room) = retract_room().await;
+    let caller = SubmitterKey::loopback();
+    seed_item(
+        room.as_ref(),
+        &caller,
+        "ri_mine",
+        "task-mine",
+        received_item(),
+    )
+    .await;
+
+    // The recipient's client starts first and observes the received item.
+    let t0 = std::time::Instant::now();
+    let mut view = LogAwarenessView::default();
+    let mut observer = LogAwarenessObserver::for_workspace(workspace.path());
+    observer.tick_at(t0, &mut view);
+    observer.settle(&mut view).await;
+    let LogAwareness::Unseen(before) = view.display else {
+        panic!(
+            "the received item is itself a ledger row: {:?}",
+            view.display
+        );
+    };
+
+    let (endpoint, cancel, http, _keys) = serve_retract_host(
+        workspace.path(),
+        journal.clone(),
+        room.clone(),
+        A2aAdmissionPolicy::Allow,
+    )
+    .await;
+    let response = rpc(
+        &reqwest::Client::new(),
+        &endpoint,
+        1,
+        "x-rustain-items/retract",
+        serde_json::json!({ "itemId": "ri_mine" }),
+    )
+    .await;
+    assert_eq!(response["result"]["itemId"], "ri_mine", "{response}");
+    assert_eq!(retract_records(&journal).await.len(), 1);
+
+    observer.tick_at(t0 + Duration::from_secs(1), &mut view);
+    observer.settle(&mut view).await;
+    assert_eq!(view.display, LogAwareness::Unseen(before + 1));
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 1)).unwrap();
+    let theme = rustain::adapters::tui::theme::Theme::dark();
+    terminal
+        .draw(|frame| {
+            rustain::adapters::tui::widgets::status_bar::render(
+                frame,
+                frame.area(),
+                "(daemon)",
+                None,
+                &rustain::domain::models::StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                rustain::domain::models::PermissionMode::Normal,
+                None,
+                0,
+                false,
+                None,
+                false,
+                true,
+                0,
+                None,
+                0,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                rustain::domain::models::visual::DensityMode::Focus,
+                false,
+                None,
+                view.display,
+            );
+        })
+        .unwrap();
+    let row: String = (0..80)
+        .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
+        .collect();
+    assert!(
+        row.trim_end().ends_with(&format!("log: {}", before + 1)),
+        "{row}"
     );
 
     cancel.cancel();

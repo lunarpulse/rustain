@@ -306,6 +306,7 @@ impl TestHarness {
                         DensityMode::Focus,
                         false,
                         None,
+                        rustain::adapters::tui::state::LogAwareness::Hidden,
                     );
 
                     input_box::render(

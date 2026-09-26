@@ -1,7 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr as _;
 
-use crate::adapters::tui::state::DailyBudgetState;
+use crate::adapters::tui::state::{DailyBudgetState, LogAwareness};
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::offset_to_message_index;
 use crate::adapters::tui::widgets::model_selector::humanize_ctx;
@@ -40,7 +41,11 @@ pub fn render(
     density_mode: crate::domain::models::visual::DensityMode,
     tab_read_only: bool,
     attached: Option<&crate::adapters::tui::state::AttachInfo>,
+    log_awareness: LogAwareness,
 ) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
     let sep = " │ ";
@@ -341,6 +346,37 @@ pub fn render(
         ));
     }
 
+    // Story 19.16g — the transparency-log reminder owns the right edge. Its
+    // whole display width (plus one separating space when room permits) is
+    // reserved BEFORE the optional hint and the left content are laid out,
+    // so neither can overwrite it; they clip on the left region instead. A bar
+    // narrower than the segment omits it whole — never a partial number.
+    let area = match log_reminder_text(log_awareness) {
+        Some(reminder) if usize::from(area.width) >= reminder.width() => {
+            let reserved = (reminder.width() + 1).min(usize::from(area.width)) as u16;
+            let left = Rect {
+                width: area.width - reserved,
+                ..area
+            };
+            let right = Rect {
+                x: area.x + left.width,
+                width: reserved,
+                ..area
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    reminder,
+                    theme.typography.meta.fg(theme.colors.fg_muted),
+                )))
+                .alignment(Alignment::Right)
+                .style(Style::default().bg(theme.colors.status_bg)),
+                right,
+            );
+            left
+        }
+        _ => area,
+    };
+
     // Contextual hint: right-aligned in remaining space (UX-DR93, UX-DR96)
     // The hint is the first thing truncated if the terminal is too narrow.
     if let Some(hint) = current_hint {
@@ -370,6 +406,24 @@ pub fn render(
     let line = Line::from(left_spans);
     let widget = Paragraph::new(line).style(Style::default().bg(theme.colors.status_bg));
     frame.render_widget(widget, area);
+}
+
+/// Story 19.16g — the reminder's ceiling. The count still moves with journal
+/// activity; the cap bounds its magnitude, not peer influence.
+pub const LOG_REMINDER_CAP: usize = 99;
+
+/// Story 19.16g — the segment text: locally authored ASCII and a bounded
+/// count, nothing else (no peer, item, task, timestamp, or kind). `None`
+/// hides the segment and its separator.
+fn log_reminder_text(awareness: LogAwareness) -> Option<String> {
+    match awareness {
+        LogAwareness::Hidden | LogAwareness::Unseen(0) => None,
+        LogAwareness::Unseen(count) if count > LOG_REMINDER_CAP => {
+            Some(format!("log: {LOG_REMINDER_CAP}+"))
+        }
+        LogAwareness::Unseen(count) => Some(format!("log: {count}")),
+        LogAwareness::Unavailable => Some("log: ?".to_owned()),
+    }
 }
 
 /// Format token counts compactly: raw numbers below 1000, `Xk` suffix above.
@@ -494,6 +548,7 @@ mod tests {
                 DensityMode::Focus,
                 false,
                 None,
+                LogAwareness::Hidden,
             );
         })
         .unwrap();
@@ -551,6 +606,7 @@ mod tests {
                 DensityMode::Focus,
                 false,
                 None,
+                LogAwareness::Hidden,
             );
         })
         .unwrap();
@@ -611,6 +667,7 @@ mod tests {
                 DensityMode::Focus,
                 false,
                 None,
+                LogAwareness::Hidden,
             );
         })
         .unwrap();
@@ -716,6 +773,7 @@ mod tests {
                 DensityMode::Focus,
                 true,
                 None,
+                LogAwareness::Hidden,
             );
         })
         .unwrap();
@@ -762,6 +820,7 @@ mod tests {
                     DensityMode::Focus,
                     false,
                     None,
+                    LogAwareness::Hidden,
                 );
             })
             .unwrap();
@@ -817,6 +876,7 @@ mod tests {
                 DensityMode::Focus,
                 false,
                 None,
+                LogAwareness::Hidden,
             );
         })
         .unwrap();
@@ -825,5 +885,184 @@ mod tests {
             txt.contains("+123 ctx"),
             "expected `+123 ctx` segment: {txt}"
         );
+    }
+
+    // ── Story 19.16g — the transparency-log reminder segment ────────────────
+
+    /// Render one real status bar row and return its cells.
+    fn draw_reminder_bar(
+        width: u16,
+        model: &str,
+        session_title: Option<&str>,
+        hint: Option<&str>,
+        density: DensityMode,
+        awareness: LogAwareness,
+    ) -> ratatui::buffer::Buffer {
+        let mut t = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        let theme = Theme::dark();
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                model,
+                Some("provider-with-a-long-id"),
+                &StatusState::Streaming,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                None,
+                200_000,
+                true,
+                session_title,
+                true,
+                false,
+                0,
+                hint,
+                3,
+                Some("a-very-long-agent-name-that-exceeds"),
+                None,
+                None,
+                false,
+                None,
+                None,
+                density,
+                false,
+                None,
+                awareness,
+            );
+        })
+        .unwrap();
+        t.backend().buffer().clone()
+    }
+
+    fn row_text(buffer: &ratatui::buffer::Buffer) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer.cell((x, 0)).unwrap().symbol())
+            .collect()
+    }
+
+    /// The last `segment.len()` cells, read cell by cell.
+    fn right_edge(buffer: &ratatui::buffer::Buffer, cells: u16) -> String {
+        let width = buffer.area.width;
+        (width.saturating_sub(cells)..width)
+            .map(|x| buffer.cell((x, 0)).unwrap().symbol())
+            .collect()
+    }
+
+    #[test]
+    fn unseen_count_is_bounded_and_hidden_at_zero() {
+        // K01 / M01: exact, capped, unavailable, hidden — at the right edge.
+        for (awareness, expected) in [
+            (LogAwareness::Unseen(1), Some("log: 1")),
+            (LogAwareness::Unseen(99), Some("log: 99")),
+            (LogAwareness::Unseen(100), Some("log: 99+")),
+            (LogAwareness::Unseen(150), Some("log: 99+")),
+            (LogAwareness::Unavailable, Some("log: ?")),
+            (LogAwareness::Unseen(0), None),
+            (LogAwareness::Hidden, None),
+        ] {
+            let buffer =
+                draw_reminder_bar(200, "sonnet-4-6", None, None, DensityMode::Focus, awareness);
+            let row = row_text(&buffer);
+            match expected {
+                Some(segment) => {
+                    assert_eq!(
+                        right_edge(&buffer, segment.len() as u16 + 1),
+                        format!(" {segment}"),
+                        "{awareness:?}: {row}"
+                    );
+                    assert_eq!(row.matches("log:").count(), 1, "{row}");
+                }
+                None => assert!(!row.contains("log:"), "{awareness:?}: {row}"),
+            }
+        }
+    }
+
+    #[test]
+    fn log_reminder_is_passive_in_every_density() {
+        // AC2: muted meta styling on the status background, no added
+        // emphasis, in Focus, Monitor and Dashboard alike.
+        let theme = Theme::dark();
+        let expected = theme.typography.meta.fg(theme.colors.fg_muted);
+        for density in [
+            DensityMode::Focus,
+            DensityMode::Monitor,
+            DensityMode::Dashboard,
+        ] {
+            let buffer = draw_reminder_bar(
+                120,
+                "sonnet-4-6",
+                None,
+                None,
+                density,
+                LogAwareness::Unseen(7),
+            );
+            assert_eq!(right_edge(&buffer, 6), "log: 7", "{density:?}");
+            for x in 114..120 {
+                let cell = buffer.cell((x, 0)).unwrap();
+                assert_eq!(cell.fg, expected.fg.unwrap(), "{density:?}");
+                assert_eq!(cell.bg, theme.colors.status_bg, "{density:?}");
+                assert_eq!(
+                    cell.modifier, expected.add_modifier,
+                    "no emphasis beyond the meta token ({density:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unseen_segment_survives_narrow_and_unicode_prefixes() {
+        // K07 / M07: the whole segment stays visible at every width, however
+        // long (or wide) the left content; the optional hint yields first.
+        let long_model = "claude-sonnet-4-6-with-an-extremely-long-model-identifier";
+        let cjk_session = "한국어 세션 제목이 매우 길다 中文会话名称也很长";
+        for width in [40u16, 60, 80, 120, 200] {
+            for (awareness, segment) in [
+                (LogAwareness::Unseen(7), "log: 7"),
+                (LogAwareness::Unseen(150), "log: 99+"),
+                (LogAwareness::Unavailable, "log: ?"),
+            ] {
+                for (model, session) in [(long_model, None), ("m", Some(cjk_session))] {
+                    let buffer = draw_reminder_bar(
+                        width,
+                        model,
+                        session,
+                        Some("Esc/Ctrl+D/Ctrl+C detach"),
+                        DensityMode::Focus,
+                        awareness,
+                    );
+                    assert_eq!(
+                        right_edge(&buffer, segment.len() as u16 + 1),
+                        format!(" {segment}"),
+                        "width {width}, {awareness:?}, {model}: {}",
+                        row_text(&buffer)
+                    );
+                }
+            }
+        }
+        // Exactly the segment's width: the segment alone, no separator.
+        let exact = draw_reminder_bar(
+            6,
+            long_model,
+            None,
+            None,
+            DensityMode::Focus,
+            LogAwareness::Unseen(7),
+        );
+        assert_eq!(row_text(&exact), "log: 7");
+        // Narrower than the segment: omitted whole, never a partial number.
+        let narrow = draw_reminder_bar(
+            5,
+            "m",
+            None,
+            None,
+            DensityMode::Focus,
+            LogAwareness::Unseen(7),
+        );
+        assert!(!row_text(&narrow).contains('7'), "{}", row_text(&narrow));
+        assert!(!row_text(&narrow).contains("log"), "{}", row_text(&narrow));
     }
 }

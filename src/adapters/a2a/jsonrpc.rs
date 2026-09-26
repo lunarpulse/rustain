@@ -152,6 +152,15 @@ pub enum JsonRpcErrorKind {
     MethodNotFound,
     InternalError,
     TaskNotFound,
+    /// [`CODE_REFUSED_BY_POLICY`] — the peer's admission policy refused an
+    /// `x-rustain-items/*` write (Story 19.16d). Named so the retract's
+    /// outcome classifier (Story 19.16f) matches the variant, ⛔ never a
+    /// literal code.
+    RefusedByPolicy,
+    /// [`CODE_ITEM_REMOVED`] — the addressed item is a tombstone (Story
+    /// 19.16d). ⛔ Never folded into [`Self::TaskNotFound`]: a tombstone must
+    /// be distinguishable from not-found (`AD-1822`).
+    ItemRemoved,
     Other(i64),
 }
 
@@ -161,6 +170,8 @@ impl JsonRpcErrorKind {
             CODE_METHOD_NOT_FOUND => Self::MethodNotFound,
             CODE_INTERNAL_ERROR => Self::InternalError,
             CODE_TASK_NOT_FOUND => Self::TaskNotFound,
+            CODE_REFUSED_BY_POLICY => Self::RefusedByPolicy,
+            CODE_ITEM_REMOVED => Self::ItemRemoved,
             other => Self::Other(other),
         }
     }

@@ -22,4 +22,5 @@ pub mod supervisor;
 pub mod telemetry;
 pub mod terminal_info;
 pub mod transparency;
+pub mod transparency_awareness;
 pub mod utils;

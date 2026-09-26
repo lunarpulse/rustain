@@ -99,9 +99,11 @@ impl TransparencyService {
         let path = self.export_path()?;
         let body = render_export(&report.rows);
         let write_path = path.clone();
-        tokio::task::spawn_blocking(move || write_export(&write_path, body.as_bytes()))
-            .await
-            .expect("transparency export task panicked")?;
+        tokio::task::spawn_blocking(move || {
+            write_private_atomic(&write_path, body.as_bytes(), ".transparency-")
+        })
+        .await
+        .expect("transparency export task panicked")?;
         Ok(TransparencyExport {
             path,
             rows: report.rows.len(),
@@ -110,18 +112,24 @@ impl TransparencyService {
     }
 }
 
-fn write_export(path: &Path, body: &[u8]) -> Result<(), std::io::Error> {
+/// Replace `path` with `body` durably and privately: a `0600` temporary
+/// regular file in the same directory, fully written and `fsync`ed,
+/// atomically renamed over the destination, then a parent-directory sync.
+/// Shared by the regenerable export and Story 19.16g's seen-through
+/// preference.
+pub(crate) fn write_private_atomic(
+    path: &Path,
+    body: &[u8],
+    prefix: &str,
+) -> Result<(), std::io::Error> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "transparency export path has no parent directory",
+            "private atomic write path has no parent directory",
         )
     })?;
     let mut builder = tempfile::Builder::new();
-    builder
-        .prefix(".transparency-")
-        .suffix(".tmp")
-        .rand_bytes(16);
+    builder.prefix(prefix).suffix(".tmp").rand_bytes(16);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

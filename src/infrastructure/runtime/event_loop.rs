@@ -471,6 +471,8 @@ pub async fn run(
         tokio::task::JoinHandle<Result<(), crate::domain::errors::ProviderError>>,
     );
     let mut pending_health_check: Option<PendingHealthCheck> = None;
+    // Story 19.16g: single-flight transparency-log observer; dropped (aborted) on exit.
+    let mut log_awareness = transparency_bridge::log_awareness_observer(&app_state);
 
     // Tab manager — owns all per-tab state; standalone proxies stay in sync with the active tab
     let mut tab_manager = if let Some(conv) = restored_conversation {
@@ -1756,6 +1758,7 @@ pub async fn run(
                                     let confirmed = matches!(action, InputAction::PeerAddConfirm);
                                     crate::infrastructure::runtime::peer_bridge::resolve_peer_add(&mut state, confirmed, &app_state).await;
                                 }
+                                InputAction::TeamRetractConfirm | InputAction::TeamRetractDecline => crate::infrastructure::runtime::transparency_bridge::resolve_team_retract(&mut state, matches!(action, InputAction::TeamRetractConfirm), &app_state).await,
                                 InputAction::DelegationCardCancel => {
                                     if let Some(ref pending) = state.pending_delegation_card {
                                         let conv_id = conversation.id.clone();
@@ -6261,6 +6264,8 @@ pub async fn run(
                     // Story 19.16b — the board is a VIEW: replace the stable
                     // `team-board` block, ⛔ never stack a fresh notice and
                     // ⛔ never route through the turn-fatal Warning path.
+                    AppEvent::TeamRetractPreviewReady { conversation_id: c, preview } => crate::infrastructure::runtime::transparency_bridge::team_retract_preview_ready(conversation.id.clone(), &mut state, &mut tab_manager, c, preview),
+                    AppEvent::TeamRetractAnswered { conversation_id: c, message, board } => crate::infrastructure::runtime::transparency_bridge::team_retract_answered(conversation.id.clone(), &mut state, &mut tab_manager, c, message, board),
                     AppEvent::TeamBoardReady { conversation_id: board_conv_id, message: board_msg } => {
                         if board_conv_id == conversation.id {
                             crate::adapters::tui::handlers::team_command::show_team_board(
@@ -8341,6 +8346,7 @@ pub async fn run(
                 } else {
                     state.room_panel.reset_head_poll();
                 }
+                state.needs_redraw |= log_awareness.tick(&mut state.log_awareness);
                 if let StatusState::Executing { elapsed_ms, .. } = &mut state.status {
                     *elapsed_ms += tick_ms;
                     state.needs_redraw = true;
@@ -8746,6 +8752,7 @@ fn save_active_tab(
     tab.focused_tool_id = state.focused_tool_id.clone();
     tab.feedback_blocks = state.feedback_blocks.clone();
     tab.active_feedback_id = state.active_feedback_id.clone();
+    tab.pending_log_visit = state.pending_log_visit;
     tab.total_content_height = state.total_content_height;
     tab.pending_anchor = state.pending_anchor;
     tab.turn_queue = turn_queue.clone();
@@ -8786,6 +8793,7 @@ fn load_active_tab(
     state.selected_tool_id = None;
     state.feedback_blocks = tab.feedback_blocks.clone();
     state.active_feedback_id = tab.active_feedback_id.clone();
+    state.pending_log_visit = tab.pending_log_visit;
     state.total_content_height = tab.total_content_height;
     state.pending_anchor = tab.pending_anchor;
     state.pending_context_carryover = tab.pending_context_carryover.clone();
@@ -9065,6 +9073,8 @@ fn render(
     let mut user_msg_bounds: Vec<usize> = Vec::new();
     let mut focused_tool_id: Option<String> = None;
     let mut vp_height: u16 = state.viewport_height;
+    let mut visible_feedback_ids: Vec<String> = Vec::new(); // Story 19.16g
+    state.restore_unflushed_log_visits();
 
     let permission_mode = security.current_mode();
 
@@ -9607,6 +9617,7 @@ fn render(
                     msg_bounds = result.message_boundaries;
                     user_msg_bounds = result.user_message_boundaries;
                     focused_tool_id = result.focused_tool_id;
+                    visible_feedback_ids = result.visible_feedback_ids;
                 }
 
                 if let Some(ref gate) = state.pending_spawn_gate {
@@ -9761,6 +9772,10 @@ fn render(
                         theme.colors.accent,
                         app_layout.chat_pane,
                     );
+                }
+
+                if let Some(pending) = &state.pending_team_retract {
+                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(frame.buffer_mut(), crate::adapters::tui::widgets::team_retract_prompt::render_team_retract_lines(pending, theme, app_layout.chat_pane.width), theme.colors.accent, app_layout.chat_pane);
                 }
 
                 if let Some(pending) = &state.pending_peer_add {
@@ -10105,7 +10120,8 @@ fn render(
                     density_mode,
                     tab_manager_for_bar.is_some_and(|tm| tm.active_tab().read_only),
                     None, // Story 12.2c — local TUI is not an attach client
-                );
+                state.log_awareness.display,
+);
                 input_box::render(
                     frame,
                     app_layout.input_area,
@@ -10182,6 +10198,7 @@ fn render(
     state.user_message_boundaries = user_msg_bounds;
     state.focused_tool_id = focused_tool_id;
     state.viewport_height = vp_height;
+    state.log_visits_presented(&visible_feedback_ids); // Story 19.16g: the draw completed
 
     // Resolve pending anchor from resize: use new heights to find correct scroll_offset.
     if let Some(anchor_idx) = state.pending_anchor.take() {
@@ -10779,6 +10796,58 @@ mod tests {
     #[test]
     fn test_post_process_title_no_strip_mismatched_quotes() {
         assert_eq!(post_process_title("\"Mismatched'"), "\"Mismatched'");
+    }
+
+    /// Story 19.16g K06 / M06: an unpresented `team-log` visit moves with its
+    /// tab; another tab never presents it.
+    #[test]
+    fn a_pending_log_visit_travels_with_its_own_tab() {
+        let visit = crate::domain::models::LogVisitCandidate {
+            seen_through: 7,
+            reset_revision: 0,
+        };
+        let mut tabs = TabManager::new(CancellationToken::new());
+        let (mut conversation, mut streaming) =
+            (Conversation::default(), StreamingState::default());
+        let mut sessions = SessionManager::new(crate::domain::models::session::SessionState::Empty);
+        let (mut queue, mut state) = (TurnQueue::default(), TuiState::new(80, 24));
+        state.pending_log_visit = Some(visit);
+        save_active_tab(
+            &mut tabs,
+            &conversation,
+            &streaming,
+            &sessions,
+            &state,
+            &queue,
+        );
+        tabs.create_tab();
+        load_active_tab(
+            &tabs,
+            &mut conversation,
+            &mut streaming,
+            &mut sessions,
+            &mut state,
+            &mut queue,
+        );
+        assert_eq!(state.pending_log_visit, None);
+        save_active_tab(
+            &mut tabs,
+            &conversation,
+            &streaming,
+            &sessions,
+            &state,
+            &queue,
+        );
+        tabs.switch_to_index(1); // 1-based: the first tab
+        load_active_tab(
+            &tabs,
+            &mut conversation,
+            &mut streaming,
+            &mut sessions,
+            &mut state,
+            &mut queue,
+        );
+        assert_eq!(state.pending_log_visit, Some(visit));
     }
 
     #[test]

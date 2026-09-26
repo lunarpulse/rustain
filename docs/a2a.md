@@ -206,6 +206,15 @@ Failures are explicit and terminal:
 
 `/team send` exists only in the interactive TUI in this release. There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
 
+## The `log: N` reminder
+
+When the transparency log holds rows newer than your last visit, the right edge of the status bar shows a muted `log: N` (`log: 99+` above 99). Your client reads its own workspace journal about once a second; nothing is pushed to it, and no peer, item, task or event name ever appears in the segment. It counts every transparency row of every kind and direction — a teammate's retract of an item you received is one such row — so the count is a reason to look, not a description of what happened.
+
+- **How to clear it.** Open the log unfiltered: `Ctrl+X, L` or `/team log` in the standalone TUI; `/team log` in a daemon-attached client (there `Ctrl+X` retracts this host's auto-sent message, and a read-only attach may still read the log). The reminder clears only once the view is actually drawn on screen. A filtered command (`--filter=…`), a panel with an active search, a failed read, a result scrolled off screen, a panel export, an unrelated key, a restart, or the offline `rustain team log` command never clears it. `--json` and `--export` clear it like the plain view, because the rows were shown — whether or not the export file was written.
+- **What clearing means.** It records that this client *presented* that snapshot. It is a local visit reminder: ⛔ not `/team ack`, not `/team remove`, not `/team retract`, not an acknowledgement or a receipt to anyone, and not proof that you read a row. The in-chat `/team log` shows at most 20 rows and says so; presenting it clears the reminder for the whole snapshot it read, while the older rows remain in `rustain team log` and the panel. Clearing does not mean those older rows were read.
+- **What it counts.** Rows newer than the durable boundary your last presented visit recorded; rows that arrive after a view was read stay counted until the next visit. On first use every existing row counts. The boundary lives in `.rustain/transparency-seen.json`, is shared by the standalone and attached clients of this workspace, survives restarts, and is never written by polling.
+- **`log: ?`** means the reminder cannot currently be trusted — the journal or the preference could not be read, a visit could not be saved, or the journal's head fell below the saved boundary (a reset, which the client confirms and then counts from zero). It is never shown as an apparently current zero; open the log for details.
+
 ## Trust tiers
 
 Trust comes only from configuration; an AgentCard cannot promote itself.

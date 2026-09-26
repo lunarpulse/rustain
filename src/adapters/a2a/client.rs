@@ -358,6 +358,24 @@ impl A2aClientAdapter {
         endpoint_url: &str,
         request: &super::jsonrpc::JsonRpcRequest,
     ) -> Result<serde_json::Value, A2aError> {
+        self.post_jsonrpc_after(endpoint_url, request, || async {})
+            .await
+    }
+
+    /// POST after `before_send` completes. The hook runs only after every
+    /// no-I/O refusal and request-build error has been resolved, immediately
+    /// before the client can open a connection. The retract path uses this
+    /// seam to make its durable "sent" row both honest and pre-POST.
+    pub(crate) async fn post_jsonrpc_after<F, Fut>(
+        &self,
+        endpoint_url: &str,
+        request: &super::jsonrpc::JsonRpcRequest,
+        before_send: F,
+    ) -> Result<serde_json::Value, A2aError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ()>,
+    {
         let url = parse_and_validate_url(endpoint_url)?;
         let client = self.http()?;
         let mut outbound = client
@@ -369,9 +387,13 @@ impl A2aClientAdapter {
         if self.auth_env.is_some() {
             outbound = outbound.header(API_KEY_HEADER, self.credential_header(&url)?);
         }
-        let response = outbound
+        let outbound = outbound
             .json(request)
-            .send()
+            .build()
+            .map_err(|error| self.map_transport_error(&error))?;
+        before_send().await;
+        let response = client
+            .execute(outbound)
             .await
             .map_err(|error| self.map_transport_error(&error))?;
         if !response.status().is_success() {
@@ -451,6 +473,15 @@ impl A2aClientAdapter {
                     failure,
                 };
             }
+        }
+        // A connect failure is PROVEN undelivered: no request byte reached
+        // the peer. `Request` cannot say that — it also carries a timeout
+        // after the body was sent — so a write verb that must only claim
+        // "nothing was marked" when it is true (Story 19.16f `F5`) needs the
+        // distinction. The Display is byte-identical to `Request`'s, so
+        // `/team send`'s rendered refusal does not change.
+        if error.is_connect() {
+            return A2aError::Connect(error.to_string());
         }
         A2aError::Request(error.to_string())
     }
@@ -662,5 +693,37 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), adapter.await_settled())
             .await
             .expect("a settle recorded before subscription must still be visible");
+    }
+
+    #[tokio::test]
+    async fn a_preflight_refusal_does_not_run_the_before_send_hook() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let spec = A2aPeerSpec::new(
+            "scoped",
+            RedactedUrl::from("http://127.0.0.1:9"),
+            A2aPeerSource::Workspace,
+        )
+        .with_auth(Some("RUSTAIN_UNUSED_TEST_KEY".to_owned()));
+        let adapter = A2aClientAdapter::new(&spec, None).expect("adapter composes");
+        let request = crate::adapters::a2a::jsonrpc::JsonRpcRequest::new(
+            1,
+            crate::adapters::a2a::ITEMS_RETRACT_METHOD,
+            serde_json::json!({ "itemId": "ri_x" }),
+        );
+        let hook_ran = AtomicBool::new(false);
+
+        let error = adapter
+            .post_jsonrpc_after("http://127.0.0.1:10/a2a", &request, || async {
+                hook_ran.store(true, Ordering::Relaxed);
+            })
+            .await
+            .expect_err("the credential origin is fixed by the roster");
+
+        assert!(matches!(
+            error,
+            crate::adapters::a2a::error::A2aError::CredentialOutOfScope { .. }
+        ));
+        assert!(!hook_ran.load(Ordering::Relaxed));
     }
 }

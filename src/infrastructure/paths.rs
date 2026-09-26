@@ -289,6 +289,22 @@ pub fn transparency_export_path(workspace: &std::path::Path) -> Result<PathBuf> 
     Ok(rustain_workspace_dir(workspace)?.join("transparency.jsonl"))
 }
 
+/// Story 19.16g — the local UI preference holding the transparency log's
+/// durable seen-through boundary: `{workspace}/.rustain/transparency-seen.json`.
+///
+/// A pure join: observation never creates it, and nothing reads
+/// `transparency.jsonl` back to derive it. A local-operator reminder
+/// boundary, not a room event, acknowledgement, receipt, or proof.
+pub fn transparency_seen_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("transparency-seen.json")
+}
+
+/// The dedicated, never-renamed, never-truncated lock serializing
+/// read/merge/write of [`transparency_seen_path`] across local clients.
+pub fn transparency_seen_lock_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("transparency-seen.lock")
+}
+
 /// Path to a crash log file with timestamp.
 pub fn crash_log_path() -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()

@@ -90,6 +90,7 @@ fn render_chat_pane_with_bookmarks(
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
     terminal
         .draw(|frame| {

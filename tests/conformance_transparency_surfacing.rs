@@ -100,6 +100,34 @@ fn the_palette_row_names_the_direct_chord() {
     assert!(entry.description.contains("transparency"), "{entry:?}");
 }
 
+/// Story 19.16f AC3(d) — the palette row enumerates every sub-verb, byte
+/// consistent with the parser's `USAGE`: an operator who finds `/team` in the
+/// palette learns the cross-host retract and the narrowed board from it.
+///
+/// Mutant `M04`(ii) → RED: omit `retract` from the registry literal.
+#[test]
+fn the_palette_row_names_the_cross_host_retract_and_the_narrowed_board() {
+    let registry = rustain::adapters::command_registry::CommandRegistry::new();
+    let mut palette = rustain::adapters::palette_registry::PaletteRegistry::new();
+    palette.populate_from_command_registry(&registry);
+    let entry = palette
+        .all_entries()
+        .iter()
+        .find(|entry| entry.name == "/team")
+        .cloned()
+        .expect("/team is in the palette");
+    for verb in [
+        "/team retract <peer-id> <item-id>",
+        "/team board [<peer-id>]",
+    ] {
+        assert!(entry.description.contains(verb), "{verb}: {entry:?}");
+        assert!(
+            rustain::adapters::tui::handlers::team_command::USAGE.contains(verb),
+            "{verb} must read the same in USAGE"
+        );
+    }
+}
+
 // ── AC6/AC8 — the CLI face, asserted on BYTES ───────────────────────────────
 
 fn hostile_entry(seq: u64) -> JournalEntry {
@@ -181,7 +209,11 @@ fn both_faces_render_the_same_rows_from_the_same_fold() {
     }
 
     // …and the slash command renders the identical rows.
-    let slash = rustain::adapters::tui::handlers::team_command::render_rows(&fold, true);
+    let slash = rustain::adapters::tui::handlers::team_command::render_rows(
+        &fold,
+        true,
+        rustain::adapters::tui::handlers::team_command::LogRail::Standalone,
+    );
     assert_eq!(
         slash,
         rustain::domain::services::transparency::render_export(&fold),
