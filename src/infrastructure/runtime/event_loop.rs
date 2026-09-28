@@ -6261,6 +6261,8 @@ pub async fn run(
                             }
                         }
                     }
+                    #[cfg(feature = "a2a")]
+                    AppEvent::TeamSendSettled { conversation_id: c, block_id, index, outcome } => crate::infrastructure::runtime::transparency_bridge::team_send_settled(&conversation.id, &mut state, &mut tab_manager, &c, &block_id, index, outcome),
                     // Story 19.16b — the board is a VIEW: replace the stable
                     // `team-board` block, ⛔ never stack a fresh notice and
                     // ⛔ never route through the turn-fatal Warning path.
@@ -8751,6 +8753,10 @@ fn save_active_tab(
     tab.user_message_boundaries = state.user_message_boundaries.clone();
     tab.focused_tool_id = state.focused_tool_id.clone();
     tab.feedback_blocks = state.feedback_blocks.clone();
+    #[cfg(feature = "a2a")]
+    {
+        tab.team_send_blocks = state.team_send_blocks.clone();
+    }
     tab.active_feedback_id = state.active_feedback_id.clone();
     tab.pending_log_visit = state.pending_log_visit;
     tab.total_content_height = state.total_content_height;
@@ -8792,6 +8798,10 @@ fn load_active_tab(
     // leak across a tab boundary (story 19.9 review patch).
     state.selected_tool_id = None;
     state.feedback_blocks = tab.feedback_blocks.clone();
+    #[cfg(feature = "a2a")]
+    {
+        state.team_send_blocks = tab.team_send_blocks.clone();
+    }
     state.active_feedback_id = tab.active_feedback_id.clone();
     state.pending_log_visit = tab.pending_log_visit;
     state.total_content_height = tab.total_content_height;

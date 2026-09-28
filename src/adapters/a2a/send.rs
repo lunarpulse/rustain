@@ -6,52 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 
 use super::client::CardSlot;
-use super::driver::{
-    A2aDelegationRuntime, DelegationError, TaskClient, build_message, disclosable_task_id,
-};
+use super::driver::{A2aDelegationRuntime, TaskClient, build_message};
 use super::endpoint::resolve_jsonrpc_endpoint;
-use super::error::{A2aError, AnchorCause, anchor_error, anchor_refusal};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SendOutcome {
-    pub peer: String,
-    pub task_id: String,
-    pub state: String,
-    pub reply_text: Option<String>,
-}
+use super::error::{A2aError, anchor_error};
 
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SendError {
-    UnknownPeer {
-        peer: String,
-        known: Vec<String>,
-    },
-    CardNotCached {
-        peer: String,
-    },
-    Endpoint {
-        peer: String,
-        source: A2aError,
-    },
-    InputRequired {
-        peer: String,
-        task_id: String,
-    },
-    Delegation {
-        peer: String,
-        source: DelegationError,
-    },
-    /// The boot card GET — this peer's first TLS handshake — refused its
-    /// certificate, or its anchor could not be loaded (`A22`).
-    ///
-    /// ⛔ Deliberately NOT routed through `DelegationError`: nothing was
-    /// delegated, and `Delegation`'s `Display` would prefix the operator's
-    /// ratified sentence with `A2A send to peer …: A2A transport failure:`.
-    AnchorRefused {
-        peer: String,
-        cause: AnchorCause,
-    },
+    UnknownPeer { peer: String, known: Vec<String> },
+    CardNotCached { peer: String },
+    Endpoint { peer: String, source: A2aError },
 }
 
 impl std::fmt::Display for SendError {
@@ -80,145 +44,330 @@ impl std::fmt::Display for SendError {
             Self::Endpoint { peer, source } => {
                 write!(f, "peer `{peer}` has no usable A2A endpoint: {source}")
             }
-            Self::InputRequired { peer, task_id } => write!(
-                f,
-                "peer `{peer}` asked a question this verb cannot answer (task `{task_id}` \
-                 cancelled) — multi-turn arrives with 19.18"
-            ),
-            Self::Delegation { peer, source } => {
-                write!(f, "A2A send to peer `{peer}` failed: {source}")
-            }
-            // The one formatter for forms 5–9, shared with `A2aError`.
-            Self::AnchorRefused { peer, cause } => f.write_str(&anchor_refusal(peer, cause)),
         }
     }
 }
 
 impl std::error::Error for SendError {}
 
-pub async fn send_text(
-    runtime: &A2aDelegationRuntime,
-    peer_id: &str,
-    text: &str,
-    cancel: CancellationToken,
-) -> Result<SendOutcome, SendError> {
-    let (spec, client) = runtime
-        .peer_binding(peer_id)
-        .ok_or_else(|| SendError::UnknownPeer {
-            peer: peer_id.to_owned(),
-            known: runtime.known_peer_ids(),
-        })?;
-    // `AnchorRefused` is checked BEFORE `CardNotCached` (`A22` item 2): a
-    // retained anchor cause is the actionable one, and `CardNotCached`'s text
-    // ("discovery may still be in flight") would be false beside it.
-    let (card, trust) = match client.card_slot().await {
-        CardSlot::Ready(card, trust) => (card, trust),
-        CardSlot::AnchorRefused(cause) => {
-            // Durable-first, exactly one row, and ⛔ no `Dispatched` row: nothing
-            // was dispatched. A journal failure is latched the way the driver
-            // latches it; the send is refused either way, so the operator still
-            // sees the anchor form.
-            let _ = runtime
-                .journal_anchor_refusal(&spec, &anchor_error(&spec.id, &cause))
-                .await;
-            return Err(SendError::AnchorRefused {
-                peer: peer_id.to_owned(),
-                cause,
-            });
-        }
-        CardSlot::Pending | CardSlot::Unavailable => {
-            return Err(SendError::CardNotCached {
-                peer: peer_id.to_owned(),
-            });
-        }
-    };
-    let endpoint = resolve_jsonrpc_endpoint(&card).map_err(|source| SendError::Endpoint {
-        peer: peer_id.to_owned(),
-        source,
-    })?;
-    let message = outbound_message(text);
-    let submitted_id = message["message"]["messageId"]
-        .as_str()
-        .expect("build_message always creates a string messageId")
-        .to_owned();
-    let transport = Arc::new(TaskClient::new(client, endpoint.url().to_owned()));
-    let result = runtime
-        .delegate(&spec, trust, &submitted_id, transport, message, cancel)
-        .await
-        .map_err(|source| match source {
-            DelegationError::InputRequired { task_id, .. } => SendError::InputRequired {
-                peer: peer_id.to_owned(),
-                // The remote agent chose this id; it reaches the TUI, so it
-                // gets the same bounded, control-stripped form the journal
-                // uses (AC8) rather than the raw wire value.
-                task_id: disclosable_task_id(&task_id),
-            },
-            source => SendError::Delegation {
-                peer: peer_id.to_owned(),
-                source,
-            },
-        })?;
-
-    Ok(outcome_from_result(peer_id, &submitted_id, &result))
+fn outbound_message(text: &str) -> serde_json::Value {
+    build_message(&serde_json::json!({ "message": text }))
 }
 
-fn outcome_from_result(
-    peer_id: &str,
-    submitted_id: &str,
-    result: &serde_json::Value,
-) -> SendOutcome {
-    // Mirror `TaskSnapshot::from_result`'s correlation precedence (`id` →
-    // `taskId` → `messageId`) so the TUI shows the same id the journal's
-    // terminal row records; `submitted_id` is the last resort only.
-    let task_id = ["id", "taskId", "messageId"]
-        .iter()
-        .find_map(|key| {
-            result
-                .get(*key)
-                .and_then(serde_json::Value::as_str)
-                .filter(|id| !id.is_empty())
-        })
-        .unwrap_or(submitted_id)
-        .to_owned();
-    let task_id = disclosable_task_id(&task_id);
-    let state = result
-        .pointer("/status/state")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("completed")
-        .to_owned();
-    let reply_text = first_text_part(result.pointer("/status/message/parts"))
-        .or_else(|| first_text_part(result.pointer("/parts")))
-        .or_else(|| {
-            result
-                .pointer("/artifacts")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|artifacts| {
-                    artifacts
-                        .iter()
-                        .find_map(|a| first_text_part(a.get("parts")))
-                })
-        });
+/// Drive N independent sends and report each row as it settles. The callback
+/// runs on the caller's task; it never waits for an unrelated recipient.
+pub async fn deliver_to_recipients<F>(
+    runtime: &A2aDelegationRuntime,
+    recipients: &[String],
+    text: &str,
+    cancel: CancellationToken,
+    mut on_settle: F,
+) where
+    F: FnMut(usize, RecipientOutcome),
+{
+    use futures::{StreamExt, stream::FuturesUnordered};
 
-    SendOutcome {
-        peer: peer_id.to_owned(),
-        task_id,
-        state,
-        reply_text,
+    let pending = FuturesUnordered::new();
+    for (index, peer) in recipients.iter().enumerate() {
+        pending.push(async move { (index, deliver_text(runtime, peer, text).await) });
+    }
+    tokio::pin!(pending);
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            next = pending.next() => next,
+        };
+        let Some((index, outcome)) = next else { break };
+        if cancel.is_cancelled() {
+            break;
+        }
+        on_settle(index, outcome);
     }
 }
 
-/// First `text` part in an A2A parts array, wherever it sits — a conforming
-/// peer may lead with a non-text part or answer entirely via artifacts.
-fn first_text_part(parts: Option<&serde_json::Value>) -> Option<String> {
-    parts?.as_array()?.iter().find_map(|part| {
-        part.get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    })
+/// A ratified local sentence can exceed the peer-text cap (notably the
+/// CardNotCached guidance). Only peer-influenced causes use that tighter cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendCause {
+    Ratified(String),
+    PeerInfluenced(String),
 }
 
-fn outbound_message(text: &str) -> serde_json::Value {
-    build_message(&serde_json::json!({ "message": text }))
+impl SendCause {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Ratified(text) | Self::PeerInfluenced(text) => text,
+        }
+    }
+}
+
+/// Story 19.17: an addressed send settles at the first answer, never at the
+/// delegation lifecycle's terminal projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecipientOutcome {
+    Delivered,
+    Declined,
+    AwaitingApproval,
+    AcceptedWithoutItem,
+    AskedQuestion { task_id: String },
+    Unreachable { cause: Option<SendCause> },
+    NoUsableAnswer,
+    NotSent,
+}
+
+/// Deliver one independently addressed message. Resolve the roster binding
+/// before calling this function; only the rail-three action validates the
+/// complete set before starting any recipient I/O.
+pub async fn deliver_text(
+    runtime: &A2aDelegationRuntime,
+    peer_id: &str,
+    text: &str,
+) -> RecipientOutcome {
+    use super::lifecycle::A2aTaskTransport;
+
+    let Some((spec, client)) = runtime.peer_binding(peer_id) else {
+        return RecipientOutcome::NotSent;
+    };
+    let card = match client.card_slot().await {
+        CardSlot::Ready(card, _) => card,
+        CardSlot::AnchorRefused(cause) => {
+            let error = anchor_error(&spec.id, &cause);
+            let reason = error.to_string();
+            let _ = runtime.journal_send_preflight_refusal(&spec, &reason).await;
+            return RecipientOutcome::Unreachable {
+                cause: Some(SendCause::Ratified(reason)),
+            };
+        }
+        CardSlot::Pending | CardSlot::Unavailable => {
+            let reason = SendError::CardNotCached {
+                peer: peer_id.to_owned(),
+            }
+            .to_string();
+            let _ = runtime.journal_send_preflight_refusal(&spec, &reason).await;
+            return RecipientOutcome::Unreachable {
+                cause: Some(SendCause::Ratified(reason)),
+            };
+        }
+    };
+    let endpoint = match resolve_jsonrpc_endpoint(&card) {
+        Ok(endpoint) => endpoint,
+        Err(source) => {
+            let reason = SendError::Endpoint {
+                peer: peer_id.to_owned(),
+                source,
+            }
+            .to_string();
+            let _ = runtime.journal_send_preflight_refusal(&spec, &reason).await;
+            return RecipientOutcome::Unreachable {
+                cause: Some(SendCause::PeerInfluenced(reason)),
+            };
+        }
+    };
+    let message = outbound_message(text);
+    let task_id = message["message"]["messageId"]
+        .as_str()
+        .expect("build_message creates messageId")
+        .to_owned();
+    let transport = TaskClient::new(client, endpoint.url().to_owned());
+    let dispatched = AtomicBool::new(false);
+    let result = transport
+        .send_after(message, || async {
+            runtime
+                .journal_send_dispatch(&spec, &task_id, text.len())
+                .await
+                .map_err(|_| A2aError::JournalDispatch)?;
+            dispatched.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await;
+    let outcome = match result {
+        Ok(answer) => {
+            let outcome = classify_first_answer(&answer, &task_id);
+            match &outcome {
+                RecipientOutcome::Delivered | RecipientOutcome::AcceptedWithoutItem => {
+                    let _ = runtime
+                        .journal_send_accepted(&spec, &task_id, &answer)
+                        .await;
+                }
+                RecipientOutcome::Declined => {
+                    let detail = answer
+                        .pointer("/status/message/parts/0/text")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("peer refused the addressed item");
+                    let _ = runtime.journal_send_rejected(&spec, &task_id, detail).await;
+                }
+                RecipientOutcome::AskedQuestion { .. } => {
+                    let remote_id = answer
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&task_id);
+                    let cancelled = transport.tasks_cancel(remote_id).await.is_ok_and(|reply| {
+                        reply
+                            .pointer("/status/state")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("canceled")
+                    });
+                    if !cancelled {
+                        // A failed or unconfirmed cancellation proves neither a
+                        // terminal refusal nor that the peer stopped waiting.
+                        // Keep only dispatch.
+                        return RecipientOutcome::NoUsableAnswer;
+                    }
+                    let _ = runtime
+                        .journal_send_rejected(
+                            &spec,
+                            &task_id,
+                            "peer asked a question this verb cannot answer",
+                        )
+                        .await;
+                }
+                _ => {}
+            }
+            outcome
+        }
+        Err(A2aError::JournalDispatch) => RecipientOutcome::NotSent,
+        Err(error) if !dispatched.load(Ordering::Relaxed) => {
+            let cause = send_preflight_cause(peer_id, &error);
+            let _ = runtime
+                .journal_send_preflight_refusal(&spec, cause.as_str())
+                .await;
+            RecipientOutcome::Unreachable { cause: Some(cause) }
+        }
+        Err(error) => match send_error_class(&error) {
+            SendErrorClass::Connect => {
+                let _ = runtime
+                    .journal_send_rejected(
+                        &spec,
+                        &task_id,
+                        &format!("A2A transport failure: {error}"),
+                    )
+                    .await;
+                RecipientOutcome::Unreachable { cause: None }
+            }
+            SendErrorClass::Trust => {
+                let cause = error.to_string();
+                let _ = runtime.journal_send_rejected(&spec, &task_id, &cause).await;
+                RecipientOutcome::Unreachable {
+                    cause: Some(SendCause::Ratified(cause)),
+                }
+            }
+            SendErrorClass::Unproven => RecipientOutcome::NoUsableAnswer,
+        },
+    };
+    outcome
+}
+
+/// The first answer alone decides delivery. Item presence outranks the task
+/// state except for an explicit rejection; oversized ids prove neither result.
+fn classify_first_answer(answer: &serde_json::Value, submitted_id: &str) -> RecipientOutcome {
+    if answer
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| id.len() > crate::domain::services::transparency::MAX_PEER_ID_BYTES)
+    {
+        return RecipientOutcome::NoUsableAnswer;
+    }
+    let item = answer
+        .pointer("/metadata/x-rustain-item-id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty());
+    let state = answer
+        .pointer("/status/state")
+        .and_then(serde_json::Value::as_str);
+    match (state, item) {
+        (Some("rejected"), _) => RecipientOutcome::Declined,
+        (_, Some(item))
+            if item.len() <= crate::domain::services::transparency::MAX_PEER_ID_BYTES =>
+        {
+            RecipientOutcome::Delivered
+        }
+        (_, Some(_)) => RecipientOutcome::NoUsableAnswer,
+        (Some("auth-required"), _) => RecipientOutcome::AwaitingApproval,
+        (Some("submitted" | "working" | "completed"), _) => RecipientOutcome::AcceptedWithoutItem,
+        (Some("input-required"), _) => {
+            let remote_id = answer
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(submitted_id);
+            RecipientOutcome::AskedQuestion {
+                task_id: remote_id.to_owned(),
+            }
+        }
+        // An A2A Message result is an immediate answer with no task to observe
+        // (the lifecycle parser reads it as completed); without an item id it
+        // is accepted, never a delivered FR165 item.
+        (None, None) if is_message_answer(answer) => RecipientOutcome::AcceptedWithoutItem,
+        _ => RecipientOutcome::NoUsableAnswer,
+    }
+}
+
+/// The A2A Message result shape, as `lifecycle::TaskSnapshot` recognises it.
+fn is_message_answer(answer: &serde_json::Value) -> bool {
+    answer.get("kind").and_then(serde_json::Value::as_str) == Some("message")
+        || answer.get("parts").is_some()
+}
+
+/// How a send error bears on the recipient outcome. The single variant match
+/// behind both the pre-I/O cause line and the post-hook classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendErrorClass {
+    /// The connection never opened: proof the request did not land.
+    Connect,
+    /// A named credential or trust-anchor refusal (`UX-DR-TM-10`).
+    Trust,
+    /// Proves neither delivery nor refusal.
+    Unproven,
+}
+
+fn send_error_class(error: &A2aError) -> SendErrorClass {
+    match error {
+        A2aError::Connect(_) => SendErrorClass::Connect,
+        A2aError::CredentialRejected { .. }
+        | A2aError::CredentialMissing { .. }
+        | A2aError::CredentialOutOfScope { .. }
+        | A2aError::AnchorValidationFailed { .. }
+        | A2aError::CaCertUnloadable { .. } => SendErrorClass::Trust,
+        A2aError::Request(_)
+        | A2aError::HttpStatus { .. }
+        | A2aError::JsonRpc { .. }
+        | A2aError::InvalidRedirect(_)
+        | A2aError::TooManyRedirects
+        | A2aError::UnexpectedContentType { .. }
+        | A2aError::BodyTooLarge { .. }
+        | A2aError::InvalidUtf8
+        | A2aError::InvalidJson(_)
+        | A2aError::UnknownTaskState { .. }
+        | A2aError::MalformedResponse { .. }
+        | A2aError::CorrelationMismatch { .. }
+        | A2aError::MalformedCard { .. }
+        | A2aError::MissingSignatures
+        | A2aError::InvalidProtectedHeader
+        | A2aError::UnsupportedAlgorithm { .. }
+        | A2aError::KeyIdMismatch { .. }
+        | A2aError::InvalidPinnedKey
+        | A2aError::InvalidSignatureEncoding
+        | A2aError::Canonicalization(_)
+        | A2aError::BadSignature
+        | A2aError::ClientBuild(_)
+        | A2aError::UnsafeUrl { .. }
+        | A2aError::NoJsonRpcEndpoint { .. }
+        | A2aError::Config(_)
+        | A2aError::JournalDispatch => SendErrorClass::Unproven,
+        // A2aError is non-exhaustive: a future post-hook error proves no outcome.
+        #[allow(unreachable_patterns)]
+        _ => SendErrorClass::Unproven,
+    }
+}
+
+fn send_preflight_cause(peer_id: &str, error: &A2aError) -> SendCause {
+    match send_error_class(error) {
+        SendErrorClass::Trust => SendCause::Ratified(error.to_string()),
+        SendErrorClass::Connect | SendErrorClass::Unproven => SendCause::PeerInfluenced(format!(
+            "peer `{peer_id}` has no usable A2A endpoint: {error}"
+        )),
+    }
 }
 
 // ── Story 19.16f · the cross-host retract, the sender's half ────────────────
@@ -361,7 +510,7 @@ pub enum RetractOutcome {
     NotSent(RetractNotSent),
 }
 
-/// Resolve ONE roster peer in `send_text`'s order: binding → card slot →
+/// Resolve ONE roster peer in the addressed-send order: binding → card slot →
 /// endpoint → transport.
 async fn resolve_retract_peer(
     runtime: &A2aDelegationRuntime,
@@ -460,6 +609,7 @@ pub async fn retract_item_on_peer(
                 .journal_item_retract_dispatch(&spec, task.as_deref(), item_id, bytes)
                 .await;
             request_started.store(true, Ordering::Relaxed);
+            Ok(())
         })
         .await
     {
@@ -507,23 +657,35 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
+    use tokio::sync::{Mutex, mpsc};
 
     use crate::adapters::a2a::client;
     use crate::adapters::a2a::driver::A2aDelegationRuntime;
+    use crate::adapters::a2a::test_fixtures::{PeerFixture, RpcAnswer};
     use crate::domain::events::AppEvent;
     use crate::domain::models::{A2aPeerSource, A2aPeerSpec, RedactedUrl, RoomEvent};
     use crate::domain::ports::{RoomJournal, RoomJournalError};
     use crate::infrastructure::subagent::NodeTree;
 
-    use super::{SendError, outbound_message, outcome_from_result, send_text};
+    use super::{
+        RecipientOutcome, SendCause, classify_first_answer, deliver_text, outbound_message,
+    };
 
     struct AcceptingJournal;
 
     #[async_trait]
     impl RoomJournal for AcceptingJournal {
         async fn record_event(&self, _event: RoomEvent) -> Result<(), RoomJournalError> {
+            Ok(())
+        }
+    }
+
+    struct RecordingJournal(Mutex<Vec<RoomEvent>>);
+
+    #[async_trait]
+    impl RoomJournal for RecordingJournal {
+        async fn record_event(&self, event: RoomEvent) -> Result<(), RoomJournalError> {
+            self.0.lock().await.push(event);
             Ok(())
         }
     }
@@ -543,56 +705,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_peer_lists_the_configured_ids_without_attempting_io() {
-        let alpha = peer("alpha");
-        let client = Arc::new(client::A2aClientAdapter::new(&alpha, None).expect("client"));
-        let error = send_text(
-            &runtime(vec![(alpha, client)]),
-            "missing",
-            "hello",
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("unknown peer must be refused before transport");
-
-        assert!(matches!(
-            error,
-            SendError::UnknownPeer { ref peer, ref known }
-                if peer == "missing" && known == &["alpha"]
-        ));
-        assert_eq!(
-            error.to_string(),
-            "no A2A peer `missing` in the configured A2A roster \
-             (`.rustain/a2a.json` or the active profile) (known: alpha)"
-        );
-    }
-
-    #[tokio::test]
     async fn configured_peer_without_cached_card_refuses_without_on_demand_fetch() {
         let known = peer("known");
         let client = Arc::new(client::A2aClientAdapter::new(&known, None).expect("client"));
-        let error = send_text(
-            &runtime(vec![(known, client)]),
-            "known",
-            "hello",
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("send must not refresh an uncached card");
-
-        assert!(matches!(
-            error,
-            SendError::CardNotCached { ref peer } if peer == "known"
-        ));
-        let text = error.to_string();
-        assert!(
-            text.starts_with("peer `known` is configured but its AgentCard is not cached"),
-            "{text}"
-        );
-        // The refusal must not assert a definite boot-time failure while the
-        // startup fetch can still be in flight.
+        let outcome = deliver_text(&runtime(vec![(known, client)]), "known", "hello").await;
+        let RecipientOutcome::Unreachable {
+            cause: Some(SendCause::Ratified(text)),
+        } = outcome
+        else {
+            panic!("uncached roster peer must be unreachable with local guidance");
+        };
+        assert!(text.contains("AgentCard is not cached"), "{text}");
         assert!(text.contains("may still be in flight"), "{text}");
         assert!(text.contains("DF-18-9-CARD-REFRESH"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn failed_question_cancellation_never_claims_the_remote_task_was_cancelled() {
+        let fixture = PeerFixture::plaintext().await;
+        fixture
+            .answer_with(RpcAnswer::InputRequiredCancelFails)
+            .await;
+        let spec = A2aPeerSpec::new(
+            "questions",
+            RedactedUrl::from(fixture.origin.clone()),
+            A2aPeerSource::Workspace,
+        );
+        let client = Arc::new(client::A2aClientAdapter::new(&spec, None).expect("client"));
+        client.refresh_agent_card(&spec).await.expect("cached card");
+        let journal = Arc::new(RecordingJournal(Mutex::new(Vec::new())));
+        let (event_tx, _event_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let runtime = A2aDelegationRuntime::new(NodeTree::new(), journal.clone(), event_tx)
+            .with_peer_bindings(vec![(spec, client)].into());
+
+        assert_eq!(
+            deliver_text(&runtime, "questions", "hello").await,
+            RecipientOutcome::NoUsableAnswer
+        );
+        let methods: Vec<_> = fixture
+            .posts()
+            .await
+            .iter()
+            .map(|post| {
+                serde_json::from_str::<serde_json::Value>(&post.body)
+                    .expect("recorded JSON-RPC")
+                    ["method"]
+                    .as_str()
+                    .expect("method")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(methods, ["message/send", "tasks/cancel"]);
+        let rows = journal.0.lock().await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "only a dispatch is proven when cleanup fails"
+        );
+        assert!(matches!(
+            rows[0],
+            RoomEvent::RemoteEnvelopeDispatched { .. }
+        ));
     }
 
     #[test]
@@ -609,98 +782,58 @@ mod tests {
     }
 
     #[test]
-    fn outcome_uses_peer_assigned_task_id_and_completed_reply() {
-        let result = serde_json::json!({
-            "kind": "task",
-            "id": "peer-task-42",
-            "status": {
-                "state": "completed",
-                "message": {
-                    "role": "agent",
-                    "parts": [{ "kind": "text", "text": "peer answer" }]
-                }
-            }
-        });
-
-        let outcome = outcome_from_result("moon", "submitted-local-id", &result);
-
-        assert_eq!(outcome.peer, "moon");
-        assert_eq!(outcome.task_id, "peer-task-42");
-        assert_eq!(outcome.state, "completed");
-        assert_eq!(outcome.reply_text.as_deref(), Some("peer answer"));
-    }
-
-    #[test]
-    fn outcome_correlates_message_shaped_replies_by_their_own_id() {
-        // `TaskSnapshot::from_result` correlates message-shaped responses by
-        // `taskId`/`messageId`; the TUI must show the same id the journal's
-        // terminal row records, not the locally submitted one.
-        let result = serde_json::json!({
+    fn itemless_first_answers_never_claim_a_delivered_item() {
+        let accepted = serde_json::json!({"status": {"state": "working"}});
+        assert_eq!(
+            classify_first_answer(&accepted, "local"),
+            RecipientOutcome::AcceptedWithoutItem
+        );
+        let message = serde_json::json!({
             "kind": "message",
-            "messageId": "peer-message-1",
-            "parts": [{ "kind": "text", "text": "fast reply" }]
+            "messageId": "peer-reply",
+            "parts": [{"kind": "text", "text": "noted"}]
         });
-
-        let outcome = outcome_from_result("moon", "submitted-local-id", &result);
-
-        assert_eq!(outcome.task_id, "peer-message-1");
-        assert_eq!(outcome.state, "completed");
-        assert_eq!(outcome.reply_text.as_deref(), Some("fast reply"));
-    }
-
-    #[test]
-    fn outcome_extracts_text_from_later_parts_and_artifacts() {
-        // A conforming peer may lead with a non-text part, or answer through
-        // task artifacts instead of status.message.
-        let leading_data_part = serde_json::json!({
-            "kind": "task",
-            "id": "t-1",
-            "status": {
-                "state": "completed",
-                "message": {
-                    "parts": [
-                        { "kind": "data", "data": { "a": 1 } },
-                        { "kind": "text", "text": "after a data part" }
-                    ]
-                }
+        assert_eq!(
+            classify_first_answer(&message, "local"),
+            RecipientOutcome::AcceptedWithoutItem,
+            "a Message result is an immediate answer, not an unusable one"
+        );
+        let question = serde_json::json!({
+            "id": "peer-\nquestion",
+            "status": {"state": "input-required"}
+        });
+        assert_eq!(
+            classify_first_answer(&question, "local"),
+            RecipientOutcome::AskedQuestion {
+                task_id: "peer-\nquestion".into()
             }
+        );
+        let parked = serde_json::json!({
+            "status": {"state": "auth-required"},
+            "metadata": {"x-rustain-item-id": "ri_123"}
         });
         assert_eq!(
-            outcome_from_result("moon", "s", &leading_data_part)
-                .reply_text
-                .as_deref(),
-            Some("after a data part")
+            classify_first_answer(&parked, "local"),
+            RecipientOutcome::Delivered
         );
-
-        let artifact_answer = serde_json::json!({
-            "kind": "task",
-            "id": "t-2",
-            "status": { "state": "completed" },
-            "artifacts": [
-                { "parts": [{ "kind": "text", "text": "answer in an artifact" }] }
-            ]
+        let oversized = serde_json::json!({
+            "status": {"state": "auth-required"},
+            "metadata": {"x-rustain-item-id": "x".repeat(crate::domain::services::transparency::MAX_PEER_ID_BYTES + 1)}
         });
         assert_eq!(
-            outcome_from_result("moon", "s", &artifact_answer)
-                .reply_text
-                .as_deref(),
-            Some("answer in an artifact")
+            classify_first_answer(&oversized, "local"),
+            RecipientOutcome::NoUsableAnswer
         );
-    }
-
-    #[test]
-    fn outcome_task_id_is_sanitized_before_it_reaches_the_tui() {
-        // The remote agent controls this id; control characters must not
-        // reach terminal-facing sinks (AC8 — same bound as the journal).
-        let result = serde_json::json!({
-            "kind": "task",
-            "id": "evil\u{0007}\u{000a}forged-header",
-            "status": { "state": "completed" }
-        });
-
-        let task_id = outcome_from_result("moon", "s", &result).task_id;
-
-        assert!(!task_id.contains('\u{0007}'), "{task_id:?}");
-        assert!(!task_id.contains('\n'), "{task_id:?}");
+        for state in ["working", "input-required"] {
+            let oversized_task = serde_json::json!({
+                "id": "x".repeat(crate::domain::services::transparency::MAX_PEER_ID_BYTES + 1),
+                "status": { "state": state }
+            });
+            assert_eq!(
+                classify_first_answer(&oversized_task, "local"),
+                RecipientOutcome::NoUsableAnswer,
+                "an oversized remote task id never authorizes acceptance or cancellation"
+            );
+        }
     }
 }

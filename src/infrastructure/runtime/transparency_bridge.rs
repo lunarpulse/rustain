@@ -544,35 +544,79 @@ pub async fn team_command(
                 );
             }
         }
-        TeamCommandArgs::Send { peer, text } => {
+        TeamCommandArgs::Send { recipients, text } => {
+            use crate::adapters::tui::handlers::team_command::show_team_send;
+
+            state.team_send_next_id += 1;
+            let block_id = format!("team-send-{}", state.team_send_next_id);
             #[cfg(feature = "a2a")]
             {
+                use crate::adapters::tui::handlers::team_command::{
+                    TeamSendRow, render_team_send_rows,
+                };
                 let Some(runtime) = app_state.a2a_send.clone() else {
-                    emit_team_warning(
+                    show_team_send(
                         state,
-                        conversation_id,
-                        app_state,
-                        "A2A send runtime is not configured for this session.".to_owned(),
+                        &block_id,
+                        "· A2A send runtime is not configured for this session.".to_owned(),
                     );
                     return;
                 };
+                let known = runtime.known_peer_ids();
+                let unknown: Vec<_> = recipients
+                    .iter()
+                    .filter(|peer| !known.contains(peer))
+                    .cloned()
+                    .collect();
+                if !unknown.is_empty() {
+                    let refusal = crate::adapters::a2a::send::SendError::UnknownPeer {
+                        peer: unknown.join(", "),
+                        known,
+                    }
+                    .to_string();
+                    show_team_send(state, &block_id, refusal);
+                    return;
+                }
+                let rows: Vec<_> = recipients
+                    .iter()
+                    .map(|alias| TeamSendRow {
+                        alias: alias.clone(),
+                        outcome: None,
+                    })
+                    .collect();
+                show_team_send(state, &block_id, render_team_send_rows(&rows));
+                state.team_send_blocks.insert(block_id.clone(), rows);
                 let event_bus = app_state.event_bus.clone();
                 let conversation_id = conversation_id.to_owned();
                 let cancel = app_state.session_cancel.child_token();
                 tokio::spawn(async move {
-                    let result =
-                        crate::adapters::a2a::send::send_text(&runtime, &peer, &text, cancel).await;
-                    let event = team_send_event(&conversation_id, result);
-                    let _ = event_bus.emit_domain(event);
+                    crate::adapters::a2a::send::deliver_to_recipients(
+                        &runtime,
+                        &recipients,
+                        &text,
+                        cancel.clone(),
+                        |index, outcome| {
+                            if !cancel.is_cancelled() {
+                                let _ = event_bus.emit_domain(
+                                    crate::domain::events::AppEvent::TeamSendSettled {
+                                        conversation_id: conversation_id.clone(),
+                                        block_id: block_id.clone(),
+                                        index,
+                                        outcome,
+                                    },
+                                );
+                            }
+                        },
+                    )
+                    .await;
                 });
             }
             #[cfg(not(feature = "a2a"))]
             {
-                let _ = (peer, text);
-                emit_team_warning(
+                let _ = (recipients, text);
+                show_team_send(
                     state,
-                    conversation_id,
-                    app_state,
+                    &block_id,
                     handler::team_send_unavailable().to_owned(),
                 );
             }
@@ -619,64 +663,6 @@ pub async fn team_command(
             Err(message) => emit_team_warning(state, conversation_id, app_state, message),
         },
     }
-}
-
-#[cfg(feature = "a2a")]
-fn team_send_event(
-    conversation_id: &str,
-    result: Result<crate::adapters::a2a::send::SendOutcome, crate::adapters::a2a::send::SendError>,
-) -> crate::domain::events::AppEvent {
-    match result {
-        Ok(outcome) => crate::adapters::tui::handlers::team_command::team_send(
-            conversation_id,
-            &outcome.peer,
-            &outcome.task_id,
-            &outcome.state,
-            outcome.reply_text.as_deref(),
-        ),
-        Err(error) => crate::domain::events::AppEvent::SystemNotice {
-            conversation_id: Some(conversation_id.to_owned()),
-            // Advisory, not Warning: refusals arrive from a background task
-            // and must not abort an unrelated streaming turn (turn-fatal).
-            level: crate::domain::models::NoticeLevel::Advisory,
-            message: team_send_refusal(&error),
-        },
-    }
-}
-
-/// Render one send refusal.
-///
-/// Story 19.14 (`A5`): a credential or anchor refusal renders **exactly** its
-/// ratified sentence. Matched on the **variant** — ⛔ never by string-matching a
-/// `Display`, and ⛔ never with `SendError::Delegation`'s
-/// `A2A send to peer …: A2A transport failure:` prefix in front of it, which is
-/// what `FR166` forbids and what `A2A peer returned HTTP 401` used to be.
-///
-/// Story 19.15 shares this arm and owns the single peer-text sanitize point
-/// (`AD-1824`); every string below is locally minted, so ⛔ no second sanitize
-/// point is added here.
-#[cfg(feature = "a2a")]
-pub(crate) fn team_send_refusal(error: &crate::adapters::a2a::send::SendError) -> String {
-    use crate::adapters::a2a::driver::DelegationError;
-    use crate::adapters::a2a::error::A2aError;
-    use crate::adapters::a2a::send::SendError;
-
-    let rendered = match error {
-        SendError::AnchorRefused { .. } => error.to_string(),
-        SendError::Delegation {
-            source: DelegationError::Transport(transport),
-            ..
-        } => match transport {
-            A2aError::CredentialMissing { .. }
-            | A2aError::CredentialRejected { .. }
-            | A2aError::CredentialOutOfScope { .. }
-            | A2aError::AnchorValidationFailed { .. }
-            | A2aError::CaCertUnloadable { .. } => transport.to_string(),
-            _ => error.to_string(),
-        },
-        _ => error.to_string(),
-    };
-    crate::domain::services::peer_text::sanitize_peer_text_line(&rendered).into_owned()
 }
 
 /// The board's spawn body: every roster peer, or one named peer uncapped
@@ -967,6 +953,76 @@ pub(crate) async fn resolve_team_retract(state: &mut TuiState, accept: bool, app
     }
     #[cfg(not(feature = "a2a"))]
     let _ = (pending, app_state);
+}
+
+/// Story 19.17: settle only the addressed action's row on its issuing tab.
+#[cfg(feature = "a2a")]
+pub fn team_send_settled(
+    active_conversation_id: &str,
+    state: &mut TuiState,
+    tab_manager: &mut crate::domain::models::tab::TabManager,
+    conversation_id: &str,
+    block_id: &str,
+    index: usize,
+    outcome: crate::adapters::a2a::send::RecipientOutcome,
+) {
+    let redraw = if conversation_id == active_conversation_id {
+        settle_team_send_row(
+            &mut state.team_send_blocks,
+            &mut state.feedback_blocks,
+            block_id,
+            index,
+            outcome,
+        )
+    } else if let Some(tab) = tab_manager.find_by_conversation_mut(conversation_id) {
+        settle_team_send_row(
+            &mut tab.team_send_blocks,
+            &mut tab.feedback_blocks,
+            block_id,
+            index,
+            outcome,
+        )
+    } else {
+        false
+    };
+    if redraw {
+        state.needs_redraw = true;
+    }
+}
+
+/// Replace one row and re-render its block. Once every row has settled the
+/// block text is final, so its typed rows are dropped rather than carried
+/// (and cloned on every tab switch) for the rest of the session.
+#[cfg(feature = "a2a")]
+fn settle_team_send_row(
+    blocks: &mut std::collections::BTreeMap<
+        String,
+        Vec<crate::adapters::tui::handlers::team_command::TeamSendRow>,
+    >,
+    feedback_blocks: &mut std::collections::BTreeMap<String, crate::domain::models::FeedbackBlock>,
+    block_id: &str,
+    index: usize,
+    outcome: crate::adapters::a2a::send::RecipientOutcome,
+) -> bool {
+    use crate::adapters::tui::handlers::team_command::render_team_send_rows;
+
+    let Some(rows) = blocks.get_mut(block_id) else {
+        return false;
+    };
+    let Some(row) = rows.get_mut(index) else {
+        return false;
+    };
+    row.outcome = Some(outcome);
+    let redraw = if let Some(block) = feedback_blocks.get_mut(block_id) {
+        block.message = render_team_send_rows(rows);
+        true
+    } else {
+        false
+    };
+    if rows.iter().all(|row| row.outcome.is_some()) {
+        blocks.remove(block_id);
+    }
+    redraw
 }
 
 /// The `TeamRetractPreviewReady` arm. The card is raised on the active tab
@@ -1460,48 +1516,6 @@ mod tests {
         assert!(message.contains("nothing changed"));
         assert!(!workspace.path().join(".rustain").exists());
     }
-    #[cfg(feature = "a2a")]
-    #[test]
-    fn send_completion_and_input_required_use_tainted_feedback_events() {
-        let success = team_send_event(
-            "conv",
-            Ok(crate::adapters::a2a::send::SendOutcome {
-                peer: "moon".to_owned(),
-                task_id: "peer-task-42".to_owned(),
-                state: "completed".to_owned(),
-                reply_text: Some("peer answer".to_owned()),
-            }),
-        );
-        let crate::domain::events::AppEvent::SystemNotice { level, message, .. } = success else {
-            panic!("send completion must use the feedback event path");
-        };
-        // Advisory: a late peer reply must not abort an unrelated turn.
-        assert!(matches!(
-            level,
-            crate::domain::models::NoticeLevel::Advisory
-        ));
-        assert!(!level.is_turn_fatal());
-        assert_eq!(
-            message,
-            "[peer] moon task peer-task-42 — completed\npeer answer"
-        );
-
-        let input_required = team_send_event(
-            "conv",
-            Err(crate::adapters::a2a::send::SendError::InputRequired {
-                peer: "moon".to_owned(),
-                task_id: "peer-task-43".to_owned(),
-            }),
-        );
-        let crate::domain::events::AppEvent::SystemNotice { message, .. } = input_required else {
-            panic!("input-required must use the feedback event path");
-        };
-        assert_eq!(
-            message,
-            "peer `moon` asked a question this verb cannot answer (task `peer-task-43` \
-             cancelled) — multi-turn arrives with 19.18"
-        );
-    }
 
     #[test]
     fn cross_tab_retract_outcome_replaces_the_card_host_blocks_sending_state() {
@@ -1551,15 +1565,96 @@ mod tests {
             "landed"
         );
     }
+
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn a_background_team_send_settlement_updates_only_its_issuing_tab() {
+        use crate::adapters::a2a::send::RecipientOutcome;
+        use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
+        use crate::domain::models::{FeedbackBlock, FeedbackLevel};
+
+        const BLOCK_ID: &str = "team-send-12";
+        let mut tabs = crate::domain::models::tab::TabManager::default();
+        let issuing_conversation_id = tabs.active_tab().conversation.id.clone();
+        tabs.create_tab();
+        let active_conversation_id = tabs.active_tab().conversation.id.clone();
+        let mut state = TuiState::new(120, 40);
+        state.density_mode = crate::domain::models::visual::DensityMode::Focus;
+
+        let sending_row = TeamSendRow {
+            alias: "jun-dev".to_owned(),
+            outcome: None,
+        };
+        let sending_block = FeedbackBlock {
+            id: BLOCK_ID.to_owned(),
+            level: FeedbackLevel::Info,
+            message: render_team_send_rows(std::slice::from_ref(&sending_row)),
+            actions: Vec::new(),
+        };
+        let issuing_tab = tabs
+            .find_by_conversation_mut(&issuing_conversation_id)
+            .expect("the issuing tab remains open in the background");
+        issuing_tab
+            .team_send_blocks
+            .insert(BLOCK_ID.to_owned(), vec![sending_row.clone()]);
+        issuing_tab
+            .feedback_blocks
+            .insert(BLOCK_ID.to_owned(), sending_block.clone());
+        state
+            .team_send_blocks
+            .insert(BLOCK_ID.to_owned(), vec![sending_row]);
+        state
+            .feedback_blocks
+            .insert(BLOCK_ID.to_owned(), sending_block);
+
+        team_send_settled(
+            &active_conversation_id,
+            &mut state,
+            &mut tabs,
+            &issuing_conversation_id,
+            BLOCK_ID,
+            0,
+            RecipientOutcome::Delivered,
+        );
+
+        assert_eq!(
+            state.team_send_blocks[BLOCK_ID][0].outcome, None,
+            "a settlement for a background tab must not overwrite the visible tab's row"
+        );
+        assert_eq!(
+            state.feedback_blocks[BLOCK_ID].message, "    jun-dev  sending…",
+            "the visible Info block remains its own in-progress action"
+        );
+        let issuing_tab = tabs
+            .find_by_conversation(&issuing_conversation_id)
+            .expect("the issuing tab is retained");
+        assert!(
+            !issuing_tab.team_send_blocks.contains_key(BLOCK_ID),
+            "a fully settled action keeps only its final block text, not its typed rows"
+        );
+        assert_eq!(
+            issuing_tab.feedback_blocks[BLOCK_ID].level,
+            FeedbackLevel::Info
+        );
+        assert_eq!(
+            issuing_tab.feedback_blocks[BLOCK_ID].message, "  ● jun-dev  delivered",
+            "the background tab's visible Info block is updated in place"
+        );
+        assert!(
+            state.queued_notifications.is_empty(),
+            "Focus must retain the Info block rather than queue an advisory notice"
+        );
+        assert!(state.needs_redraw);
+    }
 }
 
 /// Story 19.14 `AC2`/`AC4`/`AC5` — the credential, the typed refusals, and the
 /// secret's absence, through the `/team send` front door.
 ///
-/// Front door: `A2aEgress::compose` → `egress.runtime()` → `send::send_text` →
-/// `team_send_event` — the calls `team_command`'s send arm makes, minus its
-/// `TuiState`/`AppState` shell (the nearest test-visible production seam;
-/// `team_command` is `pub(crate)` and `team_send_event` private).
+/// Front door: `A2aEgress::compose` → `egress.runtime()` →
+/// `send::deliver_text` → `render_team_send_rows` — the calls `team_command`'s
+/// send arm makes, minus its `TuiState`/`AppState` shell (the nearest
+/// test-visible production seam).
 ///
 /// ⛔ Forbidden bypasses, none used here: a hand-built
 /// `A2aDelegationRuntime::with_peer_bindings` around a hand-constructed adapter,
@@ -1576,19 +1671,18 @@ mod credential_tests {
     use tracing_test::traced_test;
 
     use crate::adapters::a2a::egress::A2aEgress;
-    use crate::adapters::a2a::send::send_text;
+    use crate::adapters::a2a::send::{RecipientOutcome, deliver_text};
     use crate::adapters::a2a::test_fixtures::{
         PeerFixture, RpcAnswer, TestLeaf, Validity, leaf_issued_by, self_signed_leaf, test_ca,
         write_pem,
     };
+    use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
     use crate::domain::events::AppEvent;
     use crate::domain::models::{
         A2aPeerSource, A2aPeerSpec, CapabilityId, RedactedUrl, RejectReason, RoomEvent,
     };
     use crate::domain::ports::{CapabilityProvider, RoomJournal, RoomJournalError};
     use crate::infrastructure::subagent::NodeTree;
-
-    use super::{team_send_event, team_send_refusal};
 
     const SETTLE: Duration = Duration::from_secs(20);
 
@@ -1665,23 +1759,9 @@ mod credential_tests {
             Self { egress, journal }
         }
 
-        /// The whole front door: send, then render the way production renders.
-        async fn send(&self, alias: &str, text: &str) -> AppEvent {
-            let result =
-                send_text(self.egress.runtime(), alias, text, CancellationToken::new()).await;
-            team_send_event("conv", result)
-        }
-
-        async fn advisory(&self, alias: &str) -> String {
-            let AppEvent::SystemNotice { level, message, .. } = self.send(alias, "hello").await
-            else {
-                panic!("a send outcome always arrives as a SystemNotice");
-            };
-            assert!(
-                matches!(level, crate::domain::models::NoticeLevel::Advisory),
-                "a refusal is an Advisory, ⛔ never a turn-fatal Warning"
-            );
-            message
+        /// The delivery seam production settles independently for each recipient.
+        async fn send(&self, alias: &str, text: &str) -> RecipientOutcome {
+            deliver_text(self.egress.runtime(), alias, text).await
         }
 
         async fn rejected_rows(&self) -> Vec<String> {
@@ -1707,6 +1787,21 @@ mod credential_tests {
                 .filter(|row| matches!(row, RoomEvent::RemoteEnvelopeDispatched { .. }))
                 .count()
         }
+    }
+
+    fn unreachable_cause(alias: &str, outcome: RecipientOutcome) -> String {
+        let RecipientOutcome::Unreachable { cause: Some(cause) } = outcome.clone() else {
+            panic!("a refusal must retain its typed, operator-safe cause: {outcome:?}");
+        };
+        assert_eq!(
+            render_team_send_rows(&[TeamSendRow {
+                alias: alias.to_owned(),
+                outcome: Some(outcome),
+            }]),
+            format!("  ⚠ {alias}  unreachable\n    {}", cause.as_str()),
+            "the cause is a separate row line, never a transient notice"
+        );
+        cause.as_str().to_owned()
     }
 
     fn peer(alias: &str, origin: &str) -> A2aPeerSpec {
@@ -1742,12 +1837,10 @@ mod credential_tests {
         );
 
         export(VAR, "first-value");
-        assert!(
-            matches!(
-                harness.send("rotator", "one").await,
-                AppEvent::SystemNotice { .. }
-            ),
-            "the first send completes"
+        assert_eq!(
+            harness.send("rotator", "one").await,
+            RecipientOutcome::AcceptedWithoutItem,
+            "the fixture's first answer accepts without an item id"
         );
         export(VAR, "second-value");
         let _ = harness.send("rotator", "two").await;
@@ -1759,6 +1852,7 @@ mod credential_tests {
             "the value is read on EVERY call; a constructor read or any cache \
              would send `first-value` twice"
         );
+        assert_eq!(harness.dispatched_rows().await, 2);
     }
 
     /// `AC2(b)` + `AC2(c)`: the card GET carries no credential, and the order
@@ -1784,7 +1878,7 @@ mod credential_tests {
         ])
         .await;
 
-        let message = harness.advisory("pinned").await;
+        let message = unreachable_cause("pinned", harness.send("pinned", "hello").await);
         unexport(VAR);
 
         let requests = fixture.requests().await;
@@ -1807,6 +1901,8 @@ mod credential_tests {
             message.contains("is configured but its AgentCard is not cached"),
             "a JWS pin failure is not an anchor failure and keeps CardNotCached: {message}"
         );
+        assert_eq!(harness.rejected_rows().await.len(), 1);
+        assert_eq!(harness.dispatched_rows().await, 0);
     }
 
     /// `AC2(f)` / `AC4(a′)`: a credentialed peer whose card names **another
@@ -1828,7 +1924,7 @@ mod credential_tests {
         ])
         .await;
 
-        let message = harness.advisory("wanderer").await;
+        let message = unreachable_cause("wanderer", harness.send("wanderer", "hello").await);
         unexport(VAR);
 
         assert_eq!(
@@ -1852,8 +1948,8 @@ mod credential_tests {
     }
 
     /// `AC2(f)` on the **model rail**: the origin check lives in `post_jsonrpc`,
-    /// so `A2aProvider::invoke` inherits it. Placing the check in `send_text`
-    /// would leave this rail leaking.
+    /// so `A2aProvider::invoke` inherits it. Placing the check in the
+    /// JSON-RPC transport would leave this rail leaking.
     #[tokio::test]
     #[serial]
     async fn the_model_rail_also_refuses_a_card_that_names_another_origin() {
@@ -1910,7 +2006,7 @@ mod credential_tests {
         ])
         .await;
 
-        let message = harness.advisory("keyless").await;
+        let message = unreachable_cause("keyless", harness.send("keyless", "hello").await);
 
         assert_eq!(
             message,
@@ -1937,7 +2033,8 @@ mod credential_tests {
         let harness = Harness::compose(vec![peer("unconfigured", &fixture.origin)]).await;
         fixture.answer_with(RpcAnswer::Status(401)).await;
 
-        let message = harness.advisory("unconfigured").await;
+        let message =
+            unreachable_cause("unconfigured", harness.send("unconfigured", "hello").await);
 
         assert_eq!(
             message,
@@ -1948,6 +2045,8 @@ mod credential_tests {
             !message.contains("401") && !message.contains("FIXTURE-SERVER-TEXT"),
             "⛔ no bare status and ⛔ no server-supplied text: {message}"
         );
+        assert_eq!(harness.rejected_rows().await.len(), 1);
+        assert_eq!(harness.dispatched_rows().await, 1);
     }
 
     /// `AC4(b)` form 3 + `AC4(f)`: a present credential the server rejects. The
@@ -1964,7 +2063,7 @@ mod credential_tests {
         .await;
         fixture.answer_with(RpcAnswer::Status(403)).await;
 
-        let message = harness.advisory("picky").await;
+        let message = unreachable_cause("picky", harness.send("picky", "hello").await);
         unexport(VAR);
 
         assert_eq!(message, "picky rejected this credential");
@@ -1980,13 +2079,15 @@ mod credential_tests {
                 .all(|row| !row.contains("FIXTURE-SERVER-TEXT")),
             "the journal detail must not carry server text either"
         );
+        assert_eq!(harness.rejected_rows().await.len(), 1);
+        assert_eq!(harness.dispatched_rows().await, 1);
     }
 
     /// `AC4(d)` precedence, fixture (i): an anchor failure **and** an unset
     /// variable are both present; the anchor is reported. Reversing the order —
-    /// checking the variable in `send_text` — renders form 1 instead.
-    /// `AC4(g)`: the retained-cause path writes exactly one row and ⛔ no
-    /// `Dispatched`.
+    /// checking the variable before the retained boot cause — renders form 1
+    /// instead. `AC4(g)`: the retained-cause path writes exactly one row and
+    /// ⛔ no `Dispatched`.
     #[tokio::test]
     #[serial]
     async fn an_anchor_failure_outranks_a_missing_credential_and_writes_one_row() {
@@ -2010,7 +2111,7 @@ mod credential_tests {
         ])
         .await;
 
-        let message = harness.advisory("both").await;
+        let message = unreachable_cause("both", harness.send("both", "hello").await);
 
         assert_eq!(
             message, "both's certificate does not match the pinned anchor",
@@ -2035,13 +2136,13 @@ mod credential_tests {
     }
 
     /// `AC4(c)` form 6 through the real surface (code review 2026-09-15): the
-    /// retained boot cause renders the ratified string on the Advisory **and**
-    /// writes exactly one rejection row with no Dispatched. `egress.rs`'s
+    /// retained boot cause renders as a typed outcome's cause line and writes
+    /// exactly one rejection row with no Dispatched. `egress.rs`'s
     /// characterization module proves the slot and the variant; THIS harness
     /// proves the operator surface and the journal cardinality.
     #[tokio::test]
     #[serial]
-    async fn an_expired_leaf_refuses_by_name_on_the_advisory_with_one_row() {
+    async fn an_expired_leaf_refuses_by_name_with_a_typed_cause_and_one_row() {
         let ca = test_ca("19-14 surface expired CA", Validity::Current);
         let leaf = leaf_issued_by(
             &ca,
@@ -2057,7 +2158,7 @@ mod credential_tests {
         ])
         .await;
 
-        let message = harness.advisory("stale").await;
+        let message = unreachable_cause("stale", harness.send("stale", "hello").await);
 
         assert_eq!(
             message,
@@ -2078,7 +2179,7 @@ mod credential_tests {
     /// `AC4(c)` form 7 through the real surface.
     #[tokio::test]
     #[serial]
-    async fn a_wrong_name_leaf_refuses_by_name_on_the_advisory_with_one_row() {
+    async fn a_wrong_name_leaf_refuses_by_name_with_a_typed_cause_and_one_row() {
         let ca = test_ca("19-14 surface wrong-name CA", Validity::Current);
         let leaf = leaf_issued_by(
             &ca,
@@ -2094,7 +2195,7 @@ mod credential_tests {
         ])
         .await;
 
-        let message = harness.advisory("misnamed").await;
+        let message = unreachable_cause("misnamed", harness.send("misnamed", "hello").await);
 
         assert_eq!(
             message,
@@ -2112,7 +2213,7 @@ mod credential_tests {
     /// certificate `openssl req -x509` produces by default.
     #[tokio::test]
     #[serial]
-    async fn a_ca_true_anchor_refuses_by_name_on_the_advisory_with_one_row() {
+    async fn a_ca_true_anchor_refuses_by_name_with_a_typed_cause_and_one_row() {
         let leaf = self_signed_leaf(
             "19-14 surface ca-true leaf",
             "localhost",
@@ -2126,7 +2227,7 @@ mod credential_tests {
         ])
         .await;
 
-        let message = harness.advisory("ca-true").await;
+        let message = unreachable_cause("ca-true", harness.send("ca-true", "hello").await);
 
         assert_eq!(
             message,
@@ -2141,12 +2242,12 @@ mod credential_tests {
     }
 
     /// `AC4(c′)` form 9 through the real surface: an unloadable anchor names
-    /// `pem_tls`'s reason on the Advisory, writes one rejection row, and the
-    /// HTTPS fixture's accepted-connection count stays ZERO — no fallback client
-    /// is ever built.
+    /// `pem_tls`'s reason on the typed outcome's cause line, writes one rejection
+    /// row, and the HTTPS fixture's accepted-connection count stays ZERO — no
+    /// fallback client is ever built.
     #[tokio::test]
     #[serial]
-    async fn an_unloadable_anchor_refuses_by_name_on_the_advisory_without_a_socket() {
+    async fn an_unloadable_anchor_refuses_by_name_with_a_typed_cause_without_a_socket() {
         let ca = test_ca("19-14 surface unloadable CA", Validity::Current);
         let leaf = leaf_issued_by(
             &ca,
@@ -2162,7 +2263,7 @@ mod credential_tests {
         ])
         .await;
 
-        let message = harness.advisory("unloadable").await;
+        let message = unreachable_cause("unloadable", harness.send("unloadable", "hello").await);
 
         assert!(
             message.starts_with("unloadable's pinned anchor could not be loaded: ")
@@ -2216,7 +2317,7 @@ mod credential_tests {
         fixture.rotate(&rotated).await;
         fixture.answer_with(RpcAnswer::Completed).await;
 
-        let message = harness.advisory("rotated").await;
+        let message = unreachable_cause("rotated", harness.send("rotated", "hello").await);
 
         assert_eq!(
             message, "rotated's certificate does not match the pinned anchor",
@@ -2246,7 +2347,7 @@ mod credential_tests {
         ])
         .await;
 
-        let message = harness.advisory("badname").await;
+        let message = unreachable_cause("badname", harness.send("badname", "hello").await);
 
         assert_eq!(
             message,
@@ -2257,6 +2358,7 @@ mod credential_tests {
             "the refusal is local: ⛔ no connection is opened"
         );
         assert_eq!(harness.rejected_rows().await.len(), 1);
+        assert_eq!(harness.dispatched_rows().await, 0);
     }
 
     /// `AC4(d)` precedence, fixture (ii): an out-of-scope endpoint **and** an
@@ -2277,8 +2379,9 @@ mod credential_tests {
         ])
         .await;
 
+        let message = unreachable_cause("scoped", harness.send("scoped", "hello").await);
         assert_eq!(
-            harness.advisory("scoped").await,
+            message,
             format!(
                 "scoped's card sends requests to another host; its credential is only \
                  sent to {}",
@@ -2286,6 +2389,8 @@ mod credential_tests {
             ),
             "the origin is checked before the variable is read"
         );
+        assert_eq!(harness.rejected_rows().await.len(), 1);
+        assert_eq!(harness.dispatched_rows().await, 0);
     }
 
     /// `AC2` positive control: an auth-less loopback peer sends no `x-api-key`
@@ -2296,18 +2401,20 @@ mod credential_tests {
         let fixture = PeerFixture::plaintext().await;
         let harness = Harness::compose(vec![peer("plain", &fixture.origin)]).await;
 
-        let AppEvent::SystemNotice { message, .. } = harness.send("plain", "hello").await else {
-            panic!("a send outcome always arrives as a SystemNotice");
-        };
-
-        assert!(
-            message.contains("[peer] plain") && message.contains("completed"),
-            "the normal success row still renders: {message}"
+        let outcome = harness.send("plain", "hello").await;
+        assert_eq!(outcome, RecipientOutcome::AcceptedWithoutItem);
+        assert_eq!(
+            render_team_send_rows(&[TeamSendRow {
+                alias: "plain".to_owned(),
+                outcome: Some(outcome),
+            }]),
+            "    plain  accepted — this peer keeps no item id"
         );
         assert!(
             fixture.api_keys_seen().await.is_empty(),
             "⛔ an auth-less peer sends no credential"
         );
+        assert_eq!(harness.dispatched_rows().await, 1);
     }
 
     /// `AC2` positive control: a credentialed peer whose card names an endpoint
@@ -2323,20 +2430,22 @@ mod credential_tests {
         ])
         .await;
 
-        let AppEvent::SystemNotice { message, .. } = harness.send("welcome", "hello").await else {
-            panic!("a send outcome always arrives as a SystemNotice");
-        };
+        let outcome = harness.send("welcome", "hello").await;
         unexport(VAR);
-
-        assert!(
-            message.contains("[peer] welcome") && message.contains("completed"),
-            "a credentialed send still renders its normal success row: {message}"
+        assert_eq!(outcome, RecipientOutcome::AcceptedWithoutItem);
+        assert_eq!(
+            render_team_send_rows(&[TeamSendRow {
+                alias: "welcome".to_owned(),
+                outcome: Some(outcome),
+            }]),
+            "    welcome  accepted — this peer keeps no item id"
         );
         assert_eq!(fixture.api_keys_seen().await, vec!["accepted-secret"]);
+        assert_eq!(harness.dispatched_rows().await, 1);
     }
 
-    /// `AC5`: with the secret set to a distinctive sentinel, **every** string the
-    /// story's paths emit is scanned for its exact bytes — the Advisory, the
+    /// `AC5`: with the secret set to a distinctive sentinel, **every** string
+    /// the delivery path emits is scanned for its exact bytes — rendered rows,
     /// journal rows, and the **unfiltered** global log buffer.
     ///
     /// ⚠ The scan must read the buffer unfiltered: `tracing-test`'s
@@ -2346,7 +2455,7 @@ mod credential_tests {
     #[tokio::test]
     #[serial]
     #[traced_test]
-    async fn the_secret_never_reaches_an_advisory_a_journal_row_or_a_log_line() {
+    async fn the_secret_never_reaches_a_delivery_row_a_journal_row_or_a_log_line() {
         const VAR: &str = "RUSTAIN_19_14_SENTINEL_KEY";
         const SENTINEL: &str = "SENTINEL-4d5f6a7b-19-14";
         const ALIAS: &str = "sentinel-peer-19-14";
@@ -2357,21 +2466,23 @@ mod credential_tests {
         ])
         .await;
         // Drive both a success and a rejection: the secret is on the wire for
-        // one and the refusal path runs for the other. ⛔ BOTH events are kept:
-        // a leak into the SUCCESS notice must be caught too (code review
-        // 2026-09-15 — the success event used to be discarded unscanned).
+        // one and the refusal path runs for the other.
         let success = harness.send(ALIAS, "hello").await;
         fixture.answer_with(RpcAnswer::Status(401)).await;
-        let refused = harness.advisory(ALIAS).await;
+        let refused = unreachable_cause(ALIAS, harness.send(ALIAS, "hello").await);
         unexport(VAR);
 
-        let AppEvent::SystemNotice {
-            message: succeeded, ..
-        } = success
-        else {
-            panic!("the credentialed send to the roster origin must succeed");
-        };
+        assert_eq!(success, RecipientOutcome::AcceptedWithoutItem);
+        let succeeded = render_team_send_rows(&[TeamSendRow {
+            alias: ALIAS.to_owned(),
+            outcome: Some(success),
+        }]);
         assert_eq!(refused, format!("{ALIAS} rejected this credential"));
+        tokio::spawn(async move {
+            tracing::info!(peer = ALIAS, "fanout secret scan control");
+        })
+        .await
+        .expect("control logging task");
 
         let logs = {
             let buffer = tracing_test::internal::global_buf()
@@ -2380,13 +2491,12 @@ mod credential_tests {
             String::from_utf8_lossy(&buffer).into_owned()
         };
 
-        // Positive control FIRST: if the scan cannot see the spawned delegation
-        // task, the invariant below is green from birth.
+        // The global log scan must observe a spawned task before checking
+        // that no production path logged the credential.
         assert!(
             logs.lines()
-                .any(|line| line.contains("dispatching A2A delegation") && line.contains(ALIAS)),
-            "the unfiltered buffer must contain the SPAWNED task's own line, carrying \
-             this test's unique alias — otherwise the sentinel scan proves nothing"
+                .any(|line| line.contains("fanout secret scan control") && line.contains(ALIAS)),
+            "the unfiltered buffer must include a spawned task's log"
         );
 
         for surface in [succeeded.as_str(), refused.as_str(), logs.as_str()] {
@@ -2410,90 +2520,6 @@ mod credential_tests {
             !refused.contains(&SENTINEL.len().to_string()),
             "⛔ not the secret's length either"
         );
-    }
-
-    /// `AC5` positive control on the refusal's usefulness: the form names the
-    /// alias and the fix. Also `AC4(e)`'s exact-string guard against form 1
-    /// being rendered for an auth-less peer.
-    #[test]
-    fn the_two_credential_missing_forms_are_selected_by_the_option_not_a_string() {
-        use crate::adapters::a2a::error::A2aError;
-
-        let named = A2aError::CredentialMissing {
-            alias: "alpha".to_owned(),
-            env_var: Some("ALPHA_KEY".to_owned()),
-        };
-        let unconfigured = A2aError::CredentialMissing {
-            alias: "alpha".to_owned(),
-            env_var: None,
-        };
-        assert_eq!(
-            named.to_string(),
-            "no credential for alpha: set the env var named in its auth field"
-        );
-        assert_eq!(
-            unconfigured.to_string(),
-            "no credential configured for alpha: add an auth field naming the env var \
-             that holds its key"
-        );
-        assert!(
-            !named.to_string().contains("ALPHA_KEY"),
-            "⛔ no form interpolates the variable's name"
-        );
-    }
-
-    /// `AC4(e)`: the render boundary matches on the **variant**. A refusal that
-    /// travels inside `DelegationError::Transport` must lose that wrapper's
-    /// prefix entirely.
-    #[test]
-    fn a_typed_refusal_renders_without_the_delegation_wrapper_prefix() {
-        use crate::adapters::a2a::driver::DelegationError;
-        use crate::adapters::a2a::error::A2aError;
-        use crate::adapters::a2a::send::SendError;
-
-        let rendered = team_send_refusal(&SendError::Delegation {
-            peer: "beta".to_owned(),
-            source: DelegationError::Transport(A2aError::CredentialRejected {
-                alias: "beta".to_owned(),
-            }),
-        });
-        assert_eq!(rendered, "beta rejected this credential");
-
-        // A non-19.14 transport failure keeps today's rendering untouched.
-        let untouched = team_send_refusal(&SendError::Delegation {
-            peer: "beta".to_owned(),
-            source: DelegationError::Transport(A2aError::HttpStatus { status: 503 }),
-        });
-        assert_eq!(
-            untouched,
-            "A2A send to peer `beta` failed: A2A transport failure: A2A peer returned HTTP 503"
-        );
-    }
-    #[test]
-    fn remote_transport_failure_variants_are_sanitized_before_feedback() {
-        use crate::adapters::a2a::driver::DelegationError;
-        use crate::adapters::a2a::error::A2aError;
-        use crate::adapters::a2a::send::SendError;
-
-        for transport in [
-            A2aError::JsonRpc {
-                code: -32000,
-                message: "bad\x1b[2J\n[forged]".to_owned(),
-            },
-            A2aError::NoJsonRpcEndpoint {
-                reason: "missing\x1b]0;title\x07\r\n[forged]".to_owned(),
-            },
-        ] {
-            let rendered = team_send_refusal(&SendError::Delegation {
-                peer: "beta".to_owned(),
-                source: DelegationError::Transport(transport),
-            });
-            assert!(rendered.contains("bad[forged]") || rendered.contains("missing[forged]"));
-            assert!(
-                !rendered.chars().any(char::is_control),
-                "remote error text reached feedback unsanitized: {rendered:?}"
-            );
-        }
     }
 
     // ── Story 19.16f · the retract's outcome block, on scripted answers ─────
@@ -2590,21 +2616,25 @@ mod credential_tests {
         assert_eq!(rejected.len(), 1, "{rejected:?}");
     }
 
-    /// Story 19.16f `F5` — `A2aError::Connect` keeps `Request`'s Display
-    /// byte-for-byte, so `/team send` to a closed port renders exactly what it
-    /// rendered before the variant existed.
+    /// Story 19.16f `F5` — a connect failure is an unreachable first answer
+    /// without a trusted cause line; it still journals the attempted dispatch.
     #[tokio::test]
-    async fn a_send_to_a_closed_port_still_renders_the_request_failed_sentence() {
+    async fn a_send_to_a_closed_port_settles_unreachable_without_a_cause_line() {
         let fixture = PeerFixture::plaintext().await;
         let harness = Harness::compose(vec![peer("gone", &fixture.origin)]).await;
-        let origin = fixture.origin.clone();
         drop(fixture);
-        let advisory = harness.advisory("gone").await;
-        let expected = format!(
-            "A2A send to peer `gone` failed: A2A transport failure: A2A request failed: error \
-             sending request for url ({origin}"
+
+        let outcome = harness.send("gone", "hello").await;
+        assert_eq!(outcome, RecipientOutcome::Unreachable { cause: None });
+        assert_eq!(
+            render_team_send_rows(&[TeamSendRow {
+                alias: "gone".to_owned(),
+                outcome: Some(outcome),
+            }]),
+            "  ⚠ gone  unreachable"
         );
-        assert!(advisory.starts_with(&expected), "{advisory}");
+        assert_eq!(harness.dispatched_rows().await, 1);
+        assert_eq!(harness.rejected_rows().await.len(), 1);
     }
 
     /// Story 19.16f `AC10(b)` (`F8`) — accepting the card takes the slot and

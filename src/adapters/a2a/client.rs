@@ -358,14 +358,13 @@ impl A2aClientAdapter {
         endpoint_url: &str,
         request: &super::jsonrpc::JsonRpcRequest,
     ) -> Result<serde_json::Value, A2aError> {
-        self.post_jsonrpc_after(endpoint_url, request, || async {})
+        self.post_jsonrpc_after(endpoint_url, request, || async { Ok(()) })
             .await
     }
 
-    /// POST after `before_send` completes. The hook runs only after every
+    /// POST after `before_send` succeeds. The hook runs only after every
     /// no-I/O refusal and request-build error has been resolved, immediately
-    /// before the client can open a connection. The retract path uses this
-    /// seam to make its durable "sent" row both honest and pre-POST.
+    /// before the client can open a connection. A failed append prevents POST.
     pub(crate) async fn post_jsonrpc_after<F, Fut>(
         &self,
         endpoint_url: &str,
@@ -374,7 +373,7 @@ impl A2aClientAdapter {
     ) -> Result<serde_json::Value, A2aError>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = ()>,
+        Fut: Future<Output = Result<(), A2aError>>,
     {
         let url = parse_and_validate_url(endpoint_url)?;
         let client = self.http()?;
@@ -391,7 +390,7 @@ impl A2aClientAdapter {
             .json(request)
             .build()
             .map_err(|error| self.map_transport_error(&error))?;
-        before_send().await;
+        before_send().await?;
         let response = client
             .execute(outbound)
             .await
@@ -716,6 +715,7 @@ mod tests {
         let error = adapter
             .post_jsonrpc_after("http://127.0.0.1:10/a2a", &request, || async {
                 hook_ran.store(true, Ordering::Relaxed);
+                Ok(())
             })
             .await
             .expect_err("the credential origin is fixed by the roster");

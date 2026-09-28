@@ -45,6 +45,10 @@ pub struct TabState {
     pub user_message_boundaries: Vec<usize>,
     pub focused_tool_id: Option<String>,
     pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
+    /// Story 19.17: inactive tabs retain typed send rows with their blocks.
+    #[cfg(feature = "a2a")]
+    pub team_send_blocks:
+        BTreeMap<String, Vec<crate::adapters::tui::handlers::team_command::TeamSendRow>>,
     pub active_feedback_id: Option<String>,
     /// Story 19.16g — the unpresented seen-through boundary of this tab's
     /// `team-log` block. Moves with the block, so an inactive tab's visit is
@@ -129,6 +133,8 @@ impl TabState {
             user_message_boundaries: Vec::new(),
             focused_tool_id: None,
             feedback_blocks: BTreeMap::new(),
+            #[cfg(feature = "a2a")]
+            team_send_blocks: BTreeMap::new(),
             active_feedback_id: None,
             pending_log_visit: None,
             total_content_height: 0,
@@ -201,6 +207,8 @@ impl TabState {
             user_message_boundaries: Vec::new(),
             focused_tool_id: None,
             feedback_blocks: BTreeMap::new(),
+            #[cfg(feature = "a2a")]
+            team_send_blocks: BTreeMap::new(),
             active_feedback_id: None,
             pending_log_visit: None,
             total_content_height: 0,

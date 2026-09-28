@@ -169,6 +169,8 @@ pub(crate) enum RpcAnswer {
     /// codes the real server cannot be driven to answer for a served verb,
     /// e.g. `-32601` from an older build).
     JsonRpcError(i64),
+    /// A third-party peer asks for input but refuses the cleanup request.
+    InputRequiredCancelFails,
 }
 
 struct FixtureState {
@@ -423,6 +425,28 @@ where
                 })
                 .to_string(),
             ),
+            RpcAnswer::InputRequiredCancelFails => {
+                let request: serde_json::Value =
+                    serde_json::from_str(&body).expect("fixture JSON-RPC request");
+                let answer = if request["method"] == "tasks/cancel" {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id(&body),
+                        "error": { "code": -32603, "message": "cannot cancel" }
+                    })
+                } else {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id(&body),
+                        "result": {
+                            "kind": "task",
+                            "id": "fixture-question",
+                            "status": { "state": "input-required" }
+                        }
+                    })
+                };
+                http_response(200, "application/json", &answer.to_string())
+            }
         }
     } else {
         http_response(404, "text/plain", "")

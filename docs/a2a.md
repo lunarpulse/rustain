@@ -181,30 +181,25 @@ Each failure names one trust decision, because each has a different fix:
 There is still **no** mutual TLS: rustain presents a bearer secret, never a client
 certificate (`DF-18-1-MTLS`).
 
-## Sending to a configured peer from the TUI
+## Sending to configured peers from the TUI
 
 Peer entries are loaded once when rustain starts. After adding, removing, or changing an entry in `.rustain/a2a.json` or the active profile, restart rustain; `/team send` does not re-read configuration or discover a second source of truth.
 
-In the TUI, send one message with the roster ID followed by the message text:
+Address one or more roster IDs as a comma list, followed by the verbatim message body:
 
 ```text
-/team send security-peer review the authentication changes
+/team send security-peer,remote-reviewer review the authentication changes
 ```
 
-The command resolves `security-peer` from the startup roster, reuses its cached AgentCard and transport, records the outbound attempt before the HTTP POST, then polls the remote task to a terminal state. It does not inject peer output into the conversation. A successful reply appears only as a tainted feedback block such as `[peer: security-peer] task … — completed …`.
+Every listed ID must be a configured, distinct, non-empty roster ID. An empty segment, duplicate, unknown ID, or missing body refuses the whole action before network I/O and writes no journal row. A roster ID containing `,` is therefore not addressable by this verb.
 
-Use `/team log` for the durable local record. Outbound rows use `→`. For rustain↔rustain peers the attempt and the terminal result carry the same task ID (the receiving rustain reuses the sender's `messageId` as its task id); a third-party agent may assign its own id, in which case the two outbound rows are correlated only by order — that equality is a rustain behaviour, not an A2A protocol guarantee. A successful send also materializes an `a2a-peer` node in the Agents panel.
+The action creates one stable, keyless `Info` block with one row per alias in the order typed. It has no header or aggregate result. Each recipient settles independently at its **first** `message/send` answer: `● delivered` means that answer carried a non-empty recipient item ID; `✗ declined` is a send-time rejection; `⚠ unreachable` names a send that did not land, with a named preflight cause on its indented line when available. Tokenless rows name `sending…`, `awaiting their approval` (`auth-required` without an item), `accepted — this peer keeps no item id`, `no usable answer — '/team board' shows whether it arrived`, `asked a question this verb cannot answer … — multi-turn arrives with 19.18`, or `not sent — this host could not record the attempt`. The recipient's `server.admission` defaults to `deny`, so an unconfigured recipient declines a team message.
 
-Failures are explicit and terminal:
+There is exactly one `message/send` attempt per recipient and no automatic retry or queue. To send again, re-type `/team send` with the recipients you choose; the block has no retry control. A recipient with an item ID is delivered even when its first answer is `auth-required`: this rail does not poll or cancel that task. An item-less `input-required` triggers a single-turn `tasks/cancel`; if that cleanup fails or its answer is not `canceled`, the row says `no usable answer` rather than claiming cancellation. A peer that answers with an A2A Message instead of a task, and no item ID, is `accepted — this peer keeps no item id`.
 
-- an unknown roster ID is refused locally, names the configured IDs, performs no network request, and writes no journal row;
-- a configured peer whose AgentCard was unavailable at startup is refused without an on-demand discovery request;
-- a transport failure after dispatch records `dispatched` followed by `refused` and renders the transport error;
-- a remote refusal renders the peer's reason;
-- `input-required` renders a cancellation message because this command is single-turn; multi-turn peer input is not supported here;
-- a missing, out-of-scope or rejected credential, and every trust-anchor failure, name the one trust decision that failed — see [When it refuses](#when-it-refuses).
+Each recipient is journaled independently. A request that may leave the host records `dispatched` before its POST; a delivered or accepted answer adds `accepted`; a proved rejection, a connection that never opened, or a post-dispatch credential/trust-anchor refusal adds `refused`; and an approval-needed or no-usable-answer row (including a timeout, HTTP or JSON-RPC error, or unreadable answer after dispatch) remains dispatch-only. A pre-I/O refusal writes one outbound `refused` row and no `dispatched` row. If durable dispatch recording fails, nothing is sent and no row is written. An accepted answer contributes a content hash, not stored reply text; a decline stores its sanitized reason. `/team send` never renders a peer reply and never materializes an `a2a-peer` node in the Agents panel. FR169 replies are the later answer channel.
 
-`/team send` exists only in the interactive TUI in this release. There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
+`/team send` exists only in the interactive, non-attached TUI. On the attached rail it refuses aloud: `'/team send' needs this session's own A2A egress — run it in a non-attached session.` There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
 
 ## The `log: N` reminder
 

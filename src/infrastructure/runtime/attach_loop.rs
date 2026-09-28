@@ -681,14 +681,18 @@ fn after_attached_draw(state: &mut TuiState, drawn: bool, visible_feedback_ids: 
 fn attached_team_line(text: &str) -> AttachedTeamLine {
     use crate::adapters::tui::handlers::team_command::{TeamCommandArgs, parse_team_command};
 
-    // `DF-19-16C` review bullet (deferred-work.md `/team` leading-whitespace
-    // bypass), paid here because this story touches the intercept table: the
-    // classifier used to read the RAW composer buffer, so a pasted
-    // `" /team remove ri_x"` failed `strip_prefix`, classified `PassThrough`,
-    // and submitted a destructive verb to the model as an ordinary turn.
-    let Some(arg) = text.trim_start().strip_prefix("/team ") else {
+    // Story 19.17: accept the `/team` word only at an input boundary.
+    // Bare `/team` and whitespace-delimited verbs are local; `/teamwork`
+    // remains an ordinary model prompt. Leading pasted whitespace is ignored
+    // so an attached send or removal cannot evade the intercept table.
+    let line = text.trim_start();
+    let Some(arg) = line.strip_prefix("/team") else {
         return AttachedTeamLine::PassThrough;
     };
+    if !arg.is_empty() && !arg.starts_with(char::is_whitespace) {
+        return AttachedTeamLine::PassThrough;
+    }
+    let arg = arg.trim_start();
     match parse_team_command(Some(arg)) {
         Ok(TeamCommandArgs::Acknowledge { item_id }) => {
             AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { item_id })
@@ -723,6 +727,12 @@ fn attached_team_line(text: &str) -> AttachedTeamLine {
         // object, and its frame is untouched.
         Ok(TeamCommandArgs::Retract { .. }) => AttachedTeamLine::Refused(
             "'/team retract' needs this session's own A2A egress — run it in a non-attached \
+             session."
+                .to_owned(),
+        ),
+        // Story 19.17: the attached client has no per-session A2A send egress.
+        Ok(TeamCommandArgs::Send { .. }) => AttachedTeamLine::Refused(
+            "'/team send' needs this session's own A2A egress — run it in a non-attached \
              session."
                 .to_owned(),
         ),
@@ -1945,8 +1955,8 @@ mod tests {
 
     /// Story 19.16c AC3(h) — in an **attached** session a `/team` verb the
     /// intercept table does not name falls through to `driver.submit` and
-    /// becomes a model prompt. That is already true of `log`, `trust`,
-    /// `status` and `send`; a destructive verb must not inherit it.
+    /// becomes a model prompt. `trust` and `status` still do; `log`, `board`,
+    /// `retract` and (Story 19.17) `send` have explicit local/refusal arms.
     ///
     /// Mutant → RED: delete the `Remove` arm. The line classifies as
     /// `PassThrough` and the operator's removal is typed at the model.
@@ -1989,9 +1999,9 @@ mod tests {
     ///
     /// The board reads every configured A2A peer over this session's own
     /// egress and an attached session holds none, so there is no frame to
-    /// send; the one thing that must not happen is the shipped failure mode —
-    /// falling through to `driver.submit` and becoming an LLM turn, *"exactly
-    /// what happened to `log`, `trust`, `status` and `send`."*
+    /// send; the one thing that must not happen is the former failure mode —
+    /// falling through to `driver.submit` and becoming an LLM turn. Story
+    /// 19.17 also intercepts `send`; `trust` and `status` still pass through.
     ///
     /// Mutant → RED: delete the `Board` arm — the line classifies as
     /// `PassThrough` and the operator's board request is typed at the model.
@@ -2035,6 +2045,35 @@ mod tests {
         assert!(matches!(
             attached_team_line("/team ack ri_x"),
             AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
+    }
+
+    #[test]
+    fn attached_team_send_and_bare_team_do_not_reach_the_model() {
+        let AttachedTeamLine::Refused(reason) = attached_team_line("/team send a,b hi") else {
+            panic!("send must be refused aloud on the attached rail");
+        };
+        assert_eq!(
+            reason,
+            "'/team send' needs this session's own A2A egress — run it in a non-attached session."
+        );
+        for input in ["/team", " /team", "/team\tlog"] {
+            assert!(
+                matches!(attached_team_line(input), AttachedTeamLine::LocalLog(_)),
+                "{input:?}"
+            );
+        }
+        assert!(matches!(
+            attached_team_line("/teamwork today"),
+            AttachedTeamLine::PassThrough
+        ));
+        assert!(matches!(
+            attached_team_line("/team ack ri_x"),
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
+        assert!(matches!(
+            attached_team_line("/team board"),
+            AttachedTeamLine::Refused(_)
         ));
     }
 

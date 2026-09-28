@@ -157,6 +157,7 @@ jobs:
             --test conformance_17_2a_node_journal \
             --test conformance_19_16d_retract \
             --test conformance_19_16f_retract_surface \
+            --test conformance_19_17_a2a_fanout \
             --test conformance_a2a_architecture \
             --test conformance_18_3c_response_modes \
             --test conformance_18_3a_c_artifacts \

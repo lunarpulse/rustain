@@ -174,6 +174,9 @@ pub enum A2aError {
     CorrelationMismatch { expected: u64, actual: String },
     #[error("A2A server configuration is invalid: {0}")]
     Config(String),
+    /// Story 19.17: the durable dispatch append failed; no POST was attempted.
+    #[error("A2A dispatch was not sent because its journal append failed")]
+    JournalDispatch,
 
     // ── Story 19.14: the credential and anchor refusals (forms 1–9) ──────────
     /// Forms 1 (`env_var: Some`) and 2 (`env_var: None`). ⛔ `env_var` holds the

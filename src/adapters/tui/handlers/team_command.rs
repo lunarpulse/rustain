@@ -17,13 +17,12 @@
 use crate::adapters::tui::state::TuiState;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
-use crate::domain::services::peer_text::sanitize_peer_text_line;
 use crate::domain::services::transparency::{
     ATTRIBUTION_CAVEAT, STRUCTURAL_REPLAY_CLAIM, TransparencyExport, TransparencyRow,
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [<peer-id>] | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send <peer-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [<peer-id>] | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send <peer-id>[,<peer-id>…] <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
 
 /// Three verbs retract three different objects (`…addendum-team-messaging.md:116`),
 /// so every refusal of one names the others **by object** (Story 19.16f
@@ -91,7 +90,7 @@ pub enum TeamCommandArgs {
         peer: Option<String>,
     },
     Send {
-        peer: String,
+        recipients: Vec<String>,
         text: String,
     },
     Acknowledge {
@@ -142,19 +141,24 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
             })
         }
         "send" => {
-            let peer = tokens
+            let recipient_token = tokens
                 .next()
                 .ok_or_else(|| format!("Missing peer id after '/team send'. Use: {USAGE}"))?;
-            // FR54-a: exactly the text the operator typed leaves the host.
-            // Only the verb and the peer token are delimiters — the remainder
-            // keeps its internal whitespace verbatim (indentation, repeated
-            // spaces, tabs), so pasted snippets are not rewritten on the wire.
-            let text = raw_remainder_after_peer(arg, peer)
-                .ok_or_else(|| format!("Missing message text after peer `{peer}`. Use: {USAGE}"))?;
-            Ok(TeamCommandArgs::Send {
-                peer: peer.to_owned(),
-                text,
-            })
+            let mut recipients = Vec::new();
+            for id in recipient_token.split(',') {
+                if id.is_empty() || recipients.iter().any(|existing| existing == id) {
+                    return Err(format!(
+                        "Invalid or duplicate peer id in '/team send'. Use: {USAGE}"
+                    ));
+                }
+                recipients.push(id.to_owned());
+            }
+            // FR54-a: only the verb and the recipient-list token delimit the
+            // body; preserve its internal whitespace exactly as typed.
+            let text = raw_remainder_after_peer(arg, recipient_token).ok_or_else(|| {
+                format!("Missing message text after peers `{recipient_token}`. Use: {USAGE}")
+            })?;
+            Ok(TeamCommandArgs::Send { recipients, text })
         }
         "ack" => {
             let item_id = tokens
@@ -228,44 +232,20 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
     }
 }
 
-pub(crate) fn team_send(
-    conversation_id: &str,
-    peer: &str,
-    task_id: &str,
-    state: &str,
-    reply_text: Option<&str>,
-) -> AppEvent {
-    let peer = sanitize_peer_text_line(peer);
-    let task_id = sanitize_peer_text_line(task_id);
-    let state = sanitize_peer_text_line(state);
-    let mut message = format!("[peer] {peer} task {task_id} — {state}");
-    if let Some(reply_text) = reply_text {
-        message.push('\n');
-        message.push_str(&sanitize_peer_text_line(reply_text));
-    }
-    // Advisory, not Warning: a peer reply can land minutes after dispatch,
-    // and Warning is turn-fatal (`NoticeLevel::is_turn_fatal`) — it would
-    // abort whatever unrelated model turn is streaming when the peer answers.
-    // Advisory renders through the same Warning→FeedbackBlock path.
-    AppEvent::SystemNotice {
-        conversation_id: Some(conversation_id.to_owned()),
-        level: NoticeLevel::Advisory,
-        message,
-    }
-}
-
-/// The message body: the raw argument text after the `send` verb and peer
-/// token, with only the delimiter whitespace between peer and body skipped.
-/// Internal whitespace is preserved verbatim (FR54-a).
-fn raw_remainder_after_peer(arg: &str, peer: &str) -> Option<String> {
-    let peer_start = arg.find(peer)?;
-    let after_peer = peer_start + peer.len();
+/// The message body after the verb and recipient-list token. Locate the
+/// token by its position, never by its contents (which may occur in `send`).
+fn raw_remainder_after_peer(arg: &str, recipients: &str) -> Option<String> {
+    let after_verb = arg
+        .char_indices()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, _)| index)?;
+    let peer_start = after_verb + arg[after_verb..].find(|ch: char| !ch.is_whitespace())?;
+    let after_peer = peer_start + recipients.len();
     let body_start = arg[after_peer..]
         .char_indices()
         .find(|(_, ch)| !ch.is_whitespace())
         .map(|(idx, _)| after_peer + idx)?;
-    let text = &arg[body_start..];
-    (!text.is_empty()).then(|| text.to_owned())
+    Some(arg[body_start..].to_owned())
 }
 
 #[cfg(not(feature = "a2a"))]
@@ -504,6 +484,111 @@ pub(crate) fn show_team_board(state: &mut TuiState, message: String) {
     state.needs_redraw = true;
 }
 
+/// Typed, action-local row state. The block text is always a projection of
+/// these rows, never mutated by line number or completion order.
+#[cfg(feature = "a2a")]
+#[derive(Clone)]
+pub struct TeamSendRow {
+    pub alias: String,
+    pub outcome: Option<crate::adapters::a2a::send::RecipientOutcome>,
+}
+
+#[cfg(feature = "a2a")]
+pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
+    use std::borrow::Cow;
+    use std::fmt::Write;
+
+    use crate::adapters::a2a::board::BoardOutcome;
+    use crate::adapters::a2a::send::{RecipientOutcome, SendCause};
+    use crate::domain::services::transparency::{
+        MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, sanitize_disclosable,
+    };
+
+    let width = rows
+        .iter()
+        .map(|row| row.alias.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut text = String::new();
+    for row in rows {
+        let (token, label, cause): (&str, Cow<'_, str>, Option<&SendCause>) = match row
+            .outcome
+            .as_ref()
+        {
+            None => (" ", Cow::Borrowed("sending…"), None),
+            Some(RecipientOutcome::Delivered) => (
+                BoardOutcome::Delivered.token(),
+                Cow::Borrowed(BoardOutcome::Delivered.label()),
+                None,
+            ),
+            Some(RecipientOutcome::Declined) => (
+                BoardOutcome::Declined.token(),
+                Cow::Borrowed(BoardOutcome::Declined.label()),
+                None,
+            ),
+            Some(RecipientOutcome::Unreachable { cause }) => (
+                BoardOutcome::Unreachable.token(),
+                Cow::Borrowed(BoardOutcome::Unreachable.label()),
+                cause.as_ref(),
+            ),
+            Some(RecipientOutcome::AwaitingApproval) => {
+                (" ", Cow::Borrowed("awaiting their approval"), None)
+            }
+            Some(RecipientOutcome::AcceptedWithoutItem) => (
+                " ",
+                Cow::Borrowed("accepted — this peer keeps no item id"),
+                None,
+            ),
+            Some(RecipientOutcome::NoUsableAnswer) => (
+                " ",
+                Cow::Borrowed("no usable answer — '/team board' shows whether it arrived"),
+                None,
+            ),
+            Some(RecipientOutcome::NotSent) => (
+                " ",
+                Cow::Borrowed("not sent — this host could not record the attempt"),
+                None,
+            ),
+            Some(RecipientOutcome::AskedQuestion { task_id }) => (
+                " ",
+                Cow::Owned(format!(
+                    "asked a question this verb cannot answer (task `{}` cancelled) — multi-turn arrives with 19.18",
+                    sanitize_disclosable(task_id, MAX_PEER_ID_BYTES)
+                )),
+                None,
+            ),
+        };
+        let _ = writeln!(text, "  {token} {:width$}  {label}", row.alias);
+        if let Some(cause) = cause {
+            text.push_str("    ");
+            let limit = match cause {
+                SendCause::Ratified(_) => MAX_SUMMARY_BYTES,
+                SendCause::PeerInfluenced(_) => MAX_PEER_ID_BYTES,
+            };
+            text.push_str(&sanitize_disclosable(cause.as_str(), limit));
+            text.push('\n');
+        }
+    }
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    text
+}
+
+pub fn show_team_send(state: &mut TuiState, block_id: &str, message: String) {
+    state.feedback_blocks.insert(
+        block_id.to_owned(),
+        crate::domain::models::FeedbackBlock {
+            id: block_id.to_owned(),
+            level: crate::domain::models::FeedbackLevel::Info,
+            message,
+            actions: Vec::new(),
+        },
+    );
+    state.active_feedback_id = Some(block_id.to_owned());
+    state.needs_redraw = true;
+}
+
 /// Stable id for the retract's outcome block (Story 19.16f `AC10`): one block
 /// for EVERY rail-3 retract answer — `sending…`, not found, not sent, and each
 /// dispatch outcome — replaced on every update. ⛔ Never a stacked `wfb-N`,
@@ -711,18 +796,77 @@ mod tests {
         assert_eq!(
             parse_team_command(Some("send moon   Καλημέρα 🌕\tsecond  line")),
             Ok(TeamCommandArgs::Send {
-                peer: "moon".to_owned(),
+                recipients: vec!["moon".to_owned()],
                 text: "Καλημέρα 🌕\tsecond  line".to_owned(),
             })
         );
         assert!(parse_team_command(Some("send")).is_err());
         assert!(parse_team_command(Some("send moon")).is_err());
         assert!(parse_team_command(Some("send moon   ")).is_err());
-        assert!(USAGE.contains("/team send <peer-id> <text…>"));
+        assert!(USAGE.contains("/team send <peer-id>[,<peer-id>…] <text…>"));
         assert!(USAGE.contains(
             "`rustain team send` (the CLI twin) is not in this cut — \
              `18-9b-cli-team-send`"
         ));
+    }
+
+    #[test]
+    fn send_list_refuses_malformed_addresses_and_keeps_body_by_position() {
+        assert_eq!(
+            parse_team_command(Some("send a,b,c body")),
+            Ok(TeamCommandArgs::Send {
+                recipients: vec!["a".into(), "b".into(), "c".into()],
+                text: "body".into(),
+            })
+        );
+        assert_eq!(
+            parse_team_command(Some("send e hi")),
+            Ok(TeamCommandArgs::Send {
+                recipients: vec!["e".into()],
+                text: "hi".into(),
+            })
+        );
+        for input in [
+            "send a,,b hi",
+            "send a, hi",
+            "send ,a hi",
+            "send a,b,a hi",
+            "send a",
+        ] {
+            let error = parse_team_command(Some(input)).expect_err(input);
+            assert!(error.contains(USAGE), "{input}: {error}");
+        }
+    }
+
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn send_rows_keep_operator_order_and_strip_peer_line_injection() {
+        use crate::adapters::a2a::send::{RecipientOutcome, SendCause};
+
+        let rows = [
+            TeamSendRow {
+                alias: "long-peer".into(),
+                outcome: None,
+            },
+            TeamSendRow {
+                alias: "b".into(),
+                outcome: Some(RecipientOutcome::Unreachable {
+                    cause: Some(SendCause::PeerInfluenced(
+                        "unavailable\n  ● forged  delivered".into(),
+                    )),
+                }),
+            },
+        ];
+        assert_eq!(
+            render_team_send_rows(&rows),
+            "    long-peer  sending…\n  ⚠ b          unreachable\n    unavailable  ● forged  delivered"
+        );
+        let mut settled = rows.to_vec();
+        settled[0].outcome = Some(RecipientOutcome::Delivered);
+        assert_eq!(
+            render_team_send_rows(&settled),
+            "  ● long-peer  delivered\n  ⚠ b          unreachable\n    unavailable  ● forged  delivered"
+        );
     }
 
     #[test]
@@ -736,57 +880,6 @@ mod tests {
         assert!(parse_team_command(Some("ack")).is_err());
         assert!(parse_team_command(Some("ack ri_123 alias")).is_err());
         assert!(USAGE.contains("/team ack <item-id>"));
-    }
-
-    #[test]
-    fn send_result_routes_peer_task_state_and_optional_reply_as_tainted_feedback() {
-        let event = team_send(
-            "conv",
-            "moon",
-            "peer-task-42",
-            "completed",
-            Some("peer answer"),
-        );
-
-        let AppEvent::SystemNotice {
-            conversation_id,
-            level,
-            message,
-        } = event
-        else {
-            panic!("peer send result must use the existing feedback event path");
-        };
-        assert_eq!(conversation_id.as_deref(), Some("conv"));
-        // A late peer reply must never abort an unrelated streaming turn.
-        assert!(matches!(level, NoticeLevel::Advisory));
-        assert!(!level.is_turn_fatal());
-        assert_eq!(
-            message,
-            "[peer] moon task peer-task-42 — completed\npeer answer"
-        );
-    }
-
-    #[test]
-    fn send_result_sanitizes_each_peer_derived_one_line_slot() {
-        let AppEvent::SystemNotice { message, .. } = team_send(
-            "conv",
-            "mo\non",
-            "peer-\x1b[2Jtask-42",
-            "completed\x1b[2J\r\n[urgent]",
-            Some("answer\x1b]0;forged\x07\nsecond"),
-        ) else {
-            panic!("peer send result must use the existing feedback event path");
-        };
-        assert_eq!(
-            message,
-            "[peer] moon task peer-task-42 — completed[urgent]\nanswersecond"
-        );
-        assert!(
-            message
-                .lines()
-                .all(|line| !line.chars().any(char::is_control)),
-            "{message:?}"
-        );
     }
 
     #[cfg(not(feature = "a2a"))]

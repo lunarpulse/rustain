@@ -109,13 +109,29 @@ impl TaskClient {
     ) -> Result<serde_json::Value, A2aError>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = ()>,
+        Fut: Future<Output = Result<(), A2aError>>,
     {
         let request = JsonRpcRequest::new(
             self.next_id(),
             super::ITEMS_RETRACT_METHOD,
             serde_json::json!({ "itemId": item_id }),
         );
+        self.client
+            .post_jsonrpc_after(&self.endpoint, &request, before_send)
+            .await
+    }
+
+    /// Story 19.17: send once, after a fallible durable-first dispatch append.
+    pub async fn send_after<F, Fut>(
+        &self,
+        message: serde_json::Value,
+        before_send: F,
+    ) -> Result<serde_json::Value, A2aError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), A2aError>>,
+    {
+        let request = JsonRpcRequest::new(self.next_id(), "message/send", message);
         self.client
             .post_jsonrpc_after(&self.endpoint, &request, before_send)
             .await
@@ -340,29 +356,67 @@ impl A2aDelegationRuntime {
         Ok(())
     }
 
-    /// Journal a send refused by a **retained** anchor cause (`A22` item 5).
-    ///
-    /// One narrow method rather than widening `emit_room`, and it writes exactly
-    /// one row: ⛔ no `RemoteEnvelopeDispatched`, because nothing was dispatched —
-    /// the refusal happens before a transport even exists. The emission shape is
-    /// the driver's own first-hop shape, so the two paths cannot describe the same
-    /// failure two ways, and it goes through `emit_room` so a journal failure is
-    /// latched identically.
-    pub(crate) async fn journal_anchor_refusal(
+    /// Story 19.17: an addressed send that never reached the dispatch hook.
+    pub(crate) async fn journal_send_preflight_refusal(
         &self,
         spec: &A2aPeerSpec,
-        error: &A2aError,
+        error: &str,
     ) -> Result<(), DelegationError> {
         self.emit_room(RoomEvent::RemoteEnvelopeRejected {
             peer: spec.resolved_identity(),
             reason: RejectReason::Policy {
-                detail: sanitize_disclosable(
-                    &format!("A2A transport failure: {error}"),
-                    MAX_SUMMARY_BYTES,
-                ),
+                detail: sanitize_disclosable(error, MAX_SUMMARY_BYTES),
             },
             direction: Direction::Outbound,
             task: None,
+        })
+        .await
+    }
+
+    pub(crate) async fn journal_send_dispatch(
+        &self,
+        spec: &A2aPeerSpec,
+        task: &str,
+        bytes: usize,
+    ) -> Result<(), DelegationError> {
+        self.emit_room(RoomEvent::RemoteEnvelopeDispatched {
+            peer: spec.resolved_identity(),
+            task: Some(sanitize_disclosable(task, MAX_PEER_ID_BYTES)),
+            bytes,
+            act: crate::domain::models::DispatchAct::Task,
+        })
+        .await
+    }
+
+    pub(crate) async fn journal_send_accepted(
+        &self,
+        spec: &A2aPeerSpec,
+        task: &str,
+        answer: &serde_json::Value,
+    ) -> Result<(), DelegationError> {
+        self.emit_room(RoomEvent::RemoteEnvelopeAccepted {
+            peer: spec.resolved_identity(),
+            node: mint_node_id(&spec.id, task),
+            content_hash: content_hash(answer),
+            direction: Direction::Outbound,
+            task: Some(sanitize_disclosable(task, MAX_PEER_ID_BYTES)),
+        })
+        .await
+    }
+
+    pub(crate) async fn journal_send_rejected(
+        &self,
+        spec: &A2aPeerSpec,
+        task: &str,
+        detail: &str,
+    ) -> Result<(), DelegationError> {
+        self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+            peer: spec.resolved_identity(),
+            reason: RejectReason::Policy {
+                detail: sanitize_disclosable(detail, MAX_SUMMARY_BYTES),
+            },
+            direction: Direction::Outbound,
+            task: Some(sanitize_disclosable(task, MAX_PEER_ID_BYTES)),
         })
         .await
     }
@@ -1078,6 +1132,21 @@ fn outbound_message_fact(message: &serde_json::Value) -> (Option<String>, usize)
     (task, bytes)
 }
 
+/// Story 19.17: one process-wide source for both model delegation and
+/// addressed sends. A clock step backwards cannot reuse an issued id.
+static LAST_MESSAGE_NANOS: AtomicU64 = AtomicU64::new(0);
+
+fn next_message_nanos(now: u64, last: &AtomicU64) -> u64 {
+    let mut previous = last.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(previous.checked_add(1).expect("message id space exhausted"));
+        match last.compare_exchange_weak(previous, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(observed) => previous = observed,
+        }
+    }
+}
+
 /// Build an A2A `message/send` params object from the tool input. The JSON-RPC
 /// binding uses `kind`-tagged parts.
 ///
@@ -1104,8 +1173,9 @@ pub fn build_message(input: &serde_json::Value) -> serde_json::Value {
         });
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
+        .map(|d| u64::try_from(d.as_nanos()).expect("epoch nanoseconds fit message id"))
         .unwrap_or(0);
+    let nanos = next_message_nanos(nanos, &LAST_MESSAGE_NANOS);
     let mut metadata = serde_json::Map::new();
     if let Some(token) = message_type {
         metadata.insert(
@@ -1136,6 +1206,15 @@ mod tests {
     use super::*;
     use crate::domain::models::{JournalRecord, RedactedUrl};
     use crate::infrastructure::subagent::{NodeJournal, NodeRoomJournal};
+
+    #[test]
+    fn message_ids_are_unique_at_one_clock_tick_and_after_clock_regression() {
+        let last = AtomicU64::new(0);
+        assert_eq!(next_message_nanos(42, &last), 42);
+        assert_eq!(next_message_nanos(42, &last), 43);
+        assert_eq!(next_message_nanos(10, &last), 44);
+        assert_eq!(next_message_nanos(90, &last), 90);
+    }
 
     #[test]
     fn build_message_emits_the_exact_semantic_type_metadata_key() {

@@ -147,6 +147,15 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         message: String,
     },
+    /// Story 19.17: one independently settled row in a rail-three send block.
+    #[cfg(feature = "a2a")]
+    TeamSendSettled {
+        conversation_id: ConversationId,
+        block_id: String,
+        index: usize,
+        outcome: crate::adapters::a2a::send::RecipientOutcome,
+    },
+
     /// The confirm-time read behind `/team retract` finished (Story 19.16f
     /// `AC4(c)`): raise the decision card, or render the one sentence that
     /// replaces it. Produced only by the rail-3 preview spawn.

@@ -2466,6 +2466,11 @@ pub struct TuiState {
     pub retry_state: Option<RetryState>,
     /// Feedback blocks displayed in conversation, keyed by block ID.
     pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
+    /// Story 19.17: per-action rows remain typed beside their visible blocks.
+    #[cfg(feature = "a2a")]
+    pub team_send_blocks:
+        BTreeMap<String, Vec<crate::adapters::tui::handlers::team_command::TeamSendRow>>,
+    pub team_send_next_id: u64,
     /// The ID of the most recent active (actionable) feedback block.
     pub active_feedback_id: Option<String>,
     /// Whether a Ctrl+K chord leader has been pressed and the next character key
@@ -3002,6 +3007,9 @@ impl TuiState {
             pending_feedback_input: None,
             retry_state: None,
             feedback_blocks: BTreeMap::new(),
+            #[cfg(feature = "a2a")]
+            team_send_blocks: BTreeMap::new(),
+            team_send_next_id: 0,
             active_feedback_id: None,
             chord_leader_active: false,
             pending_z: false,

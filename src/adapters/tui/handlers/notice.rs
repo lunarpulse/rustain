@@ -80,8 +80,8 @@ pub(crate) fn apply_warning_notice(state: &mut TuiState, msg: String) -> String 
 
 /// Store a notice addressed to a **background** tab as a `FeedbackBlock` in
 /// that tab's own state, so it survives the tab switch. Errors always were;
-/// a Warning/Advisory notice (e.g. a late `/team send` reply landing while
-/// the operator is on another tab) must not vanish either (18.9 review P2).
+/// a Warning/Advisory notice addressed to a background tab must not vanish
+/// either (18.9 review P2). `/team send` now updates its own Info block.
 /// Streaming abort is NOT done here — the caller's turn-fatal handling owns
 /// that, and an Advisory must leave the turn running.
 pub(crate) fn store_background_notice(

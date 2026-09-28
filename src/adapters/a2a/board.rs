@@ -5,11 +5,12 @@
 //!
 //! A recipient item exists **only on the host that received the message**: the
 //! sole production producer of `RoomEvent::RecipientItemReceived` is the
-//! inbound `message/send` path in [`super::server`], and the sender never
-//! stores what it sent (`RECIPIENT_ITEM_METADATA_KEY` has one emission site
-//! and no reader). ⛔ Rendering this host's own
-//! `JournalRecipientItemProjection` would show its **inbound** items as if
-//! they were its own outbound fan-out status — the board inverted (`A21`).
+//! inbound `message/send` path in [`super::server`]. Story 19.17's sender
+//! delivery path reads `RECIPIENT_ITEM_METADATA_KEY` on that request's first
+//! answer to classify `delivered`, but does not retain the item ID. ⛔ Rendering
+//! this host's own `JournalRecipientItemProjection` would show its **inbound**
+//! items as if they were its own outbound fan-out status — the board inverted
+//! (`A21`).
 //!
 //! ⇒ One [`super::ITEMS_LIST_METHOD`] call per **configured A2A roster** peer,
 //! aggregated here. ⛔ The peer set is A2A-roster-only: resolving `peer_id`
@@ -25,10 +26,10 @@
 //! durable dispatch ledger (`RemoteEnvelopeDispatched` rows, keyed by the
 //! peer's resolved identity): a row reports the newest item **this host
 //! dispatched to that peer**, not the peer's newest bag. That inverse mapping
-//! — item.task ↔ dispatched task — is the correlator's first production
-//! reader. The `x-rustain-item-id` metadata carrier (`a2a/mod.rs:9`) stays
-//! the tasks/get-side half of the same correlation and keeps its readers with
-//! Stories 19.18/19.21, which own the reply and the scene.
+//! — item.task ↔ dispatched task — is the correlator's first production reader.
+//! The `x-rustain-item-id` metadata carrier (`a2a/mod.rs:9`) also has Story
+//! 19.17's first-answer reader; the board keeps its remote-list reader, while
+//! Stories 19.18/19.21 own reply and scene consumption.
 //!
 //! # What this module does NOT do
 //!
@@ -71,9 +72,10 @@ pub enum BoardOutcome {
     Delivered,
     /// The recipient's policy or the recipient refused the item.
     ///
-    /// ⚠ **Rendered here, produced nowhere.** `ux-…addendum:256` names the
-    /// producer as a recipient's `FR169` reply arriving at the sender —
-    /// Story 19.18's to emit, this board's to render. ⛔ Do not invent one.
+    /// ⚠ Story 19.17 `G2(d)` produces this at **send time** from a first-answer
+    /// rejection. A board read still produces no decline: the FR169 verdict
+    /// remains Story 19.18's new item for this board to render. ⛔ Do not
+    /// invent another producer.
     Declined,
     /// The read did not land. ⛔ Never `Declined`: *"a host being down is not a
     /// person saying no"* (`:236`).

@@ -121,7 +121,10 @@ mod trust_anchor_tests {
         PeerFixture, RpcAnswer, TestLeaf, Validity, leaf_issued_by, self_signed_leaf, test_ca,
         unreachable_origin, write_pem,
     };
-    use crate::adapters::a2a::{client::CardSlot, send::send_text};
+    use crate::adapters::a2a::{
+        client::CardSlot,
+        send::{RecipientOutcome, deliver_text},
+    };
     use crate::domain::models::{A2aPeerSource, A2aPeerSpec, RedactedUrl, RoomEvent};
     use crate::domain::ports::{RoomJournal, RoomJournalError};
 
@@ -205,22 +208,14 @@ mod trust_anchor_tests {
         client.trust_steps().to_vec()
     }
 
-    /// What the operator actually reads, produced by the production renderer.
-    ///
-    /// ⛔ Not `SendError::to_string()`: on the RPC path the refusal travels
-    /// inside `DelegationError::Transport`, whose `Display` prefixes
-    /// `A2A send to peer …: A2A transport failure:` — the exact prefix `FR166`
-    /// forbids and which only `team_send_refusal`'s variant match strips.
+    /// The typed refusal cause delivered to the command renderer.
     async fn refusal(egress: &A2aEgress, alias: &str) -> String {
-        let error = send_text(
-            egress.runtime(),
-            alias,
-            "hello",
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .expect_err("an anchored refusal must not succeed");
-        crate::infrastructure::runtime::transparency_bridge::team_send_refusal(&error)
+        let RecipientOutcome::Unreachable { cause: Some(cause) } =
+            deliver_text(egress.runtime(), alias, "hello").await
+        else {
+            panic!("an anchored refusal must be an unreachable outcome with a cause");
+        };
+        cause.as_str().to_owned()
     }
 
     /// `AC3` part 3 and clause (a): the ONLY evidence that an anchored peer does
