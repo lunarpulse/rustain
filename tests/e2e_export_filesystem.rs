@@ -41,6 +41,8 @@ fn msg(role: MessageRole, content: &str) -> ChatMessage {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 

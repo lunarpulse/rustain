@@ -256,6 +256,8 @@ fn make_conversation() -> Conversation {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }],
         turns: Vec::new(),
         created_at: 0,
@@ -345,6 +347,7 @@ async fn turn_scheduler_migration() {
         Arc::new(rustain::adapters::noop::NoOpStorage),
         make_conversation(),
         None,
+        None,
         CancellationToken::new(),
         Arc::new(rustain::adapters::noop::NoOpUsageLedger) as Arc<dyn UsageLedgerPort>,
         ResolvedModel {
@@ -357,6 +360,8 @@ async fn turn_scheduler_migration() {
         None,
         "sess-test".into(),
         rustain::domain::models::TurnOrigin::Interactive,
+        false,
+        None,
     )
     .await;
 
@@ -438,6 +443,7 @@ async fn successful_a2a_result_taints_next_main_turn_dispatch() {
         Arc::new(rustain::adapters::noop::NoOpStorage),
         make_conversation(),
         None,
+        None,
         turn_cancel.clone(),
         Arc::new(rustain::adapters::noop::NoOpUsageLedger) as Arc<dyn UsageLedgerPort>,
         ResolvedModel {
@@ -450,6 +456,8 @@ async fn successful_a2a_result_taints_next_main_turn_dispatch() {
         None,
         "sess-taint".into(),
         rustain::domain::models::TurnOrigin::Interactive,
+        false,
+        None,
     ));
 
     tokio::time::timeout(Duration::from_secs(1), async {

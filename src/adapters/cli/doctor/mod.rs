@@ -1,5 +1,6 @@
 pub mod checks;
 pub mod json;
+pub mod policy_check;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -60,6 +61,23 @@ pub struct CheckResult {
 pub trait HealthCheck: Send + Sync {
     fn name(&self) -> &str;
     async fn run(&self) -> CheckResult;
+
+    /// Structured machine-readable detail for `doctor --json`, populated during
+    /// [`Self::run`].
+    ///
+    /// Defaults to `None` so no existing check needs modification — the same
+    /// extensibility promise `build_check_list` documents. Story 18.3b's policy
+    /// explainer overrides it because NFR66's derivation is structured data, and a
+    /// surface that exists only in the human view is half a surface.
+    fn machine_detail(&self) -> Option<serde_json::Value> {
+        None
+    }
+}
+
+#[derive(Default)]
+struct PolicyCheckContext {
+    workspace: Option<std::path::PathBuf>,
+    peers: Vec<crate::domain::models::A2aPeerSpec>,
 }
 
 /// Build the ordered list of health checks to run.
@@ -72,6 +90,7 @@ fn build_check_list(
         Option<std::sync::Arc<dyn crate::domain::ports::StreamingProvider>>,
     )],
     mcp_servers: Vec<crate::domain::models::McpServerSpec>,
+    policy: PolicyCheckContext,
 ) -> Vec<Box<dyn HealthCheck>> {
     let mut checks: Vec<Box<dyn HealthCheck>> = vec![
         Box::new(ApiKeyCheck {
@@ -120,6 +139,13 @@ fn build_check_list(
     }));
     #[cfg(feature = "self-update")]
     checks.push(Box::new(checks::UpdateHealthCheck));
+    // Story 18.3b (AC6 / NFR66) — the interaction-policy explainer. Appended, not
+    // woven in: `CheckTier::Info`, so a policy conflict never changes `doctor`'s
+    // exit code.
+    checks.push(Box::new(policy_check::PolicyExplainerCheck::new(
+        policy.workspace,
+        policy.peers,
+    )));
     if terminal_detail {
         checks.push(Box::new(TerminalDetailCheck));
     }
@@ -149,6 +175,7 @@ pub async fn run_doctor(
         Option<std::sync::Arc<dyn crate::domain::ports::StreamingProvider>>,
     )>,
     mcp_servers: Vec<crate::domain::models::McpServerSpec>,
+    a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
 ) -> Result<()> {
     if adapters {
         let ports = ADAPTERS_TABLE;
@@ -220,14 +247,26 @@ pub async fn run_doctor(
         return Ok(());
     }
 
-    let checks = build_check_list(terminal_detail, &providers, mcp_servers);
+    let checks = build_check_list(
+        terminal_detail,
+        &providers,
+        mcp_servers,
+        PolicyCheckContext {
+            workspace: None,
+            peers: a2a_peers,
+        },
+    );
     let mut results = Vec::with_capacity(checks.len());
     for check in &checks {
         results.push(check.run().await);
     }
+    // Collected AFTER every `run`, because `machine_detail` reports what that run
+    // observed. Positional against `results` by construction — same list, same order.
+    let details: Vec<Option<serde_json::Value>> =
+        checks.iter().map(|check| check.machine_detail()).collect();
 
     if json {
-        let report = self::json::DoctorReport::from_results(&results);
+        let report = self::json::DoctorReport::from_results_with_detail(&results, &details);
         let json_str =
             serde_json::to_string_pretty(&report).expect("DoctorReport serialization cannot fail");
         println!("{json_str}");
@@ -688,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_build_check_list_default() {
-        let checks = build_check_list(false, &[], vec![]);
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default());
         assert!(checks.len() >= 8, "Should have at least 8 checks");
         // Verify names
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
@@ -709,8 +748,8 @@ mod tests {
 
     #[test]
     fn test_build_check_list_with_terminal_detail() {
-        let checks_without = build_check_list(false, &[], vec![]);
-        let checks_with = build_check_list(true, &[], vec![]);
+        let checks_without = build_check_list(false, &[], vec![], PolicyCheckContext::default());
+        let checks_with = build_check_list(true, &[], vec![], PolicyCheckContext::default());
         assert_eq!(
             checks_with.len(),
             checks_without.len() + 1,
@@ -724,7 +763,7 @@ mod tests {
 
     #[test]
     fn test_mcp_check_present_in_build_check_list() {
-        let checks = build_check_list(false, &[], vec![]);
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default());
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
             names.contains(&"MCP server reachability"),
@@ -736,7 +775,7 @@ mod tests {
     #[cfg(feature = "self-update")]
     #[tokio::test]
     async fn test_update_health_is_info_tier_and_present() {
-        let checks = build_check_list(false, &[], vec![]);
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default());
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
             names.contains(&"Update health"),
@@ -763,7 +802,7 @@ mod tests {
     #[cfg(not(feature = "self-update"))]
     #[test]
     fn test_no_update_health_without_feature() {
-        let checks = build_check_list(false, &[], vec![]);
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default());
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
             !names
@@ -884,5 +923,161 @@ mod tests {
         assert_eq!(result.status, CheckStatus::Pass);
         assert!(result.message.contains("api.z.ai"));
         assert!(result.message.contains("custom"));
+    }
+
+    // ── Story 18.3b (AC6 / NFR66): the interaction-policy explainer ──
+    //
+    // These live here, in `doctor/mod.rs`'s own test module, because
+    // `build_check_list` is PRIVATE and must stay that way: widening production
+    // visibility to give an out-of-module test reach is the bypass Rule 2 exists to
+    // stop. The keystones therefore obtain the check exactly the way `run_doctor`
+    // does — from `build_check_list` — and drive it through `HealthCheck::run`.
+    //
+    // Forbidden and deliberately not done here: hand-constructing a `CheckResult`
+    // and asserting on that, or asserting only that the check *appears* in the
+    // list. A presence or count assertion proves nothing about behaviour.
+
+    /// Pull the policy explainer out of the production check list while injecting
+    /// an isolated workspace. Production still passes `None`; the test must not
+    /// depend on whatever policy files happen to exist in the checkout.
+    fn policy_check_from_production_list(workspace: std::path::PathBuf) -> Box<dyn HealthCheck> {
+        let mut checks = build_check_list(
+            false,
+            &[],
+            Vec::new(),
+            PolicyCheckContext {
+                workspace: Some(workspace),
+                peers: Vec::new(),
+            },
+        );
+        let index = checks
+            .iter()
+            .position(|check| check.name() == "Interaction policy")
+            .expect("build_check_list must wire the interaction-policy explainer");
+        checks.swap_remove(index)
+    }
+
+    /// AC6 positive control, driven through the front door.
+    ///
+    /// With no policy files in an isolated workspace the check reports built-in
+    /// defaults, flags nothing, and still shows the derivation.
+    #[tokio::test]
+    async fn ac6_policy_explainer_runs_through_build_check_list() {
+        let workspace = tempfile::tempdir().unwrap();
+        let check = policy_check_from_production_list(workspace.path().to_path_buf());
+        let result = check.run().await;
+
+        assert_eq!(result.category, "policy");
+        // A policy conflict is never a reason for `doctor` to exit non-zero.
+        assert_eq!(result.tier, CheckTier::Info);
+        assert_ne!(
+            result.status,
+            CheckStatus::Fail,
+            "a workspace with no policy files must not fail: {}",
+            result.message
+        );
+        assert!(result.message.contains("resolved from built-in defaults"));
+        assert!(
+            !result
+                .message
+                .contains("resolved from a2a-interaction.toml")
+        );
+
+        // The derivation, not just the effective value: every one of the three
+        // quantities is named, each with its own sentence.
+        for needle in [
+            "notification urgency",
+            "response automation",
+            "sharing breadth",
+        ] {
+            assert!(
+                result.message.contains(needle),
+                "explainer omitted `{needle}`:\n{}",
+                result.message
+            );
+        }
+        // The fail-closed default is reported as such.
+        assert!(
+            result.message.contains("notify-and-wait"),
+            "{}",
+            result.message
+        );
+        // The empty consent projection must SAY it is empty — silence would be
+        // indistinguishable from absence.
+        assert!(
+            result
+                .message
+                .contains("no journaled consent grants recorded"),
+            "the consent stub must announce itself:\n{}",
+            result.message
+        );
+    }
+
+    /// The structured mirror is published only after `run`, and it carries the same
+    /// per-dimension fields as the human view (AC6 — a surface that exists only in
+    /// the human view is half a surface).
+    #[tokio::test]
+    async fn ac6_policy_explainer_publishes_machine_detail_after_running() {
+        let workspace = tempfile::tempdir().unwrap();
+        let check = policy_check_from_production_list(workspace.path().to_path_buf());
+        assert!(
+            check.machine_detail().is_none(),
+            "machine detail must describe an actual run, not a guess made before one"
+        );
+
+        let _ = check.run().await;
+        let detail = check
+            .machine_detail()
+            .expect("the policy explainer must publish machine-readable detail");
+
+        for quantity in [
+            "notification_urgency",
+            "response_automation",
+            "sharing_breadth",
+        ] {
+            let node = &detail[quantity];
+            assert!(!node.is_null(), "json missing `{quantity}`: {detail}");
+            // effective AND the pair that produced it AND provenance.
+            for field in ["effective", "individual", "source"] {
+                assert!(
+                    node.get(field).is_some(),
+                    "`{quantity}.{field}` missing from json: {node}"
+                );
+            }
+        }
+        assert_eq!(detail["notification_urgency"]["source"], "default");
+        assert!(detail["notification_urgency"]["source_file"].is_null());
+        assert_eq!(detail["response_automation"]["source"], "default");
+        assert!(detail["response_automation"]["source_file"].is_null());
+        assert!(detail["sharing_breadth"]["source_file"].is_null());
+        assert!(detail["consent"].is_array());
+        assert_eq!(detail["journal_projection_empty"], true);
+        assert_eq!(detail["sharing_breadth"]["merge"], "not-merged");
+        assert_eq!(detail["sharing_breadth"]["enforced"], false);
+        assert_eq!(
+            detail["notification_urgency"]["merge"],
+            "max(individual, team)"
+        );
+        assert_eq!(
+            detail["response_automation"]["merge"],
+            "min(individual, team)"
+        );
+    }
+
+    /// Every other check publishes no structured detail, so appending the explainer
+    /// changed nothing about them (the framework's extensibility promise).
+    #[tokio::test]
+    async fn ac6_only_the_policy_check_publishes_machine_detail() {
+        let checks = build_check_list(false, &[], Vec::new(), PolicyCheckContext::default());
+        for check in &checks {
+            if check.name() == "Interaction policy" {
+                continue;
+            }
+            assert!(
+                check.machine_detail().is_none(),
+                "`{}` unexpectedly publishes machine detail",
+                check.name()
+            );
+        }
     }
 }

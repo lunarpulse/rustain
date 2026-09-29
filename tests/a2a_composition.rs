@@ -4,16 +4,19 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rustain::adapters::a2a::client::A2aClientAdapter;
+use rustain::adapters::a2a::egress::A2aEgress;
 use rustain::adapters::a2a::provider::A2aProvider;
 use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
 use rustain::adapters::tui::handlers::a2a_catalog::handle_a2a_catalog_changed;
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::errors::ToolError;
+use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
     A2aPeerSource, A2aPeerSpec, Capability, CapabilityError, CapabilityId, ProviderCapabilities,
     RedactedUrl, ToolDefinition, ToolResult, TransportKind, TrustTier,
 };
-use rustain::domain::ports::{CapabilityProvider, ToolSetPort};
+use rustain::domain::ports::{CapabilityProvider, RoomJournal, ToolSetPort};
+use rustain::infrastructure::subagent::{NodeJournal, NodeRoomJournal, NodeTree};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -117,12 +120,11 @@ async fn a2a_inventory_enters_the_llm_surface_under_namespaced_wire_names() {
 }
 
 fn peer_spec(url: String) -> A2aPeerSpec {
-    A2aPeerSpec {
-        id: "wire-peer".to_owned(),
-        url: RedactedUrl::from(url),
-        pinned_key: None,
-        source: A2aPeerSource::Workspace,
-    }
+    A2aPeerSpec::new(
+        "wire-peer",
+        RedactedUrl::from(url),
+        A2aPeerSource::Workspace,
+    )
 }
 
 fn composite() -> Arc<CompositeToolsetAdapter> {
@@ -189,6 +191,73 @@ async fn zero_skill_peer_is_a_valid_empty_inventory_control() {
     client.refresh_agent_card(&peer).await.unwrap();
     let composite = composite();
     composite.set_a2a_provider(Arc::new(A2aProvider::new(vec![(peer, client)])));
+    composite.populate_registry().await.unwrap();
+
+    assert!(composite.capability_registry().snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn egress_composition_exposes_a_cached_peer_and_its_same_delegation_runtime() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/agent-card.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"name":"Egress Peer","skills":[{"id":"inspect","name":"Inspect"}]}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let peer = peer_spec(server.uri());
+    let workspace = tempfile::tempdir().unwrap();
+    let journal = Arc::new(NodeJournal::open_workspace(workspace.path()).await.unwrap());
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(
+        journal.clone(),
+        Some(event_tx.clone()),
+    ));
+    let egress = A2aEgress::compose(vec![peer], NodeTree::new(), room, journal, event_tx).unwrap();
+    let composite = composite();
+    egress.install(&composite);
+
+    assert!(Arc::ptr_eq(
+        egress.runtime(),
+        egress
+            .provider()
+            .delegation_runtime()
+            .expect("provider must retain the composed runtime"),
+    ));
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            composite.populate_registry().await.unwrap();
+            if composite
+                .capability_registry()
+                .snapshot()
+                .iter()
+                .any(|capability| capability.id.to_string() == "a2a::wire-peer::inspect")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the spawned egress discovery must populate the composed catalogue");
+}
+
+#[tokio::test]
+async fn egress_composition_with_no_peers_exposes_no_a2a_capabilities() {
+    let workspace = tempfile::tempdir().unwrap();
+    let journal = Arc::new(NodeJournal::open_workspace(workspace.path()).await.unwrap());
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(
+        journal.clone(),
+        Some(event_tx.clone()),
+    ));
+    let egress = A2aEgress::compose(Vec::new(), NodeTree::new(), room, journal, event_tx).unwrap();
+    let composite = composite();
+    egress.install(&composite);
     composite.populate_registry().await.unwrap();
 
     assert!(composite.capability_registry().snapshot().is_empty());

@@ -49,4 +49,16 @@ pub struct ToolResult {
 pub struct ToolResultInfo {
     pub content: String,
     pub is_error: bool,
+    /// UI-only display-diff state for completed Write calls (Story 19.1,
+    /// FR30). See [`WriteDiffState`] for why this is an enum rather than an
+    /// `Option<Vec<DiffLine>>` — the Option encoding made the widget state
+    /// things that were false, which ruling A4 forbids.
+    ///
+    /// Persisted with the conversation, so `#[serde(default)]` is mandatory
+    /// for old session JSONL; the default is deliberately
+    /// `NotCaptured { HistoricalOrReattached }` and never `NewFile`.
+    /// NEVER mirrored onto the provider-facing [`ToolResult`] (A5 — the
+    /// model's bytes are unchanged).
+    #[serde(default)]
+    pub diff: super::diff::WriteDiffState,
 }

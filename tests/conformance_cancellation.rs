@@ -333,6 +333,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: std::sync::Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -382,6 +383,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             tool_exposure: None,
             skill_exposure: None,
             sandbox_adapter: None,
+            serve_a2a: None,
         },
         None,
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),

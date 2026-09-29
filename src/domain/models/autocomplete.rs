@@ -6,11 +6,22 @@ pub enum AutocompleteKind {
     FileMention,
     AgentMention,
     McpMention,
+    A2aMention,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpToolInfo {
     pub server: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// Cached A2A peer agent entry for `@A2A/` autocomplete (Story 19.13).
+/// `name` is the raw skill ID, NOT the human skill title; `peer` is the
+/// configured peer ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct A2aAgentInfo {
+    pub peer: String,
     pub name: String,
     pub description: String,
 }
@@ -35,6 +46,11 @@ pub enum AutocompleteSuggestion {
     },
     McpTool {
         server: String,
+        name: String,
+        description: String,
+    },
+    A2aAgent {
+        peer: String,
         name: String,
         description: String,
     },

@@ -107,12 +107,12 @@ fn build_list_rows(
 }
 
 /// Map `AuthMethod` variants to human-readable tokens.
-/// `#[non_exhaustive]` catch-all keeps forward-compat for Epic 19.
+/// `#[non_exhaustive]` catch-all keeps forward-compat for Epic 20 (OAuth; numbered 19 until 2026-08-23).
 fn auth_method_token(m: &crate::domain::models::credential::AuthMethod) -> &'static str {
     use crate::domain::models::credential::AuthMethod;
     match m {
         AuthMethod::ApiKey => "api-key",
-        // Forward-compat catch-all for Epic 19 additions.
+        // Forward-compat catch-all for Epic 20 additions.
         #[allow(unreachable_patterns)]
         _ => "unknown",
     }

@@ -1,0 +1,50 @@
+{
+  "scene": "smoke",
+  "personas": {
+    "scene-ci": {
+      "turns": [
+        {
+          "expect": "scene ping",
+          "content": [
+            {
+              "type": "text",
+              "text": "scene pong — this sentence is in the scene file, not in a model"
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": { "input_tokens": 11, "output_tokens": 7 }
+        }
+      ]
+    },
+    "scene-tools": {
+      "turns": [
+        {
+          "expect": "write the scene file",
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Write",
+              "input": {
+                "file_path": "scene.txt",
+                "content": "scene bytes from the smoke scene\n"
+              }
+            }
+          ],
+          "stop_reason": "tool_use",
+          "usage": { "input_tokens": 13, "output_tokens": 21 }
+        },
+        {
+          "expect": "Successfully wrote",
+          "content": [
+            {
+              "type": "text",
+              "text": "the tool_result above is the binary's own work, not the scene's"
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": { "input_tokens": 29, "output_tokens": 9 }
+        }
+      ]
+    }
+  }
+}

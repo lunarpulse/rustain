@@ -40,7 +40,7 @@ fn make_conversation(messages: Vec<(MessageRole, &str)>) -> Conversation {
                 synthetic: false,
                 id: format!(
                     "msg-{
-                }",
+            }",
                     i
                 ),
                 role,
@@ -52,6 +52,8 @@ fn make_conversation(messages: Vec<(MessageRole, &str)>) -> Conversation {
                 stop_reason: None,
                 images: vec![],
                 origin: rustain::domain::models::ChannelKind::Terminal,
+                authorship: Default::default(),
+                retracted_at_ms: None,
             })
             .collect(),
         turns: Vec::new(),
@@ -88,6 +90,7 @@ fn render_chat_pane_with_bookmarks(
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
     terminal
         .draw(|frame| {
@@ -113,6 +116,7 @@ fn render_chat_pane_with_bookmarks(
                 None,
                 None,
                 None, // open_prose
+                None, // current_focus
             );
         })
         .unwrap();

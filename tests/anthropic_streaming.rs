@@ -154,6 +154,8 @@ data: {\"type\":\"message_stop\"}\n\
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
 
         // Usage
@@ -295,6 +297,8 @@ data: {\"type\":\"message_stop\"}\n\
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         let mut streaming = make_streaming();
         let (mut reducer, clock) = test_reducer_state(1000);
@@ -641,6 +645,8 @@ data: {\"type\":\"message_stop\"}\n\
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         let mut streaming = make_streaming();
         let (mut reducer, clock) = test_reducer_state(1000);
@@ -756,6 +762,7 @@ data: {\"type\":\"message_stop\"}\n\
             Arc::new(rustain::adapters::noop::NoOpStorage),
             make_conversation(),
             None,
+            None,
             tokio_util::sync::CancellationToken::new(),
             Arc::new(rustain::adapters::noop::NoOpUsageLedger)
                 as Arc<dyn rustain::domain::ports::UsageLedgerPort>,
@@ -769,6 +776,8 @@ data: {\"type\":\"message_stop\"}\n\
             None,
             "sess-test".into(),
             rustain::domain::models::TurnOrigin::Interactive,
+            false,
+            None,
         )
         .await;
 

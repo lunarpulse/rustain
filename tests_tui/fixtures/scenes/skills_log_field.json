@@ -1,0 +1,41 @@
+{
+  "scene": "skills-log-field",
+  "personas": {
+    "scene-ci-skills": {
+      "turns": [
+        {
+          "expect": "no skill yet",
+          "content": [
+            {"type": "text", "text": "nothing active"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 11, "output_tokens": 3}
+        },
+        {
+          "expect": "use the deploy skill",
+          "content": [
+            {"type": "tool_use", "name": "activate_skill", "input": {"name": "safe-deploy"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 12, "output_tokens": 9}
+        },
+        {
+          "expect": "activated",
+          "content": [
+            {"type": "text", "text": "protocol loaded"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 21, "output_tokens": 4}
+        },
+        {
+          "expect": "second message",
+          "content": [
+            {"type": "text", "text": "still following it"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 26, "output_tokens": 5}
+        }
+      ]
+    }
+  }
+}

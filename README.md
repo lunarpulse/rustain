@@ -211,7 +211,7 @@ For full semantics, guards, exit codes, and bulk-delete behavior see
 ```sh
 cargo build                # debug build
 cargo check                # type check (fastest feedback)
-cargo test                 # run the test suite (~180 test files)
+cargo test                 # run the test suite (~255 test files)
 cargo clippy               # lint
 cargo fmt                  # format
 
@@ -219,15 +219,29 @@ cargo fmt                  # format
 cargo build --no-default-features --features anthropic     # minimal
 cargo build --features telegram                            # with Telegram channel
 cargo build --features vector-search                       # with local embeddings
+cargo build --features a2a,p2p                             # federation from source
 ```
 
-**Default features:** `anthropic`, `openai`, `ollama`, `clipboard`, `mcp`,
-`meta-search`.
+A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them** — they are on in every release built after this change; source builds need `--features a2a,p2p`. See [`docs/a2a.md`](docs/a2a.md) and [`docs/p2p.md`](docs/p2p.md).
 
-The test suite includes 47 conformance tests that enforce architectural
+### TUI peer-send quick start
+
+`rustain team send` (the CLI twin) is not in this cut — it is tracked as `18-9b-cli-team-send`; use the TUI verb below.
+
+1. Build the feature: `cargo build --features a2a`.
+2. Configure a roster ID and URL in `.rustain/a2a.json`, for example `"reviewer": {"url": "http://127.0.0.1:8080"}` (the recipient started in the next step).
+3. Start the recipient first; if it is rustain, use `rustain --serve-a2a=127.0.0.1:8080 daemon start`.
+4. Start rustain in the configured workspace; peers are discovered at startup. ⚠ Discovery runs once at boot — a peer that is down when you start may be refused until you restart with it up (on-demand refresh is deferred; see `docs/a2a.md`).
+5. In the TUI, run `/team send reviewer review this patch`; inspect delivery with `/team log`.
+
+**Default features:** `anthropic`, `openai`, `ollama`, `clipboard`, `mcp`,
+`meta-search`, `models-dev`.
+
+The test suite includes 96 conformance tests that enforce architectural
 invariants (dependency rules, lock policies, namespace conventions, port
-contracts). These run on every change and are the primary guard against
-architectural drift.
+contracts). The `ci.yml` lanes name the targets they run, so a conformance
+file is only a guard once a lane lists it — see the Check job's explicit
+enumeration. They are the primary guard against architectural drift.
 
 **Tracing:** logs route to `~/.rustain/rustain.log` (10MB rolling rotation)
 because stdout is owned by the ratatui terminal. Set `RUST_LOG=debug` for
@@ -283,7 +297,7 @@ rustain/
 │       ├── startup.rs          # ordered startup (< 20ms to first frame)
 │       ├── config.rs           # layered configuration loader
 │       └── signals.rs          # panic hook + signal handlers
-├── tests/                      # 180 test files inc. 47 conformance tests
+├── tests/                      # 255 test files inc. 96 conformance tests
 ├── profiles/                   # built-in profile definitions (TOML)
 │   ├── base.toml
 │   ├── coding.toml
@@ -369,7 +383,7 @@ line. To enable delegation in any profile, set `[tools] adapter = "composite"`.
 Layer -1: Ports          What the agent IS (27 port traits, composed by profiles)
 Layer  0: Built-in tools What the agent ships with (bash, read, write, edit, glob, grep, web fetch)
 Layer  1: Agent Skills   Markdown-based procedural knowledge (agentskills.io standard, 30+ tools)
-Layer  2: MCP            Tool-level interop via external servers (stdio/SSE/HTTP)
+Layer  2: MCP            Tool-level interop via external servers (stdio/Streamable HTTP)
 Layer  3: A2A            Agent-to-agent delegation (localhost/LAN/internet)
 ```
 
@@ -377,8 +391,10 @@ Layer  3: A2A            Agent-to-agent delegation (localhost/LAN/internet)
   Claude Code, Codex, Gemini CLI, or Cursor works in Rustain without
   modification. Discovery paths: `.agents/skills/`, `.rustain/skills/`,
   `.claude/skills/`, `~/.agents/skills/`.
-- **MCP** extends the tool set via sandboxed server processes. Supports stdio,
-  SSE, and HTTP transports.
+- **MCP** extends the tool set via sandboxed server processes and remote
+  servers. Supports **stdio** and **Streamable HTTP**; legacy SSE is rejected
+  per ADR-06-08 (the MCP spec deprecated it on 2025-03-26) — use a proxy such as
+  `mcp-proxy`, or a server that speaks Streamable HTTP.
 - **A2A** enables agent-to-agent delegation. Rustain acts as both client (discover
   and delegate to remote agents) and server (accept tasks from external agents).
 
@@ -399,8 +415,8 @@ sub-agents, context assembly, and daemon supervision.
 | **v0.5** | Agent Skills, MCP, sub-agents, plan mode, multi-provider | Shipped (Epics 5–10) |
 | **v0.75** | Memory tiers, context assembly, windowing, vector search | Shipped (Epic 11) |
 | **v1.0** | Daemon mode, Telegram channel, cron scheduler, multi-client attach | In progress (Epic 12) |
-| **v1.5** | A2A client, multi-agent orchestration | Planned (Epic 14) |
-| **v2.0** | A2A server, dynamic adapter loading, community hub | Planned |
+| **v1.5** | A2A client, P2P peer transport, multi-agent orchestration | Shipped (Epics 17–18) |
+| **v2.0** | A2A server, dynamic adapter loading, community hub | A2A server shipped; dynamic loading and hub planned |
 
 Detailed sprint tracking in
 [`sprint-status.yaml`](../_bmad-output/implementation-artifacts/sprint-status.yaml).

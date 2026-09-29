@@ -588,15 +588,22 @@ async fn acp_initialize_advertises_auth_methods_without_secret_leaks() {
                 || caps["promptCapabilities"]["audio"] == serde_json::json!(false),
             "audio must stay false/absent because ACP audio passthrough is not implemented: {caps}"
         );
-        assert!(
-            caps["mcpCapabilities"].get("http").is_none()
-                || caps["mcpCapabilities"]["http"] == serde_json::json!(false),
-            "MCP HTTP must stay false/absent because rustain forwards stdio MCP only: {caps}"
+        // ⚑ Story 9.9 INVERTED this. `mcpCapabilities.http` was pinned false
+        // "because rustain forwards stdio MCP only"; Streamable HTTP is a
+        // first-class transport now, and an ACP client only ever offers
+        // `McpServer::Http` when the agent advertises it — so a false here would
+        // make `mcp_servers_from_acp`'s HTTP arm a mechanism no client can
+        // trigger (a wiring hole, authoring-rules class B).
+        assert_eq!(
+            caps["mcpCapabilities"]["http"],
+            serde_json::json!(true),
+            "rustain forwards Streamable HTTP MCP servers, so initialize must say so: {caps}"
         );
         assert!(
             caps["mcpCapabilities"].get("sse").is_none()
                 || caps["mcpCapabilities"]["sse"] == serde_json::json!(false),
-            "MCP SSE must stay false/absent because rustain forwards stdio MCP only: {caps}"
+            "MCP SSE must stay false: the legacy SSE transport is rejected permanently \
+             (ADR-06-08): {caps}"
         );
     };
 
@@ -748,8 +755,17 @@ async fn acp_initialize_then_prompt_matches_golden_transcript() {
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
 
-    let core_factory: CoreFactory =
-        Rc::new(move |_cwd: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
+        let core = make_core(&ws_for_factory);
+        core.event_tx
+            .send(AppEvent::SystemNotice {
+                conversation_id: None,
+                level: rustain::domain::models::NoticeLevel::Warning,
+                message: "plaintext MCP transport fixture".to_string(),
+            })
+            .expect("queue MCP warning");
+        Ok(core)
+    });
     #[cfg(feature = "test-instrumentation")]
     let _run_turn_guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
     #[cfg(feature = "test-instrumentation")]
@@ -800,6 +816,7 @@ async fn acp_initialize_then_prompt_matches_golden_transcript() {
         let mut saw_session_acp_1 = false;
         let mut saw_agent_message_chunk = false;
         let mut saw_prompt_end_turn = false;
+        let mut saw_mcp_warning_chunk = false;
 
         loop {
             let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
@@ -832,10 +849,15 @@ async fn acp_initialize_then_prompt_matches_golden_transcript() {
             // sessionUpdate notification: the streamed model text.
             if v["method"] == serde_json::json!("session/update") {
                 let update = &v["params"]["update"];
-                if update["sessionUpdate"] == serde_json::json!("agent_message_chunk")
-                    && update["content"]["text"] == serde_json::json!(GOLDEN_AGENT_TEXT)
-                {
-                    saw_agent_message_chunk = true;
+                if update["sessionUpdate"] == serde_json::json!("agent_message_chunk") {
+                    if update["content"]["text"] == serde_json::json!(GOLDEN_AGENT_TEXT) {
+                        saw_agent_message_chunk = true;
+                    }
+                    if update["content"]["text"]
+                        == serde_json::json!("Warning: plaintext MCP transport fixture")
+                    {
+                        saw_mcp_warning_chunk = true;
+                    }
                 }
                 continue;
             }
@@ -853,10 +875,11 @@ async fn acp_initialize_then_prompt_matches_golden_transcript() {
             saw_session_acp_1,
             saw_agent_message_chunk,
             saw_prompt_end_turn,
+            saw_mcp_warning_chunk,
         )
     };
 
-    let (init_ok, new_ok, chunk_ok, prompt_ok) = tokio::select! {
+    let (init_ok, new_ok, chunk_ok, prompt_ok, warning_ok) = tokio::select! {
         outcome = drive => outcome,
         server_res = server => {
             panic!("ACP server exited before the client finished the transcript: {server_res:?}");
@@ -875,6 +898,10 @@ async fn acp_initialize_then_prompt_matches_golden_transcript() {
     assert!(
         prompt_ok,
         "session/prompt must resolve with stopReason `end_turn`"
+    );
+    assert!(
+        warning_ok,
+        "a queued MCP warning must stream through ACP as an agent_message_chunk"
     );
     #[cfg(feature = "test-instrumentation")]
     assert_eq!(
@@ -1777,6 +1804,7 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         storage,
         conversation,
         None,
+        None,
         CancellationToken::new(),
         ledger,
         ResolvedModel {
@@ -1789,6 +1817,8 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         None,
         "direct-test".into(),
         rustain::domain::models::TurnOrigin::Interactive,
+        false,
+        None,
     ));
     // `tools`/`tool_scheduler` were moved (or cloned) into run_turn above; the
     // turn owns the only live ToolSetPort senders now, so event_tx closes when

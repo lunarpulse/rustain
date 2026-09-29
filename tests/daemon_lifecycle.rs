@@ -15,6 +15,11 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use predicates::str::contains;
 
+#[cfg(feature = "a2a")]
+use wiremock::matchers::{method, path};
+#[cfg(feature = "a2a")]
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
 /// Build a `rustain` invocation pinned to the given isolated dirs.
 fn daemon_cmd(workspace: &Path, data: &Path, config: &Path) -> Command {
     let mut c = Command::cargo_bin("rustain").expect("cargo bin rustain");
@@ -47,6 +52,206 @@ impl Dirs {
     }
 }
 
+#[cfg(not(feature = "a2a"))]
+#[test]
+fn configured_a2a_peer_refuses_daemon_start_with_the_existing_feature_message() {
+    let d = dirs();
+    let config_dir = d.ws.path().join(".rustain");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("a2a.json"),
+        r#"{"agents":{"peer":{"url":"https://peer.example"}}}"#,
+    )
+    .unwrap();
+
+    d.cmd()
+        .args(["daemon", "start", "--foreground"])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "A2A peers or serving are configured, but this build has the `a2a` feature disabled",
+        ));
+}
+
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn daemon_composition_starts_a2a_agent_card_discovery_for_configured_peers() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/agent-card.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"name":"Daemon Peer","skills":[{"id":"inspect","name":"Inspect"}]}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let d = dirs();
+    let workspace_config = d.ws.path().join(".rustain");
+    std::fs::create_dir_all(&workspace_config).unwrap();
+    std::fs::write(
+        workspace_config.join("a2a.json"),
+        format!(
+            r#"{{"agents":{{"daemon-peer":{{"url":"{}"}}}}}}"#,
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let log_dir = d.data.path().join("logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("rustain"))
+        .current_dir(d.ws.path())
+        .env("RUSTAIN_DATA_DIR", d.data.path())
+        .env("RUSTAIN_CONFIG_DIR", d.cfg.path())
+        .env("RUSTAIN_LOG_PATH", log_dir.join("rustain.log"))
+        .args(["daemon", "start", "--foreground"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // 18.9b-a review patch — poll (bounded) for the daemon's card GET instead
+    // of a fixed 250 ms sleep: wiremock verifies `.expect(1)` at server drop,
+    // so killing the child before the fetch completed on a slow runner made
+    // the test fail spuriously.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while server
+        .received_requests()
+        .await
+        .map(|requests| requests.is_empty())
+        .unwrap_or(true)
+    {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the configured-peer daemon must remain running through boot discovery"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "daemon never fetched the configured peer's AgentCard"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the configured-peer daemon must remain running through boot discovery"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // 18.9b-a D1 — the happy path (composite profile) must stay SILENT: the
+    // upgrade disclosure is a defect signal, not ambient noise.
+    assert_eq!(
+        read_log_mentions(&log_dir, "daemon toolset upgraded to host A2A peers"),
+        0,
+        "coding/composite profile with peers must not emit the upgrade disclosure"
+    );
+}
+
+/// 18.9b-a D1 (party-mode ruling 2026-09-06, owner-approved Shape A): `base`
+/// resolves builtin-only tools, which cannot host the a2a provider install —
+/// before the upgrade such a daemon booted and even fetched the peer's
+/// AgentCard (egress composition is profile-independent) while the provider
+/// silently never installed. The daemon must BOOT WORKING: the toolset
+/// upgrades to the composite and the widening is disclosed in the log.
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn base_profile_daemon_with_peers_upgrades_toolset_and_discloses() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/agent-card.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"name":"Base Peer","skills":[{"id":"inspect","name":"Inspect"}]}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let d = dirs();
+    let workspace_config = d.ws.path().join(".rustain");
+    std::fs::create_dir_all(&workspace_config).unwrap();
+    std::fs::write(
+        workspace_config.join("a2a.json"),
+        format!(
+            r#"{{"agents":{{"base-peer":{{"url":"{}"}}}}}}"#,
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let log_dir = d.data.path().join("logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("rustain"))
+        .current_dir(d.ws.path())
+        .env("RUSTAIN_DATA_DIR", d.data.path())
+        .env("RUSTAIN_CONFIG_DIR", d.cfg.path())
+        .env("RUSTAIN_LOG_PATH", log_dir.join("rustain.log"))
+        .args(["daemon", "start", "--foreground", "--profile", "base"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Boot discovery still fires: egress composition happens before the
+    // toolset install, on every profile (this is what made D1 silent).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while server
+        .received_requests()
+        .await
+        .map(|requests| requests.is_empty())
+        .unwrap_or(true)
+    {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the base-profile peer daemon must boot, not refuse"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "daemon never fetched the configured peer's AgentCard"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the base-profile peer daemon must boot, not refuse"
+    );
+
+    // The disclosure must land in the daemon log exactly once (bounded poll:
+    // the warn fires during build_daemon_core, concurrent with discovery).
+    let needle = "daemon toolset upgraded to host A2A peers";
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut mentions;
+    loop {
+        mentions = read_log_mentions(&log_dir, needle);
+        if mentions > 0 || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        mentions, 1,
+        "exactly one upgrade disclosure expected in {:?}",
+        log_dir
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// Count needle mentions across the daemon's daily-rotated log files in
+/// `log_dir` (tracing_appender names them `<prefix>.<date>`).
+#[cfg(feature = "a2a")]
+fn read_log_mentions(log_dir: &Path, needle: &str) -> usize {
+    let mut count = 0;
+    if let Ok(entries) = std::fs::read_dir(log_dir) {
+        for entry in entries.flatten() {
+            if let Ok(body) = std::fs::read_to_string(entry.path()) {
+                count += body.lines().filter(|l| l.contains(needle)).count();
+            }
+        }
+    }
+    count
+}
 #[test]
 fn start_status_stop_full_lifecycle() {
     let d = dirs();

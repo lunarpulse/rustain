@@ -1,0 +1,382 @@
+journey J0 — Sam's first run of the real binary (Story 19.9, gate J0)
+recorded-at: 2026-08-28T10:47:34Z
+binary:      /home/lunarpulse/dev_ws/rustain/target/release/rustain
+version:     rustain rustain 0.1.2 (x86_64-unknown-linux-gnu)
+tree:        rustain@7081a05
+scene:       tests_tui/journeys/j0/scenes/j0-sam.json sha256:c59645a1408ed08a1e67c741e0939dd786c63b17261b56ee49254c6d7bc4e471
+run dir:     /tmp/tmp.tG41SoyZde
+
+=== journey_j0_sam.py — the beats
+[beat] boot: saw 'Ready'
+--- pane: boot ---
+                                                                                                                                  
+                                                        Welcome to Rustain.                                                       
+                                                                                                                                  
+                                                     Type a message to start.                                                     
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ctx: 0/1m (0%) │ Ready │ █ coding                                                     
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] turn-1 reply: saw 'Two source files'
+--- pane: tools-collapsed ---
+You:                                                                                                                              
+explain this codebase structure J0-SAM-MSG-1                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "src/lib.rs" → ✓ (0.0s) ┄                                                                                      
+│                                                                                                                                 
+│ Two source files, one entry point.                                                                                              
+│ main() loads the config, unwraps it, and calls run().                                                                           
+│ The unwrap is the only place a bad config can panic.                                                                            
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ↑641 ↓58 │ ctx: 641/1m (0%) │ Ready │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+--- pane: vim-nav ---
+You:                                                                                                                              
+explain this codebase structure J0-SAM-MSG-1                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "src/lib.rs" → ✓ (0.0s) ┄                                                                                      
+│                                                                                                                                 
+│ Two source files, one entry point.                                                                                              
+│ main() loads the config, unwraps it, and calls run().                                                                           
+│ The unwrap is the only place a bad config can panic.                                                                            
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ↑641 ↓58 │ ctx: 641/1m (0%) │ Ready │ █ coding                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] write permission prompt: saw '[y] Allow'
+--- pane: write-prompt ---
+You:                                                                                                                              
+explain this codebase structure J0-SAM-MSG-1                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "src/lib.rs" → ✓ (0.0s) ┄                                                                                      
+│                                                                                                                                 
+│ Two source files, one entry point.                                                                                              
+│ main() loads the config, unwraps it, and calls run().                                                                           
+│ The unwrap is the only place a bad config can panic.                                                                            
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+You:                                                                                                                              
+refactor the error handling in main.rs                                                                                            
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ● Executing Write "src/main.rs" → running... (0.1s) ┄                                                                         
+│ ⠸ Write                                                                                                                         
+┃ Write: {"content":"fn main() { // J0-SAM-FILE-NEEDLE\n    let cfg = load();\n    let v = cfg.expect(\"config\"); // J0-SAM-NEW\n
+┃ [y] Allow  [s] Session  [a] Always ┃                                                                                            
+┃ [n] Deny   [f] Deny + feedback ┃                                                                                                
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ↑641 ↓58 │ ctx: 641/1m (0%) │ Executing tools... │ █ coding                           
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] turn-2 reply: saw 'Rewrote the error handling'
+[beat] auto-title on the status bar (second exchange): saw 'Scene capture'
+[witness] src/main.rs sha256: 54c132871ed6665cc1b1c1d61a48c8f0fd3f7d7fe8fb81c31082154ecad679d9
+[witness] scripted content sha256: 54c132871ed6665cc1b1c1d61a48c8f0fd3f7d7fe8fb81c31082154ecad679d9
+[witness] bytes written: 118
+--- pane: write-collapsed ---
+You:                                                                                                                              
+explain this codebase structure J0-SAM-MSG-1                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "src/lib.rs" → ✓ (0.0s) ┄                                                                                      
+│                                                                                                                                 
+│ Two source files, one entry point.                                                                                              
+│ main() loads the config, unwraps it, and calls run().                                                                           
+│ The unwrap is the only place a bad config can panic.                                                                            
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+You:                                                                                                                              
+refactor the error handling in main.rs                                                                                            
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Write "src/main.rs" → ✓ (0.3s) ┄                                                                                    
+│                                                                                                                                 
+│ Rewrote the error handling.                                                                                                     
+│                                                                                                                                 
+│                                                                                                                                 
+ anthropic/claude-sonnet-4-6 [F] │ Scene capture │ Normal │ ↑894 ↓12 │ ctx: 894/1m (0%) │ Ready │ █ coding                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] write block: focused turn 2, invocation 1
+--- pane: write-expanded ---
+│ Two source files, one entry point.                                                                                              
+│ main() loads the config, unwraps it, and calls run().                                                                           
+│ The unwrap is the only place a bad config can panic.                                                                            
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+You:                                                                                                                              
+refactor the error handling in main.rs                                                                                            
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+▶ │ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                   
+│ ┌─ Write ──────────────────────────────────────────────────────────────────────────────────────────────────────── ✓ (0.3s) ┐    
+│ │ {"content":"fn main() { // J0-SAM-FILE-NEEDLE\n    let cfg = load();\n    let v = cfg.expect(\"config\"); // J0-SAM-NEW\n    r
+│   fn main() { // J0-SAM-FILE-NEEDLE                                                                                             
+│       let cfg = load();                                                                                                         
+│ -     let v = cfg.unwrap(); // J0-SAM-OLD-LINE                                                                                  
+│ +     let v = cfg.expect("config"); // J0-SAM-NEW                                                                               
+│       run(v);                                                                                                                   
+│   }                                                                                                                             
+│ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+│                                                                                                                                 
+│ Rewrote the error handling.                                                                                                     
+│                                                                                                                                 
+│                                                                                                                                 
+ ⚓  anthropic/claude-sonnet-4-6 [F] │ Scene capture │ Normal │ ↑894 ↓12 │ ctx: 894/1m (0%) │ Ready │ █ coding                    
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+--- pane: write-recollapsed ---
+You:                                                                                                                              
+explain this codebase structure J0-SAM-MSG-1                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "src/lib.rs" → ✓ (0.0s) ┄                                                                                      
+│                                                                                                                                 
+│ Two source files, one entry point.                                                                                              
+│ main() loads the config, unwraps it, and calls run().                                                                           
+│ The unwrap is the only place a bad config can panic.                                                                            
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+You:                                                                                                                              
+refactor the error handling in main.rs                                                                                            
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+▶ │ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                   
+│ ┄ ✓ Success Write "src/main.rs" → ✓ (0.3s) ┄                                                                                    
+│                                                                                                                                 
+│ Rewrote the error handling.                                                                                                     
+│                                                                                                                                 
+│                                                                                                                                 
+ ⚓  anthropic/claude-sonnet-4-6 [F] │ Scene capture │ Normal │ ↑894 ↓12 │ ctx: 894/1m (0%) │ Ready │ █ coding                    
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] TUI quit via Ctrl+Q
+
+=== launch 2 — bare `rustain`, the session restores itself
+[beat] boot after restore: saw 'Ready'
+[beat] the first message repainted from disk: saw 'J0-SAM-MSG-1'
+--- pane: after-restore ---
+You:                                                                                                                              
+explain this codebase structure J0-SAM-MSG-1                                                                                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Read "src/lib.rs" → ✓ (0.0s) ┄                                                                                      
+│                                                                                                                                 
+│ Two source files, one entry point.                                                                                              
+│ main() loads the config, unwraps it, and calls run().                                                                           
+│ The unwrap is the only place a bad config can panic.                                                                            
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+You:                                                                                                                              
+refactor the error handling in main.rs                                                                                            
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                     
+│ ┄ ✓ Success Write "src/main.rs" → ✓ (0.3s) ┄                                                                                    
+│                                                                                                                                 
+│ Rewrote the error handling.                                                                                                     
+│                                                                                                                                 
+│                                                                                                                                 
+ anthropic/claude-sonnet-4-6 [F] │ Scene capture │ Normal │ ctx: 0/1m (0%) │ Ready │ █ coding                                     
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] restored write block: focused turn 2, invocation 1
+--- pane: restore-expanded ---
+│ Two source files, one entry point.                                                                                              
+│ main() loads the config, unwraps it, and calls run().                                                                           
+│ The unwrap is the only place a bad config can panic.                                                                            
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+You:                                                                                                                              
+refactor the error handling in main.rs                                                                                            
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+▶ │ ┄ ✓ Success Read "src/main.rs" → ✓ (0.0s) ┄                                                                                   
+│ ┌─ Write ──────────────────────────────────────────────────────────────────────────────────────────────────────── ✓ (0.3s) ┐    
+│ │ {"content":"fn main() { // J0-SAM-FILE-NEEDLE\n    let cfg = load();\n    let v = cfg.expect(\"config\"); // J0-SAM-NEW\n    r
+│   fn main() { // J0-SAM-FILE-NEEDLE                                                                                             
+│       let cfg = load();                                                                                                         
+│ -     let v = cfg.unwrap(); // J0-SAM-OLD-LINE                                                                                  
+│ +     let v = cfg.expect("config"); // J0-SAM-NEW                                                                               
+│       run(v);                                                                                                                   
+│   }                                                                                                                             
+│ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+│                                                                                                                                 
+│ Rewrote the error handling.                                                                                                     
+│                                                                                                                                 
+│                                                                                                                                 
+ ⚓  anthropic/claude-sonnet-4-6 [F] │ Scene capture │ Normal │ ctx: 0/1m (0%) │ Ready │ █ coding                                 
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] TUI quit via Ctrl+Q
+[beat] restore launch quit
+[beats] complete
+
+=== --- ledger --- (product-minted milliseconds, one row per stream POST; the title call writes none)
+{"timestampMs":1787914057347,"sessionId":"ZzGLFCqaJ9vEhYpUebAAH","conversationId":"EUdaiGgpPcIY9Yw56gRVo","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":412,"tokensOut":34,"parentCtx":11,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1787914057348,"sessionId":"ZzGLFCqaJ9vEhYpUebAAH","conversationId":"EUdaiGgpPcIY9Yw56gRVo","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":528,"tokensOut":29,"parentCtx":11,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1787914057350,"sessionId":"ZzGLFCqaJ9vEhYpUebAAH","conversationId":"EUdaiGgpPcIY9Yw56gRVo","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":641,"tokensOut":58,"parentCtx":11,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1787914061730,"sessionId":"ZzGLFCqaJ9vEhYpUebAAH","conversationId":"EUdaiGgpPcIY9Yw56gRVo","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":703,"tokensOut":33,"parentCtx":55,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1787914061731,"sessionId":"ZzGLFCqaJ9vEhYpUebAAH","conversationId":"EUdaiGgpPcIY9Yw56gRVo","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":812,"tokensOut":91,"parentCtx":55,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+{"timestampMs":1787914062044,"sessionId":"ZzGLFCqaJ9vEhYpUebAAH","conversationId":"EUdaiGgpPcIY9Yw56gRVo","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":894,"tokensOut":12,"parentCtx":55,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+
+=== --- sessions --- (ids, titles, is_default_resume — session list is cwd-bound)
+{
+  "schema_version": "1.1",
+  "sessions": [
+    {
+      "id": "EUdaiGgpPcIY9Yw56gRVo",
+      "index": 1,
+      "title": "Scene capture",
+      "message_count": 4,
+      "created_at": 1787914054,
+      "updated_at": 1787914076,
+      "has_fork_source": false,
+      "is_default_resume": true,
+      "workspace": "/tmp/tmp.tG41SoyZde/workspace"
+    }
+  ]
+}
+
+=== --- requests --- (every request the binary made, in order)
+{"n":1,"method":"POST","path":"/v1/messages","kind":"health_check","persona":"scene-sam","auth":"x-api-key","model":"claude-sonnet-4-6"}
+{"n":2,"method":"GET","path":"/v1/models","kind":"probe"}
+{"n":3,"method":"GET","path":"/api.json","kind":"models_dev"}
+{"n":4,"method":"POST","path":"/v1/messages","persona":"scene-sam","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":1,"last_user":"explain this codebase structure J0-SAM-MSG-1","tools":15,"tool_results":0,"desync":false}
+{"n":5,"method":"POST","path":"/v1/messages","persona":"scene-sam","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":2,"last_user":"1\tfn main() { // J0-SAM-FILE-NEEDLE\n2\t    let cfg = load();\n3\t    let v = cfg.unwrap(); // J0-SAM-OLD-LINE\n4\t    run(v);","tools":15,"tool_results":1,"desync":false}
+{"n":6,"method":"POST","path":"/v1/messages","persona":"scene-sam","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":3,"last_user":"1\t// J0-SAM-LIB-NEEDLE\n2\tpub fn run(_v: u32) {}","tools":15,"tool_results":1,"desync":false}
+{"n":7,"method":"POST","path":"/v1/messages","persona":"scene-sam","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":4,"last_user":"1\tfn main() { // J0-SAM-FILE-NEEDLE\n2\t    let cfg = load();\n3\t    let v = cfg.unwrap(); // J0-SAM-OLD-LINE\n4\t    run(v);","tools":15,"tool_results":2,"desync":false}
+{"n":8,"method":"POST","path":"/v1/messages","persona":"scene-sam","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":5,"last_user":"1\tfn main() { // J0-SAM-FILE-NEEDLE\n2\t    let cfg = load();\n3\t    let v = cfg.unwrap(); // J0-SAM-OLD-LINE\n4\t    run(v);","tools":15,"tool_results":1,"desync":false}
+{"n":9,"method":"POST","path":"/v1/messages","persona":"scene-sam","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":6,"last_user":"Successfully wrote 118 bytes to src/main.rs","tools":15,"tool_results":1,"desync":false}
+{"n":10,"method":"POST","path":"/v1/messages","kind":"title","persona":"scene-sam","auth":"x-api-key","model":"claude-sonnet-4-6"}
+{"n":11,"method":"POST","path":"/v1/messages","kind":"health_check","persona":"scene-sam","auth":"x-api-key","model":"claude-sonnet-4-6"}
+{"n":12,"method":"GET","path":"/v1/models","kind":"probe"}
+
+=== --- what this run did not prove ---
+diff timing: shown in the expanded block AFTER execution; the approval prompt
+  renders the tool input only
+first-run config: the harness wrote .rustain/config.toml and .claude/settings.json
+  with EMPTY allow-lists; the copied .env was deleted before the first keystroke
+Glob: there is no Glob tool in this product (15 tool definitions on the wire,
+  none of them Glob) — PRD J0's second tool call is a second real Read over a
+  second driver-written file; the needle that came back is J0-SAM-LIB-NEEDLE
+<100ms first frame: not measured (host timing)
+vim j/k/i: recorded, not asserted
+tool-block focus: every block is expandable by keyboard as of this tree
+  (Story 19.9 A3); the Write opened here is the 4th tool call, reached by
+  ]] to its turn and Tab to its invocation
+live-LLM variant: not recorded
+input line: │ │ {"content":"fn main() { // J0-SAM-FILE-NEEDLE\n    let cfg = load();\n    let v = cfg.expect(\"config\"); // J0-SAM-NEW\n    r
+  ^ DF-19-1-INPUT-LINE-DUMP evidence, not fixed: the compact tool input is
+    dumped verbatim and truncated at the 130-column pane
+
+=== stopping the scene provider
+
+=== scene provider exit status: 0 (0 clean; 1 desync or unknown path)
+
+=== captured
+transcript: /home/lunarpulse/dev_ws/rustain/tests_tui/journeys/j0/receipts/journey-J0-2026-08-28T10-47-33Z.transcript.txt
+
+=== cleanup

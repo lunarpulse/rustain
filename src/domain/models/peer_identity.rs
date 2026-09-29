@@ -50,6 +50,25 @@ impl PeerId {
     pub fn matches_public_key(&self, public_key: &[u8]) -> bool {
         Self::from_public_key(public_key).is_ok_and(|want| want == *self)
     }
+
+    /// Derive a `PeerId` from a JWK `x` value — a base64url (unpadded) Ed25519
+    /// public key, the form an operator pins in `.rustain/a2a.json`.
+    ///
+    /// Lives here rather than beside `A2aPeerSpec` because "how a public-key
+    /// encoding becomes a `PeerId`" is knowledge about `PeerId`, next to the
+    /// sha256-multihash-and-hex it already owns. Keeping the codec here also keeps
+    /// `a2a_peer_spec.rs` free of any wire encoding, which
+    /// `a2a_domain_model_remains_transport_and_wire_free` pins.
+    ///
+    /// Pure crypto/encoding in `domain/` is deliberate and sanctioned — see
+    /// `a2a_wire_types_absent_from_entire_src_domain`.
+    pub fn from_jwk_ed25519_x(x: &str) -> Result<Self, PeerIdentityError> {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(x.as_bytes())
+            .map_err(|_| PeerIdentityError::InvalidPublicKeyEncoding)?;
+        Self::from_public_key(&bytes)
+    }
 }
 
 impl std::fmt::Display for PeerId {
@@ -107,6 +126,8 @@ impl PeerIdentity {
 pub enum PeerIdentityError {
     #[error("ed25519 public key must be 32 bytes, got {0}")]
     InvalidPublicKeyLength(usize),
+    #[error("ed25519 public key is not valid unpadded base64url")]
+    InvalidPublicKeyEncoding,
     #[error("peer id is not lowercase hex multihash bytes")]
     InvalidPeerIdEncoding,
     #[error("peer id hex is not canonical lowercase (uppercase or mixed case rejected)")]
@@ -130,6 +151,43 @@ fn validate_multihash_bytes(bytes: &[u8]) -> Result<(), PeerIdentityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The operator-facing pin form: unpadded base64url of a 32-byte Ed25519 key.
+    /// Must agree with `from_public_key` on the same bytes, or every pinned peer's
+    /// identity would shift (Story 18.3b, ADR-18-3b-01 D1).
+    #[test]
+    fn from_jwk_ed25519_x_agrees_with_from_public_key() {
+        use base64::Engine as _;
+        for seed in [0u8, 1, 7, 42, 200, 255] {
+            let bytes = [seed; 32];
+            let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+            assert_eq!(
+                PeerId::from_jwk_ed25519_x(&x),
+                PeerId::from_public_key(&bytes),
+                "pin decode diverged for seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_jwk_ed25519_x_rejects_non_base64url() {
+        assert_eq!(
+            PeerId::from_jwk_ed25519_x("not+valid/base64url=="),
+            Err(PeerIdentityError::InvalidPublicKeyEncoding)
+        );
+    }
+
+    /// A well-formed encoding of the wrong LENGTH must fail on length, not be
+    /// silently accepted — the caller treats any error as "no usable pin".
+    #[test]
+    fn from_jwk_ed25519_x_rejects_a_short_key() {
+        use base64::Engine as _;
+        let short = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8; 16]);
+        assert_eq!(
+            PeerId::from_jwk_ed25519_x(&short),
+            Err(PeerIdentityError::InvalidPublicKeyLength(16))
+        );
+    }
 
     #[test]
     fn peer_id_round_trips_minimal_sha256_multihash() {

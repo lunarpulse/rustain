@@ -23,15 +23,21 @@ use crate::domain::models::AppConfig;
 #[cfg(unix)]
 mod attach_client;
 #[cfg(unix)]
+pub(crate) mod consent;
+#[cfg(unix)]
 mod crash;
 #[cfg(unix)]
 mod lifecycle;
 #[cfg(unix)]
 mod pidfile;
 #[cfg(unix)]
+mod policy_startup;
+#[cfg(unix)]
 mod procargs;
 #[cfg(unix)]
 pub mod protocol;
+#[cfg(unix)]
+pub(crate) mod response_modes;
 #[cfg(unix)]
 pub mod runtime;
 #[cfg(unix)]
@@ -46,6 +52,8 @@ mod session_queue;
 mod socket;
 #[cfg(unix)]
 pub mod status;
+#[cfg(unix)]
+pub(crate) mod urgency;
 
 #[cfg(unix)]
 pub use lifecycle::{duration_until_next, emit_session_boundary};
@@ -59,19 +67,44 @@ pub async fn run_daemon(
     config: AppConfig,
     memory_adapter: String,
     selection: crate::domain::models::profile::ProfileSelection,
+    a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
+    // Story 18.1b — `--serve-a2a=ADDR` combined with daemon mode. The A2A
+    // listener runs as a sibling `tokio::spawn` inside this daemon's lifecycle,
+    // sharing its `NodeTree`, `DaemonCore` and event bus. There is no second
+    // core.
+    serve_a2a: Option<String>,
+    p2p_listen: bool,
 ) -> Result<()> {
     #[cfg(unix)]
     {
         match action {
             DaemonAction::Start { foreground } => {
                 if foreground {
-                    run_daemon_foreground(workspace, config, memory_adapter, selection).await
+                    run_daemon_foreground(
+                        workspace,
+                        config,
+                        memory_adapter,
+                        selection,
+                        a2a_peers,
+                        serve_a2a,
+                        p2p_listen,
+                    )
+                    .await
                 } else {
-                    run_daemon_start(workspace, config).await
+                    run_daemon_start(workspace, config, serve_a2a).await
                 }
             }
             DaemonAction::Run => {
-                run_daemon_foreground(workspace, config, memory_adapter, selection).await
+                run_daemon_foreground(
+                    workspace,
+                    config,
+                    memory_adapter,
+                    selection,
+                    a2a_peers,
+                    serve_a2a,
+                    p2p_listen,
+                )
+                .await
             }
             DaemonAction::Stop => run_daemon_stop(workspace).await,
             // Story 12.2c — default to the rich multi-channel TUI; `--plain` keeps
@@ -94,7 +127,15 @@ pub async fn run_daemon(
     }
     #[cfg(not(unix))]
     {
-        let _ = (action, workspace, config, memory_adapter, selection);
+        let _ = (
+            action,
+            workspace,
+            config,
+            memory_adapter,
+            selection,
+            serve_a2a,
+            p2p_listen,
+        );
         windows_not_supported()
     }
 }
@@ -121,7 +162,11 @@ use pidfile::{DaemonPidFile, GuardOutcome};
 /// legal between fork and exec). The parent waits for the readiness handshake
 /// (the child writing its PID file) within the NFR47 3s budget, then returns.
 #[cfg(unix)]
-async fn run_daemon_start(workspace: PathBuf, config: AppConfig) -> Result<()> {
+async fn run_daemon_start(
+    workspace: PathBuf,
+    config: AppConfig,
+    serve_a2a: Option<String>,
+) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -166,10 +211,14 @@ async fn run_daemon_start(workspace: PathBuf, config: AppConfig) -> Result<()> {
 
     let mut cmd = Command::new(exe);
     // Forward the resolved profile so the child composes the SAME memory adapter.
-    cmd.arg("--profile")
-        .arg(&config.active_profile)
-        .arg("daemon")
-        .arg("__run");
+    cmd.arg("--profile").arg(&config.active_profile);
+    // Story 18.1b — the detached child is the process that actually serves, so
+    // the flag has to travel with it. `--serve-a2a` uses `require_equals`, so it
+    // must be passed as one `=`-joined argument.
+    if let Some(addr) = serve_a2a.as_deref() {
+        cmd.arg(format!("--serve-a2a={addr}"));
+    }
+    cmd.arg("daemon").arg("__run");
     cmd.current_dir(&workspace);
     // Lineage nonce injection (Story 12.1c P1): generate the nonce HERE and pass it to
     // the child via the environment so the live daemon *carries* it (observable via
@@ -232,8 +281,47 @@ async fn run_daemon_foreground(
     config: AppConfig,
     memory_adapter: String,
     selection: crate::domain::models::profile::ProfileSelection,
+    a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
+    serve_a2a: Option<String>,
+    p2p_listen: bool,
 ) -> Result<()> {
     config.daemon.validate().map_err(|e| anyhow::anyhow!(e))?;
+
+    // One read supplies both replay-folded consent and restart-safe digest
+    // state. Neither projection re-reads the journal on delivery.
+    let journal_reader =
+        crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+            &workspace,
+        );
+    let journal_entries = crate::domain::ports::RoomJournalReader::load_entries(&journal_reader)
+        .await
+        .context("failed to load policy and urgency journal projections")?;
+    let consent_projection = std::sync::Arc::new(
+        crate::adapters::policy::JournalConsentProjection::from_entries(&journal_entries),
+    );
+    let effective_policy = policy_startup::validate_startup_policies(
+        &workspace,
+        &a2a_peers,
+        consent_projection.as_ref(),
+    )?;
+    let effective_policy = std::sync::Arc::new(effective_policy);
+    // The admission value only feeds the authority-widening WARNING — a
+    // malformed optional-listener config must not be fatal to daemon startup
+    // (previously it could only break the feature-gated A2A listener itself).
+    match crate::adapters::a2a::config::parse_workspace_a2a_server_config(
+        &crate::infrastructure::paths::workspace_a2a_config_path(&workspace),
+    ) {
+        Ok(config) => {
+            let admission = config.map_or_else(Default::default, |server| server.admission);
+            policy_startup::report_auto_authority_widening(
+                admission,
+                &effective_policy,
+                &a2a_peers,
+                consent_projection.as_ref(),
+            );
+        }
+        Err(error) => policy_startup::report_unknown_admission_posture(&error),
+    }
 
     let pid_path = crate::infrastructure::paths::daemon_pid_path(&workspace)?;
     let socket_path = crate::infrastructure::paths::daemon_socket_path(&workspace)?;
@@ -281,9 +369,10 @@ async fn run_daemon_foreground(
             .await
             .map_err(|error| anyhow::anyhow!("opening node journal: {error}"))?,
     );
+    let clock: std::sync::Arc<dyn crate::domain::clock::Clock> =
+        std::sync::Arc::new(crate::domain::clock::SystemClock::default());
     let now_fn = {
-        use crate::domain::clock::Clock;
-        let clock = std::sync::Arc::new(crate::domain::clock::SystemClock::default());
+        let clock = clock.clone();
         std::sync::Arc::new(move || clock.wall_now_ms())
     };
     let node_tree =
@@ -323,6 +412,23 @@ async fn run_daemon_foreground(
             }
         });
     }
+    #[cfg(feature = "a2a")]
+    let a2a_egress = std::sync::Arc::new(
+        crate::adapters::a2a::egress::A2aEgress::compose(
+            a2a_peers.clone(),
+            node_tree.clone(),
+            std::sync::Arc::new(
+                crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
+                    node_journal.clone(),
+                    Some(domain_tx.clone()),
+                ),
+            ),
+            node_journal.clone(),
+            domain_tx.clone(),
+        )
+        .map_err(|error| anyhow::anyhow!("composing daemon A2A egress: {error}"))?,
+    );
+
     let core = std::sync::Arc::new(
         crate::infrastructure::composition::build_daemon_core(
             &workspace,
@@ -333,6 +439,8 @@ async fn run_daemon_foreground(
             Some(channel_turn_tx.clone()),
             node_tree.clone(),
             node_journal.clone(),
+            #[cfg(feature = "a2a")]
+            a2a_egress,
         )
         .map_err(|e| anyhow::anyhow!("composing daemon core: {e}"))?,
     );
@@ -365,6 +473,7 @@ async fn run_daemon_foreground(
             domain_tx.clone(),
             config.assembler.strategy.clone(),
             Some(channel_turn_tx),
+            core.peer_topic_store.clone(),
         );
         crate::infrastructure::composition::build_channels(chan_name, chan_config, &chan_ctx)
             .unwrap_or_else(|e| {
@@ -415,13 +524,113 @@ async fn run_daemon_foreground(
         }
     };
 
-    let server = crate::adapters::daemon::server::AttachServer::new_with_node_tree(
-        core.clone(),
-        conversation.clone(),
-        domain_tx,
-        node_tree,
+    // The room journal is shared by peer transparency and the same-host
+    // response action dispatcher. Both write through the same durable port.
+    let reader: std::sync::Arc<dyn crate::domain::ports::RoomJournalReader> = node_journal.clone();
+    let journal: std::sync::Arc<dyn crate::domain::ports::RoomJournal> = std::sync::Arc::new(
+        crate::infrastructure::subagent::node_journal::NodeRoomJournal::new(
+            node_journal,
+            Some(domain_tx.clone()),
+        ),
     );
+    let urgency_router = std::sync::Arc::new(crate::adapters::daemon::urgency::UrgencyRouter::new(
+        clock,
+        journal.clone(),
+        &journal_entries,
+        i64::from(effective_policy.digest_interval_minutes).saturating_mul(60_000),
+    ));
+
+    // Story 18.3c (AC1) — the composition root installs the already-resolved
+    // effective policy into the ONE bus consumed by verified peer delivery.
+    // Relationship disposition remains a separate decision inside the policy.
+    let delivery_policy: std::sync::Arc<dyn crate::domain::ports::DeliveryPolicy> =
+        std::sync::Arc::new(crate::domain::ports::EffectiveDeliveryPolicy::new(
+            effective_policy.clone(),
+        ));
+    let peer_bus = crate::adapters::daemon::server::peer_bus_slot_with_policy(
+        &node_tree,
+        delivery_policy.clone(),
+    );
+    let server =
+        crate::adapters::daemon::server::AttachServer::new_with_node_tree_bus_policy_journal_and_urgency(
+            core.clone(),
+            conversation.clone(),
+            domain_tx.clone(),
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            journal.clone(),
+            reader.clone(),
+            Some(consent_projection.clone()),
+            Some(urgency_router.clone()),
+        );
+    server
+        .configure_consent_policy(effective_policy.clone())
+        .await;
+    if let Some(batch) = urgency_router
+        .flush_pending_on_start()
+        .await
+        .context("failed to prepare pending startup digest")?
+    {
+        server
+            .surface_digest_batch(batch.clone())
+            .await
+            .context("failed to surface pending startup digest")?;
+        urgency_router
+            .commit_flush(&batch)
+            .await
+            .context("failed to journal pending startup digest")?;
+    }
+    let urgency_shutdown = tokio_util::sync::CancellationToken::new();
+    let urgency_task = tokio::spawn(crate::adapters::daemon::urgency::run_digest_flusher(
+        urgency_router,
+        std::sync::Arc::downgrade(&server),
+        urgency_shutdown.child_token(),
+    ));
+
+    // The recorder is mandatory for every live verified peer frame, regardless
+    // of whether the optional HTTP A2A listener is enabled.
+    let notices: std::sync::Arc<dyn crate::domain::ports::EventEmitter> = std::sync::Arc::new(
+        crate::infrastructure::runtime::event_bus::ChannelEmitter::new(domain_tx.clone()),
+    );
+    let transparency = std::sync::Arc::new(
+        crate::adapters::a2a::transparency::TransparencySink::new(journal)
+            .with_reader(reader)
+            .with_notices(notices),
+    );
+    server
+        .configure_peer_recorder(
+            transparency.clone()
+                as std::sync::Arc<dyn crate::domain::ports::PeerInteractionRecorder>,
+            core.peer_topic_store.clone(),
+        )
+        .await;
     arm_node_recovery_harness(&server).await?;
+
+    // Story 18.1b, AC5b — the A2A listener is a SIBLING `tokio::spawn` inside
+    // this daemon's lifecycle. It shares this `node_tree`, this
+    // `Arc<DaemonCore>` and this `domain_tx` through `AttachServer` (which is
+    // the `InboundPeerRuntime`), so an inbound A2A task runs on exactly the peer-turn
+    // path the Unix socket drives. There is no second core and no second tree.
+    let a2a_shutdown = tokio_util::sync::CancellationToken::new();
+    let a2a_task = spawn_a2a_listener(
+        serve_a2a,
+        &workspace,
+        &config,
+        server.clone(),
+        transparency,
+        a2a_shutdown.child_token(),
+    )
+    .await?;
+
+    let p2p_shutdown = tokio_util::sync::CancellationToken::new();
+    let p2p_task = spawn_p2p_listener(
+        p2p_listen,
+        &workspace,
+        server.clone(),
+        p2p_shutdown.child_token(),
+    )
+    .await?;
 
     let rt = DaemonRuntime {
         config: config.clone(),
@@ -477,11 +686,654 @@ async fn run_daemon_foreground(
 
     let result = lifecycle::run_lifecycle(rt).await;
 
+    // Signal every listener FIRST, then await them. Cancelling in the same pass
+    // that awaits lets an earlier listener's five-second grace run while a later
+    // one is still admitting remote frames into a daemon whose lifecycle has
+    // already stopped.
+    urgency_shutdown.cancel();
+    a2a_shutdown.cancel();
+    p2p_shutdown.cancel();
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), urgency_task).await;
+
+    if let Some(task) = a2a_task {
+        // Bounded: a listener that will not stop must not hold the daemon's exit
+        // hostage — the process is going away regardless.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+    }
+
+    if let Some(task) = p2p_task {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+    }
+
     // Belt-and-suspenders: ensure the PID file is gone even if the loop errored
     // before its own cleanup ran.
     pidfile::remove(&pid_path);
     drop(singleton);
     result
+}
+
+/// Await the A2A listener's bind/configuration handshake before publishing the
+/// daemon's PID readiness marker.
+#[cfg(all(unix, feature = "a2a"))]
+async fn wait_for_a2a_listener_ready(
+    ready: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
+) -> Result<()> {
+    match ready.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => anyhow::bail!("A2A listener failed to start: {error}"),
+        Err(error) => {
+            anyhow::bail!("A2A listener exited before reporting readiness: {error}")
+        }
+    }
+}
+
+#[cfg(all(test, unix, feature = "a2a"))]
+mod a2a_listener_readiness_tests {
+    use super::wait_for_a2a_listener_ready;
+
+    #[tokio::test]
+    async fn listener_startup_errors_block_daemon_readiness() {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        ready_tx
+            .send(Err("TLS configuration is invalid".to_owned()))
+            .expect("receiver remains available");
+
+        let error = wait_for_a2a_listener_ready(ready_rx)
+            .await
+            .expect_err("listener startup error must fail daemon startup");
+
+        assert_eq!(
+            error.to_string(),
+            "A2A listener failed to start: TLS configuration is invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_listener_readiness_blocks_daemon_readiness() {
+        let (ready_tx, ready_rx) =
+            tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
+        drop(ready_tx);
+
+        let error = wait_for_a2a_listener_ready(ready_rx)
+            .await
+            .expect_err("a dropped readiness sender must fail daemon startup");
+
+        assert!(
+            error
+                .to_string()
+                .contains("exited before reporting readiness")
+        );
+    }
+}
+
+/// Compose and spawn the A2A listener alongside the daemon, when `--serve-a2a`
+/// asked for it.
+///
+/// Returns `Ok(None)` when the flag is absent (or the build lacks the `a2a`
+/// feature), so the daemon runs exactly as before.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+async fn spawn_a2a_listener(
+    addr: Option<String>,
+    workspace: &std::path::Path,
+    config: &AppConfig,
+    server: std::sync::Arc<crate::adapters::daemon::server::AttachServer>,
+    transparency: std::sync::Arc<crate::adapters::a2a::transparency::TransparencySink>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    let Some(addr) = addr else {
+        let _ = (workspace, config, server, transparency, shutdown);
+        return Ok(None);
+    };
+    #[cfg(not(feature = "a2a"))]
+    {
+        let _ = (workspace, config, server, transparency, shutdown);
+        anyhow::bail!(
+            "--serve-a2a={addr} was requested but this build has the `a2a` feature disabled"
+        );
+    }
+    #[cfg(feature = "a2a")]
+    {
+        use crate::domain::ports::InboundPeerRuntime;
+        let runtime: std::sync::Arc<dyn InboundPeerRuntime> = server;
+        let workspace = workspace.to_path_buf();
+        let config = config.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let listener_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                result = crate::adapters::a2a::server::run(
+                    addr,
+                    config,
+                    workspace,
+                    Some(runtime),
+                    transparency,
+                    Some(ready_tx),
+                ) => {
+                    match result {
+                        Ok(()) if listener_shutdown.is_cancelled() => {
+                            tracing::debug!("daemon A2A listener stopped during shutdown");
+                        }
+                        Ok(()) => {
+                            tracing::error!("daemon A2A listener stopped unexpectedly");
+                        }
+                        Err(error) if listener_shutdown.is_cancelled() => {
+                            tracing::debug!("daemon A2A listener stopped during shutdown: {error:#}");
+                        }
+                        Err(error) => {
+                            tracing::error!("daemon A2A listener stopped: {error:#}");
+                        }
+                    }
+                }
+                () = listener_shutdown.cancelled() => {}
+            }
+        });
+
+        match wait_for_a2a_listener_ready(ready_rx).await {
+            Ok(()) => Ok(Some(task)),
+            Err(error) => {
+                shutdown.cancel();
+                task.abort();
+                let _ = task.await;
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Compose the config-gated QUIC listener beside the daemon's existing peer
+/// front door. The disabled path allocates nothing and binds no endpoint.
+#[cfg(unix)]
+async fn spawn_p2p_listener(
+    enabled: bool,
+    workspace: &std::path::Path,
+    server: std::sync::Arc<crate::adapters::daemon::server::AttachServer>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    if !enabled {
+        let _ = (workspace, server, shutdown);
+        return Ok(None);
+    }
+    #[cfg(not(feature = "p2p"))]
+    {
+        let _ = (workspace, server, shutdown);
+        anyhow::bail!(
+            ".rustain/p2p.json enables the listener but this build has the `p2p` feature disabled"
+        );
+    }
+    #[cfg(feature = "p2p")]
+    {
+        let handler = server
+            .verified_peer_handler()
+            .await
+            .context("peer delivery front door is not configured")?;
+        let signer =
+            crate::adapters::rap::IdentityKeyStore::new(crate::infrastructure::paths::data_dir()?)
+                .load_or_generate()
+                .context("loading the local peer identity key")?;
+        let listener = compose_p2p_listener(
+            workspace,
+            handler,
+            signer.transport_secret_key_bytes(),
+            shutdown,
+        )
+        .await?;
+        tracing::info!(
+            address = listener.address,
+            "{}",
+            crate::adapters::cli::peer::rows::listener_reach_line(&listener.relay)
+        );
+        // AC9 — the disclosure is emitted where the operator reads the ready
+        // line too (Story 18.4c review): a host that composes a relay says a
+        // third party is carrying its traffic, and the startup log is a surface
+        // the completion record names. `None` on a `disabled` host.
+        if let Some(disclosure) =
+            crate::adapters::cli::peer::rows::relay_disclosure(&listener.relay)
+        {
+            tracing::info!("{disclosure}");
+        }
+        Ok(Some(listener.task))
+    }
+}
+
+/// A bound listener, the address an operator can hand to a peer, and the relay
+/// mode it composed — which the ready line has to name, because a `disabled`
+/// host and a relay-composed host reach different sets of peers.
+#[cfg(all(unix, feature = "p2p"))]
+struct P2pListener {
+    address: String,
+    relay: crate::domain::models::RelayConfigState,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Everything the listener is, minus the two lookups that reach outside this
+/// process (the front door on `AttachServer` and the on-disk identity key).
+///
+/// Split out so the composition itself — bind, allowlist health, ingress, and
+/// shutdown — is reachable by a test that delivers a real frame through it,
+/// instead of being asserted about by reading this file's source.
+#[cfg(all(unix, feature = "p2p"))]
+async fn compose_p2p_listener(
+    workspace: &std::path::Path,
+    handler: std::sync::Arc<crate::adapters::rap::VerifiedPeerFrameHandler>,
+    transport_secret_key: [u8; 32],
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<P2pListener> {
+    use crate::domain::ports::PeerTransport;
+
+    // ⚑ The relay mode is read **before** the bind and reaches the composition
+    // itself, not a log line about it. Absent means `disabled`, which is
+    // byte-for-byte the endpoint every shipped build already composes; a
+    // malformed file degrades to `disabled` too, and says so distinguishably
+    // rather than taking the whole peer transport down over one corrupt byte.
+    let relay = crate::adapters::relay_config::load_workspace_relay_config(
+        &crate::infrastructure::paths::workspace_relay_config_path(workspace),
+    );
+    if let Some(reason) = relay.degraded_reason() {
+        // The row names the FILE and the REASON. Without it the operator
+        // degrades into a mode nobody can tell apart from the one they chose,
+        // and never learns their configuration is broken.
+        tracing::warn!(
+            file = %crate::infrastructure::paths::workspace_relay_config_path(workspace).display(),
+            %reason,
+            "the relay configuration did not read; this host composed no relay"
+        );
+    }
+    let relay_mode = relay.mode();
+    // The set of relay hosts this process may contact is exactly the set the
+    // endpoint was composed with (D13) — so the dial map is filtered by the
+    // same value the bind uses, never by a second reading of the file.
+    let relay_set = crate::adapters::relay_config::relay_url_set(&relay_mode);
+
+    // The dial map comes from the one builder (Story 18.4d, AC4), never from an
+    // inline map here. ⚠ **Populating it does not make the daemon dial.** This
+    // cut adds no daemon-initiated dial at all; the map is supplied so reach is
+    // in place for a future dialer and so the listener and `peer ping` share one
+    // source. The only exercised dialer is `peer ping`.
+    let transport = std::sync::Arc::new(
+        crate::adapters::iroh::IrohPeerTransport::bind(
+            transport_secret_key,
+            crate::adapters::p2p_reach::peer_dial_map_from_workspace(workspace, &relay_set)
+                .addresses(),
+            &relay_mode,
+        )
+        .await
+        .context("binding the P2P listener")?,
+    );
+    let local_address = transport.local_address()?;
+    let address = String::from_utf8(local_address.as_bytes().to_vec())
+        .context("rendering the P2P listener address")?;
+
+    // AC1 — publish this host's own reach, **after** a successful bind and never
+    // before: a record written before the endpoint exists is a placeholder a
+    // ticket would then publish as fact. ⚠ The endpoint binds an ephemeral port,
+    // so this is rewritten every bind and a ticket minted during a previous run
+    // may name a port nobody is listening on. A reach write failure degrades —
+    // the listener still serves, and `peer invite` then emits its honest
+    // no-address copy — because reach is reachability, not admission.
+    if let Err(error) = crate::adapters::p2p_reach::publish_self_reach(
+        &crate::infrastructure::paths::workspace_p2p_reach_path(workspace),
+        &local_address,
+        chrono::Utc::now().timestamp(),
+    ) {
+        tracing::warn!(
+            %error,
+            "this host's reach could not be recorded; tickets will carry no network address"
+        );
+    }
+
+    // AC3 — and then keep it true. The bind-time record above is the honest
+    // fact at that instant, but a relay is established *after* the bind
+    // returns, so on a relay-composed host it names no relay and `peer invite`
+    // would mint a ticket that names none either. ⛔ The fix is not
+    // `Endpoint::online()`: with no relay configured that pends forever, which
+    // is exactly the `disabled` host. It is the endpoint's own address watcher,
+    // writing **only when the address actually changed** — a flapping relay
+    // must not fsync this file on every WAN twitch.
+    {
+        let watcher_transport = transport.clone();
+        let watcher_cancel = shutdown.clone();
+        let reach_path = crate::infrastructure::paths::workspace_p2p_reach_path(workspace);
+        tokio::spawn(async move {
+            watcher_transport
+                .republish_address_on_change(watcher_cancel, |address| {
+                    match crate::adapters::p2p_reach::publish_self_reach_on_change(
+                        &reach_path,
+                        &address,
+                        chrono::Utc::now().timestamp(),
+                    ) {
+                        Ok(true) => tracing::info!(
+                            "this host's own address changed; the reach record now matches it"
+                        ),
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "this host's changed reach could not be recorded; tickets keep the \
+                             address already on file"
+                        ),
+                    }
+                })
+                .await;
+        });
+    }
+
+    // An entry with no pinned key can never match a presented endpoint, so it
+    // silently admits nobody. The refusal path names the peer that knocked, not
+    // this hole, so the operator hears about it here instead.
+    if let crate::domain::models::P2pConfigState::Present(peers) =
+        crate::adapters::p2p_config::load_workspace_p2p_config(
+            &crate::infrastructure::paths::workspace_p2p_config_path(workspace),
+        )
+    {
+        let unpinned: Vec<&str> = peers
+            .iter()
+            .filter(|peer| peer.pinned_key.is_none())
+            .map(|peer| peer.id.as_str())
+            .collect();
+        if !unpinned.is_empty() {
+            tracing::warn!(
+                entries = ?unpinned,
+                "P2P allowlist entries have no pinned key and can admit no peer"
+            );
+        }
+    }
+
+    // ⚑ Story 18.4a, Rule 1 — the topic mechanism's production producer is
+    // wired HERE and nowhere else: this is the first point at which a bound
+    // transport exists to re-gossip on. Without this call
+    // `PeerTransport::gossip_topic` has no production caller and
+    // `RoomEvent::PeerEquivocated` has no producer, which is the
+    // mechanism-without-a-trigger class this epic has paid for three times.
+    //
+    // The signer is derived from the **same** secret key the endpoint bound, so
+    // the identity that signs an advertisement is the identity that carries it.
+    {
+        let signer = crate::adapters::rap::AgentSigner::from_signing_key(
+            ed25519_dalek::SigningKey::from_bytes(&transport_secret_key),
+        );
+        let bound = handler.bind_topic_effects(crate::adapters::rap::TopicEffects {
+            workspace: workspace.to_path_buf(),
+            transport: transport.clone() as std::sync::Arc<dyn PeerTransport>,
+            signer,
+        });
+        if !bound {
+            tracing::warn!(
+                "topic replication effects were already bound; this listener did not rebind them"
+            );
+        }
+    }
+
+    let ingress = std::sync::Arc::new(crate::adapters::iroh::IrohPeerIngress::new(
+        transport.clone(),
+        handler,
+        workspace.to_path_buf(),
+    )?);
+    let task = tokio::spawn(async move {
+        if let Err(error) = ingress.run(shutdown).await {
+            tracing::error!(error = %error, "P2P listener stopped");
+        }
+        if let Err(error) = transport.shutdown().await {
+            tracing::error!(error = %error, "P2P listener shutdown failed");
+        }
+    });
+    Ok(P2pListener {
+        address,
+        relay,
+        task,
+    })
+}
+
+/// Story 18.4 AC2 — the config-gated listener is composed here, so the proof
+/// that it works has to run here too. Everything below the front-door lookup is
+/// exercised: bind, allowlist, shared verification, front-door delivery and
+/// cancellation.
+#[cfg(all(test, unix, feature = "p2p"))]
+mod p2p_listener_composition_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use async_trait::async_trait;
+    use base64::Engine as _;
+    use tokio::sync::mpsc;
+
+    use crate::adapters::iroh::{IrohPeerTransport, derive_peer_endpoint_identity};
+    use crate::adapters::rap::{
+        AgentSigner, VerifiedPeerConsent, VerifiedPeerConsumer, VerifiedPeerFrameHandler,
+    };
+    use crate::domain::models::{AgentId, AgentMessage, CorrelationId, MessageKind, PeerId};
+    use crate::domain::ports::{
+        AgentMessageBus, PeerDeliveryRecord, PeerInteractionRecorder, PeerTransport,
+        RelationshipDeliveryPolicy,
+    };
+    use crate::infrastructure::subagent::{LocalMessageBus, NodeTree};
+
+    struct ForwardingConsumer(mpsc::UnboundedSender<String>);
+
+    #[async_trait]
+    impl VerifiedPeerConsumer for ForwardingConsumer {
+        async fn consent(
+            &self,
+            _recipient: &AgentId,
+            _content: &AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<VerifiedPeerConsent, String> {
+            Ok(VerifiedPeerConsent::Accept)
+        }
+
+        async fn ingest(
+            &self,
+            _recipient: &AgentId,
+            content: AgentMessage,
+            _peer_id: &PeerId,
+        ) -> Result<(), String> {
+            let _ = self.0.send(content.content);
+            Ok(())
+        }
+    }
+
+    struct AcceptingRecorder;
+
+    #[async_trait]
+    impl PeerInteractionRecorder for AcceptingRecorder {
+        async fn record_peer_delivery(&self, _record: PeerDeliveryRecord) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn record_transport_refusal(
+            &self,
+            _record: crate::domain::ports::TransportRefusalRecord,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn composed_listener_delivers_an_allowlisted_frame_and_stops_on_cancel() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let server_key = ed25519_dalek::SigningKey::from_bytes(&[41; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+
+        let pinned = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(client_key.verifying_key().to_bytes());
+        let config_dir = workspace.path().join(".rustain");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::write(
+            config_dir.join("p2p.json"),
+            format!(
+                r#"{{"listen":true,"agents":{{"client":{{"pinnedKey":{{"alg":"EdDSA","x":"{pinned}"}}}}}}}}"#
+            ),
+        )
+        .expect("write allowlist");
+
+        let (ingested_tx, mut ingested_rx) = mpsc::unbounded_channel();
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let node_tree = NodeTree::new();
+        let bus = Arc::new(LocalMessageBus::new(
+            node_tree.clone(),
+            Arc::new(RelationshipDeliveryPolicy),
+        )) as Arc<dyn AgentMessageBus>;
+        let handler = Arc::new(VerifiedPeerFrameHandler::new(
+            node_tree,
+            Arc::new(ArcSwap::from_pointee(bus)),
+            domain_tx,
+            Arc::new(ForwardingConsumer(ingested_tx)),
+            Arc::new(AcceptingRecorder),
+        ));
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let listener = super::compose_p2p_listener(
+            workspace.path(),
+            handler,
+            server_key.to_bytes(),
+            shutdown.child_token(),
+        )
+        .await
+        .expect("compose the production listener");
+
+        let server_identity = derive_peer_endpoint_identity(&server_key.verifying_key().to_bytes())
+            .expect("server identity");
+        let client = IrohPeerTransport::bind(
+            client_key.to_bytes(),
+            HashMap::from([(
+                server_identity.peer_id.clone(),
+                crate::domain::ports::PeerAddress::from_bytes(listener.address.into_bytes())
+                    .expect("listener address"),
+            )]),
+            &crate::domain::models::RelayMode::Disabled,
+        )
+        .await
+        .expect("bind client");
+
+        let signer = AgentSigner::from_signing_key(client_key);
+        let pid = signer.identity().peer_id.as_str();
+        let sender =
+            AgentId::from_peer_path(&format!("{pid}/peer-transport")).expect("peer-rooted sender");
+        // ⚑ Rooted at the sender's own namespace (the recipient rule 18.4a
+        // enforces, `DF-18-4d-RECIPIENT-NAMESPACE`); pre-18.4a this fixture
+        // addressed a bare `local-recipient`, which is refused now.
+        let recipient = AgentId::from_peer_path(&format!("{pid}/local-recipient"))
+            .expect("peer-rooted recipient");
+        let not_after =
+            crate::domain::clock::Clock::wall_now_ms(&crate::domain::clock::SystemClock::default())
+                + 60_000;
+        let envelope = signer
+            .sign(
+                sender,
+                recipient.clone(),
+                CorrelationId::new("composition-1"),
+                MessageKind::PeerMessage,
+                String::new(),
+                1,
+                not_after,
+                "composition-nonce".to_owned(),
+                Vec::new(),
+                serde_json::json!("through the composed listener"),
+            )
+            .expect("sign envelope");
+        client
+            .send_to(&server_identity.peer_id, envelope)
+            .await
+            .expect("send to the composed listener");
+
+        let delivered =
+            tokio::time::timeout(std::time::Duration::from_secs(10), ingested_rx.recv())
+                .await
+                .expect("the composed listener must deliver within the test budget")
+                .expect("ingest channel stays open");
+        assert_eq!(delivered, "through the composed listener");
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), listener.task)
+            .await
+            .expect("cancellation stops the composed listener")
+            .expect("listener task does not panic");
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    /// Story 18.4d AC1 — the listener publishes this host's own reach **at
+    /// bind**, through the production composition path.
+    ///
+    /// Mutants: (a) skipping the write leaves the store absent, so a ticket
+    /// carries no address; (b) writing before `bind` succeeds would persist a
+    /// placeholder — asserted by requiring the recorded bundle to be one `bind`
+    /// accepts; (c) `listen: false` never reaches this path at all, which the
+    /// sibling test below holds.
+    #[tokio::test]
+    async fn the_composed_listener_publishes_its_own_reach_at_bind() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let server_key = ed25519_dalek::SigningKey::from_bytes(&[45; 32]);
+        let config_dir = workspace.path().join(".rustain");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::write(
+            config_dir.join("p2p.json"),
+            r#"{"listen":true,"agents":{}}"#,
+        )
+        .expect("write allowlist");
+
+        let reach_path = crate::infrastructure::paths::workspace_p2p_reach_path(workspace.path());
+        assert_eq!(
+            crate::adapters::p2p_reach::load_workspace_p2p_reach(&reach_path),
+            crate::domain::models::PeerReachState::Absent,
+            "positive control: nothing has published reach yet"
+        );
+
+        let (ingested_tx, _ingested_rx) = mpsc::unbounded_channel();
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let node_tree = NodeTree::new();
+        let bus = Arc::new(LocalMessageBus::new(
+            node_tree.clone(),
+            Arc::new(RelationshipDeliveryPolicy),
+        )) as Arc<dyn AgentMessageBus>;
+        let handler = Arc::new(VerifiedPeerFrameHandler::new(
+            node_tree,
+            Arc::new(ArcSwap::from_pointee(bus)),
+            domain_tx,
+            Arc::new(ForwardingConsumer(ingested_tx)),
+            Arc::new(AcceptingRecorder),
+        ));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let listener = super::compose_p2p_listener(
+            workspace.path(),
+            handler,
+            server_key.to_bytes(),
+            shutdown.child_token(),
+        )
+        .await
+        .expect("compose the production listener");
+
+        let state = crate::adapters::p2p_reach::load_workspace_p2p_reach(&reach_path);
+        let own = state
+            .own()
+            .expect("binding the listener must publish this host's reach");
+        assert!(own.captured_at > 0, "the record carries a capture stamp");
+        assert_eq!(
+            own.address.as_bytes(),
+            listener.address.as_bytes(),
+            "the published record must be the address the listener actually bound"
+        );
+        // Mutant (b): a placeholder written before bind would not be dialable.
+        // This proves the recorded bundle is consumable, not merely non-empty.
+        let identity = derive_peer_endpoint_identity(&server_key.verifying_key().to_bytes())
+            .expect("server identity");
+        IrohPeerTransport::bind(
+            ed25519_dalek::SigningKey::from_bytes(&[46; 32]).to_bytes(),
+            HashMap::from([(identity.peer_id, own.address.clone())]),
+            &crate::domain::models::RelayMode::Disabled,
+        )
+        .await
+        .expect("the published reach must be an address `bind` accepts")
+        .shutdown()
+        .await
+        .expect("shutdown probe");
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), listener.task)
+            .await
+            .expect("cancellation stops the composed listener")
+            .expect("listener task does not panic");
+    }
 }
 
 /// Real-process crash arming seam used by the Story 17.2a L2 harness. The

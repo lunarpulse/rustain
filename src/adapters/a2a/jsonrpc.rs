@@ -17,12 +17,30 @@ use serde::{Deserialize, Serialize};
 
 use super::error::A2aError;
 
+/// Standard JSON-RPC parse error.
+pub const CODE_PARSE_ERROR: i64 = -32700;
+/// Standard JSON-RPC invalid-request error.
+pub const CODE_INVALID_REQUEST: i64 = -32600;
+/// Standard JSON-RPC invalid-params error.
+pub const CODE_INVALID_PARAMS: i64 = -32602;
 /// Standard JSON-RPC method-not-found (captured by the spike).
 pub const CODE_METHOD_NOT_FOUND: i64 = -32601;
 /// Internal error; the v1.0 agent returns this for an unsupported `A2A-Version`.
 pub const CODE_INTERNAL_ERROR: i64 = -32603;
 /// A2A "Task not found" — `tasks/get`/`tasks/cancel` on an unknown id.
 pub const CODE_TASK_NOT_FOUND: i64 = -32001;
+/// Story 19.16d — this host's admission policy refused an `x-rustain-items/*`
+/// write (`server.admission` is `deny`, or `ask`, which has no approval shape
+/// for a non-task verb). ⛔ Distinct from [`CODE_TASK_NOT_FOUND`]: a policy
+/// refusal is not an addressing failure and leaks no ownership. Chosen clear
+/// of the A2A spec's `-32001`–`-32007` because the verb is rustain-namespaced.
+pub const CODE_REFUSED_BY_POLICY: i64 = -32040;
+/// Story 19.16d — the caller owns the addressed item, and the recipient has
+/// already removed it (a tombstone). ⛔ Distinct from [`CODE_TASK_NOT_FOUND`]:
+/// ownership is already proven, so folding the two would lie to the owner
+/// while protecting nobody, and `AD-1822` requires a tombstone to differ from
+/// not-found.
+pub const CODE_ITEM_REMOVED: i64 = -32041;
 
 /// A JSON-RPC 2.0 request. `id` is a monotonic correlation key that the response
 /// must echo. `params` is pre-built A2A payload JSON.
@@ -42,6 +60,65 @@ impl JsonRpcRequest {
             id,
             method: method.into(),
             params,
+        }
+    }
+}
+
+/// Inbound JSON-RPC request shape. Kept separate from [`JsonRpcRequest`] so the
+/// client can retain a numeric monotonic id while the server echoes any valid
+/// JSON-RPC scalar id.
+#[derive(Debug, Clone, Deserialize)]
+pub struct JsonRpcInboundRequest {
+    pub jsonrpc: String,
+    #[serde(default)]
+    pub id: serde_json::Value,
+    pub method: String,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: &'static str,
+    pub id: serde_json::Value,
+    pub result: serde_json::Value,
+}
+
+impl JsonRpcResponse {
+    pub fn new(id: serde_json::Value, result: serde_json::Value) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonRpcError {
+    pub code: i64,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonRpcErrorResponse {
+    pub jsonrpc: &'static str,
+    pub id: serde_json::Value,
+    pub error: JsonRpcError,
+}
+
+impl JsonRpcErrorResponse {
+    pub fn new(id: serde_json::Value, code: i64, message: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            error: JsonRpcError {
+                code,
+                message: message.into(),
+                data: None,
+            },
         }
     }
 }
@@ -75,6 +152,15 @@ pub enum JsonRpcErrorKind {
     MethodNotFound,
     InternalError,
     TaskNotFound,
+    /// [`CODE_REFUSED_BY_POLICY`] — the peer's admission policy refused an
+    /// `x-rustain-items/*` write (Story 19.16d). Named so the retract's
+    /// outcome classifier (Story 19.16f) matches the variant, ⛔ never a
+    /// literal code.
+    RefusedByPolicy,
+    /// [`CODE_ITEM_REMOVED`] — the addressed item is a tombstone (Story
+    /// 19.16d). ⛔ Never folded into [`Self::TaskNotFound`]: a tombstone must
+    /// be distinguishable from not-found (`AD-1822`).
+    ItemRemoved,
     Other(i64),
 }
 
@@ -84,6 +170,8 @@ impl JsonRpcErrorKind {
             CODE_METHOD_NOT_FOUND => Self::MethodNotFound,
             CODE_INTERNAL_ERROR => Self::InternalError,
             CODE_TASK_NOT_FOUND => Self::TaskNotFound,
+            CODE_REFUSED_BY_POLICY => Self::RefusedByPolicy,
+            CODE_ITEM_REMOVED => Self::ItemRemoved,
             other => Self::Other(other),
         }
     }

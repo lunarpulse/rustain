@@ -109,7 +109,7 @@ fn host_bound_marker_clears_when_node_returns_home() {
 /// no-op (`=> {}`), so a rejection projected to nothing.
 #[test]
 fn remote_envelope_rejection_is_observable_and_idempotent() {
-    use rustain::domain::models::{PeerId, RejectReason};
+    use rustain::domain::models::{Direction, PeerId, RejectReason};
 
     let room_id = OrchestrationRoomId::parse("room-reject").expect("valid room id");
     let peer = PeerId::from_public_key(&[9u8; 32]).expect("peer id");
@@ -119,10 +119,14 @@ fn remote_envelope_rejection_is_observable_and_idempotent() {
             reason: RejectReason::Policy {
                 detail: "multi-turn not supported".to_owned(),
             },
+            direction: Direction::Outbound,
+            task: Some("task-out".to_owned()),
         },
         RoomEvent::RemoteEnvelopeRejected {
             peer: peer.clone(),
             reason: RejectReason::Malformed,
+            direction: Direction::Inbound,
+            task: Some("task-in".to_owned()),
         },
     ];
     let encoded = events
@@ -147,4 +151,10 @@ fn remote_envelope_rejection_is_observable_and_idempotent() {
         first.remote_rejections()[1].reason,
         RejectReason::Malformed
     ));
+    // Story 18.2 (AC2, P-3): the read model carries `direction` too — a
+    // projection that drops a field it was just told to record is the drift
+    // this story exists to prevent. Direction is UNRECOVERABLE here: this
+    // variant carries no node to derive it from.
+    assert_eq!(first.remote_rejections()[0].direction, Direction::Outbound);
+    assert_eq!(first.remote_rejections()[1].direction, Direction::Inbound);
 }

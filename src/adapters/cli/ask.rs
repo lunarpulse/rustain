@@ -384,6 +384,7 @@ impl<'a> AskRenderer<'a> {
                 id,
                 content,
                 is_error,
+                diff: _,
             } => StreamEvent {
                 schema_version: SCHEMA_VERSION,
                 event_type: "tool_result",
@@ -767,6 +768,8 @@ pub async fn run_ask_core(
         synthetic: false,
         images: vec![],
         origin: crate::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
 
     let messages = message_builder::build_api_messages(&conversation);
@@ -864,6 +867,16 @@ pub async fn run_ask_core(
         storage.clone(),
         conversation.clone(),
         None,
+        // Story 19.28 AC5 / A16 item 1 — proven-correct `None`, stated rather
+        // than left silent. Measured at implementation and re-measured at the
+        // 2026-09-13 code review: `grep -n
+        // "ActiveAgent\|agent_snapshot\|active_agent" adapters/cli/ask.rs`
+        // returns ZERO hits — `rustain ask` has no agent-selection flag and
+        // constructs no `ActiveAgent`, so there is no restriction to thread.
+        // ⛔ Not an oversight — the absence is structural. Load-bearing-ness is
+        // proved by mutant AC5(b): a fabricated `Some([Read])` at this exact
+        // site turns the `ask` tests RED (receipted as MUTANT 20).
+        None,
         turn_cancel,
         ledger.clone(),
         resolved,
@@ -872,6 +885,12 @@ pub async fn run_ask_core(
         None,
         session_id,
         TurnOrigin::Interactive,
+        // Story 18.4a scope boundary: `rustain ask` composes its own turn
+        // without the TUI's `inject_assembled_context` seam, so no
+        // `ContextBundle` exists here and no peer-origin entry can be present.
+        // ⛔ Not a suppressed taint — the absence is structural.
+        false,
+        None,
     ));
     // Drop local Arc clones of tools/tool_scheduler so any event senders
     // held inside ToolSetPort adaptors are released. The spawned run_turn
@@ -937,6 +956,7 @@ pub async fn run_ask_core(
                     id,
                     content,
                     is_error,
+                    diff: _,
                 } => {
                     if !turn_complete {
                         last_block_start = assistant_text.len();
@@ -944,6 +964,7 @@ pub async fn run_ask_core(
                             tc.result = Some(ToolResultInfo {
                                 content: content.clone(),
                                 is_error: *is_error,
+                                diff: crate::domain::models::WriteDiffState::NotAWrite,
                             });
                         } else {
                             tracing::warn!(
@@ -1082,6 +1103,8 @@ pub async fn run_ask_core(
             images: vec![],
             synthetic: false,
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         conversation.updated_at = now_unix();
         conversation.last_response_at = Some(now_unix());

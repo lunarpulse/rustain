@@ -81,6 +81,8 @@ mod a2a_conformance {
         let domain = include_str!("../models/a2a_peer_spec.rs");
         for forbidden in [
             "reqwest",
+            "axum",
+            "JsonRpc",
             "serde_jcs",
             "ed25519_dalek",
             "base64::",
@@ -119,12 +121,14 @@ mod a2a_conformance {
         // NOT forbidden: pure crypto is allowed in domain (capability_token.rs,
         // authority_ledger.rs). Forbidden set is exactly AC4's: A2A adapter/wire
         // types plus reqwest/serde_jcs.
-        const FORBIDDEN: [&str; 5] = [
+        const FORBIDDEN: [&str; 7] = [
             "reqwest",
             "serde_jcs",
+            "axum",
             "adapters::a2a",
             "AgentCardView",
             "A2aClientAdapter",
+            "JsonRpc",
         ];
         fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
@@ -194,7 +198,12 @@ mod a2a_conformance {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "rs")
                 && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                && stem.contains("a2a")
+                // Story 18.2: transparency targets ride the same contract. They
+                // are feature-independent, but CI's default lane runs
+                // `cargo test --lib` only — an integration target named in no
+                // lane never executes, which is the false green this guard
+                // exists to prevent.
+                && (stem.contains("a2a") || stem.contains("transparency"))
             {
                 targets.push(stem.to_owned());
             }
@@ -218,6 +227,96 @@ mod a2a_conformance {
             "A2A integration tests exist that the CI `a2a` lane never runs — a test that \
              never executes is a false green. Add `--test <name>` to the `a2a` job in \
              .github/workflows/ci.yml for: {missing:?}"
+        );
+    }
+
+    /// Story 18.4, AC6 — a p2p integration target not named by the dedicated
+    /// feature lane is a false green. Keep this sibling guard separate from the
+    /// A2A guard above: each guard owns exactly one CI lane.
+    #[test]
+    fn every_p2p_integration_test_is_wired_into_the_ci_p2p_lane() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut targets = Vec::new();
+        for entry in std::fs::read_dir(root.join("tests"))
+            .expect("tests/ must be readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "rs")
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                && stem.contains("p2p")
+            {
+                targets.push(stem.to_owned());
+            }
+        }
+        targets.sort();
+        assert!(
+            !targets.is_empty(),
+            "expected p2p integration tests under tests/"
+        );
+
+        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+            .expect(".github/workflows/ci.yml must be readable");
+        let lane: String = ci
+            .lines()
+            .skip_while(|line| *line != "  p2p:")
+            .skip(1)
+            .take_while(|line| {
+                line.is_empty() || !line.starts_with("  ") || line.starts_with("    ")
+            })
+            .collect();
+        assert!(!lane.is_empty(), "dedicated p2p CI job");
+        let missing: Vec<&String> = targets
+            .iter()
+            .filter(|stem| !lane.contains(&format!("--test {stem}")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "p2p integration tests exist that the CI `p2p` lane never runs: {missing:?}"
+        );
+    }
+
+    /// Story 18.1b, R1 — the async-lock ratchet was never executed by CI.
+    ///
+    /// `MAX_KNOWN_STD_SYNC_LOCKS` lives in `tests/conformance.rs`, and until this
+    /// story **no workflow ran `--test conformance`**: the Check job runs
+    /// `cargo test --lib`, and every feature lane names its targets explicitly.
+    /// The policy the whole codebase is held to was a manual-only gate, and an
+    /// untagged `std::sync::Mutex` in `adapters/` or `infrastructure/` could
+    /// merge with all lanes green.
+    ///
+    /// This story adds a task map and per-request server state, so it owns the
+    /// subject matter and closes the gap. The guard runs under `cargo test --lib`
+    /// so it fails the DEFAULT lane if someone removes the wiring.
+    #[test]
+    fn the_async_lock_ratchet_is_executed_by_ci() {
+        let ci = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
+        )
+        .expect(".github/workflows/ci.yml must be readable");
+        assert!(
+            ci.contains("--test conformance\n") || ci.contains("--test conformance "),
+            "no CI job runs `--test conformance`, so MAX_KNOWN_STD_SYNC_LOCKS is a \
+             manual-only gate again and an untagged std::sync lock can merge green"
+        );
+    }
+
+    /// Story 18.1b — the zero-mutation ratchet (AC2b) and the card-signing
+    /// counter (AC7b) are both `#[cfg(any(test, feature = "test-instrumentation"))]`.
+    /// In an *integration* target the `test` cfg applies to the test crate, not to
+    /// the library, so without the feature those keystones silently degrade to
+    /// their behavioural halves — green, and no longer proving the structural
+    /// invariant they exist for.
+    #[test]
+    fn the_ci_a2a_lane_enables_the_zero_mutation_ratchet() {
+        let ci = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
+        )
+        .expect(".github/workflows/ci.yml must be readable");
+        assert!(
+            ci.contains("--features a2a,test-instrumentation"),
+            "the CI a2a lane must run with `test-instrumentation`, or AC2b's \
+             zero-mutation ratchet and AC7b's signing counter are compiled out"
         );
     }
 

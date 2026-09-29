@@ -68,6 +68,62 @@ impl McpServerSpec {
         }
         Ok(())
     }
+
+    /// Story 9.9 (AC2) — transport ↔ field consistency. The **first** such
+    /// validation in the tree: `validate_id` checks the id alone, and
+    /// `RedactedUrl::new` is infallible and validates nothing, so an `http`
+    /// entry's URL must be parsed here or nowhere.
+    ///
+    /// ⚑ ONE function, TWO consumers. The config parsers call it to warn **per
+    /// entry** at load time — the offending entry stays in the list so its
+    /// healthy siblings survive (ruling A1: a required `command` used to fail
+    /// the WHOLE `.claude/mcp.json` and delete every server in it) — and
+    /// `McpClientAdapter::connect` calls it as the fail-closed gate that turns
+    /// the same fault into `ConnectionFailed { last_error }` in the adapter
+    /// status panel. A second, drifting copy of this rule is the defect this
+    /// shape exists to avoid.
+    pub fn validate_transport_fields(&self) -> Result<(), String> {
+        match self.transport {
+            McpTransport::Stdio => match self.command.as_deref() {
+                None => Err(format!(
+                    "MCP server '{}': transport = \"stdio\" requires a `command`, but none is configured",
+                    self.id
+                )),
+                Some(command) if command.trim().is_empty() => Err(format!(
+                    "MCP server '{}': transport = \"stdio\" has an empty `command`",
+                    self.id
+                )),
+                Some(_) => Ok(()),
+            },
+            McpTransport::Http => {
+                let Some(url) = self.url.as_ref() else {
+                    return Err(format!(
+                        "MCP server '{}': transport = \"http\" requires a `url`, but none is configured",
+                        self.id
+                    ));
+                };
+                // `parse_url` keeps the raw value inside the newtype — a
+                // credential-bearing URL must still parse, and no string below
+                // ever interpolates anything but the redacting `Display` form.
+                let parsed = url.parse_url().map_err(|error| {
+                    format!(
+                        "MCP server '{}': `url` {url} is not a valid URL: {error}",
+                        self.id
+                    )
+                })?;
+                match parsed.scheme() {
+                    "http" | "https" => Ok(()),
+                    other => Err(format!(
+                        "MCP server '{}': `url` {url} uses scheme {other:?}; Streamable HTTP requires http or https",
+                        self.id
+                    )),
+                }
+            }
+            // SSE is refused at connect (ADR-06-08) — there is no field
+            // contract worth checking for a transport that never dials.
+            McpTransport::Sse => Ok(()),
+        }
+    }
 }
 
 pub fn expand_env_vars(input: &str) -> (String, Vec<String>) {

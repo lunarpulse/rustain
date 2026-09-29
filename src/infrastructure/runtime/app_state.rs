@@ -83,6 +83,43 @@ pub struct AppState {
     pub catalog_registry: Option<
         Arc<crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry>,
     >,
+    /// Story 18.2 (AC3) — read seam over the durable room journal plus the
+    /// `transparency.jsonl` export shell. `None` when the workspace has no
+    /// journal (a non-subagent composition). Set at the composition root
+    /// rather than passed positionally: `new` already takes 19 arguments.
+    pub transparency: Option<Arc<crate::infrastructure::transparency::TransparencyService>>,
+    /// Story 18.3a (AC4) — live-refolded room-role projection over the one
+    /// journal. Always present: [`crate::adapters::policy::JournalRoomRoleProjection::inert`]
+    /// is the honest composition for a workspace with no journal (every
+    /// principal answers the least-privileged role) and it keeps every
+    /// consumer free of `Option` juggling on an authority decision.
+    ///
+    /// Assigned at the composition root after construction, for the same
+    /// reason as `transparency` above.
+    pub room_roles: Arc<crate::adapters::policy::JournalRoomRoleProjection>,
+    /// Story 18.3a-c (AC5) — the narrow domain port the `/artifact` surfaces
+    /// record verdicts and read bodies through. `None` when the workspace
+    /// composed no merge-back service (a non-subagent composition), in which
+    /// case there are no patches to review either.
+    ///
+    /// Assigned at the composition root, which owns the slot (`ADR-18-3-01`
+    /// D4): there is **no setter** — `AppState` exposes no `with_*` method that
+    /// could rebind it from anywhere else — for the same reason, and in exactly
+    /// the shape, `transparency` and `room_roles` above use. `AppState::new`
+    /// already takes 19 arguments and a 20th buys nothing.
+    pub patch_review: Option<std::sync::Arc<dyn crate::domain::ports::PatchReviewRecorder>>,
+    /// Story 18.3a-e — confirmed operator apply seam. Bound once at the
+    /// composition root; no setter and no concrete merge-back dependency.
+    pub patch_apply: Option<std::sync::Arc<dyn crate::domain::ports::PatchApplyExecutor>>,
+    /// Story 18.3a-f — the operator's indeterminate-apply resolution seam. A
+    /// **sibling** of `patch_apply`, bound to the same service at the root;
+    /// ⛔ not a second mode of the apply port.
+    pub patch_resolve: Option<std::sync::Arc<dyn crate::domain::ports::PatchApplyResolver>>,
+    /// Story 18.9 (FR54-a) — the operator's outbound-send seam. Bound once at
+    /// the composition root beside `patch_apply`/`patch_resolve`; `None` when
+    /// the build lacks `a2a` or the workspace configured no peers.
+    #[cfg(feature = "a2a")]
+    pub a2a_send: Option<std::sync::Arc<crate::adapters::a2a::driver::A2aDelegationRuntime>>,
 }
 
 impl AppState {
@@ -138,6 +175,13 @@ impl AppState {
                 telemetry,
                 #[cfg(feature = "meta-search")]
                 catalog_registry,
+                transparency: None,
+                room_roles: Arc::new(crate::adapters::policy::JournalRoomRoleProjection::inert()),
+                patch_review: None,
+                patch_apply: None,
+                patch_resolve: None,
+                #[cfg(feature = "a2a")]
+                a2a_send: None,
             },
             domain_rx,
         )

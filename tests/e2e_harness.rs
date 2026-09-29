@@ -306,6 +306,7 @@ impl TestHarness {
                         DensityMode::Focus,
                         false,
                         None,
+                        rustain::adapters::tui::state::LogAwareness::Hidden,
                     );
 
                     input_box::render(
@@ -438,6 +439,8 @@ impl TestHarness {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
 
         self.streaming.is_streaming = true;
@@ -924,6 +927,7 @@ fn test_e2e_tool_use_conversation_state() {
         id: "toolu_abc123".to_string(),
         content: "file contents here".to_string(),
         is_error: false,
+        diff: rustain::domain::models::WriteDiffState::NotAWrite,
     });
 
     h.render();
@@ -989,6 +993,8 @@ fn test_e2e_api_messages_valid_after_tool_use() {
         stop_reason: Some(StopReason::ToolUse),
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     });
 
     // Validate API messages — this is the critical regression test

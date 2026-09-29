@@ -332,6 +332,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
             id,
             content,
             is_error,
+            diff,
         } => {
             state.ensure_open_turn(clock);
             state.flush_all();
@@ -387,7 +388,11 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
                 turn.push_part(|pid| TurnPart::ToolResult {
                     id: pid,
                     refs: invocation_pid,
-                    output: ToolOutput { content, is_error },
+                    output: ToolOutput {
+                        content,
+                        is_error,
+                        diff,
+                    },
                 });
             }
 
@@ -560,6 +565,10 @@ pub fn update_streaming_mirror(state: &ReducerState, mirror: &mut StreamingState
                             Some(crate::domain::models::ToolResultInfo {
                                 content: output.content.clone(),
                                 is_error: output.is_error,
+                                // Display-only field: the provider-context
+                                // mirror never carries it (A5 — the model's
+                                // bytes are unchanged; Story 19.1).
+                                diff: crate::domain::models::WriteDiffState::NotAWrite,
                             })
                         } else {
                             None
@@ -889,6 +898,7 @@ mod tests {
                         id: "tool_1".into(),
                         content: "out".into(),
                         is_error: false,
+                        diff: crate::domain::models::WriteDiffState::NotAWrite,
                     },
                 ],
                 expected: vec![ChunkAction::NeedsRedraw, ChunkAction::NeedsRedraw],
@@ -1070,6 +1080,7 @@ mod tests {
                 id: "t1".into(),
                 content: "done".into(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             },
             &clock,
         );
@@ -1430,6 +1441,7 @@ mod tests {
                 id: "tool_1".into(),
                 content: "output".into(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             },
             &clock,
         );
@@ -1495,6 +1507,7 @@ mod tests {
                 id: "tool_1".into(),
                 content: "exit 1".into(),
                 is_error: true,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             },
             &clock,
         );
@@ -1532,6 +1545,7 @@ mod tests {
                 id: "unknown_id".into(),
                 content: "orphan".into(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             },
             &clock,
         );
@@ -1588,6 +1602,7 @@ mod tests {
                 id: "t1".into(),
                 content: "done".into(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             },
             &clock,
         );
@@ -1661,6 +1676,7 @@ mod tests {
                 id: "tool_1".into(),
                 content: "done".into(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             },
             &clock,
         );
@@ -1726,6 +1742,7 @@ mod tests {
                 id: "tool_1".into(),
                 content: "ok".into(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             },
             &clock,
         );
@@ -1757,6 +1774,7 @@ mod tests {
                 id: "tool_1".into(),
                 content: "error output".into(),
                 is_error: true,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             },
             &clock,
         );

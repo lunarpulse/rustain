@@ -143,3 +143,99 @@ async fn test_step1_multi_skill_intersection_enforced() {
     .await;
     assert!(matches!(grep_deny, PermissionDecision::Deny(_)));
 }
+
+async fn check_bash(skill: &ActiveSkill, command: &str) -> PermissionDecision {
+    permission_chain::check(
+        &NoOpSecurity,
+        "Bash",
+        &serde_json::json!({"command": command}),
+        Some(std::slice::from_ref(skill)),
+        None,
+        &NoOpToolSet,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn bash_patterns_enforce_command_prefixes_through_permission_chain() {
+    let skill = make_active_skill(
+        "safe-deploy",
+        Some(vec![
+            "Bash(kubectl:*)".to_string(),
+            "Bash(helm:*)".to_string(),
+            "Read".to_string(),
+        ]),
+    );
+
+    for command in [
+        "kubectl get pods",
+        "helm diff release chart",
+        "kubectl",
+        "kubectl get pods && helm diff release chart",
+        "kubectl get pods 2>&1",
+        "  kubectl   get\tpods",
+        "kubectl get -o jsonpath='{.a && .b}'",
+    ] {
+        let decision = check_bash(&skill, command).await;
+        assert!(
+            !matches!(decision, PermissionDecision::Deny(_)),
+            "declared command {command:?} was denied: {decision:?}"
+        );
+    }
+
+    for command in [
+        "printf 'x'",
+        "kubectl-evil --all",
+        "kubectlfoo",
+        "KUBECTL get pods",
+    ] {
+        let decision = check_bash(&skill, command).await;
+        match decision {
+            PermissionDecision::Deny(message) => assert!(
+                message.starts_with("Tool 'Bash'"),
+                "command deny lost its stable opening: {message}"
+            ),
+            other => panic!("undeclared command {command:?} was admitted: {other:?}"),
+        }
+    }
+
+    let unrestricted = make_active_skill("shell", Some(vec!["Bash".to_string()]));
+    assert!(!matches!(
+        check_bash(&unrestricted, "printf 'x'").await,
+        PermissionDecision::Deny(_)
+    ));
+}
+
+#[tokio::test]
+async fn bash_patterns_fail_closed_on_unmatched_or_unsegmentable_chains() {
+    let skill = make_active_skill(
+        "safe-deploy",
+        Some(vec![
+            "Bash(kubectl:*)".to_string(),
+            "Bash(helm:*)".to_string(),
+            "Read".to_string(),
+        ]),
+    );
+
+    for command in [
+        "kubectl get pods && printf x",
+        "kubectl get pods; printf x",
+        "kubectl get pods | tee /tmp/x",
+        "printf x && kubectl get pods",
+        "kubectl get pods &&",
+        "echo $(printf x)",
+        "kubectl get `printf x`",
+        "kubectl get \"unbalanced",
+        r"kubectl get pods --note=\'x;printf SECOND-CMD-RAN\'z",
+        "kubectl apply -f - <<EOF",
+        "KUBECONFIG=/tmp/x kubectl get pods",
+    ] {
+        assert!(
+            matches!(
+                check_bash(&skill, command).await,
+                PermissionDecision::Deny(_)
+            ),
+            "unsafe command {command:?} was admitted"
+        );
+    }
+}

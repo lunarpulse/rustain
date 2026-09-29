@@ -48,6 +48,10 @@ pub struct RenderResult {
     pub user_message_boundaries: Vec<usize>,
     /// Tool block id at the top of the viewport (for focus/keyboard interaction).
     pub focused_tool_id: Option<String>,
+    /// Story 19.16g — ids of the feedback blocks that intersect the rendered
+    /// chat viewport this frame. A block merely inserted, or scrolled wholly
+    /// offscreen, or drawn into a zero-height pane, is absent.
+    pub visible_feedback_ids: Vec<String>,
 }
 
 /// Compute the `scroll_offset` value needed to bring `target_message_idx`
@@ -185,6 +189,10 @@ fn hash_message_content(msg: &crate::domain::models::conversation::ChatMessage) 
     msg.content.hash(&mut hasher);
     msg.content_blocks.hash(&mut hasher);
     msg.stop_reason.hash(&mut hasher);
+    // Story 18.3c — authorship changes the rendered line count (the
+    // `[auto-sent]` marker line); a hash that ignores it would serve a stale
+    // cached height after a draft resolution marks the row.
+    msg.authorship.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -193,24 +201,44 @@ fn compute_message_height(
     has_error: bool,
     is_cancelled: bool,
     _is_bookmarked: bool,
+    agent_composed_marker: bool,
+    peer_derived: bool,
     width: usize,
 ) -> usize {
+    let content = if peer_derived {
+        crate::domain::services::peer_text::sanitize_peer_text_block(content)
+    } else {
+        std::borrow::Cow::Borrowed(content)
+    };
+    let content_width = if peer_derived {
+        width.saturating_sub(crate::domain::services::peer_text::PEER_CONTENT_GUTTER_WIDTH)
+    } else {
+        width
+    };
     // 1 for role line (see docstring — role + bookmark glyph never wraps at
     // the enforced minimum width).
-    let content_height = if has_error || content.is_empty() {
-        let wrapped = wrap_text(content, width);
+    let content_height = if peer_derived || has_error || content.is_empty() {
+        let wrapped = wrap_text(&content, content_width);
         wrapped.len()
     } else {
         // Use the markdown pipeline — same code path as render_message() — to
         // guarantee the height invariant required by virtual scrolling (AC6).
-        markdown::compute_height(content, width, &markdown::RenderOptions::completed())
+        markdown::compute_height(
+            &content,
+            content_width,
+            &markdown::RenderOptions::completed(),
+        )
     };
     // Cancelled messages append " [interrupted]" as a separate line.
     // compute_height() receives raw content without the suffix, so check if
     // the suffix would push the last rendered line over width. Since
     // render_message() appends it as its own Line, we always add 1.
     let interrupted_line = if is_cancelled { 1 } else { 0 };
-    1 + content_height + interrupted_line // role line + content + optional [interrupted]
+    // Story 18.3c — `render_message` inserts the `[auto-sent]` marker as its
+    // own Line directly below the role line for every AgentComposed row. The
+    // virtual-scroll invariant (AC6) breaks unless every height path counts it.
+    let marker_line = if agent_composed_marker { 1 } else { 0 };
+    1 + marker_line + content_height + interrupted_line
 }
 
 /// Render a single message into Line objects.
@@ -249,6 +277,19 @@ fn render_message<'a>(
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::new();
     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
+    let is_agent_composed =
+        msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed;
+    let is_peer_derived = msg.content_blocks.contains(&ContentBlockType::PeerText);
+    let content = if is_peer_derived {
+        crate::domain::services::peer_text::sanitize_peer_text_block(&msg.content)
+    } else {
+        std::borrow::Cow::Borrowed(msg.content.as_str())
+    };
+    let content_width = if is_peer_derived {
+        width.saturating_sub(crate::domain::services::peer_text::PEER_CONTENT_GUTTER_WIDTH)
+    } else {
+        width
+    };
 
     // Role indicator — may gain a fork marker, a bookmark marker, or both.
     // Fork marker (if any) comes first, then bookmark, then the role label.
@@ -305,10 +346,39 @@ fn render_message<'a>(
         Style::default().fg(role_color).add_modifier(Modifier::BOLD),
     ));
     lines.push(Line::from(role_spans));
+    if is_agent_composed {
+        // CANONICAL Auto-Sent Pattern (`ux-design-specification.md:2141-2151`):
+        // magenta-dotted marker, `[auto-sent]` always visible, the retract
+        // control always visible (consumed form once used). No new border,
+        // glyph, or label — the honest local-scope statement belongs to the
+        // retract confirmation, not this line.
+        let marker = match msg.retracted_at_ms {
+            Some(retracted_at_ms) => {
+                let timestamp =
+                    crate::domain::services::transparency::format_unix_millis(retracted_at_ms);
+                let time = timestamp.get(11..16).unwrap_or("—");
+                format!("┆ [auto-sent]  [retracted {time}]  [✗] Retract (used)")
+            }
+            None => "┆ [auto-sent]  [✗] Retract".to_owned(),
+        };
+        lines.push(Line::from(Span::styled(
+            marker,
+            Style::default().fg(theme.colors.auto_sent_border),
+        )));
+    }
 
-    // Content
-    if has_error {
-        let content_lines = wrap_text(&msg.content, width);
+    // Peer content is sanitized and rendered as plain text so hostile markdown
+    // cannot manufacture UI semantics; the reserved gutter is added later.
+    let content_start = lines.len();
+    if is_peer_derived {
+        for text in wrap_text(&content, content_width) {
+            lines.push(Line::from(Span::styled(
+                text,
+                Style::default().fg(theme.colors.fg_primary),
+            )));
+        }
+    } else if has_error {
+        let content_lines = wrap_text(&content, content_width);
         for text in content_lines {
             lines.push(Line::from(Span::styled(
                 text,
@@ -318,25 +388,26 @@ fn render_message<'a>(
     } else if msg.content_blocks.contains(&ContentBlockType::PlanSummary) {
         // PlanSummary: thin top border + markdown content
         lines.push(Line::from(Span::styled(
-            "┄".repeat(width),
+            "┄".repeat(content_width),
             Style::default().fg(theme.colors.fg_muted),
         )));
         let parsed_lines = markdown::render(
-            &msg.content,
-            width,
+            &content,
+            content_width,
             theme,
             &markdown::RenderOptions::completed(),
         );
         lines.extend(parsed_lines);
     } else {
         let parsed_lines = markdown::render(
-            &msg.content,
-            width,
+            &content,
+            content_width,
             theme,
             &markdown::RenderOptions::completed(),
         );
         lines.extend(parsed_lines);
     }
+    let content_end = lines.len();
 
     // Append [interrupted] suffix for cancelled messages (styled with fg_muted)
     if msg.stop_reason == Some(StopReason::Cancelled) {
@@ -365,7 +436,7 @@ fn render_message<'a>(
             let mut match_cursor: usize = 0;
             let base_style = theme.search_highlight;
             let focused_style = theme.search_highlight_focused;
-            for line in lines.iter_mut().skip(1) {
+            for line in lines.iter_mut().skip(content_start) {
                 *line = apply_search_highlights(
                     line.clone(),
                     q,
@@ -374,6 +445,25 @@ fn render_message<'a>(
                     focused_match_ordinal_in_message,
                     &mut match_cursor,
                 );
+            }
+        }
+    }
+    if is_peer_derived {
+        for line in &mut lines[content_start..content_end] {
+            line.spans.insert(
+                0,
+                Span::styled(
+                    crate::domain::services::peer_text::PEER_CONTENT_GUTTER,
+                    Style::default().fg(theme.colors.auto_sent_border),
+                ),
+            );
+        }
+    }
+
+    if msg.retracted_at_ms.is_some() {
+        for line in &mut lines {
+            for span in &mut line.spans {
+                span.style = span.style.add_modifier(Modifier::DIM);
             }
         }
     }
@@ -576,7 +666,7 @@ fn default_collapse_predicate(turn: &Turn) -> bool {
 /// Adapt a `TurnPart` into a legacy `ToolCallInfo` for reuse of
 /// `tool_block_height` and `render_tool_block_lines`.
 ///
-/// Field mapping follows `rebuild_messages_mirror`'s convention.
+/// Field mapping follows the conversation message-mirror convention.
 /// Uses `tool_call_id_for` (P1-1) so the id format cannot drift.
 fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -> ToolCallInfo {
     let (tool, args, status_chip, started_at_ms, ended_at_ms, tool_result, _pid) = match invocation
@@ -598,11 +688,13 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
                             ToolResultInfo {
                                 content: output.content.clone(),
                                 is_error: output.is_error,
+                                diff: output.diff.clone(),
                             }
                         } else {
                             ToolResultInfo {
                                 content: String::new(),
                                 is_error: false,
+                                diff: crate::domain::models::WriteDiffState::NotAWrite,
                             }
                         }
                     }),
@@ -613,11 +705,13 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
                             ToolResultInfo {
                                 content: output.content.clone(),
                                 is_error: output.is_error,
+                                diff: output.diff.clone(),
                             }
                         } else {
                             ToolResultInfo {
                                 content: String::new(),
                                 is_error: true,
+                                diff: crate::domain::models::WriteDiffState::NotAWrite,
                             }
                         }
                     });
@@ -680,6 +774,7 @@ pub(super) fn expanded_turn_height(
         return CachedTurnLayout {
             height: 0,
             block_offsets: vec![],
+            tool_block_offsets: vec![],
         };
     }
 
@@ -694,6 +789,7 @@ pub(super) fn expanded_turn_height(
 
     let mut height: usize = 0;
     let mut block_offsets: Vec<usize> = Vec::new();
+    let mut tool_block_offsets: Vec<(usize, String)> = Vec::new();
     let mut prev: Option<&TurnPart> = None;
     let mut running_count: usize = 0;
 
@@ -722,6 +818,9 @@ pub(super) fn expanded_turn_height(
             TurnPart::ToolInvocation { id, status, .. } => {
                 block_offsets.push(height);
                 let tc = adapter_shim(turn, part, result_map.get(id).copied());
+                // Story 19.9 A3: the id travels with the START offset so
+                // keyboard focus can name THIS block, not the first one.
+                tool_block_offsets.push((height, tc.id.clone()));
                 let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                 height += tool_block::tool_block_height(&tc, &tb_state);
                 if *status == InvocationStatus::Running {
@@ -741,6 +840,7 @@ pub(super) fn expanded_turn_height(
     CachedTurnLayout {
         height,
         block_offsets,
+        tool_block_offsets,
     }
 }
 
@@ -754,6 +854,7 @@ pub(super) fn collapsed_turn_height(
     CachedTurnLayout {
         height: 1,
         block_offsets: vec![],
+        tool_block_offsets: vec![],
     }
 }
 
@@ -1304,6 +1405,7 @@ pub fn render(
         None,
         None, // liveness
         None, // open_prose
+        None, // current_focus (test-only wrapper; keystones use render_with_search)
     )
 }
 
@@ -1344,6 +1446,7 @@ pub fn render_attached(
         None,
         None, // liveness
         None, // open_prose
+        None, // current_focus
         true,
     )
 }
@@ -1389,6 +1492,9 @@ pub fn render_with_search(
     pending_plan_card: Option<&PendingPlanCard>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     open_prose: Option<&str>,
+    // Story 19.9 A3: `state.focused_tool_id` from the caller. See
+    // `find_focused_tool_id` for the rule this feeds.
+    current_focus: Option<&str>,
 ) -> RenderResult {
     render_with_search_impl(
         frame,
@@ -1411,6 +1517,7 @@ pub fn render_with_search(
         pending_plan_card,
         liveness,
         open_prose,
+        current_focus,
         false,
     )
 }
@@ -1437,6 +1544,10 @@ fn render_with_search_impl(
     pending_plan_card: Option<&PendingPlanCard>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     open_prose: Option<&str>,
+    // Story 19.9 A3: the focus the caller currently holds
+    // (`state.focused_tool_id`). Kept when no tool block starts in the top 3
+    // rows but that block is still visible — the `Tab` cycle depends on it.
+    current_focus: Option<&str>,
     show_terminal_origin_prefix: bool,
 ) -> RenderResult {
     let empty = RenderResult {
@@ -1445,6 +1556,7 @@ fn render_with_search_impl(
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
 
     // Empty state: no messages, no open turn, no streaming, no feedback blocks
@@ -1492,6 +1604,10 @@ fn render_with_search_impl(
     // Walk conversation.messages for layout; dispatch on role for height calc.
     let mut message_heights: Vec<usize> = Vec::with_capacity(msg_count + 1);
     let mut block_boundaries: Vec<usize> = Vec::new();
+    // Story 19.9 A3: (start_line, tool_call_id) for every tool block in the
+    // laid-out conversation. Parallel to `block_boundaries`, but id-carrying
+    // and start-anchored, which is what makes per-block keyboard focus possible.
+    let mut tool_block_boundaries: Vec<(usize, String)> = Vec::new();
     let mut message_boundaries: Vec<usize> = Vec::new();
     let mut user_message_boundaries: Vec<usize> = Vec::new();
     let mut cumulative_offset: usize = 0;
@@ -1534,15 +1650,18 @@ fn render_with_search_impl(
                                 };
                                 if probe.height != l.height
                                     || probe.block_offsets != l.block_offsets
+                                    || probe.tool_block_offsets != l.tool_block_offsets
                                 {
                                     tracing::warn!(
-                                        "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}), computed=({}, {:?})",
+                                        "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}, {:?}), computed=({}, {:?}, {:?})",
                                         turn.id.0,
                                         !collapsed,
                                         l.height,
                                         l.block_offsets,
+                                        l.tool_block_offsets,
                                         probe.height,
-                                        probe.block_offsets
+                                        probe.block_offsets,
+                                        probe.tool_block_offsets
                                     );
                                     tab_render_state.height_cache.invalidate_all();
                                 }
@@ -1565,8 +1684,17 @@ fn render_with_search_impl(
                         }
                     };
                     h = layout.height;
+                    if msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed {
+                        // Not reachable today (agent-composed rows carry no
+                        // Turn), but the marker line would break the
+                        // virtual-scroll invariant here too if that changed.
+                        h += 1;
+                    }
                     for offset in &layout.block_offsets {
                         block_boundaries.push(cumulative_offset + offset);
+                    }
+                    for (offset, id) in &layout.tool_block_offsets {
+                        tool_block_boundaries.push((cumulative_offset + offset, id.clone()));
                     }
                 } else {
                     // TODO(S16.10-cleanup): No matching turn — fall back to legacy height calc
@@ -1578,10 +1706,16 @@ fn render_with_search_impl(
                         has_error,
                         is_cancelled,
                         is_bookmarked,
+                        msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed,
+                        msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
                     );
                     for tc in &msg.tool_calls {
                         let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+                        // A3: the block's START, before its height is added —
+                        // `block_boundaries` keeps pushing the end (unchanged,
+                        // it anchors scrolling), the focus list needs the start.
+                        tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
                         h += tool_block::tool_block_height(tc, &tb_state);
                         block_boundaries.push(cumulative_offset + h);
                     }
@@ -1616,6 +1750,9 @@ fn render_with_search_impl(
                             has_error,
                             is_cancelled,
                             is_bookmarked,
+                            msg.authorship
+                                == crate::domain::models::MessageAuthorship::AgentComposed,
+                            msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
                         );
                         tab_render_state.height_cache.set_message(key, computed);
@@ -1624,6 +1761,7 @@ fn render_with_search_impl(
                 };
                 for tc in &msg.tool_calls {
                     let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+                    tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
                     h += tool_block::tool_block_height(tc, &tb_state);
                     block_boundaries.push(cumulative_offset + h);
                 }
@@ -1686,7 +1824,13 @@ fn render_with_search_impl(
             if cumulative_offset > 0 {
                 cumulative_offset += spacing;
             }
-            let h = expanded_turn_height(ot, theme, width, tool_block_states).height;
+            let layout = expanded_turn_height(ot, theme, width, tool_block_states);
+            // A3: a still-open turn's tool blocks are focusable too — the claim
+            // is that EVERY tool block can be expanded, not every committed one.
+            for (offset, id) in &layout.tool_block_offsets {
+                tool_block_boundaries.push((cumulative_offset + offset, id.clone()));
+            }
+            let h = layout.height;
             cumulative_offset += h;
             h
         }
@@ -1830,6 +1974,9 @@ fn render_with_search_impl(
                             msg.content_blocks.contains(&ContentBlockType::Error),
                             msg.stop_reason == Some(StopReason::Cancelled),
                             is_bookmarked,
+                            msg.authorship
+                                == crate::domain::models::MessageAuthorship::AgentComposed,
+                            msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
                         );
                         for (j, line) in msg_lines.into_iter().enumerate() {
@@ -1871,6 +2018,8 @@ fn render_with_search_impl(
                         msg.content_blocks.contains(&ContentBlockType::Error),
                         msg.stop_reason == Some(StopReason::Cancelled),
                         is_bookmarked,
+                        msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed,
+                        msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
                     );
                     for (j, line) in msg_lines.into_iter().enumerate() {
@@ -2097,6 +2246,7 @@ fn render_with_search_impl(
     }
 
     // Feedback blocks at bottom
+    let mut visible_feedback_ids: Vec<String> = Vec::new();
     if !feedback_blocks.is_empty() {
         if line_offset > 0 {
             let spacing_end = line_offset + spacing;
@@ -2118,6 +2268,9 @@ fn render_with_search_impl(
             let fb_height = fb_lines.len();
             let fb_end = line_offset + fb_height;
             if fb_end > visible_start && line_offset < visible_end {
+                if fb_height > 0 {
+                    visible_feedback_ids.push(fb.id.clone());
+                }
                 for (j, line) in fb_lines.into_iter().enumerate() {
                     let abs_line = line_offset + j;
                     if abs_line >= visible_start && abs_line < visible_end {
@@ -2159,12 +2312,18 @@ fn render_with_search_impl(
     let widget = Paragraph::new(Text::from(lines));
     frame.render_widget(widget, area);
 
+    // A3: `tool_call_id_for` is `tc_{turn_id}_{part_id}`, so the focused turn's
+    // blocks are exactly the ids carrying this prefix — no parallel bookkeeping.
+    let focused_turn_prefix = view_state
+        .focused_turn
+        .as_ref()
+        .map(|t| format!("tc_{}_", t.0));
     let focused_tool_id = find_focused_tool_id(
-        conversation,
-        streaming,
-        &block_boundaries,
+        &tool_block_boundaries,
         visible_start,
         visible_end,
+        current_focus,
+        focused_turn_prefix.as_deref(),
     );
 
     RenderResult {
@@ -2173,47 +2332,111 @@ fn render_with_search_impl(
         message_boundaries,
         user_message_boundaries,
         focused_tool_id,
+        visible_feedback_ids,
     }
 }
 
-/// Find the tool block id at the top of the viewport for keyboard focus.
-/// Returns the id of the first tool block whose content falls within the top
-/// 3 lines of the visible viewport.
+/// Resolve which tool block holds keyboard focus for this frame.
+///
+/// Story 19.9 A3 (FR29 — collapsible tool blocks, *plural*). The pre-19.9
+/// heuristic returned `all_tool_ids.first()` whenever ANY block boundary —
+/// prose, message or tool — landed in the viewport's top 3 rows, and
+/// `event_loop.rs` writes this result back into `state.focused_tool_id` every
+/// frame. Two consequences, both measured under a PTY at Task 0 (story Debug
+/// Log, T0.3(1)): a conversation whose first tool call was a `Read` made every
+/// later `Write`/`Bash` block permanently unreachable by keyboard, and the
+/// `Tab` cycle (`CycleInvocationInFocusedTurn`, `event_loop.rs`) was undone
+/// before the next `Enter` could act on it.
+///
+/// The rule, in order:
+/// 1. If `current_focus` names a visible tool block AND that block belongs to
+///    the currently focused turn (or no turn is focused), KEEP it. An explicit
+///    selection — `Tab` inside the focused turn — is the user's, and a
+///    recompute may not take it away while the block is on screen.
+/// 2. Otherwise, if a turn IS focused (`]]` / `[[` / `zz`) and that turn has a
+///    VISIBLE tool block, focus its nearest such block. Navigation does NOT
+///    scope focus to the turn: when the focused turn has no visible block —
+///    typically because it is scrolled out of view — this rule matches
+///    nothing, and rule 3 seats the nearest visible block of a DIFFERENT
+///    turn, so `Enter` acts outside the navigated turn. Rule 2 is still what
+///    makes a single-invocation turn's block reachable at all: it may sit in
+///    the conversation's last viewport-height of lines, where no amount of
+///    scrolling can bring it to the top.
+/// 3. Otherwise focus the visible tool block NEAREST to `visible_start` —
+///    plain scroll steering (`g`/`G`/`j`/`k`/`J`/`K`). This is a UNIVERSAL
+///    fallback over all turns, not scoped to the navigated turn: with a turn
+///    focused but none of its blocks visible, some other turn's block wins
+///    (owner ruling 2026-08-29: the fallback is the intended ergonomics; the
+///    defect was this doc overselling rule 2).
+/// 4. Otherwise `None` — which only holds when NO tool block at all is on
+///    screen; only then is `Enter` a no-op.
+///
+/// Visibility is decided on a block's START row only (`visible` below), so a
+/// block expanded taller than the viewport releases focus once its `┌─`
+/// header scrolls above the top and cannot be collapsed by `Enter` until its
+/// start scrolls back into view. Deliberate —
+/// `tests/chat_pane.rs::focus_is_released_when_its_block_scrolls_out_of_view`
+/// pins it; carrying `(start, end, id)` spans so focus could ride the whole
+/// block was considered and rejected as out of scope (story 19.9 review
+/// ruling).
+///
+/// `focused_turn_prefix` is `"tc_<turn_id>_"`. Ids are minted by
+/// `tool_call_id_for` as `tc_{turn_id}_{part_id}`, so turn membership is a
+/// prefix test and needs no second list to drift out of sync.
+///
+/// ⚑ A3(2) as authored had two rules — a three-row window first, the keep-branch
+/// second — and both were corrected at T0.3(1) against the real product, under a
+/// PTY, with the panes in the story's Debug Log:
+///
+/// * A conversation shorter than the viewport cannot scroll at all, so no block
+///   start can ever enter the top three rows. The authored rule would have made
+///   `Enter` dead for exactly the short conversations where the old (wrong)
+///   heuristic at least did something — a regression, not a fix.
+/// * Window-priority silently re-broke the `Tab` cycle whenever any block
+///   happened to sit at the viewport top, which is the coupling A3 exists to
+///   remove.
+/// * Nearest-visible alone still could not reach a single-invocation turn near
+///   the tail (measured: `J`-walking to the end left the earlier `Bash` block
+///   top-most and the `Write` unreachable) — hence rule 2.
+///
+/// The result subsumes the window, keeps all three A3(3) keystones true, and
+/// keeps every A3(3) mutant RED.
 fn find_focused_tool_id(
-    conversation: &Conversation,
-    streaming: &StreamingState,
-    block_boundaries: &[usize],
+    tool_block_boundaries: &[(usize, String)],
     visible_start: usize,
-    _visible_end: usize,
+    visible_end: usize,
+    current_focus: Option<&str>,
+    focused_turn_prefix: Option<&str>,
 ) -> Option<String> {
-    // Collect all tool call ids from conversation and streaming
-    let all_tool_ids: Vec<String> = conversation
-        .messages
-        .iter()
-        .flat_map(|m| m.tool_calls.iter())
-        .chain(streaming.active_tool_calls.values())
-        .map(|tc| tc.id.clone())
-        .collect();
+    let visible = |start: usize| start >= visible_start && start < visible_end;
+    let in_focused_turn =
+        |id: &str| focused_turn_prefix.is_none_or(|prefix| id.starts_with(prefix));
 
-    if all_tool_ids.is_empty() {
-        return None;
-    }
-
-    // Find the block boundary closest to visible_start (within 3 lines).
-    // Block boundaries include tool block starts — match by index into the
-    // tool_ids list (tool blocks are appended to boundaries in order).
-    // For MVP: return the first tool id if any boundary is near viewport top.
-    for &boundary in block_boundaries {
-        if boundary >= visible_start && boundary < visible_start + 3 {
-            // A block boundary is at the viewport top.
-            // Find the tool id that corresponds to this boundary.
-            // Since tool block boundaries are interleaved with message boundaries,
-            // we return the first tool call as the focused one.
-            return all_tool_ids.into_iter().next();
+    if let Some(current) = current_focus {
+        if in_focused_turn(current)
+            && tool_block_boundaries
+                .iter()
+                .any(|(start, id)| id == current && visible(*start))
+        {
+            return Some(current.to_string());
         }
     }
 
-    None
+    if let Some(prefix) = focused_turn_prefix {
+        if let Some((_, id)) = tool_block_boundaries
+            .iter()
+            .filter(|(start, id)| visible(*start) && id.starts_with(prefix))
+            .min_by_key(|(start, _)| *start)
+        {
+            return Some(id.clone());
+        }
+    }
+
+    tool_block_boundaries
+        .iter()
+        .filter(|(start, _)| visible(*start))
+        .min_by_key(|(start, _)| *start)
+        .map(|(_, id)| id.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -2265,6 +2488,65 @@ mod parts_aware_tests {
         }
         turn.stop_reason = stop_reason;
         turn
+    }
+
+    // ── Story 19.9 A3: the cached layout carries one (start, id) per tool ──
+
+    /// `tool_block_offsets` must hold exactly one entry per `ToolInvocation`,
+    /// in part order, with the canonical mirror id — otherwise
+    /// `find_focused_tool_id` cannot name a block other than the first.
+    ///
+    /// Mutant (executed RED at Task 1): delete the
+    /// `tool_block_offsets.push(...)` in the `ToolInvocation` arm.
+    #[test]
+    fn expanded_turn_layout_carries_one_tool_block_offset_per_invocation() {
+        let mut turn = Turn::new("claude".into(), 1_700_000_000_000);
+        turn.id = crate::domain::models::TurnId("t-off".into());
+        let read_pid = turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "Read".to_string(),
+            args: serde_json::json!({}),
+            status: InvocationStatus::Success,
+            started_at: 1_700_000_000_000,
+            ended_at: Some(1_700_000_001_000),
+        });
+        turn.push_part(|id| TurnPart::Prose {
+            id,
+            text: "between".to_string(),
+        });
+        let write_pid = turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "Write".to_string(),
+            args: serde_json::json!({}),
+            status: InvocationStatus::Success,
+            started_at: 1_700_000_002_000,
+            ended_at: Some(1_700_000_003_000),
+        });
+        turn.stop_reason = Some(StopReason::EndTurn);
+
+        let layout = expanded_turn_height(&turn, &Theme::dark(), 80, &HashMap::new());
+        let ids: Vec<&str> = layout
+            .tool_block_offsets
+            .iter()
+            .map(|(_, id)| id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                tool_call_id_for(&turn.id, read_pid).as_str(),
+                tool_call_id_for(&turn.id, write_pid).as_str(),
+            ],
+            "one entry per ToolInvocation, in part order, with the mirror id"
+        );
+        // Starts are the offsets `block_offsets` records for the same parts:
+        // the tool arm pushes both from the same `height` value.
+        assert_eq!(layout.tool_block_offsets[0].0, layout.block_offsets[0]);
+        assert_eq!(layout.tool_block_offsets[1].0, layout.block_offsets[2]);
+        assert!(
+            layout.tool_block_offsets[0].0 < layout.tool_block_offsets[1].0,
+            "offsets must be the blocks' STARTS, in increasing order: {:?}",
+            layout.tool_block_offsets
+        );
     }
 
     // ── AC2 / AC3: gutter_lines and inter_part_blank_lines ──
@@ -2766,6 +3048,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 5,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         assert!(tab_render_state.height_cache.get(&key).is_some());
@@ -2792,6 +3075,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 1,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         assert!(tab_render_state.height_cache.get(&key).is_some());
@@ -2851,6 +3135,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 10,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -2858,6 +3143,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 20,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         assert_eq!(cache.get(&key_v0).unwrap().height, 10);
@@ -2887,6 +3173,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 5,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -2894,6 +3181,7 @@ mod parts_aware_tests {
             CachedTurnLayout {
                 height: 8,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         assert_eq!(cache.get(&key_w80).unwrap().height, 5);
@@ -3133,6 +3421,8 @@ mod parts_aware_tests {
                 synthetic: false,
                 images: vec![],
                 origin: crate::domain::models::ChannelKind::Terminal,
+                authorship: Default::default(),
+                retracted_at_ms: None,
             }],
             turns: vec![turn.clone()],
             created_at: 0,
@@ -3175,6 +3465,7 @@ mod parts_aware_tests {
                     None,
                     None, // liveness
                     None, // open_prose
+                    None, // current_focus
                 );
             })
             .unwrap();
@@ -3210,6 +3501,7 @@ mod parts_aware_tests {
                     None,
                     None, // liveness
                     None, // open_prose
+                    None, // current_focus
                 );
             })
             .unwrap();
@@ -3247,6 +3539,7 @@ mod parts_aware_tests {
                     None,
                     None, // liveness
                     None, // open_prose
+                    None, // current_focus
                 );
             })
             .unwrap();
@@ -3455,5 +3748,164 @@ mod parts_aware_tests {
         );
 
         assert_eq!(layout.focused_turn_top, Some(layout.turn_top_offsets[1].1));
+    }
+    #[test]
+    fn agent_composed_height_invariant_matches_rendered_lines() {
+        let message = crate::domain::models::ChatMessage {
+            role: MessageRole::Assistant,
+            content: "generated response".to_owned(),
+            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            ..Default::default()
+        };
+        let theme = Theme::dark();
+        let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
+        let computed =
+            compute_message_height(&message.content, false, false, false, true, false, 80);
+        assert_eq!(
+            rendered.len(),
+            computed,
+            "the virtual-scroll invariant: every rendered line is counted"
+        );
+        let plain = render_message(
+            &crate::domain::models::ChatMessage {
+                role: MessageRole::Assistant,
+                content: "generated response".to_owned(),
+                ..Default::default()
+            },
+            80,
+            &theme,
+            false,
+            false,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            plain.len() + 1,
+            rendered.len(),
+            "the marker is exactly one line"
+        );
+    }
+
+    #[test]
+    fn provenance_content_changes_height_cache_hash_and_preserves_layout_invariant() {
+        let plain = crate::domain::models::ChatMessage {
+            role: MessageRole::User,
+            content: "peer message".to_owned(),
+            ..Default::default()
+        };
+        let surfaced = crate::domain::models::ChatMessage {
+            content: "peer message\nresponse: notify-and-wait · via default\nnotification: queue · via default"
+                .to_owned(),
+            ..plain.clone()
+        };
+        assert_ne!(
+            hash_message_content(&plain),
+            hash_message_content(&surfaced)
+        );
+
+        let theme = Theme::dark();
+        let rendered = render_message(&surfaced, 80, &theme, false, false, None, None, false);
+        let computed =
+            compute_message_height(&surfaced.content, false, false, false, false, false, 80);
+        assert_eq!(rendered.len(), computed);
+        assert!(
+            computed
+                > compute_message_height(&plain.content, false, false, false, false, false, 80)
+        );
+    }
+
+    #[test]
+    fn peer_block_preserves_authored_lines_and_host_frames_each_one() {
+        let message = crate::domain::models::ChatMessage {
+            role: MessageRole::User,
+            content: "first\n┆ [auto-sent]  [✗] Retract\n\x1b[31mthird\x1b[0m".to_owned(),
+            content_blocks: vec![ContentBlockType::PeerText],
+            ..Default::default()
+        };
+        let theme = Theme::dark();
+        let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
+        let content = rendered
+            .iter()
+            .skip(1)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(content.len(), 3, "{content:?}");
+        assert!(
+            content.iter().all(|line| line.starts_with("┆  ")),
+            "{content:?}"
+        );
+        assert_eq!(
+            content
+                .iter()
+                .filter(|line| line.starts_with("┆  "))
+                .count(),
+            3,
+            "only host-composed lines may carry the gutter: {content:?}"
+        );
+        assert!(content[1].contains("[auto-sent]"), "{content:?}");
+        assert!(!content[1].contains("┆  ┆"), "{content:?}");
+        assert!(
+            !content.iter().any(|line| line.contains('\x1b')),
+            "{content:?}"
+        );
+        let computed =
+            compute_message_height(&message.content, false, false, false, false, true, 80);
+        assert_eq!(
+            rendered.len(),
+            computed,
+            "peer gutter width must preserve the virtual-scroll invariant"
+        );
+        let highlighted = render_message(
+            &message,
+            80,
+            &theme,
+            false,
+            false,
+            Some("third"),
+            Some(0),
+            false,
+        );
+        assert!(
+            highlighted
+                .iter()
+                .skip(1)
+                .all(|line| line.to_string().starts_with("┆  ")),
+            "search rebuilding must not remove host framing: {highlighted:?}"
+        );
+    }
+
+    #[test]
+    fn auto_sent_and_retracted_rows_keep_authorship_and_content_visible() {
+        let mut message = crate::domain::models::ChatMessage {
+            role: MessageRole::Assistant,
+            content: "generated response".to_owned(),
+            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            ..Default::default()
+        };
+        let theme = Theme::dark();
+        let rendered = render_message(&message, 80, &theme, false, false, None, None, false)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("[auto-sent]"));
+        assert!(rendered.contains("[✗] Retract"));
+        assert!(rendered.contains("generated response"));
+
+        message.retracted_at_ms = Some(1_700_000_123_000);
+        let retracted = render_message(&message, 80, &theme, false, false, None, None, false)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(retracted.contains("[retracted"));
+        assert!(retracted.contains("[✗] Retract (used)"));
+        assert!(retracted.contains("generated response"));
+        assert!(
+            !retracted.contains("remote copies"),
+            "the marker carries no invented label — the local-scope statement\n\
+             belongs to the retract confirmation (AC5)"
+        );
     }
 }

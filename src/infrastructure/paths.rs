@@ -50,6 +50,40 @@ pub fn workspace_dir() -> Result<PathBuf> {
     std::env::current_dir().context("Could not determine current working directory")
 }
 
+/// Path to the workspace A2A-over-HTTP peer configuration.
+pub fn workspace_a2a_config_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("a2a.json")
+}
+
+/// Path to the independent workspace QUIC peer transport configuration.
+pub fn workspace_p2p_config_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("p2p.json")
+}
+
+/// Path to the workspace peer **reach** store (Story 18.4d, D1).
+///
+/// A sibling of `p2p.json`, deliberately not a field inside it: that file's
+/// loader uses `deny_unknown_fields`, so a reachability key there could make the
+/// whole *admission* list `Malformed` on an older binary — and a malformed
+/// allowlist means this host admits no peer. Two files is the structural form of
+/// `reach ≠ trust`.
+pub fn workspace_p2p_reach_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("p2p-reach.json")
+}
+
+/// Path to the workspace relay-mode configuration (Story 18.4c, FR159).
+///
+/// A **third** sibling, for the same structural reason the reach store is a
+/// second one: `p2p.json`'s root uses `deny_unknown_fields`, so a `relay` key
+/// added there would make an older binary read the whole *admission* list as
+/// `Malformed` — and a malformed allowlist means this host admits no peer. A
+/// reachability addition would therefore become a silent security-posture
+/// change on downgrade. Relay mode is reachability, so it lives beside the
+/// allowlist and never inside it.
+pub fn workspace_relay_config_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("relay.json")
+}
+
 /// Resolve the `{workspace}/.claude/sessions/` directory for session persistence.
 pub fn sessions_dir(workspace: &std::path::Path) -> PathBuf {
     workspace.join(".claude").join("sessions")
@@ -242,6 +276,33 @@ pub fn daemon_consolidation_queue_path(workspace: &std::path::Path) -> Result<Pa
 /// record for a live file-edit purge, surfaced at the next attach (Story 12.2).
 pub fn daemon_purge_notice_path(workspace: &std::path::Path) -> Result<PathBuf> {
     Ok(rustain_workspace_dir(workspace)?.join("memory-md-purge-notice.json"))
+}
+
+/// Path to the regenerable A2A transparency export (Story 18.2, AC3).
+/// `{workspace}/.rustain/transparency.jsonl`.
+///
+/// **Not a log.** This file is rendered whole from the room journal on demand
+/// and holds no fact that does not live there; nothing in the product ever
+/// reads it back. A continuous writer here would be a second source of truth,
+/// and the one that drifts is the one nobody is looking at (ADR-17-CC-05).
+pub fn transparency_export_path(workspace: &std::path::Path) -> Result<PathBuf> {
+    Ok(rustain_workspace_dir(workspace)?.join("transparency.jsonl"))
+}
+
+/// Story 19.16g — the local UI preference holding the transparency log's
+/// durable seen-through boundary: `{workspace}/.rustain/transparency-seen.json`.
+///
+/// A pure join: observation never creates it, and nothing reads
+/// `transparency.jsonl` back to derive it. A local-operator reminder
+/// boundary, not a room event, acknowledgement, receipt, or proof.
+pub fn transparency_seen_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("transparency-seen.json")
+}
+
+/// The dedicated, never-renamed, never-truncated lock serializing
+/// read/merge/write of [`transparency_seen_path`] across local clients.
+pub fn transparency_seen_lock_path(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".rustain").join("transparency-seen.lock")
 }
 
 /// Path to a crash log file with timestamp.

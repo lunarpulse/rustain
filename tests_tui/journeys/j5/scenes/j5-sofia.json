@@ -1,0 +1,49 @@
+{
+  "scene": "j5-sofia",
+  "personas": {
+    "scene-sofia-tui": {
+      "turns": [
+        {
+          "expect": "Check database arithmetic",
+          "content": [{"type": "tool_use", "id": "call-db", "name": "mcp__db-tools__add", "input": {"a": 17, "b": 25}}],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 121, "output_tokens": 10}
+        },
+        {
+          "expect": "42",
+          "content": [{"type": "text", "text": "The database arithmetic check is complete."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 122, "output_tokens": 11}
+        },
+        {
+          "expect": "Review deployment compatibility",
+          "content": [{"type": "text", "text": "The deployment review is complete."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 123, "output_tokens": 12}
+        },
+        {
+          "expect": "Ask the peer to review the migration schema",
+          "content": [{"type": "tool_use", "id": "call-a2a", "name": "a2a__b__review-schema", "input": {"message": "Review the migration schema"}}],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 124, "output_tokens": 13}
+        },
+        {
+          "expect": "Received. Reviewing.",
+          "content": [{"type": "text", "text": "The peer schema review completed."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 125, "output_tokens": 14}
+        }
+      ]
+    },
+    "scene-sofia": {
+      "turns": [
+        {
+          "expect": "Review the database migration PR",
+          "content": [{"type": "text", "text": "The migration should be reviewed before deployment."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 120, "output_tokens": 9}
+        }
+      ]
+    }
+  }
+}

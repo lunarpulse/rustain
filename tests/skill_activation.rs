@@ -1,13 +1,13 @@
-use std::io::Write;
-use std::path::PathBuf;
-
 use rustain::adapters::noop::NoOpToolSet;
 use rustain::adapters::skill_activation::SkillActivator;
+use rustain::adapters::skill_registry::SkillRegistry;
 use rustain::domain::models::{
     ActiveSkill, MAX_SKILL_ACTIVATION_DEPTH, SkillActivationError, SkillDef, SkillSource,
 };
 use rustain::domain::services::permission_chain::PermissionDecision;
 use rustain::domain::services::{permission_chain, skill_context};
+use std::io::Write;
+use std::path::PathBuf;
 
 fn write_skill(dir: &std::path::Path, name: &str, body: &str) -> SkillDef {
     let skill_dir = dir.join(name);
@@ -95,6 +95,70 @@ async fn test_allowed_tools_enforced_denies_bash() {
     assert!(
         matches!(decision, PermissionDecision::Deny(_)),
         "Bash should be denied by allowed_tools"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_scalar_allowed_tools_enforced_denies_bash() {
+    // Story 19.2 AC2(b): the Agent Skills scalar form `allowed-tools: Read Grep`,
+    // parsed from the SKILL.md on disk (not hand-set on the struct), restricts
+    // execution time exactly like the bracket form (A10: this file's own
+    // test_allowed_tools_enforced_denies_bash shape).
+    let tmp = tempfile::TempDir::new().unwrap();
+    let skill_dir = tmp.path().join(".agents").join("skills").join("readonly");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: readonly\ndescription: Test skill\nallowed-tools: Read Grep\n---\n# Read-only\n",
+    )
+    .unwrap();
+    let registry = SkillRegistry::discover(tmp.path(), None, &[]);
+    let def = registry
+        .find("readonly")
+        .expect("scalar-frontmatter skill discovered")
+        .clone();
+    assert_eq!(
+        def.allowed_tools,
+        Some(vec!["Read".to_string(), "Grep".to_string()]),
+        "the scalar line must reach the SkillDef as two items"
+    );
+
+    let activator = SkillActivator::new();
+    activator.on_new_conversation("conv-1").await;
+    activator
+        .activate(&def, String::new(), "conv-1", 0)
+        .await
+        .unwrap();
+
+    let snap = activator.snapshot_for_turn("conv-1").await.unwrap();
+    let skills: Option<&[ActiveSkill]> = Some(snap.active_skills());
+    let security = rustain::adapters::noop::NoOpSecurity;
+    let denied = permission_chain::check(
+        &security,
+        "Bash",
+        &serde_json::json!({"command": "ls"}),
+        skills,
+        None,
+        &NoOpToolSet,
+    )
+    .await;
+    assert!(
+        matches!(denied, PermissionDecision::Deny(_)),
+        "scalar allowed-tools must deny Bash at execution time"
+    );
+
+    let honoured = permission_chain::check(
+        &security,
+        "Read",
+        &serde_json::json!({"file_path": "/tmp/deploy.yaml"}),
+        skills,
+        None,
+        &NoOpToolSet,
+    )
+    .await;
+    assert!(
+        !matches!(honoured, PermissionDecision::Deny(_)),
+        "Read must remain executable under the scalar allowlist"
     );
 }
 
@@ -443,7 +507,7 @@ async fn test_deactivate_all_clears_state() {
     assert_eq!(deactivated.len(), 2);
     assert_eq!(activator.active_count("conv-1").await, 0);
     let snap = activator.snapshot_for_turn("conv-1").await.unwrap();
-    assert!(snap.effective_allowed_tools().is_none());
+    assert!(snap.effective_allowed_tools(&[]).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

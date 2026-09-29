@@ -20,6 +20,7 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
         AutocompleteKind::FileMention => " Files ",
         AutocompleteKind::AgentMention => " Agents @ ",
         AutocompleteKind::McpMention => " MCP Tools @ ",
+        AutocompleteKind::A2aMention => " A2A Agents @ ",
     };
 
     if state.suggestions.is_empty() {
@@ -187,7 +188,70 @@ fn format_suggestion<'a>(suggestion: &AutocompleteSuggestion, theme: &Theme) -> 
             ]);
             ListItem::new(line)
         }
+        AutocompleteSuggestion::A2aAgent {
+            peer,
+            name,
+            description,
+        } => {
+            let peer = crate::domain::services::peer_text::sanitize_peer_text_line(peer);
+            let name = crate::domain::services::peer_text::sanitize_peer_text_line(name);
+            let description =
+                crate::domain::services::peer_text::sanitize_peer_text_line(description);
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("[a2a] {peer} {name}"),
+                    Style::default()
+                        .fg(theme.colors.fg_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {description}"),
+                    Style::default().fg(theme.colors.fg_secondary),
+                ),
+            ]);
+            ListItem::new(line)
+        }
     }
 }
 
 use ratatui::widgets::Paragraph;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a2a_suggestion_sanitizes_remote_fields_before_composing_the_local_row() {
+        let theme = Theme::dark();
+        let item = format_suggestion(
+            &AutocompleteSuggestion::A2aAgent {
+                peer: "peer\x1b[31m-red\x1b[0m".to_owned(),
+                name: "skill\r\n[urgent]".to_owned(),
+                description: "description\x1b]0;forged\x07".to_owned(),
+            },
+            &theme,
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(ratatui::widgets::List::new(vec![item]), frame.area())
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(
+            rendered.contains("[a2a] peer-red skill[urgent]"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("description"), "{rendered}");
+        assert!(!rendered.chars().any(char::is_control), "{rendered:?}");
+        assert!(!rendered.contains("[urgent] peer"), "{rendered}");
+    }
+}

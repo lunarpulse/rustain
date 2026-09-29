@@ -23,10 +23,12 @@ mod completion;
 mod config;
 mod content;
 pub mod context_bundle;
+pub mod context_ref;
 pub mod conversation;
 pub mod credential;
 pub mod cron_config;
 pub mod daemon_crash;
+pub mod diff;
 pub mod doc_key;
 pub mod execution_sandbox;
 pub mod filtered_catalog;
@@ -45,8 +47,12 @@ pub mod node_state;
 mod notice;
 pub mod orchestration;
 pub mod orchestration_room;
+pub mod p2p_peer_spec;
 pub mod palette;
+pub mod peer_frame;
 pub mod peer_identity;
+pub mod peer_reach;
+pub mod peer_ticket;
 mod permission;
 pub mod plan;
 pub mod pricing;
@@ -54,12 +60,16 @@ pub mod profile;
 pub mod project_context;
 pub mod provider;
 pub mod provider_capabilities;
+pub mod recipient_item;
 pub mod redacted_url;
 pub mod redaction;
+pub mod relay;
+pub mod room_role;
 pub mod router;
 pub mod sandbox;
 pub mod search_hit;
 pub mod secret;
+pub mod semantic_message_type;
 pub mod session;
 pub mod session_boundary;
 pub mod session_meta;
@@ -75,6 +85,8 @@ pub mod subagent_view;
 pub mod tab;
 pub mod taint;
 pub mod task_handle;
+pub mod team_policy;
+pub mod ticket_addressee;
 pub mod tool_call;
 pub mod tool_descriptor;
 pub mod tool_policy;
@@ -94,16 +106,18 @@ pub mod waiting_hazard;
 #[allow(unused_imports)]
 pub use a2a_peer_spec::{
     A2aPeerSource, A2aPeerSpec, A2aPeerSpecError, PinnedKey, PinnedKeyAlgorithm, TrustTier,
+    alias_pseudonym,
 };
 pub use agent::{
-    ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
-    validate_agent_frontmatter,
+    ActiveAgent, AgentDef, AgentToolRestriction, AgentValidationError, MAX_AGENT_FILE_SIZE,
+    MAX_AGENT_SCAN_FILES, ToolRestrictionOrigin, allowlist_carve_outs, is_allowlist_carve_out,
+    is_any_allowlist_carve_out, validate_agent_frontmatter,
 };
 #[allow(unused_imports)]
 pub use agent_message::{
     AgentDelivery, AgentMessage, CorrelationId, DeliveryDisposition, DeliveryMode, DeliveryOutcome,
-    Envelope, MessageHeader, MessageKind, RefuseReason, delivery_decision,
-    relationship_disposition,
+    Envelope, MessageHeader, MessageKind, RefuseReason, delivery_decision, may_consent_refuse,
+    refusal_receipt, relationship_disposition,
 };
 #[allow(unused_imports)]
 pub use agent_node::{
@@ -138,7 +152,7 @@ pub use config::{
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
 pub use conversation::{
-    ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference,
+    ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference, MessageAuthorship,
     generate_conversation_id, generate_message_id,
 };
 #[allow(unused_imports)]
@@ -148,6 +162,10 @@ pub use credential::{
 pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
+pub use diff::{
+    DIFF_MAX_LINES, DiffKind, DiffLine, NotCapturedReason, WriteDiffState, compute_diff,
+    display_diff,
+};
 #[allow(unused_imports)]
 pub use execution_sandbox::{
     CapabilityGrant, ComponentRef, HostImport, PreopenGrant, ResourceCaps, SandboxInvocation,
@@ -170,7 +188,8 @@ pub use node_journal::{
 #[allow(unused_imports)]
 pub use node_state::{NodeState, NodeStateError};
 pub use notice::{
-    FeedbackAction, FeedbackBlock, FeedbackLevel, NoticeLevel, RetryState, StatusState, next_delay,
+    FeedbackAction, FeedbackBlock, FeedbackLevel, LogVisitCandidate, NoticeLevel, RetryState,
+    StatusState, next_delay,
 };
 #[allow(unused_imports)]
 pub use orchestration::{
@@ -180,14 +199,28 @@ pub use orchestration::{
 };
 #[allow(unused_imports)]
 pub use orchestration_room::{
-    ApprovalView, HostBinding, NodeView, OrchestrationRoom, OrchestrationRoomId, RejectReason,
-    RemoteRejectionView, ReviewVerdict, RoomEvent, RoomIdError, TicketResolution, WaveId,
-    WaveOutcome, WaveView,
+    ApplyOutcome, ApplyState, ApprovalView, Direction, DispatchAct, HostBinding, NodeView,
+    OperatorApplyFinding, OrchestrationRoom, OrchestrationRoomId, PeerAdmissionOutcome,
+    PeerFrameAttemptOutcome, RejectReason, RemoteRejectionView, ReviewVerdict, RoomEvent,
+    RoomIdError, TicketResolution, WaveId, WaveOutcome, WaveView,
 };
+#[allow(unused_imports)]
+pub use p2p_peer_spec::{P2pConfigState, P2pPeerSpec};
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 #[allow(unused_imports)]
+pub use peer_frame::{
+    FEED_ENTRY_HASH_BYTES, FeedPosition, FrameOutcome, FrameRefusal, FrameReply, FrameVerdict,
+    MAX_GUIDED_SEQUENCE_JUMP, PathObservation,
+};
 pub use peer_identity::{Ed25519Sig, PeerId, PeerIdentity, PeerIdentityError};
+#[allow(unused_imports)]
+pub use peer_reach::{PEER_REACH_SCHEMA_VERSION, PeerReach, PeerReachState, PeerReachStore};
+#[allow(unused_imports)]
+pub use peer_ticket::{
+    PEER_FINGERPRINT_COLUMNS, PEER_ID_MULTIHASH_PREFIX, PEER_TICKET_PREFIX, PeerTicket,
+    PeerTicketError, peer_fingerprint, short_fingerprint,
+};
 #[allow(unused_imports)]
 pub use permission::{
     FileContextProvenance, FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome,
@@ -198,7 +231,15 @@ pub use plan::{
     DelegationInfo, EffortEstimate, Plan, PlanDecision, PlanStatus, PlanSubTask, PlanTask,
     PlanTaskStatus, TaskResult,
 };
+pub use recipient_item::{
+    ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, RecipientItemAllocator,
+    RecipientItemState, RecipientItemView, RetractOutcome,
+};
 pub use redacted_url::RedactedUrl;
+#[allow(unused_imports)]
+pub use relay::{MAX_CONFIGURED_RELAYS, RelayConfigState, RelayMode, RelaySet};
+#[allow(unused_imports)]
+pub use room_role::{RoomEditDecision, RoomEditKind, RoomRole};
 pub use sandbox::SandboxPolicy;
 pub use secret::SecretString;
 #[allow(unused_imports)]
@@ -222,6 +263,7 @@ pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use subagent_error::{SpawnLimitKind, SubagentError};
 pub use subagent_view::{AgentRowView, OwnershipKind, WireOwnershipKind};
 pub use task_handle::{Op, TaskHandle};
+pub use ticket_addressee::TicketAddressee;
 pub use tool_policy::ToolPolicy;
 pub use trace_context::TraceContext;
 #[allow(unused_imports)]
@@ -251,6 +293,11 @@ pub use context_bundle::{
     AssembleDiagnostics, ContextBudget, ContextBundle, ContextSource, ProvenancedEntry, Relevance,
     RetrievalMethod, estimate_tokens,
 };
+#[allow(unused_imports)]
+pub use context_ref::{
+    ContextRef, ContextRefError, ContextRefProvenance, ContextSummary, HeadVerdict,
+    MAX_CONTEXT_SUMMARY_BYTES, TopicHead,
+};
 pub use doc_key::DocKey;
 pub use filtered_catalog::FilteredCatalog;
 pub use filtered_skill_catalog::FilteredSkillCatalog;
@@ -277,12 +324,25 @@ pub use redaction::{RedactionOp, RedactionRecord};
 #[allow(unused_imports)]
 pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
 pub use search_hit::SearchHit;
+pub use semantic_message_type::{
+    SemanticMessagePolicyCapabilities, SemanticMessageRecognition, SemanticMessageType,
+    SemanticMessageTypeMetadata, semantic_message_type_metadata, semantic_message_type_tokens,
+};
 #[allow(unused_imports)]
 pub use subagent_envelope::{SubagentEnvelope, SubagentEvent};
 #[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]
 pub use taint::{ProvenanceTag, TaintDecision};
+#[allow(unused_imports)]
+pub use team_policy::{
+    DEFAULT_DIGEST_INTERVAL_MINUTES, EffectivePolicy, INDIVIDUAL_POLICY_FILE, IndividualDefaults,
+    IndividualPolicy, InteractionPolicySnapshot, InvalidMessageTypeKey,
+    InvalidMessageTypeKeyReason, MessageTypeOverride, NotificationUrgency, PolicySource, Resolved,
+    ResponseMode, SenderBinding, SenderIdentity, SenderIdentityConflict, SenderOverride,
+    SenderPolicy, SharingBreadth, TEAM_POLICY_FILE, TeamDefaults, TeamOverrides, TeamPolicy,
+    TeamTransparency, TeamTypeOverride, TransparencyInvariant,
+};
 #[allow(unused_imports)]
 pub use tool_call::{
     ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,

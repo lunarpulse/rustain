@@ -10,9 +10,9 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::events::AppEvent;
 use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{
-    CompletionOptions, EscalationReason, Message, MessageRole, NoticeLevel, ProvenanceTag,
-    StepKind, StopReason, StreamChunk, TokenUsage, ToolCall, ToolCallInfo, ToolResultMessage,
-    ToolUseMessage, TurnOrigin, UsageLedgerEntry,
+    CompletionOptions, EscalationReason, Message, MessageRole, NotCapturedReason, NoticeLevel,
+    ProvenanceTag, StepKind, StopReason, StreamChunk, TokenUsage, ToolCall, ToolCallInfo,
+    ToolResultMessage, ToolUseMessage, TurnOrigin, UsageLedgerEntry, WriteDiffState,
 };
 use crate::domain::ports::{
     SecurityPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort,
@@ -30,6 +30,102 @@ use crate::domain::services::tool_scheduler::ToolScheduler;
 /// Maximum number of tool execution loop iterations before forcing termination.
 const MAX_TOOL_ITERATIONS: usize = 256;
 
+/// Story 19.1 A3 — the ONE infrastructure site that populates a completed
+/// Write's display diff. Reads the pre-write snapshot back through
+/// [`StoragePort::read_snapshot`] (the adapter snapshotted the original in
+/// `execute_write`) and diffs it against the new content from the tool
+/// *input*; the provider-facing `ToolResult.content` is never touched (A5 —
+/// the model's bytes are identical).
+///
+/// Code review (Decision 1, Crew unanimous 4/4) kept this read-back rather
+/// than computing in the adapter: `execute_write` returns `ToolResult`, which
+/// is pinned to three fields, so it has no legitimate carrier for a UI-only
+/// value. The repairs the review did require are all here:
+///
+/// - `path` is the ADAPTER-RESOLVED absolute path, not the raw model string.
+///   The adapter snapshots `workspace_path.join(file_path)`, so re-deriving
+///   from the raw path against the process CWD silently missed whenever the
+///   two roots differ (correct before only because `startup.rs` happens to
+///   set `workspace_path = current_dir()`).
+/// - Every failure returns its OWN reason. Previously a snapshot read error
+///   rendered "no active checkpoint", which was simply false.
+/// - `already_written` names paths an earlier Write in this same batch
+///   already snapshotted. Snapshots are first-write-wins per
+///   `(checkpoint, path)`, so a second write's read-back would return the
+///   pre-FIRST-write content and misattribute both writes to this one call.
+/// - The diff is elided and capped HERE, so the journal and the persisted
+///   conversation never carry an unbounded diff.
+pub async fn write_display_diff(
+    storage: &dyn StoragePort,
+    conversation_id: &str,
+    checkpoint: CheckpointId,
+    request: &crate::domain::models::ToolCallRequest,
+    workspace_path: Option<&std::path::Path>,
+    already_written: &std::collections::HashSet<std::path::PathBuf>,
+) -> WriteDiffState {
+    if !matches!(request.tool_name.as_str(), "Write" | "write") {
+        return WriteDiffState::NotAWrite;
+    }
+    let (Some(path), Some(new_content)) = (
+        request.input.get("file_path").and_then(|v| v.as_str()),
+        request.input.get("content").and_then(|v| v.as_str()),
+    ) else {
+        // A Write whose input we cannot read is not a Write we can render;
+        // fall back to the result text rather than invent a diff.
+        return WriteDiffState::NotAWrite;
+    };
+    let Some(resolved) = resolve_write_path(workspace_path, path) else {
+        // Relative path and no known workspace root: the key cannot be
+        // reproduced, and guessing against the CWD is the bug we just fixed.
+        return WriteDiffState::NotCaptured {
+            reason: NotCapturedReason::SnapshotUnavailable,
+        };
+    };
+    if already_written.contains(&resolved) {
+        return WriteDiffState::NotCaptured {
+            reason: NotCapturedReason::SupersededInBatch,
+        };
+    }
+    // CheckpointId(0) is the sentinel `run_turn` falls through with when
+    // checkpoint creation failed — no snapshot can exist under it.
+    if checkpoint.0 == 0 {
+        return WriteDiffState::NotCaptured {
+            reason: NotCapturedReason::NoActiveCheckpoint,
+        };
+    }
+    match storage
+        .read_snapshot(conversation_id, checkpoint, &resolved)
+        .await
+    {
+        Ok(Some(original)) => WriteDiffState::from_original(&original, new_content),
+        Ok(None) => WriteDiffState::NotCaptured {
+            reason: NotCapturedReason::SnapshotUnavailable,
+        },
+        Err(e) => {
+            tracing::warn!("read_snapshot failed for {}: {}", resolved.display(), e);
+            WriteDiffState::NotCaptured {
+                reason: NotCapturedReason::SnapshotReadFailed,
+            }
+        }
+    }
+}
+
+/// Resolve a Write's `file_path` exactly as `execute_write` does, so the
+/// snapshot key derived on the write path and the one derived on the read
+/// path cannot disagree. `None` when the path is relative and no workspace
+/// root is available — the caller must then decline rather than guess.
+pub fn resolve_write_path(
+    workspace_path: Option<&std::path::Path>,
+    file_path: &str,
+) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(file_path);
+    if p.is_absolute() {
+        Some(p.to_path_buf())
+    } else {
+        workspace_path.map(|ws| ws.join(p))
+    }
+}
+
 #[cfg(any(test, feature = "test-instrumentation"))]
 pub static RUN_TURN_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -44,7 +140,8 @@ pub async fn run_turn(
     conversation_id: String,
     storage: Arc<dyn StoragePort>,
     conversation_snapshot: crate::domain::models::Conversation,
-    activation_set: Option<crate::domain::models::SkillActivationSet>,
+    mut activation_set: Option<crate::domain::models::SkillActivationSet>,
+    agent_restriction: Option<crate::domain::models::AgentToolRestriction>,
     turn_cancel: CancellationToken,
     ledger: Arc<dyn UsageLedgerPort>,
     resolved: ResolvedModel,
@@ -53,6 +150,24 @@ pub async fn run_turn(
     parent_trace: Option<crate::domain::models::TraceContext>,
     session_id: String,
     turn_origin: TurnOrigin,
+    // Whether this turn's assembled context already contains peer-origin
+    // material (Story 18.4a, FR151).
+    //
+    // ⚑ THE BRIDGE THAT WAS MISSING. `TurnOrigin::provenance()` returns
+    // `SelfOriginated` only for `RemotePeer`, and the sole mid-turn escalation
+    // was a completed tool call whose name began `"a2a__"` — so a locally
+    // initiated turn that assembled peer-sourced context dispatched destructive
+    // tools as `UserOriginated` and the taint gate never fired. The bundle's
+    // provenance and this turn's taint bit were not connected by anything.
+    //
+    // ⛔ Derived by the caller from `ContextBundle::has_peer_origin()`, which
+    // recomputes from each entry's `ContextSource`. There is no field a peer
+    // can set to clear it (17.1b's Vex rule).
+    context_tainted: bool,
+    // Live activation state is needed only when a model activates a skill
+    // during this turn. The initial snapshot still owns prompt composition;
+    // this handle refreshes scheduler enforcement between tool calls.
+    skill_activator: Option<Arc<crate::adapters::skill_activation::SkillActivator>>,
 ) {
     #[cfg(any(test, feature = "test-instrumentation"))]
     RUN_TURN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -70,7 +185,15 @@ pub async fn run_turn(
     let mut iteration = 0;
     // Once remote content enters this turn's context, every later destructive
     // dispatch is self-originated even when the turn itself began interactively.
-    let mut context_tainted = turn_origin.provenance() == ProvenanceTag::SelfOriginated;
+    //
+    // ⚑ Two sources, ⛔ never one (Story 18.4a): the turn's own route, and the
+    // assembled context it was handed. Before this story the comment above
+    // claimed the broader property while only the route half was wired, so a
+    // locally initiated turn carrying peer context dispatched as
+    // `UserOriginated` and FR151's *"peer context is read, never a silent
+    // driver of a destructive action"* was false.
+    let mut context_tainted =
+        context_tainted || turn_origin.provenance() == ProvenanceTag::SelfOriginated;
     loop {
         iteration += 1;
         if iteration > MAX_TOOL_ITERATIONS {
@@ -275,7 +398,11 @@ pub async fn run_turn(
                             )
                             .await;
                         tools
-                            .set_parent_context(parent_ctx_tokens, parent_trace.clone())
+                            .set_parent_context(
+                                parent_ctx_tokens,
+                                parent_trace.clone(),
+                                agent_restriction.clone(),
+                            )
                             .await;
 
                         let indexed: Vec<(usize, ToolCallInfo)> =
@@ -319,6 +446,7 @@ pub async fn run_turn(
                                             id: tc.id.clone(),
                                             content: "Tool execution cancelled".to_string(),
                                             is_error: true,
+                                            diff: crate::domain::models::WriteDiffState::NotAWrite,
                                         },
                                     });
                                     let _ = event_tx.send(AppEvent::ProviderChunk {
@@ -341,6 +469,8 @@ pub async fn run_turn(
                                     id: result.tool_use_id.clone(),
                                     content: result.content.clone(),
                                     is_error: result.is_error,
+                                    // AskUserQuestion answer — not a file write.
+                                    diff: crate::domain::models::WriteDiffState::NotAWrite,
                                 },
                             });
                             indexed_results.push((
@@ -371,7 +501,6 @@ pub async fn run_turn(
                                 })
                                 .collect();
                             let source = turn_origin.approval_source(&conversation_id);
-                            let active_skills = activation_set.as_ref().map(|s| s.active_skills());
                             let requests: Vec<crate::domain::models::ToolCallRequest> =
                                 batch_with_idx.iter().map(|(_, req)| req.clone()).collect();
                             let provenance = if context_tainted {
@@ -379,16 +508,67 @@ pub async fn run_turn(
                             } else {
                                 ProvenanceTag::UserOriginated
                             };
-                            let terminal = tool_scheduler
-                                .clone()
-                                .schedule_with_provenance(
-                                    source,
-                                    requests,
-                                    turn_cancel.clone(),
-                                    active_skills,
-                                    provenance,
-                                )
-                                .await;
+                            // Activation changes policy immediately. A provider may emit
+                            // `activate_skill` beside another call in one response, so run
+                            // that batch in wire order and refresh the enforcement snapshot
+                            // after each successful activation. Ordinary batches retain the
+                            // scheduler's parallel-safe fast path.
+                            let terminal = if requests
+                                .iter()
+                                .any(|request| request.tool_name == "activate_skill")
+                            {
+                                let mut terminal = Vec::with_capacity(requests.len());
+                                for request in requests {
+                                    let mut one = {
+                                        let active_skills =
+                                            activation_set.as_ref().map(|s| s.active_skills());
+                                        tool_scheduler
+                                            .clone()
+                                            .schedule_with_provenance_and_restriction(
+                                                source.clone(),
+                                                vec![request],
+                                                turn_cancel.clone(),
+                                                active_skills,
+                                                agent_restriction.as_ref(),
+                                                provenance,
+                                            )
+                                            .await
+                                    };
+                                    let activated = one.iter().any(|call| {
+                                        matches!(
+                                            call,
+                                            ToolCall::Success {
+                                                request,
+                                                result,
+                                                ..
+                                            } if request.tool_name == "activate_skill"
+                                                && !result.is_error
+                                        )
+                                    });
+                                    terminal.append(&mut one);
+                                    if activated {
+                                        if let Some(activator) = &skill_activator {
+                                            activation_set =
+                                                activator.snapshot_for_turn(&conversation_id).await;
+                                        }
+                                    }
+                                }
+                                terminal
+                            } else {
+                                let active_skills =
+                                    activation_set.as_ref().map(|s| s.active_skills());
+                                tool_scheduler
+                                    .clone()
+                                    .schedule_with_provenance_and_restriction(
+                                        source,
+                                        requests,
+                                        turn_cancel.clone(),
+                                        active_skills,
+                                        agent_restriction.as_ref(),
+                                        provenance,
+                                    )
+                                    .await
+                            };
                             if terminal.iter().any(|call| {
                                 matches!(
                                     call,
@@ -401,6 +581,14 @@ pub async fn run_turn(
                             }) {
                                 context_tainted = true;
                             }
+                            // Paths a Write in THIS batch has already
+                            // snapshotted. Snapshots are first-write-wins per
+                            // (checkpoint, path), so a later write to the same
+                            // path must not read the earlier write's original
+                            // and present both changes as its own.
+                            let mut written_paths: std::collections::HashSet<std::path::PathBuf> =
+                                std::collections::HashSet::new();
+                            let workspace_root = tools.workspace_root();
                             for (i, call) in terminal.into_iter().enumerate() {
                                 let (id, content, is_error, was_cancelled) = match call {
                                     ToolCall::Success { id, result, .. } => {
@@ -421,12 +609,45 @@ pub async fn run_turn(
                                         false,
                                     ),
                                 };
+                                // Story 19.1 A3: display diff for completed,
+                                // non-error Writes (snapshot read-back).
+                                // Provider-facing bytes are untouched (A5).
+                                let diff = if is_error {
+                                    WriteDiffState::NotAWrite
+                                } else {
+                                    write_display_diff(
+                                        storage.as_ref(),
+                                        &conversation_id,
+                                        checkpoint,
+                                        &batch_with_idx[i].1,
+                                        workspace_root.as_deref(),
+                                        &written_paths,
+                                    )
+                                    .await
+                                };
+                                if matches!(
+                                    batch_with_idx[i].1.tool_name.as_str(),
+                                    "Write" | "write"
+                                ) {
+                                    if let Some(p) = batch_with_idx[i]
+                                        .1
+                                        .input
+                                        .get("file_path")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|p| {
+                                            resolve_write_path(workspace_root.as_deref(), p)
+                                        })
+                                    {
+                                        written_paths.insert(p);
+                                    }
+                                }
                                 let _ = event_tx.send(AppEvent::ProviderChunk {
                                     conversation_id: conversation_id.clone(),
                                     chunk: StreamChunk::ToolResult {
                                         id: id.clone(),
                                         content: content.clone(),
                                         is_error,
+                                        diff,
                                     },
                                 });
                                 indexed_results.push((

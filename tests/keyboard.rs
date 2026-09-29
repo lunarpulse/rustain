@@ -2,6 +2,9 @@ use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
+use rustain::domain::models::{
+    ChatMessage, Conversation, MessageRole, ToolCallInfo, ToolResultInfo,
+};
 
 // Covers: FR22 (vim keybindings)
 /// AC: Esc toggles focus between Input and Chat.
@@ -889,6 +892,100 @@ fn test_c_key_chat_focus_no_tool_triggers_copy() {
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('c'));
     assert_eq!(action, InputAction::CopyToClipboard(String::new()));
+}
+
+// === Story 19.9 review patch: `resolve_copy_content` keystone (FR116 AC6/AC8/AC9) ===
+// The resolver moved from `event_loop.rs` onto `TuiState` (non-budgeted) so the
+// copy priority is testable here: explicitly selected tool block > last
+// assistant message > empty. The render-derived `focused_tool_id` must NOT
+// widen the copy — keying on it was the FR116 regression the review caught.
+
+/// User message carrying one answered tool call, then an assistant reply.
+fn copy_conversation() -> Conversation {
+    let base = |role, content| ChatMessage {
+        synthetic: false,
+        id: rustain::domain::models::generate_conversation_id(),
+        role,
+        content,
+        content_blocks: vec![],
+        tool_calls: vec![],
+        created_at: 0,
+        token_count: None,
+        stop_reason: None,
+        images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
+    };
+    let mut user = base(MessageRole::User, "run ls".to_string());
+    user.tool_calls = vec![ToolCallInfo {
+        id: "tc_tool_1".to_string(),
+        name: "Bash".to_string(),
+        input: serde_json::json!({"command": "ls"}),
+        result: Some(ToolResultInfo {
+            content: "tool output".to_string(),
+            is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
+        }),
+        started_at_ms: Some(0),
+        completed_at_ms: Some(1000),
+        status: None,
+    }];
+    let assistant = base(MessageRole::Assistant, "assistant reply".to_string());
+    Conversation {
+        id: "test".to_string(),
+        title: String::new(),
+        messages: vec![user, assistant],
+        turns: Vec::new(),
+        created_at: 0,
+        updated_at: 0,
+        last_response_at: None,
+        session_id: None,
+        usage: None,
+        plans: std::collections::HashMap::new(),
+        fork_source: None,
+        compaction: None,
+    }
+}
+
+// (a) An explicit selection resolves to THAT tool block's result content,
+// ahead of the later assistant message.
+#[test]
+fn test_resolve_copy_content_selected_tool_block_wins() {
+    let mut state = TuiState::new(80, 24);
+    let conversation = copy_conversation();
+    state.selected_tool_id = Some("tc_tool_1".to_string());
+
+    assert_eq!(state.resolve_copy_content(&conversation), "tool output");
+}
+
+// (b) THE REGRESSION PIN: render-derived focus alone must not widen the copy.
+// `focused_tool_id` is rewritten every frame from `find_focused_tool_id`'s
+// nearest-visible fallback, so with no explicit selection the LAST ASSISTANT
+// MESSAGE is copied even though a tool block is on screen. Fails if someone
+// re-points the resolver's guard back at `focused_tool_id`.
+#[test]
+fn test_resolve_copy_content_ignores_render_derived_focus() {
+    let mut state = TuiState::new(80, 24);
+    let conversation = copy_conversation();
+    state.selected_tool_id = None;
+    state.focused_tool_id = Some("tc_tool_1".to_string());
+
+    assert_eq!(state.resolve_copy_content(&conversation), "assistant reply");
+}
+
+// (c) No selection and no assistant message → empty string.
+#[test]
+fn test_resolve_copy_content_empty_without_selection_or_assistant() {
+    let mut state = TuiState::new(80, 24);
+    let mut conversation = copy_conversation();
+    conversation
+        .messages
+        .retain(|m| m.role == MessageRole::User);
+    state.selected_tool_id = None;
+    state.focused_tool_id = None;
+
+    assert_eq!(state.resolve_copy_content(&conversation), "");
 }
 
 // 10.3: ImagePaste attaches image and sets indicator

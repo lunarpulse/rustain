@@ -112,6 +112,28 @@ pub enum PanelType {
     Tasks,
     Agents,
     Adapters,
+    /// Story 18.2 (AC5) — `Ctrl+X, L`. Chronological A2A transparency rows
+    /// folded from the durable room journal.
+    ///
+    /// Deliberately a `PanelType` and not an `OverlayType`: every persistent
+    /// view lives in the sidebar slot, and `PanelType` is matched exhaustively
+    /// in the render dispatch, so a missed site fails to compile.
+    /// `OverlayType` has `_` arms everywhere and would silently do nothing.
+    TransparencyLog,
+    /// Story 18.3a (AC1) — `Ctrl+X, R`. The durable orchestration room,
+    /// folded from the one journal via `OrchestrationRoom::project_for_host`.
+    /// Read-only and honestly stale; it is a replay, never a live object.
+    Room,
+    /// Story 18.3a-c (AC3) — `Ctrl+X, E` (`e` for **E**vidence, FR149's own
+    /// term; the type is `EvidenceArtifact`). The durable artifact list with
+    /// one-level `depends_on` lineage and, for patches, the apply *decision*
+    /// that governs each one.
+    ///
+    /// Same reasoning as [`Self::Room`] for being a `PanelType`: the sidebar
+    /// render dispatch matches it exhaustively, so a missed site fails to
+    /// compile. ⚠ The **dashboard** dispatch has a `_` arm and does not — that
+    /// site is hand-written and pinned by a structural ratchet.
+    Artifacts,
 }
 
 /// Target of a delete confirmation dialog.
@@ -146,6 +168,19 @@ pub enum ConfirmationType {
     SkillTrustInspect,
     /// Plan approval card (Story 6-0d AC4) — y/a/n/e for plan mode exit approval.
     PlanApproval,
+    /// Confirm `/artifact apply`: an irreversible workspace write.
+    ArtifactApply,
+    /// Confirm `/peer add`: pin a key into the transport allowlist
+    /// (Story 18.4b, AC3). ⛔ Deliberately NOT `ArtifactApply` and ⛔ not routed
+    /// through the apply card's key table, which is consulted mode-blind and
+    /// would hand this surface an unpainted `y` that rebinds a pin.
+    PeerAdd,
+    /// Confirm `/team retract`: mark one item on a peer's host as retracted
+    /// by its sender (Story 19.16f `AC4`). ⛔ Wired by hand in BOTH key paths
+    /// (`handle_char`, `handle_special_key`): no exhaustive `match` over this
+    /// enum exists, so an unwired variant is zero compile errors and the
+    /// overlay wildcard would swallow every key (`DF-154`, `DF-181`).
+    TeamRetract,
 }
 
 /// Overlay types for modal focus targets.

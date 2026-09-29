@@ -34,12 +34,21 @@ pub struct CapabilityRegistry {
     inner: Arc<RwLock<RegistryInner>>,
     event_tx: Option<mpsc::UnboundedSender<AppEvent>>,
     next_subscription_id: Arc<std::sync::atomic::AtomicU64>,
+    next_registration_id: Arc<std::sync::atomic::AtomicU64>,
+    /// Monotonic catalogue version — see [`CapabilityRegistry::generation`].
+    generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug)]
 struct RegistryInner {
-    capabilities: BTreeMap<CapabilityId, RegisteredCapability>,
+    capabilities: BTreeMap<CapabilityId, RegistryEntry>,
     observers: Vec<(SubscriptionId, Weak<dyn CatalogObserver>)>,
+}
+
+#[derive(Debug)]
+struct RegistryEntry {
+    capability: RegisteredCapability,
+    registration_id: u64,
 }
 
 /// A capability that has been registered in the registry.
@@ -81,17 +90,21 @@ pub type ProviderId = String;
 #[derive(Debug)]
 pub struct RegisterHandle {
     id: CapabilityId,
+    registration_id: u64,
     registry: Weak<CapabilityRegistry>,
 }
 
 impl Drop for RegisterHandle {
     fn drop(&mut self) {
         if let Some(reg) = self.registry.upgrade() {
-            // Best-effort deregister on a spawned task since Drop is sync
+            // Best-effort deregister on a spawned task since Drop is sync. A
+            // replacement registration with the same CapabilityId owns a new
+            // id, so a stale handle can never remove the replacement.
             let reg = reg.clone();
             let id = self.id.clone();
+            let registration_id = self.registration_id;
             tokio::task::spawn(async move {
-                let _ = reg.deregister(&id).await;
+                reg.deregister_registration(&id, registration_id).await;
             });
         }
     }
@@ -123,8 +136,33 @@ impl CapabilityRegistry {
                 observers: Vec::new(),
             })),
             event_tx,
+            next_registration_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             next_subscription_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Monotonic catalogue version, bumped once per accepted mutation
+    /// (`register`, `deregister`).
+    ///
+    /// Story 18.1b (R2): the served AgentCard is expensive to build — snapshot,
+    /// project, sort, JCS-canonicalize, base64url, Ed25519-sign, canonicalize
+    /// again — and off-host it is served **unauthenticated**. Caching it needs
+    /// an invalidation signal that is cheaper than the work it guards; hashing a
+    /// snapshot is not, because taking the snapshot is already most of the cost.
+    /// This counter is that signal: one relaxed atomic load per card GET.
+    ///
+    /// Relaxed ordering is sufficient. The counter is a cache *key*, not a lock:
+    /// a reader that observes a stale generation serves a card that was valid
+    /// microseconds ago, and the next GET after the write lands serves the new
+    /// one. Nothing is ordered against it.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn bump_generation(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Look up a capability by id.
@@ -132,7 +170,10 @@ impl CapabilityRegistry {
     /// Returns `None` if the capability is not registered.
     pub async fn lookup(&self, id: &CapabilityId) -> Option<RegisteredCapability> {
         let inner = self.inner.read().await;
-        inner.capabilities.get(id).cloned()
+        inner
+            .capabilities
+            .get(id)
+            .map(|entry| entry.capability.clone())
     }
 
     /// Register a capability.
@@ -147,12 +188,19 @@ impl CapabilityRegistry {
         self: &Arc<Self>,
         cap: RegisteredCapability,
     ) -> Result<RegisterHandle, RegistryError> {
+        let registration_id = self
+            .next_registration_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let event = {
             let mut inner = self.inner.write().await;
-            if let Some(prev) = inner.capabilities.insert(cap.id.clone(), cap.clone()) {
+            let entry = RegistryEntry {
+                capability: cap.clone(),
+                registration_id,
+            };
+            if let Some(prev) = inner.capabilities.insert(cap.id.clone(), entry) {
                 CapabilityEvent::Updated {
                     id: cap.id.clone(),
-                    old: prev,
+                    old: prev.capability,
                     new: Box::new(cap.clone()),
                 }
             } else {
@@ -161,11 +209,16 @@ impl CapabilityRegistry {
                 }
             }
         }; // write guard dropped here
+        // Bump BEFORE the (async) event emit, while the mutation is the most
+        // recent thing that happened: a card cache that samples the generation
+        // after this point can never miss this write.
+        self.bump_generation();
 
         self.emit_event(event);
 
         Ok(RegisterHandle {
             id: cap.id.clone(),
+            registration_id,
             registry: Arc::downgrade(self),
         })
     }
@@ -182,12 +235,34 @@ impl CapabilityRegistry {
                 .remove(id)
                 .ok_or_else(|| RegistryError::NotFound { id: id.clone() })?;
             CapabilityEvent::Deregistered {
-                capability: removed,
+                capability: removed.capability,
             }
         }; // write guard dropped here
+        self.bump_generation();
 
         self.emit_event(event);
         Ok(())
+    }
+
+    async fn deregister_registration(&self, id: &CapabilityId, registration_id: u64) {
+        let event = {
+            let mut inner = self.inner.write().await;
+            let Some(current) = inner.capabilities.get(id) else {
+                return;
+            };
+            if current.registration_id != registration_id {
+                return;
+            }
+            let removed = inner
+                .capabilities
+                .remove(id)
+                .expect("registration checked under the same write lock");
+            CapabilityEvent::Deregistered {
+                capability: removed.capability,
+            }
+        };
+        self.bump_generation();
+        self.emit_event(event);
     }
 
     /// Return a snapshot of all currently registered capabilities.
@@ -202,7 +277,11 @@ impl CapabilityRegistry {
         // If it does fail, we log a warning — the caller (status panel)
         // will show empty data for one render frame and refresh on the next.
         match self.inner.try_read() {
-            Ok(inner) => inner.capabilities.values().cloned().collect(),
+            Ok(inner) => inner
+                .capabilities
+                .values()
+                .map(|entry| entry.capability.clone())
+                .collect(),
             Err(_) => {
                 tracing::warn!(
                     "CapabilityRegistry::snapshot() lock contention — returning empty vec"
@@ -210,6 +289,22 @@ impl CapabilityRegistry {
                 Vec::new()
             }
         }
+    }
+
+    /// Await a consistent snapshot of all currently registered capabilities.
+    ///
+    /// [`Self::snapshot`] is a best-effort `try_read` that substitutes an EMPTY
+    /// vec on contention — acceptable for a TUI panel that redraws next frame,
+    /// catastrophic for anything that treats the result as authoritative (the
+    /// A2A served AgentCard signs it). Async callers MUST use this method: it
+    /// waits for the read lock and can never fabricate an empty catalog.
+    pub async fn snapshot_consistent(&self) -> Vec<RegisteredCapability> {
+        let inner = self.inner.read().await;
+        inner
+            .capabilities
+            .values()
+            .map(|entry| entry.capability.clone())
+            .collect()
     }
 
     /// Subscribe to catalog deltas.
@@ -382,6 +477,41 @@ mod tests {
             }
             _ => panic!("Expected CapabilityEvent::Updated, got {event:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_handle_does_not_deregister_replacement() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let registry = Arc::new(CapabilityRegistry::new(Some(tx)));
+        let cap = test_cap("echo");
+        let old_handle = registry.register(cap.clone()).await.unwrap();
+        let _registered = rx.try_recv().unwrap();
+        let replacement = RegisteredCapability {
+            description: "replacement".into(),
+            ..cap.clone()
+        };
+        let replacement_handle = registry.register(replacement).await.unwrap();
+        let _updated = rx.try_recv().unwrap();
+
+        drop(old_handle);
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            registry.lookup(&cap.id).await.unwrap().description,
+            "replacement",
+            "dropping a stale handle must not deregister the current registration"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a stale handle must emit no deregistration event"
+        );
+
+        drop(replacement_handle);
+        let event = rx.recv().await.expect("replacement deregister event");
+        assert!(matches!(
+            event,
+            AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { .. })
+        ));
     }
 
     #[tokio::test]

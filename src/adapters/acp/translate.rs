@@ -23,19 +23,62 @@ pub fn mcp_servers_from_acp(servers: Vec<acp::McpServer>) -> Vec<McpServerSpec> 
     // nondeterministic (`CompositeToolsetAdapter` finds the first match).
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for server in servers {
-        let stdio = match server {
-            acp::McpServer::Stdio(stdio) => stdio,
+        // Story 9.9: the `Http` arm used to drop the server with the reason
+        // *"rustain supports stdio MCP only"* — a sentence this story falsifies.
+        // Streamable HTTP is a first-class transport now, so an ACP client that
+        // configures one gets it forwarded. ⛔ SSE keeps being dropped, and its
+        // reason now names the actual rule (ADR-06-08) rather than a claim about
+        // rustain's transport coverage that is no longer true.
+        let (name, transport, command, args, env, url) = match server {
+            acp::McpServer::Stdio(stdio) => {
+                // AC3 SECURITY: forwarded `env` values are passed through
+                // LITERALLY and are NEVER run through `expand_env_vars` against
+                // rustain's process environment — a client must not be able to
+                // exfiltrate a rustain secret (e.g. `${ANTHROPIC_API_KEY}`) into
+                // the spawned child.
+                let env = stdio
+                    .env
+                    .into_iter()
+                    .map(|var| (var.name, var.value))
+                    .collect::<BTreeMap<_, _>>();
+                (
+                    stdio.name,
+                    McpTransport::Stdio,
+                    Some(stdio.command.display().to_string()),
+                    stdio.args,
+                    env,
+                    None,
+                )
+            }
             acp::McpServer::Http(http) => {
-                tracing::warn!(
-                    server = %http.name,
-                    "Ignoring ACP MCP HTTP server because rustain supports stdio MCP only"
-                );
-                continue;
+                if !http.headers.is_empty() {
+                    // Scope cut ①: the only supported header is a static bearer
+                    // token from the environment. Say so instead of pretending
+                    // the client's headers were applied.
+                    tracing::warn!(
+                        server = %http.name,
+                        count = http.headers.len(),
+                        "Ignoring client-supplied MCP HTTP headers; rustain reads a static \
+                         bearer token from RUSTAIN_MCP_HTTP_AUTH_TOKEN[_<SERVER>] only"
+                    );
+                }
+                (
+                    http.name,
+                    McpTransport::Http,
+                    None,
+                    Vec::new(),
+                    BTreeMap::new(),
+                    Some(crate::domain::models::redacted_url::RedactedUrl::new(
+                        http.url,
+                    )),
+                )
             }
             acp::McpServer::Sse(sse) => {
                 tracing::warn!(
                     server = %sse.name,
-                    "Ignoring ACP MCP SSE server because rustain supports stdio MCP only"
+                    "Ignoring ACP MCP SSE server: the legacy SSE transport is rejected \
+                     permanently (ADR-06-08 — deprecated by the MCP spec 2025-03-26). Use a \
+                     proxy such as mcp-proxy, or a server that speaks Streamable HTTP."
                 );
                 continue;
             }
@@ -54,14 +97,14 @@ pub fn mcp_servers_from_acp(servers: Vec<acp::McpServer>) -> Vec<McpServerSpec> 
         //      first prompt turn or produce ambiguous tool names. The server
         //      name is client-controlled (AC3's threat model), so this must be
         //      a sanitize, not an assert.
-        let mut id = stdio.name.split_whitespace().collect::<Vec<_>>().join("_");
+        let mut id = name.split_whitespace().collect::<Vec<_>>().join("_");
         while id.contains("__") {
             id = id.replace("__", "_");
         }
         if id.is_empty() {
             tracing::warn!(
-                name = %stdio.name,
-                "Ignoring ACP MCP stdio server with empty/whitespace-only name \
+                name = %name,
+                "Ignoring ACP MCP server with empty/whitespace-only name \
                  (it would yield an empty id, producing uncallable tools)"
             );
             continue;
@@ -69,30 +112,28 @@ pub fn mcp_servers_from_acp(servers: Vec<acp::McpServer>) -> Vec<McpServerSpec> 
         if !seen.insert(id.clone()) {
             tracing::warn!(
                 id = %id,
-                "Ignoring duplicate ACP MCP stdio server (its name collapsed to \
+                "Ignoring duplicate ACP MCP server (its name collapsed to \
                  an id already forwarded; keeping the first)"
             );
             continue;
         }
-        // AC3 SECURITY: forwarded `env` values are passed through LITERALLY and
-        // are NEVER run through `expand_env_vars` against rustain's process
-        // environment — a client must not be able to exfiltrate a rustain
-        // secret (e.g. `${ANTHROPIC_API_KEY}`) into the spawned child.
-        let env = stdio
-            .env
-            .into_iter()
-            .map(|var| (var.name, var.value))
-            .collect::<BTreeMap<_, _>>();
-        out.push(McpServerSpec {
+        let spec = McpServerSpec {
             id,
-            transport: McpTransport::Stdio,
-            command: Some(stdio.command.display().to_string()),
-            args: stdio.args,
+            transport,
+            command,
+            args,
             env,
-            url: None,
+            url,
             persistent: false,
             source: McpServerSource::Workspace,
-        });
+        };
+        // 9.9 AC2: a contradictory forwarded entry degrades per entry — it is
+        // kept so the fault surfaces at connect, exactly as a workspace-config
+        // entry does, instead of vanishing from the client's session.
+        if let Err(e) = spec.validate_transport_fields() {
+            tracing::warn!("ACP-forwarded {e}");
+        }
+        out.push(spec);
     }
     out
 }
@@ -257,6 +298,7 @@ pub fn stream_chunk_to_session_update(
             id,
             content,
             is_error,
+            diff: _,
         } => {
             let status = if *is_error {
                 acp::ToolCallStatus::Failed
@@ -566,22 +608,24 @@ mod tests {
         );
     }
 
-    // ── Http / Sse are dropped; only stdio survives ──────────────────────
+    // ── Http is forwarded; Sse is dropped ────────────────────────────────
 
-    /// `McpServer::Http` / `McpServer::Sse` are DROPPED (rustain's
-    /// `McpClientAdapter` connects stdio only). A mixed list reaches the seam as
-    /// ONLY the stdio specs, in input order; http-only and sse-only lists yield
-    /// nothing.
+    /// ⚑ Story 9.9 INVERTED the `Http` half of this test. It previously asserted
+    /// that `McpServer::Http` was dropped "because rustain's `McpClientAdapter`
+    /// connects stdio only" — true when it was written, false now: Streamable
+    /// HTTP is a first-class transport, so an ACP client that configures one
+    /// gets it forwarded (and `initialize` advertises
+    /// `mcpCapabilities.http = true`, without which no client would ever offer
+    /// one). `McpServer::Sse` is still dropped — permanently, per ADR-06-08.
     ///
-    /// Non-vacuity: three servers go in (http + sse + stdio), only the stdio may
-    /// come out — a mutant that forwards all transports reddens `len`; a mutant
-    /// that forwards nothing also reddens `len`. Distinctive names make the
-    /// survivor identity assertions unambiguous.
+    /// Non-vacuity: three servers go in (http + sse + stdio), exactly two may
+    /// come out, in input order. A mutant that drops HTTP again reddens `len`
+    /// and the identity assertions; a mutant that forwards SSE reddens `len`.
     #[test]
-    fn test_mcp_servers_from_acp_drops_http_and_sse_keeps_stdio() {
+    fn test_mcp_servers_from_acp_forwards_http_drops_sse_keeps_stdio() {
         let mixed = vec![
             acp::McpServer::Http(acp::McpServerHttp::new(
-                "dropped-http",
+                "remote-http",
                 "https://example.invalid/mcp",
             )),
             acp::McpServer::Sse(acp::McpServerSse::new(
@@ -596,31 +640,51 @@ mod tests {
         let specs = mcp_servers_from_acp(mixed);
         assert_eq!(
             specs.len(),
-            1,
-            "only the stdio server survives; http/sse must be dropped, got {specs:?}"
+            2,
+            "http and stdio survive; sse must be dropped, got {specs:?}"
         );
-        assert_eq!(specs[0].id, "stdio-keeper");
-        assert_eq!(specs[0].transport, McpTransport::Stdio);
-        assert_eq!(specs[0].args, vec!["--x".to_string()]);
 
-        // http-only and sse-only: nothing is forwarded (the all-dropped fast
-        // path — distinct from an empty input, which also yields empty).
-        let http_only = vec![acp::McpServer::Http(acp::McpServerHttp::new(
-            "solo-http",
-            "https://example.invalid/mcp",
-        ))];
-        assert!(
-            mcp_servers_from_acp(http_only).is_empty(),
-            "an http-only list must forward nothing"
+        assert_eq!(specs[0].id, "remote-http");
+        assert_eq!(specs[0].transport, McpTransport::Http);
+        assert_eq!(
+            specs[0].url.as_ref().map(|u| u.expose_url()),
+            Some("https://example.invalid/mcp"),
+            "the forwarded url is what makes the spec dialable"
         );
+        assert!(
+            specs[0].command.is_none(),
+            "an ACP http server has no command to invent"
+        );
+        assert!(specs[0].args.is_empty() && specs[0].env.is_empty());
+
+        assert_eq!(specs[1].id, "stdio-keeper");
+        assert_eq!(specs[1].transport, McpTransport::Stdio);
+        assert_eq!(specs[1].args, vec!["--x".to_string()]);
+
+        // sse-only: nothing is forwarded (the all-dropped path — distinct from
+        // an empty input, which also yields empty).
         let sse_only = vec![acp::McpServer::Sse(acp::McpServerSse::new(
             "solo-sse",
             "https://example.invalid/sse",
         ))];
         assert!(
             mcp_servers_from_acp(sse_only).is_empty(),
-            "an sse-only list must forward nothing"
+            "an sse-only list must forward nothing — SSE is rejected permanently"
         );
+
+        // An http entry whose url cannot be parsed is KEPT, not dropped: the
+        // fault must surface at connect as `ConnectionFailed`, exactly as a
+        // workspace-config entry's would (9.9 AC2, per-entry degrade).
+        let bad_url = vec![acp::McpServer::Http(acp::McpServerHttp::new(
+            "bad-url", "notaurl",
+        ))];
+        let kept = mcp_servers_from_acp(bad_url);
+        assert_eq!(
+            kept.len(),
+            1,
+            "a malformed url degrades the ENTRY, not the list"
+        );
+        assert!(kept[0].validate_transport_fields().is_err());
 
         // empty input → empty output (the builtin-full fast path's input shape).
         assert!(
@@ -628,6 +692,7 @@ mod tests {
             "an empty input must forward an empty slice"
         );
     }
+
     // ── `__` collapse: a literal double-underscore in the name must not reach the id ──
 
     /// A client-supplied name containing `__` (no whitespace) is normalized so
@@ -931,6 +996,8 @@ mod tests {
                 completed_at_ms: None,
                 status: None,
             }],
+            authorship: Default::default(),
+            retracted_at_ms: None,
             ..Default::default()
         };
         let updates = message_to_replay_updates(&message, Path::new("/repo"));

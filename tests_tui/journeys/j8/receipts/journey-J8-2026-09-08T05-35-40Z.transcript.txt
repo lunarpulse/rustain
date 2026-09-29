@@ -1,0 +1,394 @@
+journey J8 — Ravi's custom-profile authoring and sharing spine, walked by the real binary (Story 19.12, gate J8)
+recorded-at: 2026-09-08T05:35:40Z
+binary:      /home/lunarpulse/dev_ws/rustain/target/release/rustain
+version:     rustain rustain 0.1.2 (x86_64-unknown-linux-gnu)
+tree:        rustain@183f5f5-dirty
+scene:       tests_tui/journeys/j8/scenes/j8-ravi.json sha256:bc1c87221a19dbb71bc84bc88d1a4f5f72d0fcc4b1fda395de91716b8ea7d6c9
+profile:     tests_tui/journeys/j8/profiles/devops.toml sha256:a5199d69a5a9e96978938bdadb8d9284adc24d480400d88472d543cca10f752f
+run dir:     /tmp/tmp.vyru927EtW
+
+=== journey_j8_ravi.py — the ten beats
+[witness] config dir shared by both halves: /tmp/tmp.vyru927EtW/workspace/.rustain
+[witness] committed fixture sha256: a5199d69a5a9e96978938bdadb8d9284adc24d480400d88472d543cca10f752f
+[beat] beat 1 — `profile create` with no terminal must refuse OUT LOUD
+--- pane: create-no-tty ---
+$ rustain profile create --name devops-wizard-notty
+rustain profile create requires an interactive terminal.
+exit=2
+--- end pane ---
+[beat] create-no-tty: exit 2
+[beat] beat 1 — and it wrote nothing
+[beat] beat 2 — the interactive builder, driven under a PTY
+--- pane: wizard ---
+$ rustain profile create --name devops-wizard --extends coding
+rustain profile create
+
+This wizard will help you create a new agent profile.
+Enter a blank line at any prompt to go back (except required fields).
+
+Description (optional): Ravi's first pass, built in the wizard
+
+Available persona adapters: minimal, coding, personal-assistant
+persona adapter: coding
+Available memory adapters: noop, project-scoped, daily-log
+memory adapter: project-scoped
+Available session adapters: basic, workspace
+session adapter: workspace
+Available tools adapters: builtin-only, builtin-full, composite
+tools adapter: composite
+Available channels adapters: terminal, telegram
+channels adapter: terminal
+Available scheduler adapters: none, cron
+scheduler adapter: none
+Available context adapters: default, daily, composite
+context adapter: default
+
+Common overrides:
+  default_plan_mode = false      # Disable plan mode prompt at startup
+  model = "claude-opus-4-7"      # Override default model
+  log_level = "debug"            # Override log verbosity
+
+Add overrides? (e.g., default_plan_mode, model) [y/n] n
+
+Profile preview:
+━━━━━━━━━━━━━━━━━━━━━━━━
+name = "devops-wizard"
+description = "Ravi's first pass, built in the wizard"
+extends = "coding"
+
+[persona]
+adapter = "coding"
+
+[memory]
+adapter = "project-scoped"
+
+[session]
+adapter = "workspace"
+
+[tools]
+adapter = "composite"
+
+[channels]
+adapter = "terminal"
+
+[scheduler]
+adapter = "none"
+
+[context]
+adapter = "default"
+
+Identity color: 4
+
+Save to /tmp/tmp.vyru927EtW/workspace/.rustain/profiles/devops-wizard.toml? [y/n] y
+Profile 'devops-wizard' created at /tmp/tmp.vyru927EtW/workspace/.rustain/profiles/devops-wizard.toml. Activate now? Run: rustain --profile devops-wizard
+exit=0
+--- end pane ---
+[beat] wizard: wizard completed, exit 0
+[witness] wizard wrote /tmp/tmp.vyru927EtW/workspace/.rustain/profiles/devops-wizard.toml
+[witness] wizard profile port sections: 7
+[beat] beat 3 — export flattens the extends chain into one shareable file
+--- pane: export-wizard ---
+$ rustain profile export devops-wizard -o /tmp/tmp.vyru927EtW/devops-wizard.toml
+Profile 'devops-wizard' exported to /tmp/tmp.vyru927EtW/devops-wizard.toml
+exit=0
+--- end pane ---
+[beat] export-wizard: exit 0
+--- pane: export-created-artifacts ---
+<run>/devops-wizard.toml
+--- end pane ---
+--- pane: export-artifact ---
+# Exported by rustain profile export
+# Source: devops-wizard (user)
+# Exported at: 2026-09-08T05:35:41Z
+# Note: extends chain flattened; this file is self-contained.
+name = "devops-wizard"
+
+[channels]
+adapter = "terminal"
+
+[context]
+adapter = "default"
+
+[memory]
+adapter = "project-scoped"
+
+[overrides]
+default_plan_mode = false
+
+[persona]
+adapter = "coding"
+
+[scheduler]
+adapter = "none"
+
+[session]
+adapter = "workspace"
+
+[tools]
+adapter = "composite"
+
+--- end pane ---
+[beat] beat 4 — export `coding` purely to give beat 6 a file to point at
+--- pane: export-coding-setup ---
+$ rustain profile export coding -o /tmp/tmp.vyru927EtW/coding.toml
+Profile 'coding' exported to /tmp/tmp.vyru927EtW/coding.toml
+exit=0
+--- end pane ---
+[beat] export-coding-setup: exit 0
+[beat] beat 5 — `profile install <local path>`: the shared artifact moves in
+--- pane: install-local-path ---
+$ rustain profile install /home/lunarpulse/dev_ws/rustain/tests_tui/journeys/j8/profiles/devops.toml
+Profile 'devops' imported. Activate now? Run: rustain --profile devops
+exit=0
+--- end pane ---
+[beat] install-local-path: exit 0
+[witness] installed artifact path: /tmp/tmp.vyru927EtW/workspace/.rustain/profiles/devops.toml
+[witness] installed artifact exists: True
+--- pane: install-destination ---
+landed: /tmp/tmp.vyru927EtW/workspace/.rustain/profiles/devops.toml
+community sidecar present: False
+--- end pane ---
+[beat] beat 6 — installing someone else's `coding` must be refused
+--- pane: refuse-collision ---
+$ rustain profile install /tmp/tmp.vyru927EtW/coding.toml
+Error: profile name 'coding' collides with a built-in profile. Pass --name <override> to install under a different name.
+exit=2
+--- end pane ---
+[beat] refuse-collision: exit 2
+[beat] beat 7 — a file whose own name escapes the config dir must be refused
+--- pane: refuse-traversal-install ---
+$ rustain profile install /tmp/tmp.vyru927EtW/evil.toml
+Error: Profile name must not contain '..', '/', or '\' (path traversal attempt).
+exit=2
+--- end pane ---
+[beat] refuse-traversal-install: exit 2
+--- pane: refuse-traversal-import ---
+$ rustain profile import /tmp/tmp.vyru927EtW/evil.toml
+Error: Profile name must not contain '..', '/', or '\' (path traversal attempt).
+exit=2
+--- end pane ---
+[beat] refuse-traversal-import: exit 2
+[witness] escaped write target: /tmp/tmp.vyru927EtW/workspace/ESCAPED.toml
+[witness] escaped write present: False
+[beat] beat 8 — a `gh:` spec still prints its own gh-spec error on stderr
+--- pane: gh-spec-untouched ---
+$ rustain profile install gh:
+Error: only 'gh:' scheme supported in v1 (public GitHub repos)
+exit=2
+--- end pane ---
+[beat] gh-spec-untouched: exit 2
+[beat] beat 9 — `profile show devops`: five rows the fixture never names
+--- pane: show-installed ---
+$ rustain profile show devops
+Profile: devops
+Source: user
+Description: Ravi's DevOps specialisation — shared as one portable TOML
+Identity color: blue (ANSI 4)
+Preview: false
+
+Adapter selection:
+  persona:     coding
+  memory:      project-scoped
+  session:     workspace
+  tools:       builtin-only
+  channels:    terminal
+  scheduler:   none
+  context:     default
+
+Overrides (figment):
+  default_plan_mode = Bool(false)
+exit=0
+--- end pane ---
+[beat] show-installed: exit 0
+[beat] beat 10 — one real agent turn, resolved from RUSTAIN_PROFILE=devops
+[beat] boot on the installed profile: saw 'Ready'
+--- pane: boot-devops ---
+                                                                                                                                  
+                                                        Welcome to Rustain.                                                       
+                                                                                                                                  
+                                                     Type a message to start.                                                     
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ctx: 0/1m (0%) │ Ready │ █ devops                                                     
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] the turn completed: saw 'binding constraint'
+--- pane: ravi-turn ---
+You:                                                                                                                              
+Investigate the OOM kills in the billing service.                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ Checked the billing service memory profile.                                                                                     
+│ The container limit is the binding constraint, not a leak.                                                                      
+│                                                                                                                                 
+│                                                                                                                                 
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+ anthropic/claude-sonnet-4-6 [F] │ Normal │ ↑388 ↓27 │ ctx: 388/1m (0%) │ Ready │ █ devops                                        
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+--- end pane ---
+[beat] TUI quit via Ctrl+Q (exit status 0)
+[beats] complete
+
+=== --- ledger --- (product-minted milliseconds; one row per stream POST — the CLI beats mint none)
+{"timestampMs":1788845744666,"sessionId":"FeaKN80HWqvERoHHLvSB6","conversationId":"_2df6HOw9eNCL6kfJrDF5","providerId":"router","model":"claude-sonnet-4-6","tier":"cheap_agentic","stepKind":null,"escalationReason":"none","usage":{"tokensIn":388,"tokensOut":27,"parentCtx":12,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}
+
+=== --- sessions --- (ids, titles, is_default_resume — session list is cwd-bound)
+{
+  "schema_version": "1.1",
+  "sessions": [
+    {
+      "id": "_2df6HOw9eNCL6kfJrDF5",
+      "index": 1,
+      "title": "",
+      "message_count": 2,
+      "created_at": 1788845741,
+      "updated_at": 1788845745,
+      "has_fork_source": false,
+      "is_default_resume": true,
+      "workspace": "/tmp/tmp.vyru927EtW/workspace"
+    }
+  ]
+}
+
+=== --- disk artifacts --- (every .toml and .md under the run dir, after the walk)
+--- pane: disk-artifacts ---
+<run>/coding.toml
+<run>/devops-wizard.toml
+<run>/evil.toml
+<run>/workspace/.rustain/config.toml
+<run>/workspace/.rustain/permissions.toml
+<run>/workspace/.rustain/profiles/devops-wizard.toml
+<run>/workspace/.rustain/profiles/devops.toml
+<run>/workspace/.rustain/state.toml
+--- end pane ---
+
+=== --- requests --- (every request the binary made, in order)
+{"n":1,"method":"POST","path":"/v1/messages","kind":"health_check","persona":"scene-ravi","auth":"x-api-key","model":"claude-sonnet-4-6"}
+{"n":2,"method":"GET","path":"/v1/models","kind":"probe"}
+{"n":3,"method":"GET","path":"/api.json","kind":"models_dev"}
+{"n":4,"method":"POST","path":"/v1/messages","persona":"scene-ravi","auth":"x-api-key","stream":true,"model":"claude-sonnet-4-6","turn":1,"last_user":"Investigate the OOM kills in the billing service.","skills":[],"tool_names":["Bash","Edit","Read","Write","apply_patch","exit_plan_mode","propose_plan","remember","remember_fact","search_skills","search_tools","skill_view"],"tools":12,"tool_results":0,"desync":false}
+
+=== --- what this run did not prove ---
+THE DEVOPS PERSONA DOES NOT EXIST. Journey 8's Opening Scene has Ravi "write a
+custom persona (devops.md)", and there is no mechanism for it anywhere in this
+build. `build_persona` matches three hardcoded names, and `AdapterRef` carries
+`#[serde(default, rename = "config")] pub _config` — so a profile MAY write
+`[persona] config = { file = "devops.md" }`, it PARSES, it is carried through
+composition, and `build_persona`'s `_config` is never read. A config a user can
+write, that validates, and that does nothing: a footgun, not an absence.
+`PersonaAdapter::system_prompt` returns the WORKSPACE project context
+(CLAUDE.md / .cursorrules), never a profile-scoped file. So this run proves
+PROFILE COMPOSITION, not SPECIALISATION — and specialisation is the point of
+Ravi's journey. Filed as DF-19-12-PROFILE-PERSONA-MD, an id `epics.md`, the
+Epic 19 replan and the sprint tracker were all already citing while it did not
+exist.
+
+CRON IS NOT DELIVERABLE THROUGH A PROFILE, and the honest mechanism is narrower
+than "silent no-op". In a DEFAULT build a profile naming `[scheduler] cron`
+REFUSES TO LOAD: `profile show` and `profile validate` both print "references
+adapter 'cron' (port 'Scheduler') which requires cargo feature 'cron'.
+Recompile with: cargo install rustain --features cron" and exit 2, and the
+wizard warns at selection time. That is why this capture's fixture says
+`adapter = "none"` — a cron fixture would not have loaded at all. The real
+defect is what happens WITH `--features cron` compiled: composition returns a
+`NoOpScheduler`, the loader passes, the wizard passes, and nothing is scheduled.
+Story 19.12 collapsed a `#[cfg]` split whose two arms were byte-identical
+`NoOpScheduler` — a split that lied about having two behaviours — and that
+change is honest about its reach: it changes NOTHING a user sees. Filed as
+DF-19-12-PROFILE-CRON-UNWIRED. Ravi's "scheduled checks every 2 hours" is
+therefore NOT PROVEN and NOT PROVABLE in this build.
+
+`export` WRITES TOML ONLY. The PRD calls the shared artifact "a portable TOML +
+persona markdown"; `export.rs` has one `fs::write` and it writes TOML. Zero
+`.md` files are produced anywhere. It also FLATTENS `extends` away — so the
+exported artifact and the inheritance-bearing artifact are two different files,
+by design, per the export header's own fourth line — and it orders its sections
+ALPHABETICALLY, not in port order, despite the comment in
+`profile_serializer.rs` claiming "canonical order". The exported file is not
+byte-stable either: header line 3 is `chrono::Utc::now()`.
+
+`rustain profile create devops` — the PRD's own Opening Scene command — DOES NOT
+PARSE. `error: unexpected argument 'devops' found`, exit 2: `Create` has no
+positional. The shipped forms are `rustain profile create` and
+`… --name devops`, and this capture uses the latter. Classified as a DOC defect
+and annotated in the PRD rather than "fixed" by adding a positional, which would
+have made `--name` and a positional two ways to say one thing.
+
+`install gh:user/profile-name` IS NOT EXERCISED. This story added the local-path
+arm and did not touch the git route; FR73's network half remains uncaptured. The
+one thing asserted about it here is that it still prints its own gh-spec error on
+stderr, which is what keeps the local-path branch predicate honest.
+
+`install`'s local-path arm now refuses built-in profile names before delegating
+to `import`; direct `import` still permits an explicit overwrite after its
+interactive prompt. That asymmetry is deliberate: install means accepting
+someone else's profile, while import means loading a file the operator owns.
+
+FOR J8, A "PANE" IS A CAPTURED CLI OUTPUT BLOCK, not a TUI pane. The driver
+emits the same labelled fence bytes around each child process so the shared
+checker can use its one `pane_slice` extractor without a second implementation.
+
+THE TURN'S REPLY IS STUB-SERVED AND IS ASSERTED NOWHERE. The scene decides what
+the model says. What the gate asserts about beat 10 is that the turn HAPPENED
+under the installed profile: a scene-turn row on the request log under the
+declared persona, the ledger millisecond the product minted, and the FILTERED
+wire tool count (12, against the default `coding`'s 15) that only
+`[tools] adapter = "builtin-only"` can produce. Without that third conjunct the
+marker could not go red, because `devops` extends `coding` and `coding` is the
+product default — dropping `RUSTAIN_PROFILE` would compose an agent that is
+byte-identical on the wire.
+
+`profile show`'s `Source:` LINE CAN NEVER SAY `community`. `show.rs` returns
+`User` for any non-embedded name, verified against a profile living only in
+`community/`. Anyone reaching for `Source:` to prove where a file landed gets a
+green that means nothing; the gate reads the PATH.
+
+=== stopping the scene provider
+
+=== scene provider exit status: 0 (0 clean; 1 desync or unknown path)
+
+=== captured
+transcript: /home/lunarpulse/dev_ws/rustain/tests_tui/journeys/j8/receipts/journey-J8-2026-09-08T05-35-40Z.transcript.txt
+
+=== cleanup

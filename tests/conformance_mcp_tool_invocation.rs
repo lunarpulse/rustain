@@ -10,16 +10,20 @@ use std::sync::Arc;
 use rustain::adapters::mcp::client::McpClientAdapter;
 use rustain::adapters::noop::NoOpToolSet;
 use rustain::domain::events::AppEvent;
+#[cfg(feature = "test-fake-mcp")]
+use rustain::domain::models::McpConnectionState;
 use rustain::domain::models::{
-    McpConnectionState, McpServerSource, McpServerSpec, McpTransport, PermissionMode, ToolRisk,
+    McpServerSource, McpServerSpec, McpTransport, PermissionMode, ToolRisk,
 };
 use rustain::domain::ports::ToolSetPort;
 use rustain::domain::services::permission_chain::{self, PermissionDecision};
 use serde_json::json;
+#[cfg(feature = "test-fake-mcp")]
 use tokio_util::sync::CancellationToken;
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "test-fake-mcp")]
 fn fake_spec(id: &str, env: BTreeMap<String, String>) -> McpServerSpec {
     let command = common::fake_mcp_binary();
     McpServerSpec {
@@ -34,6 +38,7 @@ fn fake_spec(id: &str, env: BTreeMap<String, String>) -> McpServerSpec {
     }
 }
 
+#[cfg(feature = "test-fake-mcp")]
 fn fake_spec_connected(
     id: &str,
     env: BTreeMap<String, String>,
@@ -48,6 +53,7 @@ fn fake_spec_connected(
     client
 }
 
+#[cfg(feature = "test-fake-mcp")]
 async fn wait_connected(client: &McpClientAdapter, timeout_ms: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
@@ -68,16 +74,16 @@ async fn wait_connected(client: &McpClientAdapter, timeout_ms: u64) -> bool {
 // ── AC-1: available_tools projects MCP tools with mcp__ prefix ──────────────
 
 #[tokio::test]
-#[cfg(feature = "mcp")]
+#[cfg(feature = "test-fake-mcp")]
 async fn test_available_tools_projects_mcp_with_prefix() {
     let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let client = fake_spec_connected("test-svr", BTreeMap::new(), tx);
     client.connect().await.expect("should connect");
 
-    if !wait_connected(&client, 5000).await {
-        eprintln!("server not connected; skipping");
-        return;
-    }
+    assert!(
+        wait_connected(&client, 5000).await,
+        "fake-mcp-server must reach a connected state"
+    );
 
     let tools = client.cached_tools().expect("should have cached tools");
     assert!(!tools.is_empty(), "fake server should return tools");
@@ -104,16 +110,16 @@ async fn test_available_tools_projects_mcp_with_prefix() {
 // ── AC-2: execute routes mcp__ prefix to client ─────────────────────────────
 
 #[tokio::test]
-#[cfg(feature = "mcp")]
+#[cfg(feature = "test-fake-mcp")]
 async fn test_execute_routes_mcp_prefix_to_client() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let client = fake_spec_connected("echo-svr", BTreeMap::new(), tx);
     client.connect().await.expect("should connect");
 
-    if !wait_connected(&client, 5000).await {
-        eprintln!("server not connected; skipping");
-        return;
-    }
+    assert!(
+        wait_connected(&client, 5000).await,
+        "fake-mcp-server must reach a connected state"
+    );
 
     let result = client
         .call_tool("echo", json!({"text": "hello"}), CancellationToken::new())
@@ -133,16 +139,11 @@ async fn test_execute_routes_mcp_prefix_to_client() {
     );
 }
 
-// ── AC-8: include_builtin = false yields MCP-only catalog ───────────────────
+// ── Parsing: unregistered server names are syntactically valid ──────────────
 
-#[tokio::test]
-#[cfg(feature = "mcp")]
-async fn test_execute_returns_not_found_when_server_absent() {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-
-    // Build a composite with a server that won't connect
-    let _client = fake_spec_connected("absent", BTreeMap::new(), tx);
-    // Use the parse helper directly to verify the routing path
+#[test]
+fn test_parse_mcp_tool_name_parses_unregistered_server_name() {
+    // Parsing a wire name is pure and does not require a configured or connected server.
     let result = rustain::adapters::mcp::tool_projection::parse_mcp_tool_name("mcp__absent__echo");
     assert!(result.is_some(), "should parse the name");
     assert_eq!(result.unwrap(), ("absent", "echo"));
@@ -490,7 +491,7 @@ fn test_plan_mode_denies_non_read_only_mcp_tool() {
 }
 
 #[tokio::test]
-#[cfg(feature = "mcp")]
+#[cfg(feature = "test-fake-mcp")]
 async fn test_list_changed_refreshes_cache() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let mut env = BTreeMap::new();

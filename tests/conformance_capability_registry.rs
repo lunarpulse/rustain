@@ -9,7 +9,7 @@ mod common;
 
 use std::sync::Arc;
 
-#[cfg(feature = "mcp")]
+#[cfg(feature = "test-fake-mcp")]
 use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
 use rustain::domain::events::{AppEvent, CapabilityEvent};
 use rustain::domain::models::capability_id::CapabilityId;
@@ -369,7 +369,7 @@ fn test_no_new_eventbus_bypass_for_capability_events() {
 /// McpProvider's discover() output matches the server's declared tools.
 /// Uses the `CompositeToolsetAdapter` end-to-end path through
 /// `discover_and_register_all`.
-#[cfg(feature = "mcp")]
+#[cfg(feature = "test-fake-mcp")]
 #[test]
 #[serial_test::serial]
 fn test_mcp_provider_discover_round_trip() {
@@ -395,7 +395,10 @@ fn test_mcp_provider_discover_round_trip() {
         client.set_self_weak(std::sync::Arc::downgrade(&client));
 
         // Connect to populate cached_tools
-        let _ = client.connect().await;
+        client
+            .connect()
+            .await
+            .expect("fake-mcp-server must connect");
 
         let builtin: std::sync::Arc<dyn rustain::domain::ports::ToolSetPort> =
             std::sync::Arc::new(rustain::adapters::noop::NoOpToolSet);
@@ -636,7 +639,7 @@ async fn test_skill_provider_invoke_returns_invoke_error_phase_a() {
     ));
 }
 
-#[cfg(feature = "mcp")]
+#[cfg(feature = "test-fake-mcp")]
 #[serial_test::serial]
 #[tokio::test]
 async fn test_registry_holds_all_three_protocols() {
@@ -677,7 +680,10 @@ async fn test_registry_holds_all_three_protocols() {
     };
     let client = Arc::new(McpClientAdapter::new(spec.clone(), None));
     client.set_self_weak(Arc::downgrade(&client));
-    let _ = client.connect().await;
+    client
+        .connect()
+        .await
+        .expect("fake-mcp-server must connect");
 
     // SkillActivator with 3 programmatic skills
     use rustain::adapters::skill_registry::SkillRegistry;
@@ -891,7 +897,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
     );
 }
 
-#[cfg(feature = "mcp")]
+#[cfg(feature = "test-fake-mcp")]
 #[serial_test::serial]
 #[tokio::test]
 async fn test_catalog_delta_added_removed_correctness() {
@@ -930,7 +936,10 @@ async fn test_catalog_delta_added_removed_correctness() {
     };
     let client = Arc::new(McpClientAdapter::new(spec.clone(), None));
     client.set_self_weak(Arc::downgrade(&client));
-    let _ = client.connect().await;
+    client
+        .connect()
+        .await
+        .expect("fake-mcp-server must connect");
 
     let composite = CompositeToolsetAdapter::new(
         builtin,

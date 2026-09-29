@@ -1,0 +1,19 @@
+{
+  "FIXTURE_room_journal_pre_18_2.jsonl": {
+    "sha256": "df58cfe5549ad99e6bf2368002a3ea913a90203aacc27ff319907c1ad8050bd9",
+    "provenance": {
+      "shape_of": "rustain@6ca43eb .rustain/rooms/room-<hash>.jsonl",
+      "authored": "2026-07-26",
+      "story": "18.2"
+    }
+  },
+  "FIXTURE_room_journal_current_18_2.jsonl": {
+    "sha256": "d9c1a5f4e3233e8841eb835b39c0b41c7dd32f1d60dbbe2855be45c2dde5adc2",
+    "provenance": {
+      "shape_of": "Story 18.2 current JournalEntry with persisted direction and task; seq 8 appended by Story 19.16d (recipient_item_retracted)",
+      "authored": "2026-07-27",
+      "amended": "2026-09-24",
+      "story": "18.2"
+    }
+  }
+}

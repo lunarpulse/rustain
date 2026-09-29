@@ -36,7 +36,9 @@
 
 #![cfg(unix)]
 
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -141,6 +143,8 @@ impl TurnDriver for SocketTurnDriver {
             synthetic,
             images: vec![],
             origin: ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
 
         // row 15 — the daemon owns the turn; no local handle. Cancellation would be
@@ -200,10 +204,22 @@ where
 /// (see the module-level reconciliation note).
 fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
     let mut content = String::new();
-    let mut outputs: HashMap<u64, (&str, bool)> = HashMap::new();
+    // Carry the display-diff state through, exactly as the two sibling
+    // reconstruction paths do (`Conversation::…` and the chat-pane shim).
+    //
+    // Story 19.1 code review, HIGH: this path used to keep only
+    // `(content, is_error)` and hardcode the diff away, so an attached client
+    // expanding a completed overwrite fell through to the input-derived
+    // all-additions branch — painting a new-file diff over a replaced file,
+    // which is precisely what ruling A4 forbids.
+    let mut outputs: HashMap<u64, (&str, bool, &crate::domain::models::WriteDiffState)> =
+        HashMap::new();
     for part in &turn.parts {
         if let TurnPart::ToolResult { refs, output, .. } = part {
-            outputs.insert(refs.0, (output.content.as_str(), output.is_error));
+            outputs.insert(
+                refs.0,
+                (output.content.as_str(), output.is_error, &output.diff),
+            );
         }
     }
     let mut tool_calls = Vec::new();
@@ -226,9 +242,10 @@ fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
                     InvocationStatus::Cancelled => Some("⊘ Cancelled"),
                     InvocationStatus::Running | InvocationStatus::Pending => None,
                 };
-                let result = outputs.get(&id.0).map(|(c, is_err)| ToolResultInfo {
+                let result = outputs.get(&id.0).map(|(c, is_err, diff)| ToolResultInfo {
                     content: (*c).to_string(),
                     is_error: *is_err,
+                    diff: (*diff).clone(),
                 });
                 tool_calls.push(ToolCallInfo {
                     id: tool_call_id_for(&turn.id, *id),
@@ -255,6 +272,8 @@ fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
         synthetic: false,
         images: vec![],
         origin: ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 
@@ -275,7 +294,151 @@ fn system_message(content: impl Into<String>) -> ChatMessage {
         synthetic: true,
         images: vec![],
         origin: ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
+}
+
+// ── Story 18.3c (AC3/AC5) — peer response decision cores ────────────────────
+//
+// The daemon owns every peer draft and every auto-sent row; this client only
+// ever *derives* its card state from the seeded conversation. Never loop-local
+// truth: detach/re-attach replays the pending card exactly (AC3's surface
+// contract), and a second attached client derives the same view.
+
+/// Which stage a pending peer response is in — each renders a different card
+/// and arms a different key set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PeerResponseStage {
+    /// `notify-and-wait`: no draft exists; the operator writes the response.
+    AwaitingOperator,
+    /// `notify-and-draft`, composition still running: nothing to resolve yet.
+    Drafting,
+    /// `notify-and-draft`, buffered and ready for the decision grammar.
+    Ready(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPeerResponse {
+    /// The inbound node's `AgentId` string — the row id's `peer-response-`
+    /// suffix, which is exactly what `ClientFrame::ResolvePeerDraft` names.
+    node: String,
+    stage: PeerResponseStage,
+    /// Additional pendings behind this one (FIFO order is message order).
+    queued: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingConsentApproval {
+    request_id: crate::domain::models::RequestId,
+    tool: String,
+    input_preview: String,
+}
+
+/// The first pending peer-response row, if any. A row is pending iff it is the
+/// wait placeholder, the drafting placeholder, or the unresolved approval card
+/// — settled rows (sent content, a rejected card) never classify.
+fn pending_peer_response(conversation: &Conversation) -> Option<PendingPeerResponse> {
+    use crate::adapters::daemon::response_modes::{
+        AWAITING_RESPONSE_PLACEHOLDER, DRAFT_APPROVAL_PREFIX, DRAFTING_PLACEHOLDER,
+    };
+    let mut pendings = conversation.messages.iter().filter_map(|message| {
+        let node = message.id.strip_prefix("peer-response-")?;
+        if message.content == AWAITING_RESPONSE_PLACEHOLDER {
+            Some((node, PeerResponseStage::AwaitingOperator))
+        } else if message.content == DRAFTING_PLACEHOLDER {
+            Some((node, PeerResponseStage::Drafting))
+        } else {
+            message
+                .content
+                .strip_prefix(DRAFT_APPROVAL_PREFIX)
+                .map(|draft| (node, PeerResponseStage::Ready(draft.to_owned())))
+        }
+    });
+    let (node, stage) = pendings.next()?;
+    Some(PendingPeerResponse {
+        node: node.to_owned(),
+        stage,
+        queued: pendings.count(),
+    })
+}
+
+/// The most recent retract target: an agent-composed row not yet retracted.
+/// Pending draft rows are never candidates — they carry the default
+/// (human-written) authorship until resolution, so AC5's "drafts never show a
+/// retract affordance" holds by construction here.
+fn latest_retractable(conversation: &Conversation) -> Option<ChatMessage> {
+    conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.authorship == crate::domain::models::MessageAuthorship::AgentComposed
+                && message.retracted_at_ms.is_none()
+        })
+        .cloned()
+}
+
+fn preview_line(content: &str, max_chars: usize) -> String {
+    let one_line = content.replace('\n', " ");
+    if one_line.chars().count() <= max_chars {
+        one_line
+    } else {
+        let mut out: String = one_line.chars().take(max_chars.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// The pending-response card, bottom-anchored like the consolidation card.
+/// Labels name exactly the keys the loop dispatches (ADR-16-02 parity).
+fn peer_response_card_lines(pending: &PendingPeerResponse) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::text::Line;
+    let queued = if pending.queued > 0 {
+        format!("  [{} more queued]", pending.queued)
+    } else {
+        String::new()
+    };
+    match &pending.stage {
+        PeerResponseStage::AwaitingOperator => vec![
+            Line::from(format!("Peer is waiting for your response.{queued}")),
+            Line::from("Type your reply below — Enter sends it.  [n] Decline".to_owned()),
+        ],
+        PeerResponseStage::Drafting => vec![Line::from(
+            "Agent is drafting a reply to the peer…".to_owned(),
+        )],
+        PeerResponseStage::Ready(draft) => vec![
+            Line::from(format!("Peer draft: {}", preview_line(draft, 72))),
+            Line::from(format!(
+                "[y] Approve  [e] Edit  [n] Reject  —  or type your own reply + Enter{queued}"
+            )),
+        ],
+    }
+}
+
+fn consent_approval_card_lines(
+    pending: &PendingConsentApproval,
+    queued: usize,
+) -> Vec<ratatui::text::Line<'static>> {
+    let mut lines: Vec<_> = pending
+        .input_preview
+        .lines()
+        .map(|line| ratatui::text::Line::from(line.to_owned()))
+        .collect();
+    if queued > 0 {
+        lines.push(ratatui::text::Line::from(format!(
+            "  [{queued} more queued]"
+        )));
+    }
+    lines
+}
+
+fn retract_confirm_lines(preview: &str) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::text::Line;
+    vec![
+        Line::from(format!("Retract this auto-sent message? {}", preview)),
+        Line::from("[y] Retract — marked in your log, never deleted  [n] Keep".to_owned()),
+    ]
 }
 
 fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
@@ -284,14 +447,17 @@ fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
         ToolCall::Success { result, .. } => Some(ToolResultInfo {
             content: result.output.clone(),
             is_error: result.is_error,
+            diff: crate::domain::models::WriteDiffState::NotAWrite,
         }),
         ToolCall::Error { error, .. } => Some(ToolResultInfo {
             content: error.clone(),
             is_error: true,
+            diff: crate::domain::models::WriteDiffState::NotAWrite,
         }),
         ToolCall::Cancelled { reason, .. } => Some(ToolResultInfo {
             content: reason.clone(),
             is_error: true,
+            diff: crate::domain::models::WriteDiffState::NotAWrite,
         }),
         _ => None,
     };
@@ -353,7 +519,7 @@ pub fn apply_client_event(
     conversation: &mut Conversation,
     streaming: &mut StreamingState,
     reducer: &mut ReducerState,
-    status: &mut StatusState,
+    state: &mut TuiState,
     permission_mode: &mut PermissionMode,
     clock: &dyn Clock,
 ) -> bool {
@@ -369,9 +535,9 @@ pub fn apply_client_event(
                 conversation.messages.push(turn_to_chat_message(&committed));
             }
             if let ChunkAction::TurnComplete { .. } = action {
-                *status = StatusState::Idle;
+                state.status = StatusState::Idle;
             } else {
-                *status = StatusState::Streaming;
+                state.status = StatusState::Streaming;
             }
             true
         }
@@ -400,10 +566,182 @@ pub fn apply_client_event(
             }
             true
         }
-        // ModeChanged/SystemNotice/Tool handled above; everything else
-        // (Approval/Mcp*/Capability/ConfigReloaded + any future variant) is not
-        // acted on by the thin client — ignore gracefully, never panic.
+        RawEventKind::DomainEvent(payload) => {
+            crate::adapters::tui::handlers::transparency::apply_domain_event(state, &payload)
+        }
+        // ModeChanged/SystemNotice/Tool/DomainEvent handled above; everything
+        // else (Approval/Mcp*/Capability/ConfigReloaded + any future variant)
+        // is not acted on by the thin client — ignore gracefully, never panic.
         _ => false,
+    }
+}
+
+/// What an attached session does with one submitted input line that may be a
+/// `/team` command.
+///
+/// Extracted so the intercept table is reachable by a test: the match it holds
+/// is **not** compile-forced. A new `/team` verb with no arm here compiles,
+/// falls through to `driver.submit`, and becomes a model prompt — which is
+/// exactly what happened to `log`, `trust`, `status` and `send`.
+#[derive(Debug)]
+enum AttachedTeamLine {
+    /// An intercepted verb: send this frame; never a model turn.
+    Frame(ClientFrame),
+    /// A malformed `/team` line: flash the parser's usage error; never a model
+    /// turn.
+    Refused(String),
+    /// Not intercepted here — the pre-existing fall-through to the model.
+    PassThrough,
+    /// Story 19.16g — `/team log …`: a local read of this workspace's journal,
+    /// rendered in-chat; ⛔ never a model turn and never a daemon frame.
+    LocalLog(crate::adapters::tui::handlers::team_command::TeamLogArgs),
+}
+
+/// Story 19.16g — what one composer key did on the attached client.
+#[derive(Debug)]
+enum ComposerOutcome {
+    /// Edited, ignored, or refused aloud — nothing further to do.
+    Handled,
+    /// An intercepted `/team` frame was queued (never a model turn).
+    FrameSent,
+    /// Run a local `/team log` read now.
+    LocalLog(crate::adapters::tui::handlers::team_command::TeamLogArgs),
+    /// Proceed to the draft-resolution / model-submission path.
+    Submit(String),
+}
+
+/// Story 19.16g — composer routing for `Char`, `Backspace` and `Enter`,
+/// extracted from `run_attached` (its production caller) so the read-only
+/// exception is reachable by a test. A read-only client may now edit its
+/// composer and run the **local** `/team log`; every other submission — a
+/// model turn, a draft resolution, a daemon-mutating `/team` frame — stays
+/// behind the existing read-only refusal, with no frame sent.
+fn attached_composer_key(
+    code: crossterm::event::KeyCode,
+    read_only: bool,
+    input: &mut String,
+    state: &mut TuiState,
+    frame_tx: &mpsc::UnboundedSender<ClientFrame>,
+) -> ComposerOutcome {
+    use crossterm::event::KeyCode;
+    let flash = |state: &mut TuiState, message: String| {
+        state.status = StatusState::Flash {
+            message,
+            remaining_ms: 1500,
+        };
+        state.needs_redraw = true;
+    };
+    match code {
+        KeyCode::Char(c) => input.push(c),
+        KeyCode::Backspace => {
+            input.pop();
+        }
+        KeyCode::Enter if input.trim().is_empty() => {
+            if read_only {
+                // AC6 #3 — inert, never silent.
+                flash(state, "read-only — can't send here".into());
+            }
+        }
+        KeyCode::Enter => match attached_team_line(input) {
+            AttachedTeamLine::LocalLog(args) => {
+                input.clear();
+                return ComposerOutcome::LocalLog(args);
+            }
+            // AC6 #3 — inert, never silent; the line stays editable.
+            _ if read_only => flash(state, "read-only — can't send here".into()),
+            AttachedTeamLine::Frame(frame) => {
+                input.clear();
+                let _ = frame_tx.send(frame);
+                return ComposerOutcome::FrameSent;
+            }
+            // A malformed `/team` line must never become a model turn —
+            // consume it and show the parser's usage error.
+            AttachedTeamLine::Refused(error) => {
+                input.clear();
+                flash(state, error);
+            }
+            AttachedTeamLine::PassThrough => {
+                return ComposerOutcome::Submit(std::mem::take(input));
+            }
+        },
+        _ => {}
+    }
+    ComposerOutcome::Handled
+}
+
+/// Story 19.16g — after the attached draw: only a frame that actually
+/// completed presents the `team-log` block it painted into the chat viewport.
+/// A failed draw, or a layout too small to paint the chat, presents nothing.
+fn after_attached_draw(state: &mut TuiState, drawn: bool, visible_feedback_ids: &[String]) {
+    if drawn {
+        state.log_visits_presented(visible_feedback_ids);
+    }
+}
+
+fn attached_team_line(text: &str) -> AttachedTeamLine {
+    use crate::adapters::tui::handlers::team_command::{TeamCommandArgs, parse_team_command};
+
+    // Story 19.17: accept the `/team` word only at an input boundary.
+    // Bare `/team` and whitespace-delimited verbs are local; `/teamwork`
+    // remains an ordinary model prompt. Leading pasted whitespace is ignored
+    // so an attached send or removal cannot evade the intercept table.
+    let line = text.trim_start();
+    let Some(arg) = line.strip_prefix("/team") else {
+        return AttachedTeamLine::PassThrough;
+    };
+    if !arg.is_empty() && !arg.starts_with(char::is_whitespace) {
+        return AttachedTeamLine::PassThrough;
+    }
+    let arg = arg.trim_start();
+    match parse_team_command(Some(arg)) {
+        Ok(TeamCommandArgs::Acknowledge { item_id }) => {
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { item_id })
+        }
+        // A destructive verb must not become a model prompt either: the
+        // daemon's own refusal reaches the operator as `[daemon error] …`.
+        Ok(TeamCommandArgs::Remove { item_id }) => {
+            AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { item_id })
+        }
+        // Story 19.16b AC3(h)1 — ⛔ NOT a fall-through. The board reads every
+        // configured peer over this session's OWN A2A egress, and an attached
+        // session holds none: `AttachServer` is composed without an
+        // `A2aDelegationRuntime` (the daemon installs its egress on the
+        // capability composite, never on the attach server). Falling through
+        // would turn `/team board` into an LLM prompt — exactly what happened
+        // to `log`, `trust`, `status` and `send`. Refuse aloud instead, and
+        // say where the verb does work.
+        // ⚠ Sized for the 1.5 s single-line status flash `Refused` routes to
+        // (19.16b review): the actionable clause must survive a narrow
+        // terminal, so the explanation lives in the comment, not the flash.
+        Ok(TeamCommandArgs::Board { .. }) => AttachedTeamLine::Refused(
+            "'/team board' needs this session's own A2A egress — run it in a non-attached \
+             session."
+                .to_owned(),
+        ),
+        // Story 19.16f AC3(c) — the cross-host retract, the SECOND verb that
+        // refuses aloud here (`DF-19-16B-BOARD-ABSENT-ON-THE-ATTACHED-RAIL`,
+        // owner 19.21): it is a write over this session's own egress, which an
+        // attached session does not hold. ⛔ Falling through would type a
+        // destructive verb at the model. ⛔ Not the same-host `Ctrl+X` retract
+        // either — that retracts this host's auto-sent message, a different
+        // object, and its frame is untouched.
+        Ok(TeamCommandArgs::Retract { .. }) => AttachedTeamLine::Refused(
+            "'/team retract' needs this session's own A2A egress — run it in a non-attached \
+             session."
+                .to_owned(),
+        ),
+        // Story 19.17: the attached client has no per-session A2A send egress.
+        Ok(TeamCommandArgs::Send { .. }) => AttachedTeamLine::Refused(
+            "'/team send' needs this session's own A2A egress — run it in a non-attached \
+             session."
+                .to_owned(),
+        ),
+        // Story 19.16g — a local read of this workspace's journal; the
+        // attached client is a Unix-socket client of the same filesystem.
+        Ok(TeamCommandArgs::Log(args)) => AttachedTeamLine::LocalLog(args),
+        // Other `/team` verbs keep their pre-existing fall-through.
+        Ok(_) => AttachedTeamLine::PassThrough,
+        Err(error) => AttachedTeamLine::Refused(error),
     }
 }
 
@@ -469,6 +807,14 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     > = None;
     let mut pending_consolidation_token: Option<crate::adapters::daemon::protocol::ProposalToken> =
         None;
+    // Story 18.3c AC3/AC5 — the pending peer response itself is re-derived
+    // from the conversation every frame (never loop-local truth); only the
+    // composer-prefill correlation and the retract confirmation live here.
+    let mut peer_draft_edit_node: Option<String> = None;
+    let mut retract_confirm: Option<(String, String)> = None;
+    // Consent cards are daemon-owned and re-emitted after attach. This FIFO is
+    // only the current socket's rendering order, never the durable truth.
+    let mut pending_consent_approvals = std::collections::VecDeque::<PendingConsentApproval>::new();
 
     // ── Terminal ──
     let mut term = terminal::setup(false)?;
@@ -479,14 +825,30 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
         String,
         crate::adapters::tui::widgets::tool_block::ToolBlockState,
     > = HashMap::new();
-    let feedback_blocks: BTreeMap<String, crate::domain::models::FeedbackBlock> = BTreeMap::new();
+    // Story 19.16g — local, read-only journal access for the reminder and
+    // `/team log`; nothing here creates a journal or sends a frame.
+    let log_service = crate::infrastructure::transparency::TransparencyService::new(
+        std::sync::Arc::new(
+            crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                workspace,
+            ),
+        ),
+        workspace.to_path_buf(),
+    );
+    let mut log_awareness =
+        crate::infrastructure::transparency_awareness::LogAwarenessObserver::for_workspace(
+            workspace,
+        );
+    // Attached clients render the same feedback blocks as the local TUI so
+    // forwarded transparency room/failure events have the same visible result.
 
     use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
     use futures::StreamExt;
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     let loop_result: Result<()> = loop {
-        let _ = term.draw(|f| {
+        let mut visible_feedback_ids: Vec<String> = Vec::new();
+        let drawn = term.draw(|f| {
             let area = f.area();
             let Some(layout) = crate::adapters::tui::layout::compute_layout(
                 area,
@@ -498,7 +860,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             ) else {
                 return;
             };
-            chat_pane::render_attached(
+            visible_feedback_ids = chat_pane::render_attached(
                 f,
                 layout.chat_pane,
                 &conversation,
@@ -508,8 +870,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 &state.theme,
                 &mut tab_render_state,
                 &tool_block_states,
-                &feedback_blocks,
-            );
+                &state.feedback_blocks,
+            )
+            .visible_feedback_ids;
             // Story 12.2d AC3 — render the consolidation card with the IDENTICAL
             // bottom-anchored inline grammar the local TUI uses (bordered + accent,
             // event_loop.rs ~8925), not a hand-rolled borderless paragraph.
@@ -520,6 +883,38 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 render_bottom_anchored_card(
                     f.buffer_mut(),
                     card_lines,
+                    state.theme.colors.accent,
+                    layout.chat_pane,
+                );
+            }
+            // Story 18.3c AC3/AC5 — the peer response card (and the retract
+            // confirmation, which takes precedence while open) ride the same
+            // bottom-anchored inline grammar as the consolidation card.
+            use crate::adapters::tui::widgets::inline_card::{
+                render_bottom_anchored_card, render_bottom_anchored_decision_card,
+            };
+            if let Some((_, ref preview)) = retract_confirm {
+                render_bottom_anchored_card(
+                    f.buffer_mut(),
+                    retract_confirm_lines(preview),
+                    state.theme.colors.auto_sent_border,
+                    layout.chat_pane,
+                );
+            } else if let Some(pending) = pending_peer_response(&conversation) {
+                render_bottom_anchored_card(
+                    f.buffer_mut(),
+                    peer_response_card_lines(&pending),
+                    state.theme.colors.accent,
+                    layout.chat_pane,
+                );
+            }
+            if let Some(pending) = pending_consent_approvals.front() {
+                render_bottom_anchored_decision_card(
+                    f.buffer_mut(),
+                    consent_approval_card_lines(
+                        pending,
+                        pending_consent_approvals.len().saturating_sub(1),
+                    ),
                     state.theme.colors.accent,
                     layout.chat_pane,
                 );
@@ -554,7 +949,8 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 DensityMode::Focus,
                 false,
                 Some(&attach_info),
-            );
+            state.log_awareness.display,
+);
             input_box::render(
                 f,
                 layout.input_area,
@@ -575,12 +971,61 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 },
             );
         });
+        after_attached_draw(&mut state, drawn.is_ok(), &visible_feedback_ids);
 
         tokio::select! {
             maybe_ev = events.next() => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                        // One derivation per key event: the pending peer
+                        // response this client's keys would act on.
+                        let pending_peer = pending_peer_response(&conversation);
+                        // Any further keypress dismisses the retract confirmation.
+                        state.feedback_blocks.remove("peer-retract");
                         match (key.code, key.modifiers) {
+                            // Story 18.3d AC1 — sender-consent Approval Pattern.
+                            // The guard is the daemon-derived pending FIFO, so
+                            // these single-letter keys are inert everywhere else.
+                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && !pending_consent_approvals.is_empty() =>
+                            {
+                                if let Some(pending) = pending_consent_approvals.pop_front() {
+                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
+                                        request_id: pending.request_id,
+                                        outcome: crate::domain::models::ApprovalOutcome::Once,
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('a'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && !pending_consent_approvals.is_empty() =>
+                            {
+                                if let Some(pending) = pending_consent_approvals.pop_front() {
+                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
+                                        request_id: pending.request_id,
+                                        outcome: crate::domain::models::ApprovalOutcome::AlwaysAndSave {
+                                            scope: crate::domain::models::ApprovalScope::Tool(
+                                                pending.tool,
+                                            ),
+                                        },
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
+                                if !m.contains(KeyModifiers::CONTROL)
+                                    && !pending_consent_approvals.is_empty() =>
+                            {
+                                if let Some(pending) = pending_consent_approvals.pop_front() {
+                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
+                                        request_id: pending.request_id,
+                                        outcome: crate::domain::models::ApprovalOutcome::Reject {
+                                            feedback: None,
+                                        },
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
                             // Story 12.2d AC4/AC5 — consolidation card intercept.
                             (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
                                 && pending_consolidation_token.is_some() =>
@@ -608,22 +1053,178 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                 pending_consolidation_card = None;
                                 state.needs_redraw = true;
                             }
+                            // Story 18.3c AC5 — the retract confirmation owns
+                            // y/n/Esc while open (Approval grammar, never a
+                            // bare key on a transient surface).
+                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && retract_confirm.is_some() =>
+                            {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't retract here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some((message_id, _)) = retract_confirm.take() {
+                                    let _ = frame_tx.send(ClientFrame::RetractAutoResponse {
+                                        message_id,
+                                        target_seq: None,
+                                    });
+                                    state.feedback_blocks.insert(
+                                        "peer-retract".to_owned(),
+                                        crate::domain::models::FeedbackBlock {
+                                            id: "peer-retract".to_owned(),
+                                            level: crate::domain::models::FeedbackLevel::Info,
+                                            message: "Retracted. Marked in your log — never deleted.\nWhat was already read, was read."
+                                                .to_owned(),
+                                            actions: vec![],
+                                        },
+                                    );
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
+                                if !m.contains(KeyModifiers::CONTROL)
+                                    && retract_confirm.is_some() =>
+                            {
+                                retract_confirm = None;
+                                state.needs_redraw = true;
+                            }
+                            // Story 18.3c AC3 — the draft decision grammar,
+                            // armed only while a Ready draft card owns the
+                            // surface (constraint 4: no bare keys without a
+                            // real non-Input surface owner).
+                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && matches!(&pending_peer, Some(p) if matches!(p.stage, PeerResponseStage::Ready(_))) =>
+                            {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't resolve here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some(p) = &pending_peer {
+                                    let _ = frame_tx.send(ClientFrame::ResolvePeerDraft {
+                                        node: p.node.clone(),
+                                        action: crate::adapters::daemon::protocol::PeerDraftAction::Approve,
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('e'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && matches!(&pending_peer, Some(p) if matches!(p.stage, PeerResponseStage::Ready(_))) =>
+                            {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't edit here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some(p) = &pending_peer
+                                    && let PeerResponseStage::Ready(draft) = &p.stage
+                                {
+                                    // Prefill FROM the draft: submitting this
+                                    // composer resolves as Edit, and the
+                                    // `[auto-sent]` tag survives (AC3).
+                                    input = draft.clone();
+                                    peer_draft_edit_node = Some(p.node.clone());
+                                }
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('n'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && matches!(&pending_peer, Some(p) if !matches!(p.stage, PeerResponseStage::Drafting)) =>
+                            {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't decline here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some(p) = &pending_peer {
+                                    let _ = frame_tx.send(ClientFrame::ResolvePeerDraft {
+                                        node: p.node.clone(),
+                                        action: crate::adapters::daemon::protocol::PeerDraftAction::Reject,
+                                    });
+                                }
+                                state.needs_redraw = true;
+                            }
+                            // Story 18.3c AC5 — Ctrl+X opens the retract
+                            // confirmation for the most recent auto-sent row.
+                            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                                if read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "read-only — can't retract here".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                } else if let Some(row) = latest_retractable(&conversation) {
+                                    retract_confirm =
+                                        Some((row.id.clone(), preview_line(&row.content, 48)));
+                                } else {
+                                    state.status = StatusState::Flash {
+                                        message: "no auto-sent message to retract".into(),
+                                        remaining_ms: 1500,
+                                    };
+                                }
+                                state.needs_redraw = true;
+                            }
                             // AC4 — detach (keybinding only, no CLI verb).
                             (KeyCode::Esc, _)
                             | (KeyCode::Char('d'), KeyModifiers::CONTROL)
                             | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                                 break Ok(());
                             }
-                            (KeyCode::Enter, _) => {
-                                if read_only {
-                                    // AC6 #3 — inert, never silent.
-                                    state.status = StatusState::Flash {
-                                        message: "read-only — can't send here".into(),
-                                        remaining_ms: 1500,
-                                    };
-                                } else if !input.trim().is_empty() {
+                            (KeyCode::Enter, _) | (KeyCode::Backspace, _) => {
+                                let text = match attached_composer_key(
+                                    key.code,
+                                    read_only,
+                                    &mut input,
+                                    &mut state,
+                                    &frame_tx,
+                                ) {
+                                    ComposerOutcome::Handled => continue,
+                                    ComposerOutcome::FrameSent => {
+                                        auto_scroll = true;
+                                        continue;
+                                    }
+                                    // Story 19.16g — a user-initiated log may
+                                    // scroll its own result into view.
+                                    ComposerOutcome::LocalLog(args) => {
+                                        for notice in crate::infrastructure::runtime::transparency_bridge::attached_team_log(
+                                            &log_service,
+                                            &mut state,
+                                            &args,
+                                        )
+                                        .await
+                                        {
+                                            conversation.messages.push(system_message(notice));
+                                        }
+                                        auto_scroll = true;
+                                        continue;
+                                    }
+                                    ComposerOutcome::Submit(text) => text,
+                                };
+                                if let Some(node) = peer_draft_edit_node.take() {
+                                    // Prefilled FROM the draft (the [e]
+                                    // path): resolves as Edit, the
+                                    // `[auto-sent]` tag survives (AC3).
+                                    let _ = frame_tx.send(ClientFrame::ResolvePeerDraft {
+                                        node,
+                                        action: crate::adapters::daemon::protocol::PeerDraftAction::Edit {
+                                            content: text,
+                                        },
+                                    });
+                                } else if let Some(p) = &pending_peer
+                                    && !matches!(p.stage, PeerResponseStage::Drafting)
+                                {
+                                    // Blank-composer "write my own" — the
+                                    // ONLY tag-clearing path, and the
+                                    // daemon journals it as such (AC3's
+                                    // tag-laundering rule).
+                                    let _ = frame_tx.send(ClientFrame::ResolvePeerDraft {
+                                        node: p.node.clone(),
+                                        action: crate::adapters::daemon::protocol::PeerDraftAction::WriteOwn {
+                                            content: text,
+                                        },
+                                    });
+                                } else {
                                     let sub = UserSubmission {
-                                        text: std::mem::take(&mut input),
+                                        text,
                                         images: vec![],
                                         synthetic: false,
                                         activation_set: None,
@@ -641,11 +1242,6 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                     auto_scroll = true;
                                 }
                             }
-                            (KeyCode::Backspace, _) => {
-                                if !read_only {
-                                    input.pop();
-                                }
-                            }
                             (KeyCode::PageUp, _) => {
                                 scroll_offset = scroll_offset.saturating_add(5);
                                 auto_scroll = false;
@@ -656,15 +1252,16 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                     auto_scroll = true;
                                 }
                             }
-                            (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
-                                if read_only {
-                                    state.status = StatusState::Flash {
-                                        message: "read-only — can't send here".into(),
-                                        remaining_ms: 1500,
-                                    };
-                                } else {
-                                    input.push(c);
-                                }
+                            (KeyCode::Char(_), m) if !m.contains(KeyModifiers::CONTROL) => {
+                                // Story 19.16g: read-only composers edit too;
+                                // only submission is refused.
+                                attached_composer_key(
+                                    key.code,
+                                    read_only,
+                                    &mut input,
+                                    &mut state,
+                                    &frame_tx,
+                                );
                             }
                             _ => {}
                         }
@@ -686,7 +1283,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             &mut conversation,
                             &mut streaming,
                             &mut reducer,
-                            &mut state.status,
+                            &mut state,
                             &mut permission_mode,
                             &clock,
                         );
@@ -700,8 +1297,20 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     Ok(Some(DaemonFrame::Error(e))) => {
                         conversation.messages.push(system_message(format!("[daemon error] {e}")));
                     }
+                    Ok(Some(DaemonFrame::ApprovalRequest {
+                        tool,
+                        request_id,
+                        input_preview,
+                        ..
+                    })) if tool == "a2a/sender-consent" => {
+                        pending_consent_approvals.push_back(PendingConsentApproval {
+                            request_id,
+                            tool,
+                            input_preview,
+                        });
+                        state.needs_redraw = true;
+                    }
                     Ok(Some(DaemonFrame::ApprovalRequest { tool, request_id, .. })) => {
-                        // Rich approval card over attach is 12.2d; surface it honestly.
                         conversation.messages.push(system_message(format!(
                             "[approval needed] {tool} (id {}) — approve from the local TUI for now.",
                             request_id.0
@@ -734,7 +1343,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     Err(e) => break Err(anyhow!("attach socket read error: {e}")),
                 }
             }
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                log_awareness.tick(&mut state.log_awareness);
+            }
         }
     };
 
@@ -757,6 +1368,120 @@ mod tests {
     use std::time::Instant;
     use tokio::net::UnixStream;
 
+    #[test]
+    fn consent_card_queue_indicator_is_derived_from_the_daemon_fifo() {
+        let pending = PendingConsentApproval {
+            request_id: crate::domain::models::RequestId::new(),
+            tool: "a2a/sender-consent".to_owned(),
+            input_preview: "Consent required\n[y] Allow once  [a] Always allow  [n] Decline"
+                .to_owned(),
+        };
+        let text = consent_approval_card_lines(&pending, 2)
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("[2 more queued]"));
+        assert!(text.contains("[y] Allow once  [a] Always allow  [n] Decline"));
+    }
+
+    // ── Story 18.3c (AC3/AC5) — peer response decision-core coverage ────────
+
+    fn peer_row(id: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            id: id.to_owned(),
+            role: MessageRole::Assistant,
+            content: content.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pending_classification_covers_every_stage_and_only_pending_rows() {
+        use crate::adapters::daemon::response_modes::{
+            AWAITING_RESPONSE_PLACEHOLDER, DRAFT_APPROVAL_PREFIX, DRAFTING_PLACEHOLDER,
+        };
+        let conversation = Conversation {
+            messages: vec![
+                peer_row("peer-response-node-a", AWAITING_RESPONSE_PLACEHOLDER),
+                peer_row("peer-response-node-b", DRAFTING_PLACEHOLDER),
+                peer_row(
+                    "peer-response-node-c",
+                    &format!("{DRAFT_APPROVAL_PREFIX}draft body"),
+                ),
+                peer_row("peer-response-node-d", "already sent"),
+                peer_row("peer-response-node-e", "[draft rejected]\nsomething"),
+            ],
+            ..Default::default()
+        };
+        let pending = pending_peer_response(&conversation).expect("a pending exists");
+        assert_eq!(pending.node, "node-a", "FIFO is message order");
+        assert_eq!(pending.stage, PeerResponseStage::AwaitingOperator);
+        assert_eq!(pending.queued, 2, "settled rows never classify as pending");
+    }
+
+    #[test]
+    fn ready_stage_strips_the_approval_prefix() {
+        use crate::adapters::daemon::response_modes::DRAFT_APPROVAL_PREFIX;
+        let conversation = Conversation {
+            messages: vec![peer_row(
+                "peer-response-node-c",
+                &format!("{DRAFT_APPROVAL_PREFIX}draft body"),
+            )],
+            ..Default::default()
+        };
+        let pending = pending_peer_response(&conversation).expect("ready draft");
+        assert_eq!(
+            pending.stage,
+            PeerResponseStage::Ready("draft body".to_owned())
+        );
+        assert_eq!(pending.queued, 0);
+    }
+
+    #[test]
+    fn no_pending_rows_means_no_card() {
+        let conversation = Conversation {
+            messages: vec![peer_row("peer-response-node-d", "already sent")],
+            ..Default::default()
+        };
+        assert_eq!(pending_peer_response(&conversation), None);
+    }
+
+    #[test]
+    fn retract_target_is_the_latest_unretracted_agent_composed_row() {
+        let mut latest = peer_row("peer-response-node-b", "second auto reply");
+        latest.authorship = crate::domain::models::MessageAuthorship::AgentComposed;
+        let mut older = peer_row("peer-response-node-a", "first auto reply");
+        older.authorship = crate::domain::models::MessageAuthorship::AgentComposed;
+        older.retracted_at_ms = Some(123);
+        let conversation = Conversation {
+            messages: vec![peer_row("human-1", "operator text"), older, latest.clone()],
+            ..Default::default()
+        };
+        let target = latest_retractable(&conversation).expect("a retract target");
+        assert_eq!(target.id, latest.id);
+        // …and once it is retracted, no target remains.
+        let conversation = Conversation {
+            messages: vec![{
+                let mut row = target;
+                row.retracted_at_ms = Some(456);
+                row
+            }],
+            ..Default::default()
+        };
+        assert!(latest_retractable(&conversation).is_none());
+    }
+
+    #[test]
+    fn preview_collapses_newlines_and_bounds_length() {
+        assert_eq!(preview_line("short", 10), "short");
+        assert_eq!(preview_line("line one\nline two", 80), "line one line two");
+        let bounded = preview_line(&"x".repeat(200), 10);
+        assert_eq!(bounded.chars().count(), 10);
+        assert!(bounded.ends_with('…'));
+    }
+
     /// Compile-time proof of the shared origination seam (Q3): `SocketTurnDriver`
     /// IS a `TurnDriver`, so `run_attached` originates turns through the same
     /// `driver.submit(...)` door the local loop's `submit_turn!` macro uses (AC3).
@@ -778,6 +1503,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -788,6 +1515,7 @@ mod tests {
             permission_mode: PermissionMode::Normal,
             channels: vec![ChannelKind::Terminal],
             blocked_actions_waiting: blocked,
+            pending_consent_cards: 0,
         }
     }
 
@@ -948,7 +1676,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Streaming;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Streaming;
         let mut mode = PermissionMode::Normal;
 
         apply_client_event(
@@ -959,7 +1688,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -973,11 +1702,11 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
-        assert_eq!(status, StatusState::Idle);
+        assert_eq!(state.status, StatusState::Idle);
         let last = conversation
             .messages
             .last()
@@ -992,7 +1721,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Streaming;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Streaming;
         let mut mode = PermissionMode::Normal;
 
         apply_client_event(
@@ -1015,7 +1745,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1092,7 +1822,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Idle;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Idle;
         let mut mode = PermissionMode::Normal;
 
         let before = conversation.messages.len();
@@ -1108,7 +1839,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1124,7 +1855,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1135,11 +1866,61 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
         assert_eq!(conversation.messages.last().unwrap().content, "after");
+    }
+
+    #[test]
+    fn forwarded_room_event_reaches_attached_tui_feedback() {
+        let clock = SystemClock::default();
+        let mut conversation = Conversation::default();
+        let mut streaming = StreamingState::default();
+        let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
+        let mut state = TuiState::new(80, 24);
+        let mut mode = PermissionMode::Normal;
+
+        let redraw = apply_client_event(
+            RawEvent {
+                conversation_id: None,
+                timestamp_ms: 0,
+                kind: RawEventKind::DomainEvent(crate::domain::events::DomainEventPayload::Room(
+                    crate::domain::models::RoomEvent::RemoteEnvelopeRejected {
+                        peer: crate::domain::models::PeerId::from_public_key(&[7; 32])
+                            .expect("valid test peer"),
+                        reason: crate::domain::models::RejectReason::Policy {
+                            detail: "blocked by policy".to_owned(),
+                        },
+                        task: Some("remote-task-7".to_owned()),
+                        direction: crate::domain::models::Direction::Inbound,
+                    },
+                )),
+            },
+            &mut conversation,
+            &mut streaming,
+            &mut reducer,
+            &mut state,
+            &mut mode,
+            &clock,
+        );
+
+        assert!(
+            redraw,
+            "a forwarded room refusal changes attached TUI feedback"
+        );
+        let block = state
+            .feedback_blocks
+            .values()
+            .next()
+            .expect("attached TUI renders a transparency feedback block");
+        assert!(
+            block.message.contains("blocked by policy"),
+            "{}",
+            block.message
+        );
+        assert!(block.id.contains("remote-task-7"), "{}", block.id);
     }
 
     /// Test 6a (read-only true-by-absence) — the client→daemon protocol has NO
@@ -1158,9 +1939,168 @@ mod tests {
             | ClientFrame::ApprovalResponse { .. }
             | ClientFrame::InputResponse { .. }
             | ClientFrame::ConsolidationResolve { .. }
+            | ClientFrame::ResolvePeerDraft { .. }
+            | ClientFrame::RetractAutoResponse { .. }
+            // Story 18.4a code-review D3: a trusted-local Topic share mutates
+            // the daemon-owned topic log and membership, NOT memory — it stays
+            // outside this memory-write-surface ratchet.
+            | ClientFrame::PeerShare { .. }
+            | ClientFrame::AcknowledgeRecipientItem { .. }
+            // Removal disposes of a recipient-owned durable ITEM, not memory.
+            | ClientFrame::RemoveRecipientItem { .. }
             | ClientFrame::PeerEnvelope(_)
             | ClientFrame::Detach => {}
         }
+    }
+
+    /// Story 19.16c AC3(h) — in an **attached** session a `/team` verb the
+    /// intercept table does not name falls through to `driver.submit` and
+    /// becomes a model prompt. `trust` and `status` still do; `log`, `board`,
+    /// `retract` and (Story 19.17) `send` have explicit local/refusal arms.
+    ///
+    /// Mutant → RED: delete the `Remove` arm. The line classifies as
+    /// `PassThrough` and the operator's removal is typed at the model.
+    #[test]
+    fn an_attached_team_remove_becomes_a_frame_not_a_model_prompt() {
+        match attached_team_line("/team remove ri_x") {
+            AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { item_id }) => {
+                assert_eq!(item_id, "ri_x");
+            }
+            other => panic!("`/team remove` must be intercepted as a frame, got {other:?}"),
+        }
+        // The shipped verb is unchanged…
+        assert!(matches!(
+            attached_team_line("/team ack ri_x"),
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
+        // …a malformed removal is consumed and explained, never submitted…
+        let AttachedTeamLine::Refused(error) = attached_team_line("/team remove") else {
+            panic!("a malformed removal must never become a model turn");
+        };
+        assert!(error.contains("/team remove"), "{error}");
+        assert!(matches!(
+            attached_team_line("/team remove ri_x extra"),
+            AttachedTeamLine::Refused(_)
+        ));
+        // …Story 19.16g: `/team log` is now a LOCAL read, never a model turn…
+        assert!(matches!(
+            attached_team_line("  /team log --json"),
+            AttachedTeamLine::LocalLog(args) if args.json && args.filter.is_none()
+        ));
+        // …and the pre-existing fall-through is preserved exactly.
+        assert!(matches!(
+            attached_team_line("tell me about /team remove"),
+            AttachedTeamLine::PassThrough
+        ));
+    }
+
+    /// Story 19.16b AC3(h)1 — `/team board` is REFUSED ALOUD on the attached
+    /// rail, ⛔ never a model prompt.
+    ///
+    /// The board reads every configured A2A peer over this session's own
+    /// egress and an attached session holds none, so there is no frame to
+    /// send; the one thing that must not happen is the former failure mode —
+    /// falling through to `driver.submit` and becoming an LLM turn. Story
+    /// 19.17 also intercepts `send`; `trust` and `status` still pass through.
+    ///
+    /// Mutant → RED: delete the `Board` arm — the line classifies as
+    /// `PassThrough` and the operator's board request is typed at the model.
+    #[test]
+    fn an_attached_team_board_is_refused_aloud_and_never_becomes_a_model_prompt() {
+        let AttachedTeamLine::Refused(reason) = attached_team_line("/team board") else {
+            panic!("`/team board` must be consumed and explained, never submitted");
+        };
+        assert!(reason.contains("/team board"), "{reason}");
+        assert!(
+            reason.contains("non-attached"),
+            "the refusal must say where the verb DOES work: {reason}"
+        );
+        // Control: an unrelated verb keeps its pre-existing fall-through, so
+        // the arm above is a named refusal and not a blanket one.
+        assert!(matches!(
+            attached_team_line("/team status"),
+            AttachedTeamLine::PassThrough
+        ));
+    }
+
+    /// Story 19.16f AC3(c) — `/team retract` is REFUSED ALOUD on the attached
+    /// rail with the ratified sentence, ⛔ never a model prompt, and a pasted
+    /// leading space does not smuggle it past the table.
+    ///
+    /// Mutant `M03` → RED: delete the `Retract` arm — the line classifies as
+    /// `PassThrough` and a destructive verb is typed at the model.
+    #[test]
+    fn an_attached_team_retract_is_refused_aloud_and_never_becomes_a_model_prompt() {
+        for line in ["/team retract a ri_x", "  /team retract a ri_x"] {
+            let AttachedTeamLine::Refused(reason) = attached_team_line(line) else {
+                panic!("{line:?} must be consumed and explained, never submitted");
+            };
+            assert_eq!(
+                reason,
+                "'/team retract' needs this session's own A2A egress — run it in a \
+                 non-attached session."
+            );
+        }
+        // Positive control: `/team ack` keeps its shipped verdict.
+        assert!(matches!(
+            attached_team_line("/team ack ri_x"),
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
+    }
+
+    #[test]
+    fn attached_team_send_and_bare_team_do_not_reach_the_model() {
+        let AttachedTeamLine::Refused(reason) = attached_team_line("/team send a,b hi") else {
+            panic!("send must be refused aloud on the attached rail");
+        };
+        assert_eq!(
+            reason,
+            "'/team send' needs this session's own A2A egress — run it in a non-attached session."
+        );
+        for input in ["/team", " /team", "/team\tlog"] {
+            assert!(
+                matches!(attached_team_line(input), AttachedTeamLine::LocalLog(_)),
+                "{input:?}"
+            );
+        }
+        assert!(matches!(
+            attached_team_line("/teamwork today"),
+            AttachedTeamLine::PassThrough
+        ));
+        assert!(matches!(
+            attached_team_line("/team ack ri_x"),
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
+        assert!(matches!(
+            attached_team_line("/team board"),
+            AttachedTeamLine::Refused(_)
+        ));
+    }
+
+    /// `DF-19-16C` review bullet — a pasted leading space must not smuggle a
+    /// destructive `/team` verb past the intercept table into the model.
+    ///
+    /// Mutant → RED: classify the raw buffer again (drop `trim_start`).
+    #[test]
+    fn a_leading_space_no_longer_turns_an_intercepted_team_verb_into_a_model_turn() {
+        assert!(
+            matches!(
+                attached_team_line("  /team remove ri_x"),
+                AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { .. })
+            ),
+            "a pasted leading space used to fail `strip_prefix`, classify \
+             PassThrough, and submit the removal to the model as a turn"
+        );
+        assert!(matches!(
+            attached_team_line("\t/team ack ri_x"),
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
+        // Control: trimming the LEADING whitespace must not start matching
+        // `/team` mid-sentence.
+        assert!(matches!(
+            attached_team_line("please run /team remove ri_x"),
+            AttachedTeamLine::PassThrough
+        ));
     }
 
     /// Test 7 (re-attach replay) — `Terminal` and `Telegram` origins in the
@@ -1282,7 +2222,8 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
-        let mut status = StatusState::Idle;
+        let mut state = TuiState::new(80, 24);
+        state.status = StatusState::Idle;
         let mut mode = PermissionMode::Normal;
 
         apply_client_event(
@@ -1297,7 +2238,7 @@ mod tests {
             &mut conversation,
             &mut streaming,
             &mut reducer,
-            &mut status,
+            &mut state,
             &mut mode,
             &clock,
         );
@@ -1308,5 +2249,173 @@ mod tests {
                 .any(|m| m.content.contains("5 facts removed from MEMORY.md")),
             "purge-notice SystemNotice should render inline"
         );
+    }
+
+    /// Story 19.16g K08 / M08 — the attached `/team log` is a LOCAL read
+    /// (zero frames, never a model turn), presented only by a successful
+    /// draw; a read-only client can reach it while every other submission
+    /// stays refused without a frame; and the observer never touches a turn.
+    #[tokio::test]
+    async fn attached_log_is_local_and_streaming_survives() {
+        use crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID;
+        use crate::adapters::tui::state::LogAwareness;
+        use crate::infrastructure::transparency_awareness::LogAwarenessObserver;
+        use crate::infrastructure::transparency_awareness::test_support::append_rows;
+        use crossterm::event::KeyCode;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        fn draw_attached(state: &TuiState) -> Vec<String> {
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            let mut tab = TabRenderState::default();
+            let tools = HashMap::new();
+            let mut visible = Vec::new();
+            term.draw(|f| {
+                visible = chat_pane::render_attached(
+                    f,
+                    f.area(),
+                    &Conversation::default(),
+                    &StreamingState::default(),
+                    0,
+                    true,
+                    &state.theme,
+                    &mut tab,
+                    &tools,
+                    &state.feedback_blocks,
+                )
+                .visible_feedback_ids;
+            })
+            .unwrap();
+            visible
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        append_rows(workspace.path(), 3).await;
+        let service = crate::infrastructure::transparency::TransparencyService::new(
+            std::sync::Arc::new(
+                crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                    workspace.path(),
+                ),
+            ),
+            workspace.path().to_path_buf(),
+        );
+        let mut observer = LogAwarenessObserver::for_workspace(workspace.path());
+        let mut state = TuiState::new(100, 30);
+        let (tx, mut rx) = mpsc::unbounded_channel::<ClientFrame>();
+        async fn poll(observer: &mut LogAwarenessObserver, state: &mut TuiState) -> LogAwareness {
+            // Every call is a later scheduled observation.
+            static SECONDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let second = SECONDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            observer.tick_at(
+                Instant::now() + Duration::from_secs(3_600 * second),
+                &mut state.log_awareness,
+            );
+            observer.settle(&mut state.log_awareness).await;
+            state.log_awareness.display
+        }
+        assert_eq!(
+            poll(&mut observer, &mut state).await,
+            LogAwareness::Unseen(3)
+        );
+
+        // A leading-space `/team log` on the writable rail: local, no frame.
+        let mut input = "  /team log".to_owned();
+        let ComposerOutcome::LocalLog(args) =
+            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx)
+        else {
+            panic!("`/team log` must be a local read on the attached rail");
+        };
+        assert!(input.is_empty());
+        let notices = crate::infrastructure::runtime::transparency_bridge::attached_team_log(
+            &service, &mut state, &args,
+        )
+        .await;
+        assert!(notices.is_empty(), "{notices:?}");
+        assert!(
+            rx.try_recv().is_err(),
+            "zero frames: never a model UserMessage"
+        );
+        assert!(
+            state.feedback_blocks[TEAM_LOG_BLOCK_ID]
+                .message
+                .contains("append-only")
+        );
+
+        // Painted, but the draw failed: nothing presented.
+        let visible = draw_attached(&state);
+        assert!(visible.iter().any(|id| id == TEAM_LOG_BLOCK_ID));
+        after_attached_draw(&mut state, false, &visible);
+        assert_eq!(
+            poll(&mut observer, &mut state).await,
+            LogAwareness::Unseen(3)
+        );
+        after_attached_draw(&mut state, true, &visible);
+        assert_eq!(poll(&mut observer, &mut state).await, LogAwareness::Hidden);
+
+        // An incoming retract row and a poll never touch a streaming turn.
+        state.status = StatusState::Streaming;
+        append_rows(workspace.path(), 1).await;
+        assert_eq!(
+            poll(&mut observer, &mut state).await,
+            LogAwareness::Unseen(1)
+        );
+        assert!(matches!(state.status, StatusState::Streaming));
+
+        // A local log error renders as a plain local line, never a
+        // turn-fatal notice and never a frame.
+        let mut input = "/team log --filter=bogus=term".to_owned();
+        let ComposerOutcome::LocalLog(args) =
+            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx)
+        else {
+            panic!("a parseable log line is local");
+        };
+        let notices = crate::infrastructure::runtime::transparency_bridge::attached_team_log(
+            &service, &mut state, &args,
+        )
+        .await;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(matches!(state.status, StatusState::Streaming));
+
+        // Read-only: the composer edits and the local log works…
+        let mut input = String::new();
+        for c in "/team logx".chars() {
+            attached_composer_key(KeyCode::Char(c), true, &mut input, &mut state, &tx);
+        }
+        attached_composer_key(KeyCode::Backspace, true, &mut input, &mut state, &tx);
+        assert_eq!(input, "/team log");
+        assert!(matches!(
+            attached_composer_key(KeyCode::Enter, true, &mut input, &mut state, &tx),
+            ComposerOutcome::LocalLog(_)
+        ));
+        // …but model turns and daemon-mutating verbs stay refused, no frame.
+        for line in ["hello model", "/team ack ri_x", "/team remove ri_x"] {
+            let mut input = line.to_owned();
+            assert!(matches!(
+                attached_composer_key(KeyCode::Enter, true, &mut input, &mut state, &tx),
+                ComposerOutcome::Handled
+            ));
+            assert_eq!(input, line, "kept for editing");
+            assert!(matches!(
+                &state.status,
+                StatusState::Flash { message, .. } if message == "read-only — can't send here"
+            ));
+        }
+        assert!(rx.try_recv().is_err(), "a read-only client sends no frame");
+
+        // Writable text still submits; an intercepted verb still frames.
+        let mut input = "hello model".to_owned();
+        assert!(matches!(
+            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
+            ComposerOutcome::Submit(text) if text == "hello model"
+        ));
+        let mut input = "/team ack ri_x".to_owned();
+        assert!(matches!(
+            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
+            ComposerOutcome::FrameSent
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
     }
 }

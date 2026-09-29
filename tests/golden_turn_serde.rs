@@ -50,6 +50,7 @@ fn golden_turn_serde_round_trip() {
         output: ToolOutput {
             content: "Applied edit.".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
     });
 

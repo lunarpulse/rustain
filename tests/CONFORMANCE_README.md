@@ -21,17 +21,16 @@ These tests run as part of `cargo test` and enforce the Dependency Rule (Clean A
 
 **Files:** `tests/conformance_<subject>.rs` (one per domain service or port trait).
 
-Each file holds the minimum set of behavioral assertions that every implementation of a given service / port must pass. For now these are primarily **skeletons** created with `#[ignore = "pending story X-Y"]` tests — they will be fleshed out as the corresponding stories are implemented.
+Each file holds the minimum set of behavioral assertions that every implementation of a given service / port must pass. A file for a **pending** story MAY start as a `#[ignore = "pending story X-Y"]` skeleton with empty bodies (see the convention below) — but that shape is only legitimate while the story is open. **Once the implementing story is `done`, the file must carry real assertions or stop existing.** An empty `#[ignore]` skeleton for a closed story is a false-green: `cargo test -- --include-ignored` reports it as a pass while it asserts nothing. Story 19.4 deleted one such file on that rule (its story had been `done` for four months and the skeleton was never filled), recording the ADR-06-01 coverage gaps it left behind in the deleting commit message.
 
 ## Current Inventory
 
 | File | Subject | Source of truth | Status |
 |---|---|---|---|
 | `conformance.rs` | Clean Architecture invariants | Hexagonal Dependency Rule | ✅ active |
-| `conformance_cancellation.rs` | CancellationToken tree + subprocess `kill_on_drop` | ADR-06-03 · Story 6-0a AC2, AC7 | 📋 skeleton |
-| `conformance_toolcall_fsm.rs` | `ToolCall` 7-state FSM legal transitions | ADR-06-02 · Story 6-0b AC3 | 📋 skeleton |
-| `conformance_approval_runtime.rs` | `ApprovalRuntime` pub/sub concurrency + fast-path + cancel-by-source | ADR-06-01 · Story 6-0c AC3, AC5, AC9 | 📋 skeleton |
-| `conformance_plan_mode.rs` | Plan-mode workflow (slug determinism, gate, handoff) | ADR-06-10 · Story 6-0d AC1–AC9 | 📋 skeleton |
+| `conformance_cancellation.rs` | CancellationToken tree + subprocess `kill_on_drop` | ADR-06-03 · Story 6-0a AC2, AC7 | ✅ active (8 tests, 0 ignored) |
+| `conformance_toolcall_fsm.rs` | `ToolCall` 7-state FSM legal transitions | ADR-06-02 · Story 6-0b AC3 | ✅ active (16 tests, 0 ignored) |
+| `conformance_plan_mode.rs` | Plan-mode workflow (slug determinism, gate, handoff) | ADR-06-10 · Story 6-0d AC1–AC9 | ✅ active (25 tests, 0 ignored) |
 
 ## Adding a New Conformance Test File
 
@@ -63,16 +62,17 @@ Guidelines:
 - Keep skeletons **import-free of types that don't exist yet** — no imports of `rustain::domain::services::approval_runtime` etc. until the story starts.
 - Use `#[ignore = "..."]` with a **reason string** that includes the story ID + AC number + short description. This string shows in CI output as the pointer to the implementing work.
 - When a story lands and the test is implemented, **remove `#[ignore]` and add real assertions**. Remove or rewrite the "When implemented:" doc comment.
+- ⛔ **Never leave an empty skeleton behind a `done` story.** The skeleton convention buys a named placeholder while a story is *open*; the moment that story flips to `done`, the file either carries real assertions or is deleted with its coverage gaps recorded in the deleting commit. A `conformance_*` file that asserts nothing gets counted as coverage by anyone grepping `tests/` — and `--include-ignored` reports it green. Precedent: Story 19.4 (19 empty `#[ignore]` bodies naming a story that had been `done` for four months).
 
 ## Running Conformance Tests
 
 ```bash
-# Default: architecture conformance only (skeletons ignored)
+# Default: architecture conformance only (any pending-story skeletons are ignored)
 cargo test --test conformance
 
-# Specific new skeleton:
-cargo test --test conformance_cancellation -- --ignored    # runs even ignored tests
-cargo test --test conformance_cancellation                 # skips ignored (CI-safe)
+# A specific behavioral file, including any skeletons it still carries:
+cargo test --test conformance_subject -- --include-ignored   # runs ignored ones too
+cargo test --test conformance_subject                        # skips ignored (CI-safe)
 
 # All conformance tests in one go:
 cargo test --tests conformance

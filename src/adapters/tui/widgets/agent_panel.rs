@@ -158,6 +158,9 @@ pub fn render(
                     Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact) => {
                         "awaiting artifact"
                     }
+                    Some(crate::domain::models::WaitReason::AwaitingPeerResponse) => {
+                        "awaiting your decision"
+                    }
                     None => "waiting",
                 }),
                 NodeState::Created => Some("queued"),
@@ -409,6 +412,18 @@ mod tests {
             !text.contains(" waiting"),
             "AC8: the typed reason must replace the static \"waiting\" string:\n{text}"
         );
+    }
+
+    #[test]
+    fn peer_response_wait_renders_operator_decision_voice() {
+        let mut entry = make_entry("peer-task", 1, NodeState::Waiting);
+        entry.wait_reason = Some(crate::domain::models::WaitReason::AwaitingPeerResponse);
+        let text = render_to_text(&[entry], 0, true, 60, 5);
+        assert!(
+            text.contains("awaiting your decision"),
+            "peer response waits must name the operator decision:\n{text}"
+        );
+        assert!(!text.contains("awaiting your answer"));
     }
 
     /// AC8 no-regression: an UNSTAMPED `Waiting` node still renders the static

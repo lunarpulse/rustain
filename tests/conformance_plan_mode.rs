@@ -89,6 +89,8 @@ fn make_conv(assistant_turns: usize) -> Conversation {
             synthetic: false,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
     }
     Conversation {
@@ -314,6 +316,8 @@ fn ac4_approve_normal_transitions_mode_and_injects_synthetic() {
         synthetic: true,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
     assert!(msg.synthetic);
     assert_eq!(msg.role, MessageRole::User);
@@ -342,6 +346,8 @@ fn ac4_reject_routes_feedback_and_stays_in_plan() {
         synthetic: true,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
     assert!(msg.synthetic);
 }
@@ -505,6 +511,8 @@ fn ac8_reminder_envelope_not_displayed() {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
     assert!(!msg.content.contains("<plan-mode>"));
     assert!(!msg.content.contains("</plan-mode>"));
@@ -539,6 +547,8 @@ fn ac9_synthetic_message_metadata() {
         synthetic: true,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.contains("synthetic"));

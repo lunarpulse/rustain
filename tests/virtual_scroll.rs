@@ -28,6 +28,8 @@ fn make_conversation(msg_count: usize) -> Conversation {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         })
         .collect();
 
@@ -461,7 +463,7 @@ fn test_virtual_scroll_only_user_messages() {
             role: MessageRole::User,
             content: format!(
                 "User message {
-            }",
+        }",
                 i
             ),
             content_blocks: vec![],
@@ -471,6 +473,8 @@ fn test_virtual_scroll_only_user_messages() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         })
         .collect();
     let conversation = Conversation {
@@ -574,6 +578,8 @@ fn make_turn_conversation_seeded(turn_count: usize) -> Conversation {
             stop_reason: Some(StopReason::EndTurn),
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
     }
 
@@ -751,6 +757,7 @@ fn test_evict_turns_not_in_drops_stale_entries() {
             CachedTurnLayout {
                 height: i + 1,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
     }
@@ -814,6 +821,7 @@ fn test_width_divergence_invalidates_cache() {
         CachedTurnLayout {
             height: 5,
             block_offsets: vec![],
+            tool_block_offsets: vec![],
         },
     );
 

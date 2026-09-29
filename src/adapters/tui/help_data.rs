@@ -246,6 +246,98 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     description: "Toggle Plan mode",
                     available: true,
                 },
+                HelpBinding {
+                    key: "/team log",
+                    description: "A2A transparency log (also Ctrl+X, L); an unfiltered, displayed visit clears the `log: N` reminder — not an acknowledgement",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/team send <peer-id>[,<peer-id>…] <text…>",
+                    description: "Send one message to each addressed A2A peer (a2a feature)",
+                    available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
+                    key: "/team trust",
+                    description: "List effective peer-consent grants (journaled vs TOML-implied)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/team untrust <peer>",
+                    description: "Revoke standing consent for a peer (alias or PeerId)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/room",
+                    description: "Durable room replay, read-only (also Ctrl+X, R)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/room role list",
+                    description: "Show journaled room roles (owner/editor/viewer)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/room role grant <peer> <role>",
+                    description: "Record a room role for a configured peer (room edits only)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/room role revoke <peer>",
+                    description: "Record withdrawal of a peer's room role",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/artifacts",
+                    description: "Durable artifact list with lineage, read-only (also Ctrl+X, E)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/artifact show <id>",
+                    description: "Drill into one artifact: kind, lineage, apply decision, policy",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/artifact review <id> <verdict>",
+                    description: "Record approve|request-changes|reject; approval is not apply success",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/artifact apply <id>",
+                    description: "Preview impact, confirm, then apply an eligible patch",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/artifact resolve <id> present|absent",
+                    description: "After an interrupted apply: record whether you found its changes in the tree",
+                    available: true,
+                },
+                // Story 18.4b. ONE section: the COMMANDS category. ⛔ No CHORDS
+                // entry — this story mints no chord.
+                HelpBinding {
+                    key: "/peer list",
+                    description: "Which peers may reach this host (configuration, not connection status)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/peer show <alias>",
+                    description: "Print one peer's pinned key and id in full, for comparing",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/peer invite",
+                    description: "Mint an expiring ticket for one person; grants reach, not authority",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/peer add <alias> <ticket>",
+                    description: "Import a ticket: confirm the fingerprint, then pin it. No bypass",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/peer revoke <peer>",
+                    description: "Remove a peer; their next frame is refused, without restart",
+                    available: true,
+                },
             ],
         },
         HelpCategory {
@@ -273,7 +365,17 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "Ctrl+X, L",
-                    description: "Log panel",
+                    description: "Transparency Log panel",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+X, R",
+                    description: "Durable Room panel (read-only replay)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+X, E",
+                    description: "Artifacts panel (Evidence, read-only replay)",
                     available: true,
                 },
                 HelpBinding {
@@ -434,6 +536,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 HelpBinding {
                     key: "q",
                     description: "Quit (from chat focus)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+Q",
+                    description: "Quit (any focus)",
                     available: true,
                 },
             ],

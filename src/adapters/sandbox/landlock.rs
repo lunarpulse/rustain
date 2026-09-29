@@ -189,15 +189,10 @@ impl SandboxManager for LandlockSandbox {
             cmd.pre_exec(move || {
                 ruleset_opt
                     .take()
-                    .ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "landlock ruleset already consumed",
-                        )
-                    })?
+                    .ok_or_else(|| std::io::Error::other("landlock ruleset already consumed"))?
                     .restrict_self()
                     .map(|_| ())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                    .map_err(std::io::Error::other)
             });
         }
 

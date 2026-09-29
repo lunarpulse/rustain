@@ -36,6 +36,7 @@ fn signed_envelope() -> AgentEnvelope<serde_json::Value> {
         AgentId::parse("recipient").expect("valid recipient"),
         CorrelationId::new("corr-1"),
         MessageKind::PeerMessage,
+        "consultation".to_owned(),
         1,
         2_000,
         "nonce-aaa".to_string(),
@@ -102,6 +103,20 @@ fn every_replay_relevant_header_field_is_bound_by_signature() {
                 Err(VerifyError::BadSignature)
             ),
             "tampered kind must invalidate the signature"
+        );
+    }
+
+    // ── semantic message type ───────────────────────────────────────────
+    {
+        let mut env = signed_envelope();
+        verify_envelope(&env, 1_000, None).expect("control: untouched verifies");
+        env.header.message_type = "bug_report".to_owned();
+        assert!(
+            matches!(
+                verify_envelope(&env, 1_000, None),
+                Err(VerifyError::BadSignature)
+            ),
+            "tampered semantic message type must invalidate the signature"
         );
     }
 

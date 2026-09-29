@@ -136,6 +136,42 @@ pub enum AppEvent {
         text: String,
         synthetic: bool,
     },
+
+    /// The Act 1 distribution board finished assembling (Story 19.16b). A
+    /// dedicated view event — not a `SystemNotice` — because the board is a
+    /// **view with a refresh verb**: the TUI must REPLACE its stable
+    /// `team-board` block rather than stack a fresh dismissible notice, and it
+    /// must never take the turn-fatal Warning path an `Advisory` notice
+    /// routes through.
+    TeamBoardReady {
+        conversation_id: ConversationId,
+        message: String,
+    },
+    /// Story 19.17: one independently settled row in a rail-three send block.
+    #[cfg(feature = "a2a")]
+    TeamSendSettled {
+        conversation_id: ConversationId,
+        block_id: String,
+        index: usize,
+        outcome: crate::adapters::a2a::send::RecipientOutcome,
+    },
+
+    /// The confirm-time read behind `/team retract` finished (Story 19.16f
+    /// `AC4(c)`): raise the decision card, or render the one sentence that
+    /// replaces it. Produced only by the rail-3 preview spawn.
+    TeamRetractPreviewReady {
+        conversation_id: ConversationId,
+        preview: TeamRetractPreview,
+    },
+    /// An accepted retract's answer arrived (Story 19.16f `AC10`): replace the
+    /// stable `team-retract` block, and — after a landed retract — the board
+    /// re-rendered from its remembered view. Produced only by the dispatch
+    /// spawn.
+    TeamRetractAnswered {
+        conversation_id: ConversationId,
+        message: String,
+        board: Option<String>,
+    },
     /// Bridge event: a `ToolCallTransition` has been received on the broadcast
     /// channel and should be forwarded to the event loop for TUI/state updates.
     ToolCallTransitionBridged {
@@ -438,6 +474,32 @@ pub enum CapabilityEvent {
     },
 }
 
+/// The confirm-time read behind `/team retract` (Story 19.16f `AC4(c)`),
+/// already rendered: the card to raise, or the one sentence that replaces it
+/// (not found, unknown peer, not sent). Plain data — the a2a adapter decides,
+/// the TUI raises.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamRetractPreview {
+    Card(TeamRetractCard),
+    Answer(String),
+}
+
+/// One retract decision card (Story 19.16f `AC4`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamRetractCard {
+    /// The roster alias (`A2aPeerSpec::id`) — ⛔ never a person-shaped name.
+    pub peer: String,
+    /// The id the operator typed; the dispatch addresses exactly this.
+    pub item_id: String,
+    /// The item's `task` as the peer listed it, for the sender's ledger rows.
+    pub task: Option<String>,
+    /// The card body, one logical line per `'\n'`; the line builder wraps.
+    pub body: String,
+    /// `false` when the confirm-time read did not resolve, or the item is
+    /// already removed: `[y]` then dispatches nothing (owner ruling; `F9`).
+    pub armed: bool,
+}
+
 /// Event wrapping a tool execution result.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -496,6 +558,9 @@ pub enum DomainKey {
     CtrlH,
     CtrlK,
     CtrlP,
+    /// Ctrl+Q — quit from any focus. Journey 0's quit key (Story 19.3);
+    /// plain `q` stays chat-focus-only.
+    CtrlQ,
     CtrlR,
     CtrlT,
     CtrlU,
@@ -516,9 +581,20 @@ pub enum CompactionPurpose {
 /// Live reactivity payload derived from the canonical durable room event.
 /// Persistence always goes through `NodeJournal`; this bus payload is never a
 /// second writable store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum DomainEventPayload {
     Room(crate::domain::models::RoomEvent),
+    /// Story 18.2 (AC1) — a transparency record could not be made durable.
+    ///
+    /// Carries the **running total**, not "one more failure": journal failures
+    /// arrive in bursts, and one transcript row per failed refusal would bury
+    /// the transcript exactly when the operator needs to read it. The handler
+    /// keys a single `FeedbackBlock` on a stable id so this count increments
+    /// in place — one latched row, not N rows.
+    TransparencyJournalFailed {
+        failures: u64,
+        detail: String,
+    },
 }
 
 impl From<crate::domain::models::RoomEvent> for DomainEventPayload {

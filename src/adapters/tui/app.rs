@@ -119,6 +119,23 @@ pub enum InputAction {
     ForgetNavigateUp,
     /// Story 11.4a: `/memory forget` card — user pressed ↓/j (move focus down).
     ForgetNavigateDown,
+    /// Story 18.3a-e: confirm the pending patch apply.
+    ApplyCardAccept,
+    /// Story 18.3a-e: decline the pending patch apply.
+    ApplyCardDecline,
+    /// Story 18.4b (AC3): confirm the pending `/peer add` and pin the key.
+    ///
+    /// ⛔ Deliberately separate from [`Self::ApplyCardAccept`]: sharing the apply
+    /// card's mode-blind key table would give a card that paints no `y` an
+    /// unpainted `y` that rebinds a pin.
+    PeerAddConfirm,
+    /// Story 18.4b (AC3): cancel the pending `/peer add`. Writes nothing.
+    PeerAddDecline,
+    /// Story 19.16f (AC4): accept the ARMED `/team retract` card — the only
+    /// path to the cross-host write. Never produced by a disarmed card.
+    TeamRetractConfirm,
+    /// Story 19.16f (AC4): cancel the `/team retract` card. Sends nothing.
+    TeamRetractDecline,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -139,6 +156,9 @@ pub enum InputAction {
     SetDensityMode(crate::domain::models::visual::DensityMode),
     /// Open or toggle a sidebar panel (Ctrl+X, T for Tasks).
     OpenPanel(crate::domain::models::visual::PanelType),
+    /// Export the exact transparency report snapshot currently rendered by the
+    /// sidebar panel.
+    ExportTransparency,
     /// Copy task result/error from drill-down detail view (Story 6-3 AC8).
     CopyTaskResult {
         plan_id: Option<String>,
@@ -762,6 +782,55 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         }
     }
 
+    if state.pending_artifact_card.is_some()
+        && state.focus
+            == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply))
+    {
+        return match crate::adapters::tui::widgets::apply_card::choice_for_key(c) {
+            Some(crate::adapters::tui::widgets::apply_card::ApplyCardChoice::Accept) => {
+                InputAction::ApplyCardAccept
+            }
+            Some(crate::adapters::tui::widgets::apply_card::ApplyCardChoice::Decline) => {
+                InputAction::ApplyCardDecline
+            }
+            None => InputAction::Consumed,
+        };
+    }
+
+    // Story 18.4b (AC3): `/peer add` confirm key intercept.
+    //
+    // ⛔ Its own two-key match, NOT `apply_card::choice_for_key`: that function
+    // is single-sourced from `APPLY_CARD_BINDINGS` and called mode-blind, so
+    // routing a pin through it hands every future card an unpainted `y` that
+    // rebinds a key. Anything other than the two painted keys is consumed, so a
+    // stray keystroke never resolves the gate either way.
+    if state.pending_peer_add.is_some()
+        && state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd))
+    {
+        return match c {
+            'y' => InputAction::PeerAddConfirm,
+            'n' => InputAction::PeerAddDecline,
+            _ => InputAction::Consumed,
+        };
+    }
+
+    // Story 19.16f (AC4): `/team retract` confirm key intercept — the PeerAdd
+    // shape (slot AND focus, its own two keys, every other key consumed) plus
+    // the card's own `armed` flag. ⛔ On a disarmed card `y` is `Consumed`,
+    // never `Ignored` (which would fall through into the input buffer), and
+    // never the confirm: the confirm-time read did not verify the item, or it
+    // is already removed on the peer's host.
+    if let Some(pending) = state.pending_team_retract.as_ref()
+        && state.focus
+            == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract))
+    {
+        return match c {
+            'y' if pending.armed => InputAction::TeamRetractConfirm,
+            'n' => InputAction::TeamRetractDecline,
+            _ => InputAction::Consumed,
+        };
+    }
+
     // Story 6.4: Plan deviation card key intercept (y/e/n)
     if let Some((ref pid, _)) = state.task_panel_state.pending_deviation {
         match c {
@@ -972,6 +1041,11 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                         state.autocomplete.kind = AutocompleteKind::McpMention;
                         String::new()
                     } else if state.autocomplete.kind == AutocompleteKind::FileMention
+                        && filter.eq_ignore_ascii_case("a2a/")
+                    {
+                        state.autocomplete.kind = AutocompleteKind::A2aMention;
+                        String::new()
+                    } else if state.autocomplete.kind == AutocompleteKind::FileMention
                         && filter == "Agents/"
                     {
                         state.autocomplete.kind = AutocompleteKind::AgentMention;
@@ -983,6 +1057,11 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                         let filter_lower = filter.to_lowercase();
                         let after_slash =
                             filter_lower.strip_prefix("mcp/").unwrap_or(&filter_lower);
+                        after_slash.to_string()
+                    } else if state.autocomplete.kind == AutocompleteKind::A2aMention {
+                        // Namespace token is case-insensitive; the suffix keeps
+                        // the user's casing (peer/skill IDs are case-sensitive).
+                        let after_slash = strip_a2a_namespace(&filter);
                         after_slash.to_string()
                     } else {
                         filter
@@ -1310,6 +1389,12 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 // p = peek preview on focused collapsed tool block
                 'p' => {
                     if let Some(ref tool_id) = state.focused_tool_id {
+                        // Peeking a block is choosing it — record the
+                        // explicit selection so `c` copies THIS block (story
+                        // 19.9 review patch: copy decoupled from
+                        // render-derived focus, which the render pass
+                        // overwrites every frame).
+                        state.selected_tool_id = Some(tool_id.clone());
                         let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
                         if entry.collapsed {
                             entry.peek_active = !entry.peek_active;
@@ -1355,6 +1440,19 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     '\u{1b}' => InputAction::TaskReorderCancel,
                     _ => InputAction::Ignored,
                 };
+            }
+            if _panel == crate::domain::models::visual::PanelType::TransparencyLog && c != '\u{1b}'
+            {
+                match crate::adapters::tui::handlers::transparency::panel_key(state, c) {
+                    crate::adapters::tui::handlers::transparency::PanelKeyAction::Consumed => {
+                        state.needs_redraw = true;
+                        return InputAction::Consumed;
+                    }
+                    crate::adapters::tui::handlers::transparency::PanelKeyAction::Export => {
+                        return InputAction::ExportTransparency;
+                    }
+                    crate::adapters::tui::handlers::transparency::PanelKeyAction::Ignored => {}
+                }
             }
             match c {
                 'j' => {
@@ -1455,6 +1553,23 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     if _panel == crate::domain::models::visual::PanelType::Agents
                         && state.agent_panel_state.drill_down_agent.is_some() =>
                 {
+                    InputAction::Consumed
+                }
+                '\u{1b}'
+                    if _panel == crate::domain::models::visual::PanelType::TransparencyLog
+                        && crate::adapters::tui::handlers::transparency::clear_transient(state) =>
+                {
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                '\n' | '\r'
+                    if _panel == crate::domain::models::visual::PanelType::TransparencyLog =>
+                {
+                    crate::adapters::tui::handlers::transparency::toggle_drill(
+                        state,
+                        state.sidebar_selected,
+                    );
+                    state.needs_redraw = true;
                     InputAction::Consumed
                 }
                 'q' => InputAction::Quit,
@@ -1925,6 +2040,18 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         };
     }
 
+    if matches!(
+        state.focus,
+        FocusState::Sidebar {
+            panel: crate::domain::models::visual::PanelType::TransparencyLog,
+            ..
+        }
+    ) && crate::adapters::tui::handlers::transparency::panel_special_key(state, key)
+    {
+        state.needs_redraw = true;
+        return InputAction::Consumed;
+    }
+
     match key {
         DomainKey::Esc => {
             // In multiline mode with content: submit message (alternative send)
@@ -1969,6 +2096,30 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             // Story 11.4a: Esc on forget card → cancel (purge nothing).
             if state.pending_forget_card.is_some() {
                 return InputAction::ForgetDeclineAll;
+            }
+            if state.pending_artifact_card.is_some()
+                && state.focus
+                    == FocusState::Overlay(OverlayType::Confirmation(
+                        ConfirmationType::ArtifactApply,
+                    ))
+            {
+                return InputAction::ApplyCardDecline;
+            }
+            // Story 18.4b (AC3): Esc on the `/peer add` confirm → cancel. Nothing
+            // is written, and the card paints `[n] Cancel (Esc)` to say so.
+            if state.pending_peer_add.is_some()
+                && state.focus
+                    == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd))
+            {
+                return InputAction::PeerAddDecline;
+            }
+            // Story 19.16f (AC4): Esc on the `/team retract` card → cancel,
+            // armed or not. The card paints `[n] Cancel (Esc)`.
+            if state.pending_team_retract.is_some()
+                && state.focus
+                    == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract))
+            {
+                return InputAction::TeamRetractDecline;
             }
             // Story 10.5: Esc on delegation card → cancel plan at this task
             if state.pending_delegation_card.is_some() {
@@ -2275,6 +2426,48 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
+        DomainKey::Enter
+            if matches!(
+                state.focus,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Room,
+                    ..
+                }
+            ) =>
+        {
+            // The durable Room is a read-only replay. It has no Enter action;
+            // falling through would route this index into conversation history.
+            InputAction::Consumed
+        }
+
+        DomainKey::Enter
+            if matches!(
+                state.focus,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Artifacts,
+                    ..
+                }
+            ) =>
+        {
+            // ⛔ NOT the Room panel's inert-`Enter` rule. This surface has write
+            // verbs, and a focused row whose `Enter` does nothing teaches the
+            // operator that the panel is dead. `Enter` drills into the selected
+            // artifact through the SAME `/artifact show` dispatch arm the typed
+            // command uses — one path, not a second one.
+            match state
+                .artifacts_panel
+                .selected_id_prefix(state.sidebar_selected)
+            {
+                Some(prefix) => InputAction::ExecuteCommand {
+                    name: "artifact".to_owned(),
+                    args: Some(format!("show {prefix}")),
+                },
+                // An empty or zero-state panel still consumes the key: falling
+                // through would route this index into conversation history.
+                None => InputAction::Consumed,
+            }
+        }
+
         DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { .. }) => {
             // Open selected conversation — event loop resolves ID from session_index
             InputAction::OpenSidebarConversation
@@ -2302,6 +2495,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         DomainKey::Enter if state.focus == FocusState::Chat => {
             // Toggle collapse/expand on focused tool block
             if let Some(ref tool_id) = state.focused_tool_id {
+                // Acting on a block is choosing it — record the explicit
+                // selection so `c` copies THIS block (story 19.9 review
+                // patch: copy decoupled from render-derived focus).
+                state.selected_tool_id = Some(tool_id.clone());
                 let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
                 entry.collapsed = !entry.collapsed;
                 entry.peek_active = false;
@@ -2364,6 +2561,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         DomainKey::CtrlB if state.focus == FocusState::Chat => InputAction::ScrollFullPageUp,
         DomainKey::CtrlH => InputAction::ToggleSidebar,
         DomainKey::CtrlT => InputAction::NewTab,
+        // Ctrl+Q — quit from any focus (Journey 0's own key). Story 19.3.
+        // Deliberately NOT CtrlC's CancelOrQuit: Ctrl+C cancels a running
+        // stream/wave first (:1491-1494); Ctrl+Q means quit, exactly like
+        // plain `q` from chat focus (:1227).
+        DomainKey::CtrlQ => InputAction::Quit,
         // Tab/focus cycling (AC11):
         // Story 16.6 AC5: Chat Tab now emits CycleInvocationInFocusedTurn first.
         // The event-loop dispatcher checks the guard (focused turn + expanded + >= 2 invocations)
@@ -2477,6 +2679,14 @@ fn insert_newline(state: &mut TuiState) {
 
 /// Submit the current input buffer as a message.
 // Covers: UX-DR77
+/// Test seam: `submit_message` is the production parser that decides whether a
+/// `/command` reaches its event-loop dispatch arm or falls through to the
+/// user-defined-command path. Integration keystones MUST enter here — a
+/// handler-only test stays green while the command is silently dead.
+pub fn submit_message_for_test(state: &mut TuiState) -> InputAction {
+    submit_message(state)
+}
+
 fn submit_message(state: &mut TuiState) -> InputAction {
     let text = state.input_buffer.clone();
     state.input_history.push(text.clone());
@@ -2625,6 +2835,52 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                     args,
                 };
             }
+            // /team log: render the A2A transparency log in-chat (Story 18.2
+            // AC6). Route as ExecuteCommand — mirroring /context and /fanout —
+            // so the event-loop `/team` dispatch arm sees the sub-verb and
+            // flags. WITHOUT this entry `/team log` falls through to
+            // SubmitWithContext, resolves no command file, and silently never
+            // runs: the exact 14.3c failure `/fanout` shipped with.
+            if cmd_name == "team" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
+            // /room: the durable-room viewer and its role subcommands (Story
+            // 18.3a AC1/AC4). Same reason as `team` above — WITHOUT this entry
+            // `/room` falls through to SubmitWithContext, resolves no command
+            // file, and silently never runs.
+            if cmd_name == "room" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
+            // /artifacts and /artifact: the durable artifact list, its
+            // drill-down and the patch-review verdict verb (Story 18.3a-c
+            // AC3/AC5). Same reason as `room` above — and BOTH spellings need
+            // an entry: an unlisted `/artifact` silently never runs while
+            // `/artifacts` keeps working, which reads as "the verdict verb is
+            // broken" rather than "the verdict verb was never routed".
+            if cmd_name == "artifacts" || cmd_name == "artifact" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
+            // /peer: the transport admission verbs (Story 18.4b). Same reason as
+            // `artifacts` above — WITHOUT this entry `/peer` falls through to
+            // SubmitWithContext, resolves no command file, and silently never
+            // runs, which is the 14.3c failure `/fanout` shipped with. A
+            // handler-only test stays green while the command is dead, so the
+            // integration keystone enters through `submit_message_for_test`.
+            if cmd_name == "peer" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
             // Discovered skill name → activate via ExecuteCommand so the event loop
             // routes through `AskActivateSkill` (Story 5-2 AC8). Fall through to
             // user-defined-command SubmitWithContext if the name is NOT a skill.
@@ -2670,6 +2926,16 @@ fn ensure_cursor_visible(state: &mut TuiState) {
         state.input_scroll_offset = cursor_row + 1 - max_visible;
     } else if cursor_row < state.input_scroll_offset {
         state.input_scroll_offset = cursor_row;
+    }
+}
+
+/// Strip a case-insensitive `a2a/` namespace prefix from an A2A mention
+/// filter, preserving the suffix verbatim (peer/skill IDs are case-sensitive).
+/// Mirrors the `mcp/` namespace stripping in the filter/backspace paths.
+fn strip_a2a_namespace(filter: &str) -> &str {
+    match filter.get(..4) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("a2a/") => &filter[4..],
+        _ => filter,
     }
 }
 
@@ -2746,6 +3012,11 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
                     {
                         state.autocomplete.kind = AutocompleteKind::FileMention;
                     }
+                    if state.autocomplete.kind == AutocompleteKind::A2aMention
+                        && !filter.to_lowercase().starts_with("a2a/")
+                    {
+                        state.autocomplete.kind = AutocompleteKind::FileMention;
+                    }
                     let filter_text = if state.autocomplete.kind == AutocompleteKind::AgentMention {
                         filter
                             .strip_prefix("Agents/")
@@ -2757,6 +3028,8 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
                             .or_else(|| filter.strip_prefix("mcp/"))
                             .unwrap_or(&filter)
                             .to_string()
+                    } else if state.autocomplete.kind == AutocompleteKind::A2aMention {
+                        strip_a2a_namespace(&filter).to_string()
                     } else {
                         filter
                     };
@@ -2841,6 +3114,27 @@ fn apply_autocomplete_selection(
         AutocompleteSuggestion::McpTool { server, name, .. } => {
             // Insert canonical mcp__<server>__<tool> form per DG 2.4
             let canonical = format!("mcp__{}__{}", server, name);
+            let before: String = state.input_buffer.chars().take(trigger).collect();
+            let after: String = state
+                .input_buffer
+                .chars()
+                .skip(state.cursor_position)
+                .collect();
+            state.input_buffer = format!("{}{}{}", before, canonical, after);
+            state.cursor_position = trigger + canonical.chars().count();
+            None
+        }
+        AutocompleteSuggestion::A2aAgent { peer, name, .. } => {
+            // Story 19.13: insert the canonical `a2a__<peer>__<skill>` wire
+            // name built through the CapabilityId bridge — never the raw peer
+            // skill ID (a hostile peer exposing a skill named like a built-in
+            // tool must not become a bare local-tool reference in the prompt).
+            let id = crate::domain::models::CapabilityId {
+                protocol: "a2a".to_string(),
+                server: peer.clone(),
+                tool: name.clone(),
+            };
+            let canonical = id.to_a2a_wire_name()?;
             let before: String = state.input_buffer.chars().take(trigger).collect();
             let after: String = state
                 .input_buffer
@@ -2970,6 +3264,15 @@ fn handle_help_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction 
             state.focus = state.help_overlay.close();
             state.needs_redraw = true;
             InputAction::CancelOrQuit
+        }
+        // Ctrl+Q: pass through to quit — same reasoning as Ctrl+C above, and the
+        // overlay itself renders the `Ctrl+Q — Quit (any focus)` binding, so
+        // swallowing it here would make the help text lie about itself.
+        // Story 19.3 (Journey 0), code review D2.
+        DomainKey::CtrlQ => {
+            state.focus = state.help_overlay.close();
+            state.needs_redraw = true;
+            InputAction::Quit
         }
         _ => InputAction::Consumed,
     }
@@ -3447,6 +3750,12 @@ pub fn convert_crossterm_event(
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('t') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlT));
             }
+            // Ctrl+Q → quit from any focus. Story 19.3 (Journey 0).
+            // Deliberately NOT CtrlC's CancelOrQuit: Ctrl+C cancels a running
+            // stream first; Ctrl+Q means quit.
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('q') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlQ));
+            }
             // Ctrl+U → clear search query in Search overlay (Story 4-4, standard readline)
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('u') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlU));
@@ -3777,6 +4086,372 @@ mod tests {
             result,
             Some(DomainInputEvent::SpecialKey(DomainKey::AltV))
         ));
+    }
+
+    // ── Story 19.3: Ctrl+Q quits from any focus (Journey 0) ────────────────
+
+    /// AC1 — Ctrl+Q translates at the crossterm boundary (the ONLY place
+    /// crossterm types are mapped, FR16).
+    #[test]
+    fn ctrl_q_maps_to_ctrl_q_domain_key() {
+        let event = ctrl_key('q');
+        assert!(matches!(
+            convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default()),
+            Some(DomainInputEvent::SpecialKey(DomainKey::CtrlQ))
+        ));
+    }
+
+    /// AC1 — full front-door chain from the real crossterm event: Chat focus
+    /// → Quit. Drives convert_crossterm_event → handle_input; never a
+    /// hand-fabricated DomainInputEvent.
+    #[test]
+    fn ctrl_q_event_quits_from_chat_focus() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let evt = ctrl_key('q');
+        let converted =
+            convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default())
+                .expect("Ctrl+Q must produce a domain event");
+        assert_eq!(handle_input(&mut state, &converted), InputAction::Quit);
+    }
+
+    /// AC1 — Input focus WITH TEXT TYPED still quits (Sam is mid-thought in
+    /// the input box; the PRD's Journey 0 key must not insert a character).
+    /// This is the AC1 mutant's tripwire: without the crossterm Ctrl+Q arm
+    /// the event degrades to KeyPress('q') and inserts instead of quitting.
+    #[test]
+    fn ctrl_q_event_quits_from_input_focus_with_text_typed() {
+        let mut state = make_state();
+        state.focus = FocusState::Input;
+        state.input_buffer = "half-written thought".to_string();
+        state.cursor_position = state.input_buffer.chars().count();
+        let evt = ctrl_key('q');
+        let converted =
+            convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default())
+                .expect("Ctrl+Q must produce a domain event");
+        assert_eq!(handle_input(&mut state, &converted), InputAction::Quit);
+        assert_eq!(
+            state.input_buffer, "half-written thought",
+            "Ctrl+Q must not insert a character"
+        );
+    }
+
+    /// AC1 positive control — plain `q` in Chat focus still quits (app.rs:1227).
+    #[test]
+    fn plain_q_in_chat_focus_still_quits() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::KeyPress('q')),
+            InputAction::Quit
+        );
+    }
+
+    /// AC2 expectation: the row either yields Quit or is a documented Skip
+    /// whose reason the story's Completion Notes repeat verbatim (A4).
+    #[derive(Debug)]
+    enum CtrlQRowExpectation {
+        Quit,
+        Skip(&'static str),
+    }
+
+    /// AC2 — for every FocusState reachable in a headless test, Ctrl+Q either
+    /// yields Quit or the row is an explicit Skip("reason") documented in the
+    /// story's Completion Notes. Rows are production-shaped: guards that gate
+    /// on a flag (palette, which-key, reverse search, autocomplete) get the
+    /// flag set exactly as the opening path sets it, because focus-only is
+    /// not the state production enters. `Overlay(Autocomplete(_))` is not a
+    /// row at all: no production site ever sets that focus value (the popup
+    /// lives at focus==Input, covered by the autocomplete row below).
+    #[test]
+    fn ctrl_q_from_every_focus_state_either_quits_or_is_documented() {
+        struct Row {
+            label: &'static str,
+            setup: Box<dyn Fn(&mut TuiState)>,
+            expect: CtrlQRowExpectation,
+        }
+        fn sidebar(panel: crate::domain::models::visual::PanelType) -> Box<dyn Fn(&mut TuiState)> {
+            Box::new(move |s| {
+                s.focus = FocusState::Sidebar { panel, selected: 0 };
+            })
+        }
+        fn overlay(ot: OverlayType) -> Box<dyn Fn(&mut TuiState)> {
+            Box::new(move |s| {
+                s.focus = FocusState::Overlay(ot.clone());
+            })
+        }
+        fn confirmation(ct: ConfirmationType) -> Box<dyn Fn(&mut TuiState)> {
+            Box::new(move |s| {
+                s.focus = FocusState::Overlay(OverlayType::Confirmation(ct.clone()));
+            })
+        }
+
+        use crate::domain::models::visual::PanelType;
+
+        let rows = vec![
+            // ── Non-modal surfaces: the Journey 0 named surfaces quit ──
+            Row {
+                label: "Input (empty buffer)",
+                setup: Box::new(|s| s.focus = FocusState::Input),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Input (text typed)",
+                setup: Box::new(|s| {
+                    s.focus = FocusState::Input;
+                    s.input_buffer = "draft".to_string();
+                    s.cursor_position = 5;
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Chat",
+                setup: Box::new(|s| s.focus = FocusState::Chat),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar History",
+                setup: sidebar(PanelType::History),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Tasks",
+                setup: sidebar(PanelType::Tasks),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Agents",
+                setup: sidebar(PanelType::Agents),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Adapters",
+                setup: sidebar(PanelType::Adapters),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar TransparencyLog",
+                setup: sidebar(PanelType::TransparencyLog),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Room",
+                setup: sidebar(PanelType::Room),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Sidebar Artifacts",
+                setup: sidebar(PanelType::Artifacts),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Input with autocomplete popup active (production shape)",
+                setup: Box::new(|s| {
+                    s.focus = FocusState::Input;
+                    s.autocomplete.active = true;
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            // ── Cards whose special-key handling has NO interceptor: Ctrl+Q
+            // reaches the global site and quits. Their y/n/e verbs are char
+            // keys; quitting abandons the card without performing it.
+            Row {
+                label: "Confirmation(PlanApproval) (no special-key interceptor)",
+                setup: confirmation(ConfirmationType::PlanApproval),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Confirmation(ArtifactApply) (no special-key interceptor)",
+                setup: confirmation(ConfirmationType::ArtifactApply),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Confirmation(PeerAdd) (no special-key interceptor)",
+                setup: confirmation(ConfirmationType::PeerAdd),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Confirmation(TeamRetract) (Esc-only interceptor)",
+                setup: confirmation(ConfirmationType::TeamRetract),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            // ── Documented Skips: the overlay handler owns the keyboard and
+            // consumes the key (same Tier-1 posture Ctrl+T/Ctrl+H already
+            // have). Reasons repeat verbatim in Completion Notes.
+            Row {
+                label: "Overlay(CommandPalette) with palette open",
+                setup: Box::new(|s| {
+                    s.command_palette.open(FocusState::Input);
+                    s.focus = FocusState::Overlay(OverlayType::CommandPalette);
+                }),
+                expect: CtrlQRowExpectation::Skip(
+                    "CommandPalette: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(WhichKey) with which-key open",
+                setup: Box::new(|s| {
+                    s.which_key.open(FocusState::Input);
+                    s.focus = FocusState::Overlay(OverlayType::WhichKey);
+                }),
+                expect: CtrlQRowExpectation::Skip(
+                    "WhichKey: any special key dismisses the overlay; the key is spent dismissing",
+                ),
+            },
+            // Help was a documented Skip until the code review (D2): the overlay
+            // RENDERS the `Ctrl+Q — Quit (any focus)` binding, so swallowing the
+            // key made the help text lie about itself. `handle_help_overlay_key`
+            // now passes Ctrl+Q through exactly as it already passed Ctrl+C.
+            Row {
+                label: "Overlay(Help) (passes Ctrl+Q through, like Ctrl+C)",
+                setup: overlay(OverlayType::Help),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Overlay(ModelSelector)",
+                setup: overlay(OverlayType::ModelSelector),
+                expect: CtrlQRowExpectation::Skip(
+                    "ModelSelector: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(ProfileSwitcher)",
+                setup: overlay(OverlayType::ProfileSwitcher),
+                expect: CtrlQRowExpectation::Skip(
+                    "ProfileSwitcher: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(ReverseSearch) with reverse search active",
+                setup: Box::new(|s| {
+                    s.reverse_search.active = true;
+                    s.focus = FocusState::Overlay(OverlayType::ReverseSearch);
+                }),
+                expect: CtrlQRowExpectation::Skip(
+                    "ReverseSearch: consumes all but Ctrl+P/Ctrl+X; Esc closes, Ctrl+C cancels",
+                ),
+            },
+            Row {
+                label: "Overlay(Search)",
+                setup: overlay(OverlayType::Search),
+                expect: CtrlQRowExpectation::Skip(
+                    "Search: Tier-1 overlay consumes ALL special keys by design (Story 4-4)",
+                ),
+            },
+            Row {
+                label: "Overlay(CrossSearch)",
+                setup: overlay(OverlayType::CrossSearch),
+                expect: CtrlQRowExpectation::Skip(
+                    "CrossSearch: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(BookmarkList)",
+                setup: overlay(OverlayType::BookmarkList),
+                expect: CtrlQRowExpectation::Skip(
+                    "BookmarkList: consumes all special keys; Esc closes first",
+                ),
+            },
+            Row {
+                label: "Overlay(WaveOverlay)",
+                setup: overlay(OverlayType::WaveOverlay),
+                expect: CtrlQRowExpectation::Skip(
+                    "WaveOverlay: consumes all special keys; Esc closes first (entry needs a wave run)",
+                ),
+            },
+            Row {
+                label: "Overlay(UsagePanel)",
+                setup: overlay(OverlayType::UsagePanel),
+                expect: CtrlQRowExpectation::Skip(
+                    "UsagePanel: consumes all special keys; Esc/Ctrl+C close it",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(Permission))",
+                setup: confirmation(ConfirmationType::Permission),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(Permission): modal Esc answers (deny) first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(PermissionFeedback))",
+                setup: confirmation(ConfirmationType::PermissionFeedback),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(PermissionFeedback): modal Esc cancels first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(Question))",
+                setup: confirmation(ConfirmationType::Question),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(Question): modal Esc cancels the question first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(DeleteConfirmation))",
+                setup: confirmation(ConfirmationType::DeleteConfirmation(
+                    crate::domain::models::visual::DeleteConfirmTarget::Single {
+                        id: "conv-1".to_string(),
+                        title: "t".to_string(),
+                    },
+                )),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(DeleteConfirmation): destructive modal Esc cancels first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(Fork))",
+                setup: confirmation(ConfirmationType::Fork),
+                expect: CtrlQRowExpectation::Skip("Confirmation(Fork): modal Esc cancels first"),
+            },
+            Row {
+                label: "Overlay(Confirmation(Rewind))",
+                setup: confirmation(ConfirmationType::Rewind),
+                expect: CtrlQRowExpectation::Skip("Confirmation(Rewind): modal Esc cancels first"),
+            },
+            Row {
+                label: "Overlay(Confirmation(ExportOverwrite))",
+                setup: confirmation(ConfirmationType::ExportOverwrite(std::path::PathBuf::from(
+                    "/tmp/out.md",
+                ))),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(ExportOverwrite): modal Esc cancels first",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(SkillTrust))",
+                setup: confirmation(ConfirmationType::SkillTrust),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(SkillTrust): modal Esc declines first (5-2 AC4)",
+                ),
+            },
+            Row {
+                label: "Overlay(Confirmation(SkillTrustInspect))",
+                setup: confirmation(ConfirmationType::SkillTrustInspect),
+                expect: CtrlQRowExpectation::Skip(
+                    "Confirmation(SkillTrustInspect): modal Esc returns to prompt first",
+                ),
+            },
+        ];
+
+        for row in rows {
+            let mut state = make_state();
+            (row.setup)(&mut state);
+            let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlQ));
+            match row.expect {
+                CtrlQRowExpectation::Quit => {
+                    assert_eq!(action, InputAction::Quit, "row {}", row.label);
+                }
+                CtrlQRowExpectation::Skip(reason) => {
+                    assert_ne!(
+                        action,
+                        InputAction::Quit,
+                        "row {} documented Skip({reason:?}) but it quits — update the story docs",
+                        row.label
+                    );
+                }
+            }
+        }
     }
 
     // ── handle_special_key via handle_input ─────────────────────────────────
@@ -4388,6 +5063,91 @@ mod tests {
             &DomainInputEvent::SpecialKey(DomainKey::Backspace),
         );
         assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+    }
+
+    // Story 19.13: `@a2a/` namespace entry is case-insensitive — any casing of
+    // the namespace token switches the popup to A2aMention and consumes the
+    // namespace, while the suffix filter keeps the user's casing verbatim.
+    #[test]
+    fn test_typing_at_a2a_slash_switches_autocomplete_kind() {
+        let mut state = make_state();
+        for c in "@a2A/".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::A2aMention);
+        assert_eq!(state.autocomplete.filter_text, "");
+        for c in "MyPeer".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.filter_text, "MyPeer");
+        let _ = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(state.autocomplete.filter_text, "MyPee");
+    }
+
+    // Story 19.13: deleting the '/' of a mixed-case `@A2a/` namespace falls
+    // back to FileMention (the A2A guard lowercases before matching) and keeps
+    // the typed text in the buffer as a plain file filter.
+    #[test]
+    fn test_backspace_past_a2a_slash_returns_to_file_mention() {
+        let mut state = make_state();
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
+        for c in "A2a/".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::A2aMention);
+        let _ = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+        assert_eq!(state.input_buffer, "@A2a");
+        assert_eq!(state.autocomplete.filter_text, "A2a");
+    }
+
+    // Story 19.13: selecting an A2A suggestion (Tab through handle_input)
+    // inserts the canonical `a2a__<peer>__<skill>` wire name — never the raw
+    // peer skill ID. A hostile peer exposing a skill named "Read" must not
+    // produce a bare local-tool reference, the multi-byte Unicode text around
+    // the trigger must survive, and the cursor must rest after the insertion.
+    #[test]
+    fn test_a2a_selection_inserts_wire_name_not_raw_hostile_read() {
+        let mut state = make_state();
+        for c in "héllo 🌍  終".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        for _ in " 終".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Left));
+        }
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+        for c in "a2a/".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::A2aMention);
+        state.autocomplete.suggestions.push(
+            crate::domain::models::autocomplete::AutocompleteSuggestion::A2aAgent {
+                peer: "evil-peer".to_string(),
+                name: "Read".to_string(),
+                description: "hostile skill".to_string(),
+            },
+        );
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
+        assert!(
+            !state.autocomplete.active,
+            "popup dismissed after selection"
+        );
+        assert_eq!(
+            state.input_buffer, "héllo 🌍 a2a__evil-peer__Read 終",
+            "canonical wire name replaces '@' trigger; Unicode prefix and suffix preserved"
+        );
+        assert_eq!(
+            state.cursor_position,
+            "héllo 🌍 a2a__evil-peer__Read".chars().count(),
+            "cursor directly after the inserted wire name"
+        );
     }
 
     // ── Story 16.5.5: Feedback Action Dispatch Arbiter ────────────────────────
@@ -5108,5 +5868,201 @@ mod tests {
             rendered_completed, 99,
             "render must NOT read the poisoned push counter"
         );
+    }
+    #[test]
+    fn enter_is_inert_in_the_read_only_room_panel() {
+        let mut state = TuiState::new(160, 40);
+        state.focus = FocusState::Sidebar {
+            panel: crate::domain::models::visual::PanelType::Room,
+            selected: 0,
+        };
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
+            InputAction::Consumed
+        );
+    }
+
+    #[test]
+    fn transparency_panel_routes_special_keys_search_navigation_and_export() {
+        use crate::domain::models::visual::PanelType;
+        use crate::domain::models::{Direction as RoomDirection, FocusState};
+        use crate::domain::services::transparency::{TransparencyKind, TransparencyRow};
+
+        let row = |seq, summary: &str| TransparencyRow {
+            seq,
+            recorded_at_ms: Some(seq as i64),
+            retracted_at_ms: None,
+            direction: RoomDirection::Inbound,
+            kind: TransparencyKind::Rejected,
+            peer: "peer-a".to_owned(),
+            task: Some(format!("task-{seq}")),
+            summary: summary.to_owned(),
+            provenance: None,
+            principal_collapsed: false,
+        };
+        let mut state = TuiState::new(160, 40);
+        state.focus = FocusState::Sidebar {
+            panel: PanelType::TransparencyLog,
+            selected: 0,
+        };
+        state
+            .transparency_panel
+            .apply_read(vec![row(1, "jammed"), row(2, "known")], 10);
+        state.sidebar_entry_count = 2;
+        state
+            .transparency_panel
+            .synchronize_selection(&mut state.sidebar_selected);
+
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::KeyPress('/')),
+            InputAction::Consumed
+        );
+        assert!(state.transparency_panel.search_active);
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
+        assert_eq!(state.transparency_panel.search.as_deref(), Some("jk"));
+        let _ = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(state.transparency_panel.search.as_deref(), Some("j"));
+        let _ = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(state.transparency_panel.search.as_deref(), Some(""));
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+        assert!(!state.transparency_panel.search_active);
+
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+        assert_eq!(state.sidebar_selected, 1);
+        assert!(
+            state.transparency_panel.scroll_offset <= state.sidebar_selected
+                && state.sidebar_selected
+                    < state.transparency_panel.scroll_offset
+                        + state.transparency_panel.viewport_rows.max(1),
+            "selected row must stay within the rendered viewport"
+        );
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+        assert_eq!(state.transparency_panel.drill_seq, Some(2));
+
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert!(
+            state.transparency_panel.search.is_none(),
+            "Esc clears filter first"
+        );
+        assert_eq!(state.transparency_panel.drill_seq, Some(2));
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert!(
+            state.transparency_panel.drill_seq.is_none(),
+            "Esc then unwinds drill"
+        );
+        assert!(matches!(state.focus, FocusState::Sidebar { .. }));
+
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
+        assert_eq!(state.sidebar_selected, 1);
+        // 'G' SELECTS the tail; it must not ACKNOWLEDGE it. Acknowledgement is
+        // a render-time effect (`widgets::transparency_panel::render` ->
+        // `acknowledge_rendered_boundary`) because a row that was never painted
+        // was never seen — the invariant stated verbatim at
+        // `transparency_panel.rs:343-346`. Story 18.2's review moved the ack to
+        // render and updated the widget test but not this one, which kept
+        // asserting the keystroke-time value and shipped RED (repaired in 18.3
+        // Task 0.5). Mutant: move the ack back into the 'G' arm -> RED here.
+        assert_eq!(
+            state.transparency_panel.acknowledged_seq, 0,
+            "selecting the tail must not acknowledge it before render"
+        );
+        // Positive control: the mechanism can fire, through the same call the
+        // renderer makes once the rows have a viewport to be painted into.
+        state
+            .transparency_panel
+            .set_viewport_rows(2, &mut state.sidebar_selected);
+        state.transparency_panel.acknowledge_rendered_boundary();
+        assert_eq!(
+            state.transparency_panel.acknowledged_seq, 2,
+            "the rendered boundary is what acknowledges"
+        );
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::KeyPress('e')),
+            InputAction::ExportTransparency
+        );
+    }
+    /// ⚑ 18.3a-f: parameterised by mode. The whole point of the mode field is
+    /// that dispatch does **not** consult it — both card modes must produce the
+    /// same `InputAction`s from the same keys, or `choice_for_key`'s
+    /// single-sourcing is a lie.
+    #[test]
+    fn apply_card_keys_only_own_input_while_confirmation_focus_is_active() {
+        let make_card = |mode: crate::adapters::tui::state::ArtifactCardMode| {
+            let hash =
+                crate::domain::models::ContentHash::parse_hex(&"e".repeat(64)).expect("hash");
+            crate::adapters::tui::state::PendingArtifactCard {
+                conversation_id: "conversation".to_owned(),
+                artifact: crate::domain::models::EvidenceArtifact {
+                    id: crate::domain::models::ArtifactId::from(hash),
+                    kind: crate::domain::models::ArtifactKind::Patch,
+                    producer: crate::domain::models::AgentId::parse("spoke-1").expect("agent"),
+                    content_hash: hash,
+                    authority: crate::domain::models::CapabilityTokenId::default(),
+                    provenance: vec![crate::domain::models::ProvenanceTag::UserOriginated],
+                    depends_on: Vec::new(),
+                    review: Some(crate::domain::models::ReviewStatus::Pending),
+                    host: crate::domain::models::HostBinding::new("host-A", "workspace"),
+                },
+                files: vec!["src/lib.rs".to_owned()],
+                workspace: std::path::PathBuf::from("/workspace"),
+                prior_focus: FocusState::Input,
+                predates_apply_records: false,
+                mode,
+            }
+        };
+        let confirmation =
+            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply));
+        for mode in [
+            crate::adapters::tui::state::ArtifactCardMode::Apply,
+            crate::adapters::tui::state::ArtifactCardMode::Resolve(
+                crate::domain::models::OperatorApplyFinding::Present,
+            ),
+        ] {
+            for (key, expected) in [
+                ('y', InputAction::ApplyCardAccept),
+                ('n', InputAction::ApplyCardDecline),
+                ('x', InputAction::Consumed),
+            ] {
+                let mut state = TuiState::new(80, 24);
+                state.pending_artifact_card = Some(make_card(mode));
+                state.focus = confirmation.clone();
+                assert_eq!(handle_char(&mut state, key), expected, "{mode:?}");
+            }
+
+            let mut input_owner = TuiState::new(80, 24);
+            input_owner.pending_artifact_card = Some(make_card(mode));
+            input_owner.focus = FocusState::Input;
+            let _ = handle_char(&mut input_owner, 'n');
+            assert_eq!(input_owner.input_buffer, "n", "{mode:?}");
+            assert!(input_owner.pending_artifact_card.is_some(), "{mode:?}");
+
+            let mut modal = TuiState::new(80, 24);
+            modal.pending_artifact_card = Some(make_card(mode));
+            modal.focus = confirmation.clone();
+            assert_eq!(
+                handle_input(&mut modal, &DomainInputEvent::SpecialKey(DomainKey::Esc),),
+                InputAction::ApplyCardDecline,
+                "{mode:?}"
+            );
+
+            let mut input_with_card = TuiState::new(80, 24);
+            input_with_card.pending_artifact_card = Some(make_card(mode));
+            input_with_card.focus = FocusState::Input;
+            assert_ne!(
+                handle_input(
+                    &mut input_with_card,
+                    &DomainInputEvent::SpecialKey(DomainKey::Esc),
+                ),
+                InputAction::ApplyCardDecline,
+                "{mode:?}"
+            );
+        }
     }
 }

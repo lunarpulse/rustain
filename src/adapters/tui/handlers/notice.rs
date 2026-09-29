@@ -78,6 +78,39 @@ pub(crate) fn apply_warning_notice(state: &mut TuiState, msg: String) -> String 
     fb_id
 }
 
+/// Store a notice addressed to a **background** tab as a `FeedbackBlock` in
+/// that tab's own state, so it survives the tab switch. Errors always were;
+/// a Warning/Advisory notice addressed to a background tab must not vanish
+/// either (18.9 review P2). `/team send` now updates its own Info block.
+/// Streaming abort is NOT done here — the caller's turn-fatal handling owns
+/// that, and an Advisory must leave the turn running.
+pub(crate) fn store_background_notice(
+    tab: &mut crate::domain::models::tab::TabState,
+    level: crate::domain::models::NoticeLevel,
+    msg: String,
+) {
+    let (fb_level, action) = match level {
+        crate::domain::models::NoticeLevel::Error => (FeedbackLevel::Error, FeedbackAction::Retry),
+        crate::domain::models::NoticeLevel::Warning
+        | crate::domain::models::NoticeLevel::Advisory => {
+            (FeedbackLevel::Warning, FeedbackAction::Dismiss)
+        }
+        _ => return,
+    };
+    static BG_FB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let fb_id = format!("bgfb-{}", BG_FB_COUNTER.fetch_add(1, Ordering::Relaxed));
+    tab.feedback_blocks.insert(
+        fb_id.clone(),
+        crate::domain::models::FeedbackBlock {
+            id: fb_id.clone(),
+            level: fb_level,
+            message: msg,
+            actions: vec![action],
+        },
+    );
+    tab.active_feedback_id = Some(fb_id);
+}
+
 /// Apply density mode transition: update mode, reconcile sidebar, drain queue.
 /// Extracted from event_loop.rs dispatch arm per code review D-2 (AC-11 ≤10 LOC ratchet).
 pub(crate) fn apply_density_transition(

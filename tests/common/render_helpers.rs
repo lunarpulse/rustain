@@ -90,6 +90,7 @@ pub fn render_to_string_ext(
             None,
             liveness,
             None, // open_prose
+            None, // current_focus
         );
     });
     use ratatui::buffer::Buffer;
@@ -141,6 +142,8 @@ pub fn make_msg(id: &str, role: MessageRole) -> ChatMessage {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 

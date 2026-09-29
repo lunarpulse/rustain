@@ -187,7 +187,14 @@ base_url = "https://user:SECRET-TOK@api.example.com/v1"
 // =========================================================================
 
 /// P0-2a: `config show` DTO construction makes zero env_var_trimmed calls.
+///
+/// `#[serial]` because `ENV_VAR_TRIMMED_CALLS` is a process-global counter and
+/// `p0_2b` deliberately increments it. Without this, the two race under a loaded
+/// parallel run and this test reads the sibling's increments as a `config show`
+/// env access — a false failure, and the file's own header already states the
+/// convention.
 #[test]
+#[serial]
 fn p0_2a_config_show_zero_env_var_trimmed_calls() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");

@@ -50,6 +50,12 @@ pub struct CompositeToolsetAdapter {
     capability_registry: Arc<CapabilityRegistry>,
     /// Handles keeping discovered capabilities alive.
     subscription_handles: TokioMutex<Vec<RegisterHandle>>,
+    /// 18.9b-a review patch — handles from the a2a eager-registration spawn
+    /// (`set_a2a_provider`) live in their own never-replaced slot:
+    /// `populate_registry` *replaces* `subscription_handles`, and a dropped
+    /// `RegisterHandle` async-deregisters its capability, so a shared vec let
+    /// a populate race erase freshly-registered a2a capabilities.
+    a2a_subscription_handles: Arc<TokioMutex<Vec<RegisterHandle>>>,
     /// Supervisor-owned connect + reconnect tasks. `Arc` so the spawned lazy
     /// connector can retain its reconnect handles here too; session teardown
     /// aborts and awaits every retained handle. Tokio mutex keeps the std
@@ -114,6 +120,7 @@ impl CompositeToolsetAdapter {
             include_builtin,
             capability_registry,
             subscription_handles: TokioMutex::new(Vec::new()),
+            a2a_subscription_handles: Arc::new(TokioMutex::new(Vec::new())),
             mcp_connection_tasks: Arc::new(TokioMutex::new(Vec::new())),
             mcp_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             skill_activator,
@@ -160,7 +167,26 @@ impl CompositeToolsetAdapter {
     /// Story 17.4a — wire the discovery-only A2A provider after composition.
     #[cfg(feature = "a2a")]
     pub fn set_a2a_provider(&self, provider: Arc<dyn CapabilityProvider>) {
-        let _ = self.a2a_provider.set(provider);
+        if self.a2a_provider.set(provider.clone()).is_err() {
+            return;
+        }
+        let registry = Arc::clone(&self.capability_registry);
+        let subscription_handles = Arc::clone(&self.a2a_subscription_handles);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                match registry
+                    .discover_and_register_all(provider.as_ref(), "a2a")
+                    .await
+                {
+                    Ok(handles) => subscription_handles.lock().await.extend(handles),
+                    Err(error) => {
+                        tracing::warn!(%error, "A2A capability registry population failed")
+                    }
+                }
+            });
+        } else {
+            tracing::warn!("A2A capability registry population requires an async runtime");
+        }
     }
 
     /// Story 9.3b — read the current catalog version (for tests).
@@ -609,6 +635,12 @@ impl ToolSetPort for CompositeToolsetAdapter {
         SwapTier::Warm
     }
 
+    /// Delegate to the builtin adapter — it owns the path resolution that the
+    /// Write display diff has to match (Story 19.1 code review).
+    fn workspace_root(&self) -> Option<std::path::PathBuf> {
+        self.builtin.workspace_root()
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -662,6 +694,10 @@ impl ToolSetPort for CompositeToolsetAdapter {
                             obj.insert(
                                 "__parent_trace".into(),
                                 serde_json::json!(ctx.parent_trace),
+                            );
+                            obj.insert(
+                                "__parent_tool_restriction".into(),
+                                serde_json::json!(ctx.parent_tool_restriction),
                             );
                         }
                         let conv_id = self.conversation_id.read().await;
@@ -738,6 +774,10 @@ impl ToolSetPort for CompositeToolsetAdapter {
                             obj.insert(
                                 "__parent_trace".into(),
                                 serde_json::json!(ctx.parent_trace),
+                            );
+                            obj.insert(
+                                "__parent_tool_restriction".into(),
+                                serde_json::json!(ctx.parent_tool_restriction),
                             );
                         }
                         let conv_id = self.conversation_id.read().await;
@@ -918,6 +958,7 @@ impl ToolSetPort for CompositeToolsetAdapter {
         &self,
         parent_ctx_tokens: u32,
         parent_trace: Option<crate::domain::models::TraceContext>,
+        parent_tool_restriction: Option<crate::domain::models::AgentToolRestriction>,
     ) {
         // D1 fix: store context on CTA (not SubagentProvider), injected at dispatch time
         *self.parent_ctx.write().await = Some(
@@ -925,10 +966,11 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 conversation_id: String::new(), // populated from set_execution_context via self.conversation_id
                 parent_ctx_tokens,
                 parent_trace: parent_trace.clone(),
+                parent_tool_restriction: parent_tool_restriction.clone(),
             },
         );
         self.builtin
-            .set_parent_context(parent_ctx_tokens, parent_trace)
+            .set_parent_context(parent_ctx_tokens, parent_trace, parent_tool_restriction)
             .await;
     }
 }

@@ -235,11 +235,13 @@ async fn must_report_obligation_is_stamped_by_delivery_and_journaled_on_terminal
     let correlation_id = CorrelationId::new("corr-violated");
     let envelope = Envelope {
         header: MessageHeader {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             sender: AgentId::parse("parent").expect("valid fixture parent id"),
             recipient: node.clone(),
             correlation_id: correlation_id.clone(),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         },
         body: AgentMessage::new("report this result"),
     };
@@ -284,11 +286,13 @@ async fn owner_report_with_matching_correlation_discharges_obligation() {
         &worker,
         Envelope {
             header: MessageHeader {
+                message_type: rustain::domain::models::SemanticMessageType::Unknown,
                 sender: parent.clone(),
                 recipient: worker.clone(),
                 correlation_id: correlation_id.clone(),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
+                verified_peer_id: None,
             },
             body: AgentMessage::new("produce a report"),
         },
@@ -299,11 +303,13 @@ async fn owner_report_with_matching_correlation_discharges_obligation() {
         &parent,
         Envelope {
             header: MessageHeader {
+                message_type: rustain::domain::models::SemanticMessageType::Unknown,
                 sender: worker.clone(),
                 recipient: parent.clone(),
                 correlation_id: correlation_id.clone(),
                 kind: MessageKind::OwnerReport,
                 sequence: None,
+                verified_peer_id: None,
             },
             body: AgentMessage::new("completed report"),
         },

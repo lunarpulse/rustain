@@ -1,8 +1,17 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::models::{AgentId, NodeState, OwnershipKind};
+use crate::domain::models::{AgentId, NodeState, OwnershipKind, SemanticMessageType};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// A conversation thread key — **and, since Story 18.4a, a Topic key**
+/// (`Topic := CorrelationId`, COLLAB D2). ⛔ No `TopicId` newtype exists: the
+/// field is already carried and signed in `AgentEnvelopeHeader`, so keying a
+/// Topic costs no wire change.
+///
+/// `Ord` is derived so a Topic can key a `BTreeMap` — the replicated log is
+/// iterated to build a bundle, and NFR71 requires that iteration to be
+/// deterministic. ⛔ A `HashMap` there would make assembly order depend on a
+/// per-process random seed.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CorrelationId(pub String);
 
 impl CorrelationId {
@@ -17,6 +26,20 @@ pub enum MessageKind {
     PeerMessage,
     OwnerReport,
     Refusal,
+    /// Topic replication traffic (Story 18.4a, FR150).
+    ///
+    /// ⛔ **Not a message.** A frame of this kind is never delivered to an
+    /// agent, never materializes a peer node, and never reaches the message
+    /// bus: the verified-peer delivery front door routes it into the Topic
+    /// store before any of that. Giving it its own kind rather than smuggling
+    /// handles inside a `PeerMessage` body is what makes that routing a
+    /// compile-checked branch instead of a body sniff.
+    ///
+    /// ⚠ An older build refuses this kind rather than mis-reading it: the enum
+    /// is `#[non_exhaustive]` but has no `#[serde(other)]`, so the envelope
+    /// fails to deserialize and the frame is refused. Fail-closed is the right
+    /// direction for a kind that carries replication state.
+    TopicGossip,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,8 +48,13 @@ pub struct MessageHeader {
     pub recipient: AgentId,
     pub correlation_id: CorrelationId,
     pub kind: MessageKind,
+    #[serde(default)]
+    pub message_type: SemanticMessageType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
+    /// Transport-authenticated peer identity. Claimed sender ids never drive policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_peer_id: Option<super::PeerId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +99,8 @@ pub struct AgentDelivery {
     /// time. The recipient's `Op::Deliver` dispatch enforces it: `MayRefuse`
     /// may consent-refuse; `MustReport` must process.
     pub disposition: DeliveryDisposition,
+    /// Response automation selected independently from relationship consent.
+    pub response_policy: crate::domain::ports::PeerResponsePolicy,
 }
 
 impl AgentDelivery {
@@ -79,10 +109,20 @@ impl AgentDelivery {
         mode: DeliveryMode,
         disposition: DeliveryDisposition,
     ) -> Self {
+        Self::new_with_response_policy(envelope, mode, disposition, Default::default())
+    }
+
+    pub(crate) fn new_with_response_policy(
+        envelope: Envelope<AgentMessage>,
+        mode: DeliveryMode,
+        disposition: DeliveryDisposition,
+        response_policy: crate::domain::ports::PeerResponsePolicy,
+    ) -> Self {
         Self {
             envelope,
             mode,
             disposition,
+            response_policy,
         }
     }
 }
@@ -103,6 +143,9 @@ pub enum RefuseReason {
     /// attaches the live runner). There is no consumer for a queued delivery,
     /// so accepting it would silently black-hole the message.
     AwaitingResume,
+    /// The recipient has no live consumer for this delivery. This is an
+    /// operational refusal, never a consent-policy decision.
+    Unavailable,
 }
 
 /// Story 14-4a (AC4) — honest outcome enum. `Accepted` is the sole variant:
@@ -145,6 +188,54 @@ pub fn relationship_disposition(ownership: OwnershipKind) -> DeliveryDisposition
     }
 }
 
+/// Story 14-4a (F8/F11), hoisted out of `run_child`'s nested scope by Story
+/// 18.3 (Task 1) so both enforcement shells share one predicate.
+///
+/// Is this recipient **permitted** to consent-refuse? `MayRefuse` (a `Peer`
+/// relationship) says yes; `MustReport` (`Owned`/`Self_`) says no — an owned
+/// recipient owes a report and cannot decline the message.
+///
+/// Deliberately a *permission*, not a refusal. The two shells establish that the
+/// recipient actually declined by different means — the in-process runner
+/// declines every peer delivery outright (a local subagent runner has no peer
+/// consumer), while the RAP peer path declines only when the verified-peer
+/// consumer rejects the ingest. Both ask THIS function whether the relationship
+/// lets that refusal count, so the `MayRefuse` check cannot drift between them.
+///
+/// Effect-free and value-returning per the Decision-Core Pattern (Story 18.0):
+/// the budget release and the receipt emission belong to the shells.
+pub fn may_consent_refuse(disposition: DeliveryDisposition) -> bool {
+    disposition == DeliveryDisposition::MayRefuse
+}
+
+/// The one `MessageRefused` receipt shape, shared by every refusal path.
+///
+/// Story 18.3 (Task 1). The in-process runner and the RAP peer path emit through
+/// different sinks (an `EventBus` vs. the daemon's `domain_tx`), so the
+/// *emission* cannot be shared — but the receipt **value** must be identical, or
+/// a sender learns a different story depending on which recipient refused.
+/// Building it here is what prevents a second refusal path from existing.
+///
+/// Takes the `MessageHeader` rather than the whole `AgentDelivery` because the
+/// RAP peer shell moves `envelope.body` into the verified-peer consumer before
+/// it knows whether the ingest was declined — so no `&AgentDelivery` survives to
+/// the refusal point. The header is everything a receipt needs anyway.
+pub fn refusal_receipt(
+    header: &MessageHeader,
+    recipient: &AgentId,
+    reason: RefuseReason,
+) -> crate::domain::events::AppEvent {
+    crate::domain::events::AppEvent::Subagent(crate::domain::models::SubagentEnvelope::new(
+        header.sender.as_str().to_string(),
+        recipient.clone(),
+        header.kind.clone(),
+        crate::domain::models::SubagentEvent::MessageRefused {
+            correlation_id: header.correlation_id.clone(),
+            reason,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,11 +275,13 @@ mod tests {
     #[test]
     fn ac5_header_round_trips_with_sequence_none() {
         let header = MessageHeader {
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
             sender: id("parent"),
             recipient: id("child"),
             correlation_id: CorrelationId::new("c-1"),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         };
         let env = Envelope::new(header, AgentMessage::new("hello"));
         let json = serde_json::to_string(&env).unwrap();

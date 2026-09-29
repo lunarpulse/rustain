@@ -3,6 +3,7 @@
 
 pub mod client;
 pub mod error;
+pub mod http;
 pub mod lazy_connect;
 pub mod lifecycle;
 pub mod mcp_provider;
@@ -97,16 +98,20 @@ mod arch_guards {
     }
 
     /// AC2 (structural half) / R-3: no per-connection session state may
-    /// participate in task identity. rustain ships stdio only — there are no
-    /// HTTP session headers — so identity is (server, taskId) alone,
-    /// behaviorally proven in `identity_is_stateless_across_independent_clients`.
+    /// participate in task identity. `http.rs` is the transport boundary and
+    /// must forward rmcp's opaque session header; every other MCP production
+    /// module remains forbidden from reading or keying on session state.
     #[test]
     fn mcp_adapter_never_reads_session_headers() {
-        // Scan PRODUCTION code (comments + the `#[cfg(test)]` module stripped by
-        // `production_code`) so the guard's own marker list cannot exempt it, and
-        // drop the blanket `mod.rs` exemption the prior version relied on.
+        // Scan production code (comments + the `#[cfg(test)]` module stripped
+        // by `production_code`). The HTTP transport's trait implementation is
+        // the sole exception: it forwards the opaque value but never exposes
+        // it to task identity code.
         const SESSION_MARKERS: &[&str] = &["Mcp-Session-Id", "session_id", "sessionId"];
         for (path, source) in mcp_adapter_sources() {
+            if path.file_name().and_then(|name| name.to_str()) == Some("http.rs") {
+                continue;
+            }
             let production = production_code(&source);
             for marker in SESSION_MARKERS {
                 assert!(
@@ -186,23 +191,30 @@ pub fn merge_mcp_specs(
     merged.into_values().collect()
 }
 
-/// Emit startup SystemNotice warnings for non-stdio transports per AC-1.
+/// Emit startup warnings for transports that will not connect.
+///
+/// ⚠ Story 9.9 (ruling A10) corrected this doc comment. It used to read *"Emit
+/// startup SystemNotice warnings…"* while the body only ever called
+/// `tracing::warn!`, which reaches `~/.rustain/rustain.log` and **never the
+/// TUI**. Story 9.1's AC-1 promised a `SystemNotice`; what shipped was a log
+/// line. The claim is now narrowed to what the code does. The one warning in
+/// this story that an operator must actually SEE — D2's plaintext non-loopback
+/// notice — is emitted from `McpClientAdapter::connect` on the real
+/// `AppEvent::SystemNotice` channel instead (AC9).
+///
+/// ⛔ The `Http` arm is gone: Story 9.9 makes Streamable HTTP a first-class
+/// transport, so a log line telling the operator it is "deferred to a later
+/// Epic 9 story" would name this story as its own blocker.
 pub fn emit_transport_warnings(specs: &[McpServerSpec]) {
     for spec in specs {
         match spec.transport {
-            McpTransport::Http => {
-                tracing::warn!(
-                    "MCP server '{}': http transport deferred to a later Epic 9 story; skipping",
-                    spec.id
-                );
-            }
             McpTransport::Sse => {
                 tracing::warn!(
                     "MCP server '{}': SSE transport is not supported (deprecated by MCP spec 2025-03-26 per ADR-06-08). Use a proxy like mcp-proxy, or update the server to Streamable HTTP.",
                     spec.id
                 );
             }
-            McpTransport::Stdio => {}
+            McpTransport::Stdio | McpTransport::Http => {}
         }
     }
 }

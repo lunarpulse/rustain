@@ -1,24 +1,24 @@
 //! `rustain profile install gh:user/profile-name` — fetches a profile from a public GitHub repo.
-//! Story 8.6b AC-1..AC-11, FR73.
+//! `rustain profile install <local path>` — the same verb over a file you were handed
+//! (Story 19.12, ruling A6): it delegates to `run_profile_import`, so there is one
+//! read, one parse and one write path for a local file.
+//! Story 8.6b AC-1..AC-11, FR73; Story 19.12 AC1 (the local-path arm).
 #![cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
 
 use std::io::{BufRead, Write};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
 use regex::Regex;
 
-use super::prompt::{fix_profile_error, validate_profile_name};
-use super::source::SinglePathSource;
+use super::prompt::validate_profile_name;
+use super::source::{
+    apply_preview_flip, check_name_collision, emit_feature_warnings, validate_or_flip,
+};
 use crate::adapters::cli::commands::Cli;
-use crate::adapters::profile_resolver::embedded::{EmbeddedProfileSource, embedded_names};
-use crate::domain::errors::ProfileError;
-use crate::domain::models::{AppConfig, PortDimension, ProfileDefinition};
+use crate::domain::models::{AppConfig, ProfileDefinition};
 use crate::domain::ports::ProfileResolver;
-use crate::domain::services::adapter_catalog::AdapterCatalog;
-use crate::domain::services::profile_loader::ProfileLoader;
 use crate::infrastructure::{
     paths,
     profile_install::{ParsedGhSpec, parse_gh_spec, raw_base_url, write_source_sidecar},
@@ -26,12 +26,8 @@ use crate::infrastructure::{
 
 const MAX_PROFILE_SIZE: usize = 1024 * 1024; // 1 MB
 
-static PREVIEW_LINE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?m)^preview\s*=\s*(true|false)\s*$").expect("PREVIEW_LINE_RE compile")
-});
-
-static NAME_LINE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?m)^name\s*=\s*"[^"]*""#).expect("NAME_LINE_RE compile"));
+static NAME_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?m)^name\s*=\s*"[^"]*""#).expect("NAME_LINE_RE compile"));
 
 pub async fn run_profile_install(
     spec: String,
@@ -42,6 +38,51 @@ pub async fn run_profile_install(
     _cli: &Cli,
     _bootstrap_config: &AppConfig,
 ) -> Result<()> {
+    // ── The local-path arm (Story 19.12, A6) ────────────────────────────────
+    //
+    // ⛔ The predicate is the SPEC SHAPE, never the error variant: `parse_gh_spec`
+    // returns `UnsupportedScheme` for BOTH a non-`gh:` spec and a `gh:` with an
+    // empty body (`profile_install.rs:31-38`), so branching on the variant would
+    // swallow `install gh:` — which today prints its own gh-spec error on stderr
+    // and exits 2. `starts_with("gh:")` is the same predicate `parse_gh_spec`
+    // opens with, so the two can never disagree.
+    //
+    // `refuse_builtin_collision = true` is NEW behaviour, not a carried guard:
+    // `install` has never guarded a local path because it has never accepted one
+    // (ruling A21). `import` keeps its shipped behaviour and passes `false`.
+    if !spec.starts_with("gh:") {
+        // ⛔ `-` is refused here rather than delegated. `import -` already reads
+        // stdin and needs `--name`; without it `run_profile_import` `bail!`s into
+        // an `anyhow::Err`, which `startup.rs` routes to `tracing::error!` — exit
+        // 1, zero bytes on both streams. Adding a surface whose failure mode is
+        // silence is the class Story 19.12 fixes elsewhere (A18), so the refusal
+        // is explicit and visible. Decision recorded for A22's `install -` item.
+        if spec == "-" {
+            eprintln!(
+                "Error: 'rustain profile install -' is not supported. Use 'rustain profile import - --name <name>' to load a profile from stdin, or pass a file path."
+            );
+            std::process::exit(2);
+        }
+        return match super::import::run_profile_import(
+            spec,
+            name_override,
+            force,
+            true,
+            strict_features,
+            _profile_resolver,
+            _cli,
+            _bootstrap_config,
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                eprintln!("Error: {}", error);
+                std::process::exit(2);
+            }
+        };
+    }
+
     let parsed = match parse_gh_spec(&spec) {
         Ok(p) => p,
         Err(e) => {
@@ -88,8 +129,7 @@ pub async fn run_profile_install(
     }
 
     // Validate and handle feature gating
-    let (def, content_to_write, feature_warnings) =
-        validate_or_flip(&content, def, strict_features);
+    let (content_to_write, feature_warnings) = validate_or_flip(&content, &def, strict_features);
 
     // Collision check
     let target_name = name_override.as_deref().unwrap_or(&def.name);
@@ -146,29 +186,7 @@ pub async fn run_profile_install(
 
     write_source_sidecar(&dest, &spec)?;
 
-    // Emit feature-gate warning to stderr
-    if !feature_warnings.is_empty() {
-        let features_list: Vec<_> = feature_warnings
-            .iter()
-            .map(|f| f.feature.as_str())
-            .collect();
-        let features_joined = features_list.join(" ");
-        eprintln!(
-            "Warning: profile '{}' references adapters not compiled into this binary:",
-            target_name
-        );
-        for fw in &feature_warnings {
-            eprintln!(
-                "  - {} (port: {}; requires --features {})",
-                fw.adapter, fw.port, fw.feature
-            );
-        }
-        eprintln!(
-            "Set preview = true so the profile falls back to no-op adapters for missing dimensions.\n\
-             Profile installed with preview = true. To use the full profile, rebuild with: cargo install rustain --features {}",
-            features_joined
-        );
-    }
+    emit_feature_warnings(target_name, &feature_warnings);
 
     println!("Installed profile '{}' from {}", target_name, spec);
 
@@ -188,151 +206,6 @@ pub async fn run_profile_install(
                 feature = %fw.feature,
                 adapter = %fw.adapter
             );
-        }
-    }
-
-    Ok(())
-}
-
-struct FeatureGateInfo {
-    feature: String,
-    adapter: String,
-    port: String,
-}
-
-/// Scan a ProfileDefinition for all adapters whose cargo features aren't compiled.
-fn scan_features(def: &ProfileDefinition) -> Vec<FeatureGateInfo> {
-    let dims: &[(
-        &str,
-        Option<&crate::domain::models::AdapterRef>,
-        PortDimension,
-    )] = &[
-        ("persona", def.persona.as_ref(), PortDimension::Persona),
-        ("memory", def.memory.as_ref(), PortDimension::Memory),
-        ("session", def.session.as_ref(), PortDimension::Session),
-        ("tools", def.tools.as_ref(), PortDimension::Tools),
-        ("channels", def.channels.as_ref(), PortDimension::Channels),
-        (
-            "scheduler",
-            def.scheduler.as_ref(),
-            PortDimension::Scheduler,
-        ),
-        ("context", def.context.as_ref(), PortDimension::Context),
-    ];
-    let mut features = Vec::new();
-    for (_dim_name, adapter_ref, port) in dims {
-        if let Some(adapter_ref) = adapter_ref {
-            if let Some(desc) = AdapterCatalog::lookup(*port, &adapter_ref.adapter) {
-                if let Some(feature) = desc.feature_gate {
-                    if !AdapterCatalog::is_feature_compiled(feature) {
-                        features.push(FeatureGateInfo {
-                            feature: feature.to_string(),
-                            adapter: adapter_ref.adapter.clone(),
-                            port: format!("{:?}", port),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    features
-}
-
-fn validate_or_flip(
-    content: &str,
-    def: ProfileDefinition,
-    strict_features: bool,
-) -> (ProfileDefinition, String, Vec<FeatureGateInfo>) {
-    let validate = |content: &str| -> Result<ProfileDefinition, ProfileError> {
-        let def: ProfileDefinition =
-            toml::from_str(content).map_err(|_| ProfileError::ProfileNotFound {
-                name: "in-memory".into(),
-                search_paths: vec![],
-            })?;
-        let source = SinglePathSource {
-            name: def.name.clone(),
-            content: content.to_string(),
-            fallback: EmbeddedProfileSource,
-        };
-        let loader = ProfileLoader::new(&AdapterCatalog, &source);
-        loader.load(&def.name)?;
-        Ok(def)
-    };
-
-    match validate(content) {
-        Ok(parsed_def) => (parsed_def, content.to_string(), Vec::new()),
-        Err(ProfileError::AdapterFeatureGated { .. }) if !strict_features => {
-            // Check if already preview
-            let already_preview = def.preview
-                || PREVIEW_LINE_RE
-                    .captures(content)
-                    .and_then(|c| c.get(1).map(|m| m.as_str() == "true"))
-                    .unwrap_or(false);
-
-            if already_preview {
-                // No warning needed — upstream already declared preview.
-                // Scan for ALL feature-gated adapters but do NOT re-validate;
-                // the loader should handle preview=true gracefully.
-                let warnings = scan_features(&def);
-                (def, content.to_string(), warnings)
-            } else {
-                // Pre-scan for ALL feature-gated adapters before flipping
-                let all_features = scan_features(&def);
-                let rewritten = apply_preview_flip(content);
-                match validate(&rewritten) {
-                    Ok(parsed_def) => (parsed_def, rewritten, all_features),
-                    Err(e) => {
-                        eprintln!("Validation still failed after preview flip: {}", e);
-                        eprintln!("{}", fix_profile_error(&e));
-                        std::process::exit(2);
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Profile validation failed: {}", e);
-            eprintln!("{}", fix_profile_error(&e));
-            std::process::exit(2);
-        }
-    }
-}
-
-fn apply_preview_flip(content: &str) -> String {
-    if PREVIEW_LINE_RE.is_match(content) {
-        PREVIEW_LINE_RE
-            .replace(content, "preview = true")
-            .to_string()
-    } else {
-        format!("{}\npreview = true\n", content)
-    }
-}
-
-fn check_name_collision(
-    target_name: &str,
-    force: bool,
-    name_override_provided: bool,
-) -> Result<(), String> {
-    // Check embedded names
-    if embedded_names().contains(&target_name) {
-        if !(force && name_override_provided) {
-            return Err(format!(
-                "Error: profile name '{}' collides with a built-in profile. Pass --name <override> to install under a different name.",
-                target_name
-            ));
-        }
-    }
-
-    // Check user profiles
-    let config_dir = paths::config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
-    let user_dest = config_dir
-        .join("profiles")
-        .join(format!("{}.toml", target_name));
-    if user_dest.exists() {
-        if !(force && name_override_provided) {
-            return Err(format!(
-                "Error: profile name '{}' collides with a user profile. Pass --name <override> to install under a different name.",
-                target_name
-            ));
         }
     }
 
@@ -443,7 +316,8 @@ mod tests {
     fn test_apply_preview_flip_when_no_preview_line() {
         let content = "name = \"test\"\n[persona]\nadapter = \"minimal\"\n";
         let result = apply_preview_flip(content);
-        assert!(result.contains("preview = true"));
+        let parsed: ProfileDefinition = toml::from_str(&result).unwrap();
+        assert!(parsed.preview);
     }
 
     #[test]

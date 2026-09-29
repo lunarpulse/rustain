@@ -348,6 +348,8 @@ pub enum WaitReason {
     /// MCP task parked on a human answer to an elicitation request (17.5b).
     /// The first writer of `WaitReason` in the product — see R-2.
     AwaitingHumanInput,
+    /// Inbound peer interaction parked until the local operator responds.
+    AwaitingPeerResponse,
 }
 
 impl WaitReason {
@@ -356,7 +358,10 @@ impl WaitReason {
     pub const fn escalates(&self) -> bool {
         matches!(
             self,
-            Self::AwaitingSpoke | Self::AwaitingUpstreamArtifact | Self::AwaitingHumanInput
+            Self::AwaitingSpoke
+                | Self::AwaitingUpstreamArtifact
+                | Self::AwaitingHumanInput
+                | Self::AwaitingPeerResponse
         )
     }
 }
@@ -568,6 +573,7 @@ mod tests {
     fn wait_reason_escalation_predicate() {
         assert!(WaitReason::AwaitingSpoke.escalates());
         assert!(WaitReason::AwaitingHumanInput.escalates());
+        assert!(WaitReason::AwaitingPeerResponse.escalates());
         assert!(!WaitReason::BudgetPaused.escalates());
     }
 

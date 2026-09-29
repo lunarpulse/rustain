@@ -94,6 +94,19 @@ impl StoragePort for NoOpStorage {
     async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, StorageError> {
         Ok(vec![])
     }
+
+    /// No storage means no snapshots, so there is never an original to show.
+    /// Stated explicitly rather than inherited: Story 19.1 code review removed
+    /// the port's default body precisely so that an implementor opting out of
+    /// the display diff has to say so.
+    async fn read_snapshot(
+        &self,
+        _conversation_id: &str,
+        _checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        _path: &std::path::Path,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(None)
+    }
 }
 
 // ── SecurityPort ────────────────────────────────────────────────

@@ -311,7 +311,7 @@ Adapter-local config (`[context.config]`):
 | Tools      | builtin-only, builtin-full, composite        |
 | Channels   | terminal, telegram (feature-gated)          |
 | Scheduler  | none, cron (feature-gated)                  |
-| Context    | default, daily (alias of default), noop      |
+| Context    | default, daily (alias of default), noop, composite (default + peer-origin context, tainted; Story 18.4a) |
 
 ### MCP Servers
 
@@ -319,18 +319,43 @@ MCP servers can be configured per-profile via `[tools.config.mcp.<server-name>]`
 
 ## CLI: Profile Management Commands
 
-Manage profiles without launching the TUI. All commands work in CI / non-TTY environments.
+Manage profiles without launching the TUI. ⚠ **CORRECTED 2026-09-07 (Story 19.12):
+this line read "All commands work in CI / non-TTY environments" — and two rows of
+this very table say TTY-only.** `create` and `edit` require an interactive
+terminal. `create` now says so out loud on stderr and exits 2; before Story
+19.12 it exited 1 with **zero bytes on both streams**, so a CI job saw a bare
+failure with no reason. Other commands can run without a terminal, but `import`
+requires `--force` when an existing destination would otherwise trigger its
+interactive overwrite prompt.
 
 | Command | Description |
 |---------|-------------|
 | `rustain profile list` | Enumerate all profiles (builtin, user, community) with source, preview, and active marker |
 | `rustain profile show <name>` | Display the fully resolved profile configuration (supports `--toml` and `--json`) |
-| `rustain profile create` | Interactive wizard to build a new profile (TTY-only) |
-| `rustain profile edit <name>` | Open the profile TOML in `$EDITOR` (TTY-only; `--no-validate` to skip post-save check) |
+| `rustain profile create` | Interactive wizard to build a new profile (**TTY-only**; refuses on stderr with exit 2 otherwise). ⛔ No positional: use `--name <n>`, plus optional `--extends <parent>` / `--from <profile>` |
+| `rustain profile edit <name>` | Open the profile TOML in `$EDITOR` (**TTY-only**; `--no-validate` to skip post-save check) |
 | `rustain profile switch <name>` | CLI stub for switching profiles (IPC requires a running TUI) |
 | `rustain profile validate <name>` | Run all 5 validation passes (default `--all` checks every profile) |
-| `rustain profile export <name>` | Flatten extends chain into a shareable self-contained TOML |
-| `rustain profile import <path>` | Validate and install a profile TOML from a local path or stdin (`-`) |
+| `rustain profile export <name>` | Flatten extends chain into a shareable self-contained TOML. ⚠ TOML only — no persona markdown — and sections are emitted **alphabetically** |
+| `rustain profile import <path>` | Validate and install a profile TOML from a local path or stdin (`-`), into `profiles/`. For unattended overwrite, pass `--force`; without it, an existing destination prompts interactively |
+| `rustain profile install <source>` | `gh:user/profile-name` → fetch over HTTPS into `profiles/community/` + a `.toml.source` sidecar. **Anything else is a local path** and delegates to `import`, landing in `profiles/`. ⚠ Undocumented here since Story 8.6b; the local-path arm is new in Story 19.12 |
+
+### Why `install` refuses a name that `import` accepts
+
+`install <local path>` **refuses** a profile whose name collides with a built-in
+(or with an existing user profile) unless you pass **both** `--force` **and**
+`--name <override>`; `import` accepts it and prompts. That asymmetry is
+deliberate: `import` means *"load my file"*, `install` means *"take someone
+else's"*, and silently replacing the default `coding` profile with a stranger's
+TOML is exactly the mistake the guard exists to stop.
+
+Both verbs refuse a file whose **own** `name` field contains `..`, `/` or `\`.
+That was a shipped arbitrary-path write in `import` until Story 19.12: a file
+carrying `name = "../../ESCAPED"` was written **outside** `RUSTAIN_CONFIG_DIR`
+at exit 0, with a success message.
+
+`install -` is refused with a message pointing at `import - --name <n>`, which is
+the verb that reads stdin.
 
 ## See Also
 

@@ -762,7 +762,7 @@ async fn test_global_config_unknown_section_is_forward_compatible_integration() 
 use rustain::adapters::cli::doctor::checks::{
     MCP_PER_SERVER_BUDGET, McpReachabilityCheck, map_connect_result,
 };
-use rustain::adapters::mcp::error::McpError;
+use rustain::adapters::mcp::error::{HttpFailureKind, McpError};
 use rustain::domain::models::{McpServerSpec, McpTransport, mcp_server_spec::McpServerSource};
 
 /// Helper to build a stdio McpServerSpec for tests.
@@ -797,12 +797,83 @@ fn test_map_connect_result_ok_zero_tools_is_info() {
 
 #[test]
 fn test_map_connect_result_unsupported_is_skipped_info() {
+    // ⚑ Story 9.9: this used to pass the literal "http transport deferred" as
+    // the payload. The test still passed after 9.9 (SSE keeps the variant) but
+    // the string became a lie — HTTP is a supported transport now. Repointed at
+    // the reason SSE actually carries.
     let (status, tier) = map_connect_result(
-        &Err(McpError::Unsupported("http transport deferred".to_string())),
+        &Err(McpError::Unsupported(
+            "SSE transport is not supported (deprecated by MCP spec 2025-03-26 per ADR-06-08)"
+                .to_string(),
+        )),
         0,
     );
     assert!(status.is_skipped());
     assert_eq!(tier, CheckTier::Info);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Story 9.9 AC6 / ruling A7 — the doctor tiers HTTP failures on WHOSE BOX the
+// server is, not on the error class.
+//
+// Why it matters: for a REMOTE server that is merely down, a non-zero
+// `rustain doctor` teaches the operator to ignore red — and then red is ignored
+// on the day their config really is broken. `local` is the SAME loopback answer
+// `connect()` computed for the D2 notice and carried in the error; the mapper
+// must never compute a second one that can disagree.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn http_error(kind: HttpFailureKind, local: bool) -> McpError {
+    McpError::Http {
+        kind,
+        local,
+        detail: "fixture".to_string(),
+    }
+}
+
+#[test]
+fn ac6_loopback_http_failures_are_fail_exit_affecting() {
+    for kind in [HttpFailureKind::Unreachable, HttpFailureKind::ServerError] {
+        let (status, tier) = map_connect_result(&Err(http_error(kind, true)), 0);
+        assert_eq!(status, CheckStatus::Fail, "loopback {kind} must be Fail");
+        assert_eq!(tier, CheckTier::ExitAffecting);
+    }
+}
+
+#[test]
+fn ac6_non_loopback_http_failures_are_warning_info() {
+    for kind in [HttpFailureKind::Unreachable, HttpFailureKind::ServerError] {
+        let (status, tier) = map_connect_result(&Err(http_error(kind, false)), 0);
+        assert_eq!(
+            status,
+            CheckStatus::Warning,
+            "a remote {kind} is not the operator's box to fix"
+        );
+        assert_eq!(tier, CheckTier::Info);
+    }
+}
+
+#[test]
+fn ac6_dns_auth_and_config_failures_are_fail_regardless_of_host() {
+    for local in [true, false] {
+        for kind in [HttpFailureKind::DnsFailure, HttpFailureKind::AuthRequired] {
+            let (status, tier) = map_connect_result(&Err(http_error(kind, local)), 0);
+            assert_eq!(
+                status,
+                CheckStatus::Fail,
+                "{kind} is a typo or a credential — the operator's own, local={local}"
+            );
+            assert_eq!(tier, CheckTier::ExitAffecting);
+        }
+    }
+    let (status, tier) = map_connect_result(
+        &Err(McpError::InvalidConfig(
+            "MCP server 'remote': transport = \"http\" requires a `url`".to_string(),
+        )),
+        0,
+    );
+    assert_eq!(status, CheckStatus::Fail);
+    assert_eq!(tier, CheckTier::ExitAffecting);
 }
 
 #[test]
@@ -928,11 +999,15 @@ async fn test_mcp_broken_stdio_spawn_failed_is_fail_exit_affecting() {
 // ── P0 #2a: Exit-neutral negative control ──
 // An Info/Skipped/Warning row must NOT change the exit code.
 // Pair with #1 to ensure the positive control moves exit and the negative doesn't.
+//
+// ⚑ Story 9.9 repointed this at SSE. It used to use `McpTransport::Http`, which
+// was exit-neutral only because HTTP was `Unsupported`; HTTP now connects, and
+// an `http` entry with no `url` is a config fault the operator must see.
 
 #[tokio::test]
 async fn test_mcp_exit_neutral_negative_control() {
-    // Non-stdio transport → Skipped/Info → exit-neutral.
-    let spec = test_mcp_spec("http-server", None, McpTransport::Http);
+    // SSE is `Unsupported` forever (ADR-06-08) → Skipped/Info → exit-neutral.
+    let spec = test_mcp_spec("sse-server", None, McpTransport::Sse);
     let check = McpReachabilityCheck {
         servers: vec![spec],
         per_server_budget: MCP_PER_SERVER_BUDGET,
@@ -951,27 +1026,25 @@ async fn test_mcp_exit_neutral_negative_control() {
     );
 }
 
-// ── P0 #4a: Non-stdio transport → Skipped("transport not supported") ──
-
+/// Story 9.9 AC2/A7: `transport = "http"` with no `url` is the operator's own
+/// config, so `rustain doctor` must FAIL on it — not skip it as an unsupported
+/// transport, which is what it did while HTTP was deferred.
 #[tokio::test]
-async fn test_mcp_http_transport_is_skipped() {
+async fn test_mcp_http_without_a_url_is_a_config_fail() {
     let spec = test_mcp_spec("http-server", None, McpTransport::Http);
     let check = McpReachabilityCheck {
         servers: vec![spec],
         per_server_budget: MCP_PER_SERVER_BUDGET,
     };
     let result = check.run().await;
-    assert!(
-        result.status.is_skipped(),
-        "Http transport should be Skipped, got {:?}",
-        result.status
-    );
-    assert!(
-        result.message.contains("transport not supported") || result.message.contains("skipped"),
-        "message should mention transport: {}",
+    assert_eq!(
+        result.status,
+        CheckStatus::Fail,
+        "an http entry with no url is a config fault: {}",
         result.message
     );
-    assert_eq!(result.tier, CheckTier::Info);
+    assert_eq!(result.tier, CheckTier::ExitAffecting);
+    assert_eq!(result.category, "mcp");
 }
 
 #[tokio::test]

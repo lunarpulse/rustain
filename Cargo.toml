@@ -56,7 +56,7 @@ clap_complete = "=4.6.5"
 
 # ── Serialization ────────────────────────────────────────────────
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 serde_jcs = { version = "0.2", optional = true }
 toml = "0.8"
 # Layered config merge (Epic 7 retro AI-7.2 / Path A). Provides field-level
@@ -75,6 +75,26 @@ tracing-appender = "0.2"
 
 # ── HTTP client (provider adapters) ─────────────────────────────
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], optional = true }
+axum = { version = "0.8", optional = true }
+# Story 18.1b — server-side TLS for the non-loopback A2A listener. Direct (not
+# via reqwest's `rustls-tls`, which is a *client* config) and `a2a`-gated.
+# Pinned to the versions reqwest already resolves so one rustls links.
+rustls = { version = "0.23", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+# Story 19.14 (`A1`) — named SOLELY to downcast `rustls::CertificateError::Other`
+# to `webpki::Error::CaUsedAsEndEntity`, the one anchor sub-cause rustls does not
+# give a first-class variant. `rustls` already depends on this exact crate
+# (lib name `webpki`); this declaration copies rustls's own form so cargo
+# unifies on ONE copy and adds no feature. ⛔ Not zero bytes: a direct
+# dependency changes crate-metadata hashes, so the proof is the one-copy
+# `cargo tree` line plus the measured release-size delta — never "byte-identical".
+rustls-webpki = { version = "0.103", default-features = false, features = [
+    "alloc",
+], optional = true }
+# Constant-time credential comparison (Story 18.1b, R6). A naive `==` over a
+# shared secret reachable from a network socket is a timing oracle.
+subtle = { version = "2", optional = true }
 
 # ── Encoding ─────────────────────────────────────────────────────
 base64 = "0.22"
@@ -103,6 +123,27 @@ gray_matter = "0.2"
 url = "2"
 zeroize = { version = "1", features = ["alloc"] }
 ed25519-dalek = { version = "=2.2.0", features = ["pkcs8", "rand_core"] }
+# Story 18.4 — replaceable cross-host transport adapter. Exact pin: iroh's
+# public vocabulary and MSRV can move within a minor release.
+iroh = { version = "=1.0.3", optional = true }
+# Story 18.4c-b — the embedded relay SERVER behind `rustain relay serve`
+# (FR159). Exact pin, and it must move in LOCKSTEP with `iroh` above: the relay
+# server and the relay client have to link the same protocol version.
+# `default-features = false` drops the default `metrics`/`tls-ring` pair, but
+# `server` re-implies BOTH (`iroh-relay-1.0.3/Cargo.toml`: `server = ["metrics",
+# …, "tls-ring"]`) — which AC4 depends on, because `Counter::get()` returns a
+# hardcoded 0 with `iroh-metrics/metrics` off and the "ask the relay" leg would
+# go silently vacuous.
+iroh-relay = { version = "=1.0.3", optional = true, default-features = false, features = [
+    "server",
+] }
+# Story 18.4b (AC2) — QR encoding for `peer invite`. `default-features = false`
+# drops the `image`/`svg`/`pic` renderers, leaving a pure-Rust encoder with
+# ZERO transitive dependencies; this crate renders the module matrix itself
+# because the tree has no block-drawing or canvas capability. NOT optional: the
+# `peer` verbs are ungated, so a `--features p2p` gate here would make
+# `peer invite` unavailable in a default build.
+qrcode = { version = "0.14.1", default-features = false }
 # Portable OS CSPRNG for identity key generation (Story 17.1a: replaces the
 # Unix-only `/dev/urandom` read). Pinned to 0.6.4 — the exact version already
 # resolved transitively via ed25519-dalek's `rand_core` feature — so this only
@@ -160,7 +201,45 @@ croner = { version = "3.0.1", optional = true }
 # llm-provider = { path = "../rustycode/llm-provider", features = ["config"] }
 
 # ── MCP SDK (Epic 9) ─────────────────────────────────────────────
-rmcp = { version = "1.0", default-features = false, features = ["client", "transport-child-process"], optional = true }
+# Story 9.9 (ruling A3 → Option A, resolved at the 2026-08-31 preflight):
+# `transport-streamable-http-client-reqwest` brings the Streamable HTTP client
+# transport; `reqwest` is the TLS backend and is ⛔ NOT optional. The transport
+# feature alone expands to `["transport-streamable-http-client", "__reqwest"]`
+# and `__reqwest = ["dep:reqwest"]` — which selects NO TLS provider, so every
+# `https://` MCP URL would fail to build a client. TLS lives in rmcp's separate
+# `reqwest = ["__reqwest", "reqwest?/rustls"]` key. BOTH STRINGS OR NEITHER.
+#
+# ⚠ rmcp resolves its own reqwest 0.13 (semver-incompatible with rustain's 0.12
+# at :77 — no feature unification, both are in the lock). Measured against the
+# SHIPPED feature set (`release.yml:70` = self-update,relay-server,a2a,p2p +
+# defaults) this adds exactly ONE crate, `sse-stream`: `reqwest 0.13`,
+# `aws-lc-rs`, `rustls-platform-verifier` and `rustls-native-certs` are already
+# at release baseline via `iroh → hickory-resolver → hickory-net → rustls`.
+rmcp = { version = "1.0", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "reqwest",
+], optional = true }
+
+# Story 9.9 (AC6) — rmcp's Streamable HTTP transport is generic over its HTTP
+# client and surfaces failures as `StreamableHttpError<reqwest::Error>` boxed
+# behind `DynamicTransportError`. AC6 requires THREE DISTINCT operator-facing
+# strings (unreachable / 401 + WWW-Authenticate / 5xx), and recovering the typed
+# error means NAMING rmcp's reqwest — which is 0.13, a different crate from
+# rustain's own 0.12 at :77. This alias binds rmcp's ALREADY-PRESENT 0.13 under
+# a second name so `adapters/mcp/http.rs` can downcast to the real error type.
+#
+# ⚑ MEASURED, not assumed: `cargo tree -e normal` over the shipped feature set
+# (`release.yml:70`) is byte-identical with and without this line — cargo
+# unifies it with rmcp's own 0.13 requirement, so it adds ZERO crates. ⛔ Keep
+# `default-features = false` and add no features: the tree must stay the union
+# rmcp already asked for.
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, optional = true }
+# Story 9.9 review: name rmcp's already-selected SSE stream types so the
+# guarded HTTP client can delegate GET streams while inspecting raw POST JSON.
+# This is the same unified 0.2 crate rmcp brings; it adds zero packages.
+sse-stream = { version = "0.2", optional = true }
 
 tempfile = "3.0"
 
@@ -194,6 +273,11 @@ trybuild = "1"  # Story 14.3 AC5: Window<Handle> inlining-mutant compile_fail + 
 minisign = "0.7"  # Story 13.3a: test-signing fixtures with ephemeral keys (NOT shipped in binary)
 parking_lot = "0.12"  # Story 17.4b: scripted A2A transport mocks (rs-parking-lot rule)
 
+# Story 18.1b — self-signed certificates for the non-loopback TLS keystone.
+# Dev-only: the production TLS path loads operator-supplied PEM files, and a
+# TLS test that never completes a handshake proves nothing.
+rcgen = "0.14"
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 procfs = "0.17"
 
@@ -208,10 +292,51 @@ ollama = ["dep:reqwest"]
 # models.dev live pricing catalog fetch. reqwest is the HTTP client; the
 # resolver + disk-cache logic compile unconditionally (pure serde/fs).
 models-dev = ["dep:reqwest"]
-mcp = ["dep:rmcp"]
+# Story 9.9: `reqwest13` is rmcp's own reqwest 0.13 under a second name, needed
+# to name `StreamableHttpError<reqwest::Error>` when classifying HTTP failures
+# (AC6). Adds zero crates — see the dependency comment.
+mcp = ["dep:rmcp", "dep:reqwest13", "dep:sse-stream"]
 test-fake-mcp = ["mcp", "rmcp/server"]
 # DF-17-4a-6: composite_toolset_adapter remains MCP-gated across its lifecycle surface.
-a2a = ["mcp", "dep:reqwest", "dep:serde_jcs"]
+a2a = [
+    "mcp",
+    "dep:reqwest",
+    "dep:serde_jcs",
+    "dep:axum",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls-webpki",
+    "dep:subtle",
+]
+# Story 18.4 — cross-host peer transport. Kept independent from the A2A HTTP
+# surface and out of default; domain types compile without the adapter.
+p2p = ["dep:iroh"]
+# Story 18.4c — the hermetic relay fixture, for `tests/conformance_p2p_relay.rs`
+# only. A SEPARATE key on purpose: `p2p` stays exactly `["dep:iroh"]`, which a
+# conformance test asserts by set equality, and `iroh/test-utils` transitively
+# pulls `iroh-relay/server` + `axum`.
+#
+# ⚑ AMENDED 2026-08-17 by Story 18.4c-b (ruling A2). This comment used to end
+# *"— a server tree that must never reach the shipped binary"*. That sentence
+# was true of THIS key and is now false by scope change: `relay-server` below
+# ships the same server tree deliberately, because `relay serve` IS the
+# product's relay. The corrected statement is narrower and still load-bearing:
+# ⛔ the **test-utils** tree (`iroh/test-utils` + `axum`) must never reach the
+# shipped binary, and nothing here may widen `p2p`.
+p2p-test-utils = ["p2p", "iroh/test-utils"]
+# Story 18.4c-b — the embedded relay server for `rustain relay serve` (FR159).
+# A SEPARATE key, exactly like `p2p-test-utils` above: `p2p` stays exactly
+# `["dep:iroh"]` (asserted by set equality), and a NEW key is invisible to that
+# assertion. Off by default — the server tree is ~15 crates and NFR53 bounds a
+# feature at 5 MB.
+#
+# ⚠ FOUR dependencies, not one. `rustls`/`rustls-pemfile` are needed to NAME
+# `rustls::ServerConfig` for `CertConfig::Manual` and to parse the operator's
+# PEMs; both already exist as optional deps behind `a2a`, pinned to the versions
+# reqwest resolves so ONE rustls links. Reusing them widens no other feature
+# array.
+relay-server = ["dep:iroh-relay", "dep:rustls", "dep:rustls-pemfile"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]

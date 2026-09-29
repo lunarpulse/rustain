@@ -43,7 +43,7 @@ fn make_conversation(messages: Vec<&str>) -> Conversation {
                 synthetic: false,
                 id: format!(
                     "msg-{
-                }",
+            }",
                     i
                 ),
                 role: if i % 2 == 0 {
@@ -59,6 +59,8 @@ fn make_conversation(messages: Vec<&str>) -> Conversation {
                 stop_reason: None,
                 images: vec![],
                 origin: rustain::domain::models::ChannelKind::Terminal,
+                authorship: Default::default(),
+                retracted_at_ms: None,
             })
             .collect(),
         turns: Vec::new(),
@@ -96,6 +98,7 @@ fn render_once(
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
     terminal
         .draw(|frame| {
@@ -121,6 +124,7 @@ fn render_once(
                 None,
                 None,
                 None, // open_prose
+                None, // current_focus
             );
         })
         .unwrap();
@@ -453,6 +457,7 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
     terminal
         .draw(|frame| {
@@ -478,6 +483,7 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
                 None,
                 None,
                 None, // open_prose
+                None, // current_focus
             );
         })
         .unwrap();
@@ -552,6 +558,7 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
+        visible_feedback_ids: Vec::new(),
     };
     // This render call must succeed and the focused ordinal lookup in
     // chat_pane::render_with_search must compute ordinal == 1 for this
@@ -582,6 +589,7 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
                 None,
                 None,
                 None, // open_prose
+                None, // current_focus
             );
         })
         .unwrap();

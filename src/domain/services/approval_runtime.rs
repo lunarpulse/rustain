@@ -190,6 +190,29 @@ impl ApprovalRuntime {
         self.events.subscribe()
     }
 
+    /// Pending sender-consent requests (tool `a2a/sender-consent`) with their
+    /// peer id (F10). The approval gate uses this after a broadcast `Lagged` to
+    /// re-render cards the bus dropped, so a never-expiring consent request
+    /// cannot hang silently with no card on screen.
+    pub async fn pending_sender_consent(
+        &self,
+    ) -> Vec<(RequestId, crate::domain::models::PeerId, ToolRisk)> {
+        let pending = self.pending.read().await;
+        pending
+            .values()
+            .filter_map(|record| {
+                if record.request.tool != "a2a/sender-consent" {
+                    return None;
+                }
+                let peer_id = match &record.request.source {
+                    ApprovalSource::RemotePeer { peer_id, .. } => peer_id.clone(),
+                    _ => return None,
+                };
+                Some((record.request.id.clone(), peer_id, record.request.risk))
+            })
+            .collect()
+    }
+
     /// Request approval for a tool call.
     /// Returns `(Some(id), rx)` for slow-path, `(None, rx)` for fast-path.
     ///
@@ -264,7 +287,9 @@ impl ApprovalRuntime {
             }
         }
 
-        {
+        let sender_consent_request =
+            tool == "a2a/sender-consent" && matches!(&source, ApprovalSource::RemotePeer { .. });
+        if !sender_consent_request {
             let mut set = self.session.write().await;
             if set.is_auto_approved(&tool, server_id, path_hint) {
                 let (tx, rx) = oneshot::channel();
@@ -278,7 +303,15 @@ impl ApprovalRuntime {
 
         let id = RequestId::new();
         let (tx, rx) = oneshot::channel();
-        let input_preview = summarize_for_display(&input, 140);
+        let input_preview = if sender_consent_request {
+            input
+                .get("card")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| summarize_for_display(&input, 140))
+        } else {
+            summarize_for_display(&input, 140)
+        };
         let server_id_owned = server_id.map(|s| s.to_string());
         let path_hint_owned = path_hint.map(|s| s.to_string());
         let request = ApprovalRequest {
@@ -308,13 +341,40 @@ impl ApprovalRuntime {
         (Some(id), rx)
     }
 
+    /// Return the immutable source of a still-pending request.
+    ///
+    /// The daemon consent shell uses this to derive the authenticated peer for
+    /// durable `[a]` handling; the client never supplies journal identity.
+    pub(crate) async fn pending_source(&self, id: &RequestId) -> Option<ApprovalSource> {
+        self.pending
+            .read()
+            .await
+            .get(id)
+            .map(|record| record.request.source.clone())
+    }
+
     /// Resolve a pending approval with an outcome.
     pub async fn resolve(&self, id: &RequestId, outcome: ApprovalOutcome) {
         let record = self.pending.write().await.remove(id);
         if let Some(record) = record {
+            // `[a]` on the sender-consent card is persisted by the consent
+            // manager as a peer-scoped journal grant. It must not leak into
+            // ApprovalRuntime's tool-wide session/persistence policy.
+            let session_outcome = if record.request.tool == "a2a/sender-consent"
+                && matches!(&record.request.source, ApprovalSource::RemotePeer { .. })
+                && matches!(
+                    &outcome,
+                    ApprovalOutcome::AlwaysTool { .. }
+                        | ApprovalOutcome::AlwaysServer { .. }
+                        | ApprovalOutcome::AlwaysAndSave { .. }
+                ) {
+                ApprovalOutcome::Once
+            } else {
+                outcome.clone()
+            };
             {
                 let mut session = self.session.write().await;
-                match &outcome {
+                match &session_outcome {
                     ApprovalOutcome::Once => {}
                     ApprovalOutcome::AlwaysTool { tool_name } => {
                         session.always_tools.insert(tool_name.clone());

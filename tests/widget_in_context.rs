@@ -99,6 +99,7 @@ fn render_full_layout(
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
             input_box::render(
                 frame,
@@ -133,6 +134,8 @@ fn test_tool_block_in_full_layout() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
         ChatMessage {
             synthetic: false,
@@ -148,6 +151,7 @@ fn test_tool_block_in_full_layout() {
                 result: Some(rustain::domain::models::ToolResultInfo {
                     content: "fn main() {}".to_string(),
                     is_error: false,
+                    diff: rustain::domain::models::WriteDiffState::NotAWrite,
                 }),
                 started_at_ms: Some(0),
                 completed_at_ms: Some(100),
@@ -158,6 +162,8 @@ fn test_tool_block_in_full_layout() {
             stop_reason: Some(StopReason::ToolUse),
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
     ]);
 
@@ -205,6 +211,8 @@ fn test_feedback_block_in_full_layout() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }]);
 
     let mut feedback_blocks = BTreeMap::new();
@@ -309,6 +317,7 @@ fn test_permission_prompt_in_full_layout() {
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
             input_box::render(
                 frame,
@@ -417,6 +426,7 @@ fn test_ask_user_question_in_full_layout() {
                 DensityMode::Focus,
                 false,
                 None,
+                rustain::adapters::tui::state::LogAwareness::Hidden,
             );
             input_box::render(
                 frame,

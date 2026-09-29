@@ -1,4 +1,5 @@
 pub mod agent_message_bus;
+pub mod apply_lock;
 pub mod clock_util;
 pub mod composition;
 pub mod config;
@@ -20,4 +21,6 @@ pub mod subagent;
 pub mod supervisor;
 pub mod telemetry;
 pub mod terminal_info;
+pub mod transparency;
+pub mod transparency_awareness;
 pub mod utils;

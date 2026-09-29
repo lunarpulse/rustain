@@ -22,6 +22,7 @@ use crate::domain::ports::StreamingProvider;
 #[cfg(feature = "a2a")]
 pub mod a2a_catalog;
 pub mod adapter_override;
+pub mod artifact_command;
 pub mod bookmark;
 pub mod budget;
 pub mod compact_slash;
@@ -36,11 +37,16 @@ pub mod forget_command;
 pub mod mcp_catalog;
 pub mod model_switch;
 pub mod notice;
+pub mod peer_command;
 pub mod profile_switch;
 pub mod render_error;
+pub mod room_command;
 pub mod scroll;
 pub mod search;
 pub mod shared;
+pub mod team_command;
+pub mod transparency;
+pub mod turn_finalize;
 pub mod usage_panel;
 
 /// Handler-to-dispatch contract per ADR-08-01 §D1.

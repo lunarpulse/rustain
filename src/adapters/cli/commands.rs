@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
+use crate::adapters::cli::peer::PeerAction;
+use crate::adapters::cli::relay::RelayAction;
 use crate::adapters::cli::session::SessionAction;
+use crate::adapters::cli::team::TeamAction;
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// Rustain — terminal-native AI coding agent.
@@ -76,6 +79,17 @@ pub struct Cli {
     /// platforms) or `"landlock"` (Linux + `sandbox` cargo feature only).
     #[arg(long, global = true, value_parser = ["noop", "landlock"])]
     pub sandbox_adapter: Option<String>,
+    /// Serve this instance as a loopback-only A2A endpoint. An explicit address
+    /// uses `--serve-a2a=127.0.0.1:PORT`; the default is 127.0.0.1:8080.
+    #[arg(
+        long,
+        global = true,
+        value_name = "ADDR",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "127.0.0.1:8080"
+    )]
+    pub serve_a2a: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -210,6 +224,37 @@ pub enum Command {
     Session {
         #[command(subcommand)]
         action: SessionAction,
+    },
+    /// Inspect A2A team activity (Story 18.2, FR95 / NFR67).
+    /// `team log` prints every recorded inbound and outbound A2A interaction
+    /// for this workspace, folded from the durable room journal. Read-only,
+    /// offline-safe, and non-billable.
+    Team {
+        #[command(subcommand)]
+        action: TeamAction,
+    },
+    /// Control which peers may reach this host over the QUIC transport
+    /// (Story 18.4b, FR157 / FR158).
+    ///
+    /// `peer invite` mints a ticket, `peer add` imports one after a fingerprint
+    /// confirm, `peer list` and `peer show` read the roster, and `peer revoke`
+    /// removes an entry. All five read and write only `.rustain/p2p.json` —
+    /// never the independent `.rustain/a2a.json` HTTP allowlist. Offline-safe
+    /// and non-billable; `peer add` additionally needs an interactive terminal.
+    Peer {
+        #[command(subcommand)]
+        action: PeerAction,
+    },
+    /// Run the relay this host offers to its peers (Story 18.4c-b, FR159).
+    ///
+    /// `relay serve` binds the relay `rustain relay serve` names and prints the
+    /// URL peers add to their own `.rustain/relay.json`;
+    /// `relay serve --print-service-unit` renders a systemd unit for those same
+    /// flags and exits without binding anything. Needs a build with the
+    /// `relay-server` feature to serve; the unit renders in any build.
+    Relay {
+        #[command(subcommand)]
+        action: RelayAction,
     },
 }
 
@@ -411,9 +456,16 @@ pub enum ProfileAction {
         #[arg(long)]
         force: bool,
     },
-    /// Install a profile from a public git repository (gh:user/repo) (Story 8.6b)
+    /// Install a profile from a public git repository (gh:user/repo) or a local path
+    ///
+    /// A `gh:` spec is fetched over HTTPS into `profiles/community/`; anything else is
+    /// treated as a local file and delegated to `import`, landing in `profiles/`.
+    /// Unlike `import`, `install` REFUSES a name that shadows a built-in profile:
+    /// `import` means "load my file", `install` means "take someone else's", and
+    /// silently replacing the default profile with a stranger's TOML is the mistake
+    /// the guard exists to stop.
     Install {
-        /// Source spec (e.g., gh:user/profile-name; optionally with /path/to/profile.toml suffix)
+        /// Source spec: gh:user/profile-name (optionally with a /path/to/profile.toml suffix), or a local file path
         spec: String,
         /// Override the installed profile's name (rewrites name = field)
         #[arg(long)]

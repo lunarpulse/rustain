@@ -41,6 +41,7 @@ fn regression_chunks() -> Vec<StreamChunk> {
             id: "toolu_01_curl_a2a_spec".into(),
             content: "spec".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         // Prose run 2: 5 text deltas
         Text {
@@ -84,16 +85,19 @@ fn regression_chunks() -> Vec<StreamChunk> {
             id: "toolu_02".into(),
             content: "MCP intro".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         ToolResult {
             id: "toolu_03".into(),
             content: "A2A key concepts".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         ToolResult {
             id: "toolu_04".into(),
             content: "Agent Skills".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         // Prose run 3: 5 text deltas
         Text {
@@ -132,11 +136,13 @@ fn regression_chunks() -> Vec<StreamChunk> {
             id: "toolu_05".into(),
             content: "discovery".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         ToolResult {
             id: "toolu_06".into(),
             content: "architecture".into(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         // Prose run 4: 6 text deltas
         Text {

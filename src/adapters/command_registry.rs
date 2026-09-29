@@ -153,6 +153,45 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            SlashCommandDef {
+                name: "team".to_string(),
+                description: "A2A team interactions: /team log (transparency log) [--filter=…] [--json] [--export] | /team board [<peer-id>] (Act 1 distribution board) | /team send <peer-id>[,<peer-id>…] <text…> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> (mark an item on a peer's host) | /team status | /team trust (list grants) | /team untrust <alias-or-peer-id>"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "room".to_string(),
+                description: "Durable orchestration room (read-only replay, also Ctrl+X, R): /room | /room role list | /room role grant <alias-or-peer-id> <owner|editor|viewer> | /room role revoke <alias-or-peer-id>"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            // Story 18.4b. The description names EVERY sub-verb: that is a
+            // tested convention (`conformance_18_3a_room.rs` asserts the /room
+            // entry's description names each of its own), because the palette
+            // description is the only place an operator discovers them.
+            SlashCommandDef {
+                name: "peer".to_string(),
+                description: "Who may reach this host over QUIC, from .rustain/p2p.json: /peer | /peer list [--json] | /peer show <alias> | /peer invite [--ttl=<dur>] [--name=<name>] | /peer add <alias> <ticket> | /peer revoke <alias-or-peer-id>"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "artifacts".to_string(),
+                description: "Durable artifact list with depends-on lineage (read-only replay, also Ctrl+X, E): /artifacts"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "artifact".to_string(),
+                description: "Inspect, review, apply or resolve one durable patch: /artifact show <id> | /artifact review <id> approve|request-changes|reject | /artifact apply <id> (confirmed workspace write) | /artifact resolve <id> present|absent (record what you found after an interrupted apply)"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,

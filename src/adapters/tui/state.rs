@@ -41,6 +41,33 @@ pub struct AttachInfo {
     pub channel_count: usize,
 }
 
+/// Story 19.16g — the passive transparency-log reminder rendered at the right
+/// edge of the status bar. Identity-free by construction: a bounded count or
+/// an unavailable mark, never a peer, item, or event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogAwareness {
+    /// Nothing unseen, or nothing observed yet: no segment and no separator.
+    #[default]
+    Hidden,
+    /// Rows above the durable seen-through boundary (always > 0).
+    Unseen(usize),
+    /// Observation or persistence is unavailable or stale: `log: ?`, never an
+    /// apparently current zero.
+    Unavailable,
+}
+
+/// Story 19.16g — the TUI-side value state of the reminder. The
+/// infrastructure observer writes `display` and `reset_revision`; a
+/// successful draw pushes presented visits into `presented`. No I/O here.
+#[derive(Debug, Default)]
+pub struct LogAwarenessView {
+    pub display: LogAwareness,
+    /// The local reset revision a newly read log view is bound to.
+    pub reset_revision: u64,
+    /// Visits actually presented by a completed draw, awaiting persistence.
+    pub presented: Vec<crate::domain::models::LogVisitCandidate>,
+}
+
 /// Pending permission request awaiting user response.
 pub struct PendingPermission {
     pub id: RequestId,
@@ -139,6 +166,107 @@ pub struct PendingForgetCard {
     pub candidates: Vec<(u64, crate::domain::models::MemoryEntry, bool)>,
     /// Index of the row that currently has keyboard focus (0-based).
     pub focused_index: usize,
+}
+
+/// What a [`PendingArtifactCard`] is asking the operator to confirm.
+///
+/// ⛔ **The mode parameterises CONTENT, never dispatch.** Both modes use the
+/// same two keys, the same `ConfirmationType`, the same card slot, the same
+/// render branch and the same `InputAction`s — that is what keeps the operator
+/// resolution verb out of `event_loop.rs`'s line budget entirely (Story
+/// 18.3a-f, ruling A7). `apply_card::bindings_for` carries a compile-time
+/// assertion that the key→choice mapping is identical across modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactCardMode {
+    /// `/artifact apply <id>` — a confirmed **workspace write**.
+    Apply,
+    /// `/artifact resolve <id> present|absent` — a confirmed durable record of
+    /// what the operator reports they saw. ⛔ Performs no workspace write, and
+    /// the card must say so before `y`.
+    Resolve(crate::domain::models::OperatorApplyFinding),
+}
+
+/// Confirmed decision card for `/artifact apply` and `/artifact resolve`.
+///
+/// ⚠ **The rename is deliberately partial** (Story 18.3a-f, ruling P3). The
+/// type and this field are mode-neutral because neither is pinned by any test
+/// and a rename moves no line count, so it is free. `InputAction::ApplyCardAccept`,
+/// `InputAction::ApplyCardDecline` and `render_apply_card_lines` keep their
+/// apply-flavoured names because `conformance_18_3a_d_apply.rs` pins all three
+/// by name inside `event_loop.rs` — and churning a pinned ratchet for cosmetics
+/// is how ratchets die by a thousand justifications. ⛔ Do not "fix" the
+/// asymmetry.
+#[derive(Debug, Clone)]
+pub struct PendingArtifactCard {
+    pub conversation_id: crate::domain::models::tab::ConversationId,
+    pub artifact: crate::domain::models::ArtifactRef,
+    pub files: Vec<String>,
+    pub workspace: std::path::PathBuf,
+    pub prior_focus: crate::domain::models::FocusState,
+    pub predates_apply_records: bool,
+    pub mode: ArtifactCardMode,
+}
+
+/// A `/peer add` awaiting the operator's confirm (Story 18.4b, AC3).
+///
+/// # Why this is its own slot and not the apply card's
+///
+/// The apply card's key table is single-sourced and consulted **mode-blind**
+/// (`apply_card::choice_for_key` always reads `APPLY_CARD_BINDINGS`), so
+/// borrowing it would give any peer surface an unpainted `y` that resolves. For
+/// a pin that is a single-keystroke rebind, which is precisely what the
+/// key-mismatch alarm exists to forbid — so this prompt has its own slot, its
+/// own [`crate::domain::models::visual::ConfirmationType::PeerAdd`] focus, and
+/// its own two input actions. ⛔ Nothing here routes through `choice_for_key`.
+///
+/// The alarm itself has **no** slot at all: it is a never-truncated
+/// `FeedbackLevel::Error` block and binds no key.
+#[derive(Debug, Clone)]
+pub struct PendingPeerAdd {
+    pub conversation_id: String,
+    /// The alias the operator typed. ⛔ Never a name the ticket suggested.
+    pub alias: String,
+    pub ticket: crate::domain::models::PeerTicket,
+    /// Derived once, through the one identity derivation, before the card is
+    /// shown — so the fingerprint on screen is the one that gets pinned.
+    pub peer_id: crate::domain::models::PeerId,
+    /// The rendered card body, built by the shared copy module so the CLI and
+    /// TUI confirms cannot diverge.
+    pub card: String,
+    /// The ticket's claimed reach, **already filtered** (Story 18.4d, D15).
+    ///
+    /// Filtered before the card is raised, so the operator is shown addresses
+    /// this host would actually dial and a hostile bundle never reaches a
+    /// keypress. `None` is the honest empty case.
+    pub reach: Option<crate::domain::ports::PeerAddress>,
+    /// `true` when this card is a reach-only refresh of an already-pinned key.
+    ///
+    /// The resolution path then writes **only** the address: no pin, no
+    /// admission record, and no first-contact trust decision is re-run.
+    pub reach_refresh: bool,
+    pub prior_focus: crate::domain::models::FocusState,
+}
+
+/// The `/team retract` decision card awaiting `[y]`/`[n]` (Story 19.16f `AC4`).
+///
+/// Raised only by the preview-ready event, from a confirm-time read of the
+/// peer's own list — ⛔ never from a cached board render. `armed == false`
+/// (the read did not resolve, or the item is already removed on the peer's
+/// host) means `y` dispatches nothing; `n`/`Esc` always cancel, and
+/// cancelling is free — nothing was sent.
+#[derive(Debug, Clone)]
+pub struct PendingTeamRetract {
+    pub conversation_id: String,
+    /// The roster alias.
+    pub peer: String,
+    /// The id the operator typed.
+    pub item_id: String,
+    /// The item's task as the peer listed it — the sender's ledger rows carry it.
+    pub task: Option<String>,
+    /// The rendered card body.
+    pub card: String,
+    pub armed: bool,
+    pub prior_focus: crate::domain::models::FocusState,
 }
 
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
@@ -250,6 +378,13 @@ pub struct MessageHeightKey {
 pub struct CachedTurnLayout {
     pub height: usize,
     pub block_offsets: Vec<usize>,
+    /// Story 19.9 A3: `(start_offset, tool_call_id)` for every
+    /// `TurnPart::ToolInvocation` in this turn, in part order. `block_offsets`
+    /// cannot serve this: it interleaves prose/reasoning starts with tool-block
+    /// starts and carries no id, so a consumer cannot tell WHICH tool block a
+    /// boundary belongs to — which is exactly why keyboard focus could only
+    /// ever resolve to the conversation's first tool call.
+    pub tool_block_offsets: Vec<(usize, String)>,
 }
 
 /// Cache of rendered line heights, keyed by turn or message.
@@ -1254,6 +1389,710 @@ impl Default for UsagePanelState {
     }
 }
 
+/// State for the Transparency Log sidebar panel (`Ctrl+X, L`). Story 18.2 AC5.
+///
+/// **Never presents itself as live.** `report` is one point-in-time fold of
+/// the durable room journal under a shared `flock`. It is retained so panel
+/// export writes the exact snapshot the operator is viewing rather than
+/// silently re-reading a later journal state.
+#[derive(Default)]
+pub struct TransparencyPanelState {
+    /// The exact report snapshot displayed by this panel, oldest first.
+    pub report: Option<crate::domain::services::transparency::TransparencyReport>,
+    /// Highest `seq` the operator has actually seen rendered.
+    pub acknowledged_seq: u64,
+    /// Rows newer than `acknowledged_seq`; this is always calculated from the
+    /// unfiltered snapshot so a search cannot hide unread arrivals.
+    pub newer_entries: usize,
+    /// First visible index in the current filtered view.
+    pub scroll_offset: usize,
+    /// Number of filtered rows the renderer can display. The widget refreshes
+    /// this on every draw; input transitions use it to keep selection visible.
+    pub viewport_rows: usize,
+    /// Wall-clock millis of the last report read, rendered as "as of …".
+    pub read_at_ms: Option<i64>,
+    /// A journal read that failed. The panel shows the error rather than an
+    /// empty list, which would read as "nothing happened".
+    pub error: Option<String>,
+    /// Free-text search (`/`), lower-cased.
+    pub search: Option<String>,
+    /// Whether the `/` search input is currently being typed into.
+    pub search_active: bool,
+    /// Expanded row (`Enter` drill-down), by `seq`.
+    pub drill_seq: Option<u64>,
+    /// Story 19.16g — the unpainted seen-through boundary of the report this
+    /// panel read on open. Distinct from `acknowledged_seq` (viewport-scoped):
+    /// consumed once, and discarded if a nonempty search is painted.
+    pub pending_visit: Option<crate::domain::models::LogVisitCandidate>,
+    /// A visit painted by the current frame; presented only once the draw
+    /// completes (`TuiState::log_visits_presented`).
+    pub painted_visit: Option<crate::domain::models::LogVisitCandidate>,
+}
+
+impl TransparencyPanelState {
+    /// Rows in the retained report snapshot, or no rows before the first read.
+    #[must_use]
+    pub fn rows(&self) -> &[crate::domain::services::transparency::TransparencyRow] {
+        self.report
+            .as_ref()
+            .map_or(&[], |report| report.rows.as_slice())
+    }
+
+    fn matches_search(&self, row: &crate::domain::services::transparency::TransparencyRow) -> bool {
+        self.search
+            .as_deref()
+            .filter(|term| !term.is_empty())
+            .is_none_or(|term| row.one_line().to_ascii_lowercase().contains(term))
+    }
+
+    /// Rows after the active search filter, oldest first.
+    pub fn visible_rows(&self) -> Vec<&crate::domain::services::transparency::TransparencyRow> {
+        self.rows()
+            .iter()
+            .filter(|row| self.matches_search(row))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn visible_len(&self) -> usize {
+        self.rows()
+            .iter()
+            .filter(|row| self.matches_search(row))
+            .count()
+    }
+
+    #[must_use]
+    pub fn visible_row(
+        &self,
+        index: usize,
+    ) -> Option<&crate::domain::services::transparency::TransparencyRow> {
+        self.rows()
+            .iter()
+            .filter(|row| self.matches_search(row))
+            .nth(index)
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        self.visible_len().saturating_sub(self.viewport_rows.max(1))
+    }
+
+    /// Clamp the shared sidebar selection and keep it inside the rendered
+    /// viewport. Every panel input transition calls this instead of updating
+    /// selection and scroll independently.
+    pub fn synchronize_selection(&mut self, selected: &mut usize) {
+        let visible_len = self.visible_len();
+        if visible_len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = (*selected).min(visible_len - 1);
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+        let viewport_rows = self.viewport_rows.max(1);
+        if *selected < self.scroll_offset {
+            self.scroll_offset = *selected;
+        } else if *selected >= self.scroll_offset.saturating_add(viewport_rows) {
+            self.scroll_offset = *selected + 1 - viewport_rows;
+        }
+    }
+
+    /// Record the renderer's actual row capacity and reconcile the viewport.
+    pub fn set_viewport_rows(&mut self, viewport_rows: usize, selected: &mut usize) {
+        self.viewport_rows = viewport_rows.max(1);
+        self.synchronize_selection(selected);
+    }
+
+    fn recompute_newer_entries(&mut self) {
+        self.newer_entries = self
+            .rows()
+            .iter()
+            .filter(|row| row.seq > self.acknowledged_seq)
+            .count();
+    }
+
+    /// Store one freshly read report without marking unrendered rows seen.
+    pub fn apply_report(
+        &mut self,
+        report: crate::domain::services::transparency::TransparencyReport,
+        read_at_ms: i64,
+    ) {
+        self.report = Some(report);
+        self.read_at_ms = Some(read_at_ms);
+        self.error = None;
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+        self.recompute_newer_entries();
+    }
+
+    /// Test/legacy convenience for a report without structural findings.
+    pub fn apply_read(
+        &mut self,
+        rows: Vec<crate::domain::services::transparency::TransparencyRow>,
+        read_at_ms: i64,
+    ) {
+        self.apply_report(
+            crate::domain::services::transparency::TransparencyReport {
+                rows,
+                findings: Vec::new(),
+            },
+            read_at_ms,
+        );
+    }
+
+    /// Select the newest boundary. A row is not acknowledged here: only the
+    /// renderer can prove that the selected tail was actually drawn.
+    pub fn open_at_tail(&mut self, selected: &mut usize) {
+        let visible_len = self.visible_len();
+        if visible_len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = visible_len - 1;
+        self.scroll_offset = self.max_scroll_offset();
+    }
+
+    /// Move selection by one filtered row and keep it rendered.
+    pub fn move_selection(&mut self, selected: &mut usize, down: bool) {
+        let visible_len = self.visible_len();
+        if visible_len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = if down {
+            selected.saturating_add(1).min(visible_len - 1)
+        } else {
+            selected.saturating_sub(1)
+        };
+        self.synchronize_selection(selected);
+    }
+
+    /// Enter search input and anchor the filtered list at its first row.
+    pub fn start_search(&mut self, selected: &mut usize) {
+        self.search = Some(String::new());
+        self.search_active = true;
+        self.drill_seq = None;
+        *selected = 0;
+        self.scroll_offset = 0;
+        self.synchronize_selection(selected);
+    }
+
+    /// Apply one printable search character, preserving a valid selection.
+    pub fn append_search(&mut self, selected: &mut usize, key: char) {
+        self.search
+            .get_or_insert_with(String::new)
+            .push(key.to_ascii_lowercase());
+        *selected = 0;
+        self.scroll_offset = 0;
+        self.synchronize_selection(selected);
+    }
+
+    /// Delete one search character when typing.
+    pub fn backspace_search(&mut self, selected: &mut usize) -> bool {
+        if !self.search_active {
+            return false;
+        }
+        if let Some(search) = &mut self.search {
+            search.pop();
+        }
+        *selected = 0;
+        self.scroll_offset = 0;
+        self.synchronize_selection(selected);
+        true
+    }
+
+    /// Stop editing the search while retaining its filter.
+    pub fn commit_search(&mut self, selected: &mut usize) {
+        self.search_active = false;
+        self.synchronize_selection(selected);
+    }
+
+    /// Acknowledge only through the last row currently in the viewport.
+    pub fn acknowledge_rendered_boundary(&mut self) {
+        let end = self
+            .scroll_offset
+            .saturating_add(self.viewport_rows.max(1))
+            .min(self.visible_len());
+        if let Some(row) = end.checked_sub(1).and_then(|index| self.visible_row(index)) {
+            self.acknowledged_seq = self.acknowledged_seq.max(row.seq);
+        }
+        self.recompute_newer_entries();
+    }
+}
+
+/// State for the durable-room viewer panel (`Ctrl+X, R` / `/room`).
+/// Story 18.3a, AC1.
+///
+/// **Never presents itself as live.** `room` is one point-in-time fold of the
+/// durable room journal under a shared `flock`, produced by
+/// [`crate::domain::models::OrchestrationRoom::project_for_host`]. The header
+/// says "as of <time>" and the boundary counts entries it has not shown.
+#[derive(Default)]
+pub struct RoomPanelState {
+    /// The exact host-honest fold displayed by this panel.
+    pub room: Option<crate::domain::models::OrchestrationRoom>,
+    /// Host id the fold was derived against — the "here" that makes a foreign
+    /// binding host-bound (AC2). Rendered so the operator can see which host
+    /// the honesty claim is relative to.
+    pub host_id: String,
+    /// Highest journal `seq` the operator has actually seen **rendered**.
+    /// Only the renderer advances it: a row is acknowledged when it was drawn,
+    /// never when it was merely read.
+    pub read_seq: u64,
+    /// Highest journal `seq` represented by `room`.
+    pub folded_seq: u64,
+    /// Highest journal `seq` observed at the durable head. It may be newer than
+    /// `folded_seq` while the viewport remains anchored to its current replay.
+    pub latest_seq: u64,
+    /// Observed head entries that are newer than `read_seq`.
+    pub newer_entries: usize,
+    /// Unrecognized `RoomEvent` tags in the journal. Rendered as an explicit
+    /// unknown row, never silently dropped (UX-DR-ROOM-01).
+    pub unknown_records: usize,
+    /// First visible index in the current view.
+    pub scroll_offset: usize,
+    /// Rows the renderer can display; refreshed on every draw.
+    pub viewport_rows: usize,
+    /// Wall-clock millis of the last read, rendered as "as of …".
+    pub read_at_ms: Option<i64>,
+    /// A journal read that failed. Shown instead of an empty list, which would
+    /// read as "nothing happened".
+    pub error: Option<String>,
+    /// `true` when this session composed no orchestration journal at all.
+    /// Distinct from "the journal is empty" — the first zero-state of three.
+    pub not_attached: bool,
+    /// Top row and selected row from the last painted Room viewport. These are
+    /// per-panel identities, unlike the shared numeric sidebar selection.
+    anchor_node: Option<crate::domain::models::AgentId>,
+    selected_node: Option<crate::domain::models::AgentId>,
+    /// Accumulator for the one-second durable-head check while Room is open.
+    head_poll_elapsed_ms: u64,
+}
+
+impl RoomPanelState {
+    /// Node rows in stable id order. Empty before the first read.
+    #[must_use]
+    pub fn nodes(&self) -> Vec<&crate::domain::models::NodeView> {
+        self.room
+            .as_ref()
+            .map(|room| room.nodes().values().collect())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn visible_len(&self) -> usize {
+        self.room.as_ref().map_or(0, |room| room.nodes().len())
+    }
+
+    /// Which of the three distinguishable zero-states applies, if any.
+    #[must_use]
+    pub fn zero_state(&self) -> Option<RoomZeroState> {
+        if self.not_attached {
+            return Some(RoomZeroState::NotAttached);
+        }
+        let room = self.room.as_ref()?;
+        if room.nodes().is_empty() {
+            return Some(RoomZeroState::NoNodes);
+        }
+        room.nodes()
+            .values()
+            .all(|view| view.state.is_terminal())
+            .then_some(RoomZeroState::AllTerminal)
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        self.visible_len().saturating_sub(self.viewport_rows.max(1))
+    }
+
+    /// Clamp the shared sidebar selection into the rendered viewport.
+    pub fn synchronize_selection(&mut self, selected: &mut usize) {
+        let len = self.visible_len();
+        if len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = (*selected).min(len - 1);
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+        let viewport_rows = self.viewport_rows.max(1);
+        if *selected < self.scroll_offset {
+            self.scroll_offset = *selected;
+        } else if *selected >= self.scroll_offset.saturating_add(viewport_rows) {
+            self.scroll_offset = *selected + 1 - viewport_rows;
+        }
+    }
+
+    /// Record the renderer's actual row capacity and reconcile the viewport.
+    pub fn set_viewport_rows(&mut self, viewport_rows: usize, selected: &mut usize) {
+        self.viewport_rows = viewport_rows.max(1);
+        self.synchronize_selection(selected);
+    }
+
+    /// Store one freshly folded durable read without moving the reader's
+    /// identity anchors.
+    pub fn apply_read(
+        &mut self,
+        room: crate::domain::models::OrchestrationRoom,
+        host_id: String,
+        max_seq: u64,
+        unknown_records: usize,
+        read_at_ms: i64,
+        selected: &mut usize,
+    ) {
+        let anchor_index = self
+            .anchor_node
+            .as_ref()
+            .and_then(|id| room.nodes().keys().position(|candidate| candidate == id));
+        let selected_index = self
+            .selected_node
+            .as_ref()
+            .and_then(|id| room.nodes().keys().position(|candidate| candidate == id));
+
+        self.folded_seq = max_seq;
+        self.latest_seq = max_seq;
+        self.newer_entries = usize::try_from(max_seq.saturating_sub(self.read_seq)).unwrap_or(0);
+        self.room = Some(room);
+        self.host_id = host_id;
+        self.unknown_records = unknown_records;
+        self.read_at_ms = Some(read_at_ms);
+        self.error = None;
+        self.not_attached = false;
+        if let Some(index) = anchor_index {
+            self.scroll_offset = index;
+        }
+        if let Some(index) = selected_index {
+            *selected = index;
+        }
+        self.synchronize_selection(selected);
+    }
+
+    /// Remember exactly which rows the last render anchored and selected.
+    pub fn record_rendered_viewport(
+        &mut self,
+        anchor: Option<crate::domain::models::AgentId>,
+        selected: Option<crate::domain::models::AgentId>,
+    ) {
+        self.anchor_node = anchor;
+        self.selected_node = selected;
+    }
+
+    /// Observe the journal head without replacing the anchored replay.
+    pub fn observe_head(&mut self, max_seq: u64) -> bool {
+        let prior = self.newer_entries;
+        self.latest_seq = max_seq;
+        self.newer_entries = usize::try_from(max_seq.saturating_sub(self.read_seq)).unwrap_or(0);
+        self.error = None;
+        self.newer_entries != prior
+    }
+
+    /// Advance the low-frequency head-poll clock.
+    pub fn head_poll_due(&mut self, tick_ms: u64, interval_ms: u64) -> bool {
+        self.head_poll_elapsed_ms = self.head_poll_elapsed_ms.saturating_add(tick_ms);
+        if self.head_poll_elapsed_ms < interval_ms {
+            return false;
+        }
+        self.head_poll_elapsed_ms %= interval_ms;
+        true
+    }
+
+    pub fn reset_head_poll(&mut self) {
+        self.head_poll_elapsed_ms = 0;
+    }
+
+    /// Mark only the currently folded replay seen. A newer observed head stays
+    /// pending until a later reopen folds and renders it.
+    pub fn acknowledge_rendered_boundary(&mut self) {
+        self.read_seq = self.folded_seq;
+        self.newer_entries =
+            usize::try_from(self.latest_seq.saturating_sub(self.read_seq)).unwrap_or(0);
+    }
+}
+
+/// The three zero-states a durable room can be in. A blank pane cannot tell
+/// them apart, and that indistinguishability is the failure this exists to
+/// prevent (`RV/review-completeness.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomZeroState {
+    /// No orchestration journal is composed in this session.
+    NotAttached,
+    /// The journal is readable and holds no node registrations.
+    NoNodes,
+    /// Every node in the room has reached a terminal state.
+    AllTerminal,
+}
+
+/// The four distinguishable zero-states of the `/artifacts` surface.
+///
+/// One more than the Room panel's three, and the extra one is the point: a
+/// room can hold artifacts and still have nothing left to review, which reads
+/// identically to "no artifacts" on a blank pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactsZeroState {
+    /// No orchestration journal is composed in this session.
+    NotAttached,
+    /// The journal is readable and holds no artifacts yet.
+    NoArtifacts,
+    /// Artifacts exist, but none of them is a patch.
+    NoPatches,
+    /// Every patch in the room has a recorded verdict.
+    AllReviewed,
+}
+
+/// State for the durable artifact list (`Ctrl+X, E` / `/artifacts`).
+///
+/// Story 18.3a-c (AC3). Deliberately shaped like [`RoomPanelState`]: one
+/// host-honest fold, an "as of" stamp, per-panel identity anchors, and no head
+/// poll. The `/room` head-poll chrome is **not** copied — it is fed by a 1 Hz
+/// tick this surface does not have, and copying the string without the wiring
+/// ships an unreachable line (`DF-18-3a-c-ARTIFACT-HEAD-POLL`).
+///
+/// ⚠ [`Default`] is hand-written, not derived: `PermissionMode` has no
+/// `Default` and must not acquire one here — a security mode's default is a
+/// decision, not a convenience. The unread panel fails closed to
+/// `PermissionMode::Plan`, whose disposition is `RefusedPlanMode` for every
+/// patch, so a panel that has never been folded can never claim a patch
+/// applies.
+pub struct ArtifactsPanelState {
+    /// The exact host-honest fold displayed by this panel.
+    pub room: Option<crate::domain::models::OrchestrationRoom>,
+    /// Host id the fold was derived against, rendered as "here:".
+    pub host_id: String,
+    /// Highest journal `seq` represented by `room`.
+    pub folded_seq: u64,
+    /// Unrecognized `RoomEvent` tags in the journal — records whose *tag* this
+    /// build cannot read, distinct from a recognized record carrying a field
+    /// *value* it cannot read (which renders in its own row).
+    pub unknown_records: usize,
+    /// Wall-clock millis of the last read, rendered as "as of …".
+    pub read_at_ms: Option<i64>,
+    /// A journal read that failed. Shown instead of an empty list, which would
+    /// read as "nothing happened".
+    pub error: Option<String>,
+    /// `true` when this session composed no orchestration journal at all.
+    pub not_attached: bool,
+    /// The merge-back policy the apply path uses, carried so the row's
+    /// `(policy)` clause and the gate cannot disagree.
+    pub policy: crate::domain::services::patch_review::MergeBackPolicy,
+    /// The permission mode the fold was rendered under. Read from the same
+    /// `SecurityPort` the orchestrator's apply path consults.
+    pub permission_mode: crate::domain::models::PermissionMode,
+    /// First visible index in the current view.
+    pub scroll_offset: usize,
+    /// Rows the renderer can display; refreshed on every draw.
+    pub viewport_rows: usize,
+    /// Top and selected artifact from the last painted viewport. Per-panel
+    /// identities, unlike the shared numeric sidebar selection.
+    anchor_artifact: Option<crate::domain::models::ArtifactId>,
+    selected_artifact: Option<crate::domain::models::ArtifactId>,
+}
+
+impl Default for ArtifactsPanelState {
+    fn default() -> Self {
+        Self {
+            room: None,
+            host_id: String::new(),
+            folded_seq: 0,
+            unknown_records: 0,
+            read_at_ms: None,
+            error: None,
+            not_attached: false,
+            policy: crate::domain::services::patch_review::MergeBackPolicy::default(),
+            permission_mode: crate::domain::models::PermissionMode::Plan,
+            scroll_offset: 0,
+            viewport_rows: 0,
+            anchor_artifact: None,
+            selected_artifact: None,
+        }
+    }
+}
+
+impl ArtifactsPanelState {
+    /// Every artifact in the fold, in the projection's own deterministic
+    /// `ArtifactId`-lexicographic order. The fold preserves no other order, and
+    /// re-sorting by recency here would be a second read model.
+    #[must_use]
+    pub fn artifacts(&self) -> Vec<&crate::domain::models::ArtifactRef> {
+        self.room
+            .as_ref()
+            .map(|room| room.artifacts().values().collect())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn visible_len(&self) -> usize {
+        self.room.as_ref().map_or(0, |room| room.artifacts().len())
+    }
+
+    /// The id prefix of the artifact at `index`, for the `Enter` drill-down.
+    ///
+    /// Returns the same [`crate::adapters::tui::widgets::artifacts_panel::ID_PREFIX_LEN`]
+    /// prefix the row renders, so the key path and the typed path resolve
+    /// through the identical `resolve_artifact` rule — including its
+    /// ambiguous-prefix refusal.
+    #[must_use]
+    pub fn selected_id_prefix(&self, index: usize) -> Option<String> {
+        self.artifacts()
+            .get(index)
+            .map(|artifact| crate::adapters::tui::widgets::artifacts_panel::id_prefix(&artifact.id))
+    }
+
+    /// Which of the four distinguishable zero-states applies, if any.
+    #[must_use]
+    pub fn zero_state(&self) -> Option<ArtifactsZeroState> {
+        if self.not_attached {
+            return Some(ArtifactsZeroState::NotAttached);
+        }
+        let room = self.room.as_ref()?;
+        if room.artifacts().is_empty() {
+            return Some(ArtifactsZeroState::NoArtifacts);
+        }
+        let patches: Vec<_> = room
+            .artifacts()
+            .values()
+            .filter(|artifact| artifact.kind == crate::domain::models::ArtifactKind::Patch)
+            .collect();
+        if patches.is_empty() {
+            return Some(ArtifactsZeroState::NoPatches);
+        }
+        patches
+            .iter()
+            .all(|artifact| {
+                matches!(
+                    artifact.review,
+                    Some(crate::domain::models::ReviewStatus::Reviewed { .. })
+                )
+            })
+            .then_some(ArtifactsZeroState::AllReviewed)
+    }
+
+    /// Rendered lines one artifact occupies: its row plus one lineage line per
+    /// `depends_on` edge. The viewport is measured in **lines, not artifacts** —
+    /// counting artifacts lets a lineage-bearing selection sit below the
+    /// clipped area while `Enter` still acts on it.
+    fn block_lines(&self, index: usize) -> usize {
+        self.artifacts()
+            .get(index)
+            .map_or(1, |artifact| 1 + artifact.depends_on.len())
+    }
+
+    /// Smallest scroll offset whose window fully contains `selected`'s block.
+    fn first_fitting_offset(&self, selected: usize) -> usize {
+        let viewport = self.viewport_rows.max(1);
+        let mut used = 0usize;
+        let mut start = selected;
+        loop {
+            let lines = self.block_lines(start);
+            if used + lines > viewport {
+                // `start` does not fit whole; begin after it — unless it IS the
+                // selection, whose block is taller than the viewport and can
+                // only clip its top.
+                return if start == selected {
+                    selected
+                } else {
+                    start + 1
+                };
+            }
+            used += lines;
+            if start == 0 {
+                return 0;
+            }
+            start -= 1;
+        }
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        let len = self.visible_len();
+        if len == 0 {
+            return 0;
+        }
+        // The bottom-most offset with no dead space: the smallest offset whose
+        // blocks still fill (or overflow) the viewport, in lines.
+        self.first_fitting_offset(len - 1).min(len - 1)
+    }
+
+    /// Clamp the shared sidebar selection into the rendered viewport.
+    pub fn synchronize_selection(&mut self, selected: &mut usize) {
+        let len = self.visible_len();
+        if len == 0 {
+            *selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        *selected = (*selected).min(len - 1);
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+        if *selected < self.scroll_offset {
+            self.scroll_offset = *selected;
+        } else {
+            // Line-aware: the selection's whole block (row + lineage lines)
+            // must fit inside the viewport, or navigation moves onto an
+            // artifact the operator cannot see.
+            let fitting = self.first_fitting_offset(*selected);
+            if self.scroll_offset < fitting {
+                self.scroll_offset = fitting;
+            }
+        }
+    }
+
+    /// Record the renderer's actual row capacity and reconcile the viewport.
+    pub fn set_viewport_rows(&mut self, viewport_rows: usize, selected: &mut usize) {
+        self.viewport_rows = viewport_rows.max(1);
+        self.synchronize_selection(selected);
+    }
+
+    /// Store one freshly folded durable read without moving the reader's
+    /// identity anchors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_read(
+        &mut self,
+        room: crate::domain::models::OrchestrationRoom,
+        host_id: String,
+        max_seq: u64,
+        unknown_records: usize,
+        read_at_ms: i64,
+        policy: crate::domain::services::patch_review::MergeBackPolicy,
+        permission_mode: crate::domain::models::PermissionMode,
+        selected: &mut usize,
+    ) {
+        let anchor_index = self.anchor_artifact.as_ref().and_then(|id| {
+            room.artifacts()
+                .keys()
+                .position(|candidate| candidate == id)
+        });
+        let selected_index = self.selected_artifact.as_ref().and_then(|id| {
+            room.artifacts()
+                .keys()
+                .position(|candidate| candidate == id)
+        });
+
+        self.folded_seq = max_seq;
+        self.room = Some(room);
+        self.host_id = host_id;
+        self.unknown_records = unknown_records;
+        self.read_at_ms = Some(read_at_ms);
+        self.policy = policy;
+        self.permission_mode = permission_mode;
+        self.error = None;
+        self.not_attached = false;
+        if let Some(index) = anchor_index {
+            self.scroll_offset = index;
+        }
+        if let Some(index) = selected_index {
+            *selected = index;
+        }
+        self.synchronize_selection(selected);
+    }
+
+    /// Remember exactly which rows the last render anchored and selected.
+    pub fn record_rendered_viewport(
+        &mut self,
+        anchor: Option<crate::domain::models::ArtifactId>,
+        selected: Option<crate::domain::models::ArtifactId>,
+    ) {
+        self.anchor_artifact = anchor;
+        self.selected_artifact = selected;
+    }
+}
+
 /// State for the command palette overlay (Ctrl+P).
 // Covers: UX-DR18
 pub struct CommandPaletteState {
@@ -1422,7 +2261,23 @@ impl WhichKeyState {
             's',
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Agents),
         );
-        chord_map.insert('l', ChordAction::Noop("Log panel — Epic 14".to_string()));
+        chord_map.insert(
+            'l',
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::TransparencyLog),
+        );
+        // Lower-case on purpose: `lookup_chord` lowercases the key, so an
+        // uppercase `'R'` entry would be unreachable.
+        chord_map.insert(
+            'r',
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Room),
+        );
+        // `e` for **E**vidence — FR149's own term, and the type is
+        // `EvidenceArtifact`. `a` was already Adapters. Lower-case for the same
+        // reason as `r` above.
+        chord_map.insert(
+            'e',
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Artifacts),
+        );
         chord_map.insert(
             't',
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Tasks),
@@ -1590,6 +2445,17 @@ pub struct TuiState {
     /// Currently focused tool block id (set by chat pane render when a tool block
     /// is at the top of the viewport after J/K navigation).
     pub focused_tool_id: Option<String>,
+    /// Explicitly selected tool block id — set ONLY by user intent (the `Tab`
+    /// cycle inside a focused turn, `Enter` toggling a block, `'p'` peeking
+    /// one), never by the render pass. Story 19.9 review finding (FR116
+    /// regression): the render pass rewrites `focused_tool_id` every frame
+    /// from `find_focused_tool_id`, whose nearest-visible fallback seats SOME
+    /// block whenever any is on screen, so keying copy/peek on that field
+    /// silently widened `c` from the last assistant message to a tool block's
+    /// raw output. `resolve_copy_content` and the peek handler read THIS
+    /// field; `focused_tool_id` stays the render-derived signal that drives
+    /// `Enter`.
+    pub selected_tool_id: Option<String>,
     /// Pending permission request awaiting user y/n/a/s/f response.
     pub pending_permission: Option<PendingPermission>,
     /// Queue for additional permission requests that arrive while one is displayed.
@@ -1600,6 +2466,11 @@ pub struct TuiState {
     pub retry_state: Option<RetryState>,
     /// Feedback blocks displayed in conversation, keyed by block ID.
     pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
+    /// Story 19.17: per-action rows remain typed beside their visible blocks.
+    #[cfg(feature = "a2a")]
+    pub team_send_blocks:
+        BTreeMap<String, Vec<crate::adapters::tui::handlers::team_command::TeamSendRow>>,
+    pub team_send_next_id: u64,
     /// The ID of the most recent active (actionable) feedback block.
     pub active_feedback_id: Option<String>,
     /// Whether a Ctrl+K chord leader has been pressed and the next character key
@@ -1721,6 +2592,18 @@ pub struct TuiState {
     >,
     /// Usage/cost panel state (Ctrl+X, U) (Story 7.5 AC3).
     pub usage_panel: UsagePanelState,
+    /// Transparency Log panel state (Ctrl+X, L) (Story 18.2 AC5).
+    pub transparency_panel: TransparencyPanelState,
+    /// Story 19.16g — the transparency-log reminder's value state.
+    pub log_awareness: LogAwarenessView,
+    /// Story 19.16g — the active tab's unpresented `team-log` visit (saved
+    /// and restored with the tab's feedback blocks).
+    pub pending_log_visit: Option<crate::domain::models::LogVisitCandidate>,
+    /// Durable room viewer panel state (Ctrl+X, R / `/room`) (Story 18.3a AC1).
+    pub room_panel: RoomPanelState,
+    /// Durable artifact list panel state (Ctrl+X, E / `/artifacts`) (Story
+    /// 18.3a-c AC3).
+    pub artifacts_panel: ArtifactsPanelState,
     /// Daily budget warning state (Story 7.5 AC5). `None` when budget disabled.
     pub daily_budget: Option<DailyBudgetState>,
     /// Captured resolved-model from `start_turn_inner`, consumed-and-cleared on
@@ -1833,6 +2716,17 @@ pub struct TuiState {
     pub pending_consolidation_card: Option<PendingConsolidationCard>,
     /// Story 11.4a: pending `/memory forget` confirm card awaiting user y/n.
     pub pending_forget_card: Option<PendingForgetCard>,
+    /// Story 18.3a-e / 18.3a-f: pending confirmed artifact decision — a patch
+    /// apply, or an operator's report about an indeterminate one. ⛔ One slot,
+    /// deliberately: a second card type would duplicate the render branch, both
+    /// focus-deferral guards and `surface_deferred_modal`.
+    pub pending_artifact_card: Option<PendingArtifactCard>,
+    /// Story 18.4b (AC3): a `/peer add` awaiting the operator's confirm. Its own
+    /// slot on purpose — see [`PendingPeerAdd`] for why the apply card's
+    /// mode-blind key table must not be borrowed for a pin.
+    pub pending_peer_add: Option<PendingPeerAdd>,
+    /// Story 19.16f `AC4`: the cross-host retract decision card, if raised.
+    pub pending_team_retract: Option<PendingTeamRetract>,
     /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
     /// when the event arrives while a stream is still active. Dispatched
     /// after the stream completes (TurnComplete handler).
@@ -1896,6 +2790,33 @@ pub struct TuiState {
 }
 
 impl TuiState {
+    /// Story 19.16g — before a draw: a panel visit painted by a frame that
+    /// never completed was not presented, so it returns to pending (unless a
+    /// newer read already replaced it).
+    pub fn restore_unflushed_log_visits(&mut self) {
+        if let Some(visit) = self.transparency_panel.painted_visit.take() {
+            self.transparency_panel.pending_visit.get_or_insert(visit);
+        }
+    }
+
+    /// Story 19.16g — after a **successful** draw: hand the visits this frame
+    /// actually presented to the persistence shell. The panel's visit counts
+    /// only if the widget painted it with body space; the `team-log` visit
+    /// only if its block intersected the rendered chat viewport. Each visit
+    /// is consumed once, so rerendering cannot acknowledge later rows.
+    pub fn log_visits_presented(&mut self, visible_feedback_ids: &[String]) {
+        if let Some(visit) = self.transparency_panel.painted_visit.take() {
+            self.log_awareness.presented.push(visit);
+        }
+        if visible_feedback_ids
+            .iter()
+            .any(|id| id == crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID)
+            && let Some(visit) = self.pending_log_visit.take()
+        {
+            self.log_awareness.presented.push(visit);
+        }
+    }
+
     /// D-B (AI-12.3): true while a `/fanout` wave is in flight (spawned but not
     /// yet delivered or cancelled). DERIVED from `active_wave_id` — never a
     /// shadow boolean. Gates the Ctrl-C wave-cancel branch so a completed
@@ -2080,11 +3001,15 @@ impl TuiState {
             pending_anchor: None,
             tool_block_states: HashMap::new(),
             focused_tool_id: None,
+            selected_tool_id: None,
             pending_permission: None,
             permission_queue: PermissionQueue::default(),
             pending_feedback_input: None,
             retry_state: None,
             feedback_blocks: BTreeMap::new(),
+            #[cfg(feature = "a2a")]
+            team_send_blocks: BTreeMap::new(),
+            team_send_next_id: 0,
             active_feedback_id: None,
             chord_leader_active: false,
             pending_z: false,
@@ -2121,6 +3046,11 @@ impl TuiState {
             profile_switcher: ProfileSwitcherState::new(),
             active_profile: None,
             usage_panel: UsagePanelState::new(),
+            transparency_panel: TransparencyPanelState::default(),
+            log_awareness: LogAwarenessView::default(),
+            pending_log_visit: None,
+            room_panel: RoomPanelState::default(),
+            artifacts_panel: ArtifactsPanelState::default(),
             daily_budget: None,
             pending_resolved_model: None,
             selected_model: None,
@@ -2160,6 +3090,9 @@ impl TuiState {
             pending_delegation_card: None,
             pending_consolidation_card: None,
             pending_forget_card: None,
+            pending_artifact_card: None,
+            pending_peer_add: None,
+            pending_team_retract: None,
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,
@@ -2248,6 +3181,61 @@ impl TuiState {
     /// Public setter for auto_snapshot. For test setup only.
     pub fn set_auto_scroll(&mut self, auto: bool) {
         self.auto_snapshot = auto;
+    }
+
+    /// Record an explicit user pick of a tool block (story 19.9 review patch:
+    /// copy/peek decoupled from render-derived focus). An explicit pick is
+    /// also the focus, so both signals move together.
+    pub fn select_tool_explicitly(&mut self, id: String) {
+        self.selected_tool_id = Some(id.clone());
+        self.focused_tool_id = Some(id);
+    }
+
+    /// Clear BOTH tool-block signals. Used wherever the render-derived focus
+    /// was already discarded (conversation reset, tab switch) so a stale
+    /// explicit selection cannot leak across a conversation or tab boundary.
+    pub fn clear_tool_selection(&mut self) {
+        self.selected_tool_id = None;
+        self.focused_tool_id = None;
+    }
+
+    /// Resolve what content `c` (copy) should place on the clipboard.
+    /// Priority: explicitly selected tool block output > last assistant
+    /// message > empty. Reads `selected_tool_id`, NOT the render-derived
+    /// `focused_tool_id`: the latter is rewritten every frame by
+    /// `find_focused_tool_id`, whose nearest-visible fallback seats some block
+    /// whenever any is on screen, which after any tool-using turn would copy
+    /// the tool block's raw output where the FR116 AC9 path (last assistant
+    /// message) used to be the common case. Moved here from `event_loop.rs`
+    /// (story 19.9 review patch) so the priority stays unit-testable outside
+    /// the line-budgeted event loop.
+    // Covers: FR116 (AC6, AC8, AC9)
+    pub fn resolve_copy_content(
+        &self,
+        conversation: &crate::domain::models::Conversation,
+    ) -> String {
+        // AC8: If a tool block is explicitly selected, copy its output
+        if let Some(tool_id) = &self.selected_tool_id {
+            // Find the tool result in conversation messages
+            for cm in conversation.messages.iter().rev() {
+                for tc in &cm.tool_calls {
+                    if tc.id == *tool_id {
+                        if let Some(result) = &tc.result {
+                            return result.content.clone();
+                        }
+                    }
+                }
+            }
+        }
+
+        // AC9: Copy the last assistant message
+        for cm in conversation.messages.iter().rev() {
+            if cm.role == crate::domain::models::MessageRole::Assistant && !cm.content.is_empty() {
+                return cm.content.clone();
+            }
+        }
+
+        String::new()
     }
 }
 
@@ -2403,6 +3391,7 @@ mod tests {
         let layout = CachedTurnLayout {
             height: 42,
             block_offsets: vec![0, 10, 20],
+            tool_block_offsets: vec![],
         };
         cache.set(key.clone(), layout.clone());
         assert_eq!(cache.get(&key).unwrap().height, 42);
@@ -2437,6 +3426,7 @@ mod tests {
             CachedTurnLayout {
                 height: 5,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.invalidate_all();
@@ -2460,6 +3450,7 @@ mod tests {
             CachedTurnLayout {
                 height: 1,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -2473,6 +3464,7 @@ mod tests {
             CachedTurnLayout {
                 height: 2,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.invalidate_turn(&t1);
@@ -2519,6 +3511,7 @@ mod tests {
             CachedTurnLayout {
                 height: 1,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -2532,6 +3525,7 @@ mod tests {
             CachedTurnLayout {
                 height: 2,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.set(
@@ -2545,6 +3539,7 @@ mod tests {
             CachedTurnLayout {
                 height: 3,
                 block_offsets: vec![],
+                tool_block_offsets: vec![],
             },
         );
         cache.evict_turns_not_in([&t1, &t3].into_iter());

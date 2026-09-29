@@ -20,7 +20,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
             role,
             content: format!(
                 "Message {
-            }",
+        }",
                 i
             ),
             content_blocks: vec![],
@@ -38,6 +38,8 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
             },
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
     }
 

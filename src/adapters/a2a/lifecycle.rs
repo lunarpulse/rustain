@@ -108,6 +108,10 @@ pub trait A2aTaskTransport: Send + Sync {
     -> Result<serde_json::Value, A2aError>;
     async fn tasks_get(&self, task_id: &str) -> Result<serde_json::Value, A2aError>;
     async fn tasks_cancel(&self, task_id: &str) -> Result<serde_json::Value, A2aError>;
+    // ⛔ The recipient-item verbs (`list_items`, `retract_item`) are NOT here:
+    // they live on `TaskClient`'s inherent impl (Story 19.16f `AC2`), because
+    // every production caller holds the concrete type and a trait method made
+    // every lifecycle double answer for a seam it never exercised.
 }
 
 /// Bounded poll configuration. `max_status_updates` mirrors the domain
@@ -331,6 +335,7 @@ mod tests {
             max_status_updates: 64,
         }
     }
+
     #[tokio::test]
     async fn drives_submitted_working_completed_to_terminal() {
         let transport = ScriptedTransport::new(&["submitted", "working", "completed"]);

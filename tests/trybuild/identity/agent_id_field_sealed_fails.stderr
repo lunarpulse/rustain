@@ -18,8 +18,9 @@ help: you might have meant to use an associated function to build this type
 12 +     let _forged = AgentId::root();
    |
 12 -     let _forged = AgentId(String::from("forge"));
-12 +     let _forged = AgentId::from_validated(_);
+12 +     let _forged = AgentId::local_operator();
    |
 12 -     let _forged = AgentId(String::from("forge"));
-12 +     let _forged = AgentId::from_segments(_);
+12 +     let _forged = AgentId::from_validated(_);
    |
+   = and 1 other candidate

@@ -54,6 +54,8 @@ fn test_domain_no_forbidden_crate_imports() {
         "arc_swap",
         "a2a",
         "serde_jcs",
+        "iroh",
+        "noq",
     ];
     let allowed_tokio = ["tokio_util::sync::CancellationToken", "tokio::sync"];
     let domain_dir = Path::new("src/domain");
@@ -580,13 +582,18 @@ fn test_no_std_sync_lock_in_async_module() {
 /// 11_071, incl. the AI-11.5 trace-id fix). This reconciles the const to
 /// committed reality and un-skips `test_event_loop_baseline_integrity`.
 ///
+/// Re-pinned 2026-08-01 (Story 18.3d Task 1) from the unreachable
+/// `1bde7715d9931a249ccee7510eeaf60590ad5070` object to the committed 18.3c
+/// baseline `cb99253`, where `event_loop.rs` is 11_237 lines. The paired
+/// `/memory` extraction creates headroom without hiding the committed baseline.
+///
 /// GOVERNANCE (Epic 11 retro AI-11.3 / closes AI-10.3): this and every other
 /// tracked ratchet const (`MAX_KNOWN_BYPASSES`, `MAX_KNOWN_STD_SYNC_LOCKS`,
 /// `EVENT_LOOP_*`, `EXPECTED_HANDLE_COUNT`) are gated by
 /// `.github/workflows/ratchet-signoff-guard.yml`. Changing any of them requires a
 /// `RATCHET-SIGNOFF: <CONST_NAME> — <why>` trailer in a commit message or the PR
 /// body, or CI fails. Bumping a ratchet is a governance decision, never a silent edit.
-const EVENT_LOOP_BASELINE_LINES: usize = 11_071;
+const EVENT_LOOP_BASELINE_LINES: usize = 11_237;
 
 /// Soft ceiling: PR-comment warning. Mary's calibration (baseline+75).
 const EVENT_LOOP_SOFT_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 75;
@@ -601,10 +608,10 @@ const EVENT_LOOP_RUN_BASELINE_CCN: u32 = 155;
 const COMPLEXITY_MULTIPLIER_PCT: u32 = 120;
 
 /// Commit SHA at which `EVENT_LOOP_BASELINE_LINES` was measured.
-/// Pinned 2026-06-05 (Epic 11 retro AI-11.7 closeout) to the `retro 11` commit,
-/// where `git show <SHA>:event_loop.rs | wc -l` == `EVENT_LOOP_BASELINE_LINES`
-/// (11_071). `test_event_loop_baseline_integrity` is now LIVE (no longer skipped).
-const EVENT_LOOP_BASELINE_SHA: &str = "1bde7715d9931a249ccee7510eeaf60590ad5070";
+///
+/// Re-pinned by Story 18.3d to the reachable 18.3c baseline, where
+/// `git show <SHA>:src/infrastructure/runtime/event_loop.rs | wc -l` is 11_237.
+const EVENT_LOOP_BASELINE_SHA: &str = "cb99253cd5b8ad16fd29f84b80bca745c2f8ec51";
 
 /// AC-4 line-budget ratchet for `event_loop.rs`. Soft warns; hard fails.
 /// Per Story 8.0a AC-4 + ADR-08-01 §D6.5.
@@ -635,6 +642,29 @@ fn test_event_loop_line_budget() {
             lines, EVENT_LOOP_SOFT_BUDGET, EVENT_LOOP_BASELINE_LINES, EVENT_LOOP_HARD_BUDGET,
         );
     }
+}
+/// Story 18.3d Task 1: `/memory consolidate|forget` must delegate to the
+/// runtime effect shell instead of spending the event-loop line budget.
+#[test]
+fn test_event_loop_memory_command_delegates_to_runtime_bridge() {
+    let event_loop = std::fs::read_to_string("src/infrastructure/runtime/event_loop.rs")
+        .expect("conformance: cannot read event_loop.rs");
+    let bridge = std::fs::read_to_string("src/infrastructure/runtime/transparency_bridge.rs")
+        .expect("conformance: cannot read transparency_bridge.rs");
+
+    assert!(
+        event_loop.contains("transparency_bridge::memory_command("),
+        "/memory must delegate into the runtime bridge"
+    );
+    assert!(
+        !event_loop.contains("build_proposal_prompt(&entries)"),
+        "memory consolidation effects must not remain inline in event_loop.rs"
+    );
+    assert!(
+        bridge.contains("build_proposal_prompt(&entries)")
+            && bridge.contains("parse_forget_query(cmd_name, cmd_arg)"),
+        "the runtime bridge must retain both shipped memory command paths"
+    );
 }
 
 /// AC-4c baseline integrity (Mary's anchor): the pinned const must match what
@@ -760,6 +790,178 @@ fn test_event_loop_complexity_floor() {
             run_ccn, EVENT_LOOP_RUN_BASELINE_CCN,
         );
     }
+}
+
+/// Story 19.16 AC5 — durable recipient-item names must not imply cryptographic
+/// properties the unsigned room journal does not provide.
+///
+/// The needles are AC5(a)'s merged ban list as identifier substrings:
+/// `verified|attested|proof|audit|signed` plus `authenticated|tamper|evidence`
+/// (identifiers cannot carry the prose forms `tamper-evident`/`audit trail`).
+/// Genuine mechanism names (`authenticate_request`) do not match: the ban is on
+/// the claim word `authenticated`, not on functions that actually authenticate.
+#[test]
+fn recipient_item_claim_identifier_ratchet_does_not_grow() {
+    const MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS: usize = 84;
+
+    let declaration = regex::Regex::new(
+        r"(?i)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:struct|enum|trait|type|fn|const|static)\s+([A-Za-z_][A-Za-z0-9_]*)",
+    )
+    .unwrap();
+    let enum_variant = regex::Regex::new(r"^\s*([A-Z][A-Za-z0-9_]*)\s*(?:\{|\(|,)\s*$").unwrap();
+    let banned = regex::Regex::new(
+        r"(?i)(verified|attested|proof|audit|signed|authenticated|tamper|evidence)",
+    )
+    .unwrap();
+    let mut sites = Vec::new();
+    for file in collect_rs_files(Path::new("src")) {
+        let source = fs::read_to_string(&file).expect("read Rust source");
+        for (line, text) in source.lines().enumerate() {
+            let captures = declaration
+                .captures(text)
+                .or_else(|| enum_variant.captures(text));
+            let Some(captures) = captures else {
+                continue;
+            };
+            let identifier = captures.get(1).unwrap().as_str();
+            if banned.is_match(identifier) {
+                sites.push(format!("{}:{} {identifier}", file.display(), line + 1));
+            }
+        }
+    }
+
+    let actual = sites.len();
+    assert!(
+        actual <= MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS,
+        "durable-item claim identifier count grew from \
+         {MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS} to {actual}. New recipient-item \
+         symbols must not claim authentication, tamper-evidence, signatures, proof, \
+         attestation, audit, or evidence properties the room journal does not \
+         provide.\n{}",
+        sites.join("\n")
+    );
+    if actual < MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS {
+        eprintln!(
+            "durable-item claim identifier ratchet dropped from \
+             {MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS} to {actual}; lower the baseline"
+        );
+    }
+}
+
+/// Story 19.16c AC5(c) — the removal kind's **glyph** collides with nothing.
+///
+/// ⛔ Scoped to this story's new kind, deliberately. A whole-enum glyph check
+/// is RED on arrival: 19.16 double-booked `✓` for `Accepted` and
+/// `RecipientItemAcknowledged`, and renaming a shipped kind's mark to make a
+/// new check pass would be the tail wagging the dog. ⛔ And there is no
+/// companion *label* check: labels have zero duplicates today, so one would be
+/// green on arrival and prove nothing.
+#[test]
+fn the_removal_transparency_glyph_is_unique_among_shipped_kinds() {
+    use rustain::domain::services::transparency::TransparencyKind;
+
+    let removal = TransparencyKind::RecipientItemRemoved;
+    assert_eq!(removal.glyph(), "⊘");
+    assert_eq!(removal.label(), "item-removed");
+
+    for other in [
+        TransparencyKind::Accepted,
+        TransparencyKind::Rejected,
+        TransparencyKind::Dispatched,
+        TransparencyKind::AwaitingApproval,
+        TransparencyKind::StatusQueried,
+        TransparencyKind::Disclosed,
+        TransparencyKind::ConsentGranted,
+        TransparencyKind::ConsentRevoked,
+        TransparencyKind::RoomRoleGranted,
+        TransparencyKind::RoomRoleRevoked,
+        TransparencyKind::TransportAdmission,
+        TransparencyKind::PeerFrameAttempted,
+        TransparencyKind::PeerEquivocated,
+        TransparencyKind::RecipientItemReceived,
+        TransparencyKind::RecipientItemAcknowledged,
+        TransparencyKind::RecipientItemRetracted,
+        TransparencyKind::InteractionSurfaced,
+        TransparencyKind::DigestFlushed,
+        TransparencyKind::Unknown,
+    ] {
+        assert_ne!(
+            removal.glyph(),
+            other.glyph(),
+            "a shared glyph makes two decisions one row in a monochrome ledger: {} vs {}",
+            removal.label(),
+            other.label()
+        );
+    }
+
+    // The kind is filterable — a rendered kind no `--filter=kind=` token can
+    // name is the drift this story filed rather than repeated.
+    let filter =
+        rustain::domain::services::transparency::TransparencyFilter::parse("kind=item-removed")
+            .expect("the new kind is accepted by the filter grammar");
+    let rejected =
+        rustain::domain::services::transparency::TransparencyFilter::parse("kind=item-disposed")
+            .expect_err("an unknown kind is still refused");
+    assert!(rejected.contains("item-removed"), "{rejected}");
+    let _ = filter;
+}
+
+/// Story 19.16d AC5(a) — the retract kind's glyph collides with nothing, tested
+/// with the NEW kind as the subject.
+///
+/// ⛔ Adding `RecipientItemRetracted` to the removal test's array above proves
+/// only `⊘ ≠ ⇠`, because that test's subject is pinned to the removal kind; a
+/// retract glyph colliding with, say, `⊙` would pass it green. ⛔ Still scoped,
+/// never global: `✓` is double-booked (`Accepted` + `RecipientItemAcknowledged`)
+/// and a whole-enum check would be RED on arrival.
+#[test]
+fn the_retract_transparency_glyph_is_unique_among_shipped_kinds() {
+    use rustain::domain::services::transparency::{TransparencyFilter, TransparencyKind};
+
+    let retract = TransparencyKind::RecipientItemRetracted;
+    assert_eq!(
+        retract.glyph(),
+        "⇠",
+        "the ratified glyph (ux-Analysis-2026-09-21)"
+    );
+    assert_eq!(retract.label(), "item-retracted");
+
+    for other in [
+        TransparencyKind::Accepted,
+        TransparencyKind::Rejected,
+        TransparencyKind::Dispatched,
+        TransparencyKind::AwaitingApproval,
+        TransparencyKind::StatusQueried,
+        TransparencyKind::Disclosed,
+        TransparencyKind::ConsentGranted,
+        TransparencyKind::ConsentRevoked,
+        TransparencyKind::RoomRoleGranted,
+        TransparencyKind::RoomRoleRevoked,
+        TransparencyKind::TransportAdmission,
+        TransparencyKind::PeerFrameAttempted,
+        TransparencyKind::PeerEquivocated,
+        TransparencyKind::RecipientItemReceived,
+        TransparencyKind::RecipientItemAcknowledged,
+        TransparencyKind::RecipientItemRemoved,
+        TransparencyKind::InteractionSurfaced,
+        TransparencyKind::DigestFlushed,
+        TransparencyKind::Unknown,
+    ] {
+        assert_ne!(
+            retract.glyph(),
+            other.glyph(),
+            "a shared glyph makes two decisions one row in a monochrome ledger: {} vs {}",
+            retract.label(),
+            other.label()
+        );
+    }
+
+    // Filterable by the label it renders, and named in the refusal's list.
+    TransparencyFilter::parse("kind=item-retracted")
+        .expect("the new kind is accepted by the filter grammar");
+    let rejected = TransparencyFilter::parse("kind=item-withdrawn")
+        .expect_err("an unknown kind is still refused");
+    assert!(rejected.contains("item-retracted"), "{rejected}");
 }
 
 /// AC-3 handler-count + information-scent invariants. Verifies:

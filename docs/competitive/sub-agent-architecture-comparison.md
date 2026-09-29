@@ -432,7 +432,7 @@ The A2A protocol ecosystem is immature. Rustain can capture the **standards-comp
 | Source | Feature | Why |
 |--------|---------|-----|
 | **Codex** | Fork modes (Full/None/LastN) | Solves real context inheritance problem |
-| **Codex** | Path-based addressing | Intuitive, human-readable, already in Rustain's `AgentPath` |
+| **Codex** | Path-based addressing | Intuitive, human-readable, and already shipped in Rustain as **`AgentId`** — path-capable since 17.1a (`from_peer_path`, `segments()`, `is_local()`), which is NFR68 hook #1. *(Corrected 2026-08-04, Story 18.3a-b / `ADR-18-3a-b-01` D1: this row previously said "already in Rustain's `AgentPath`". No such type exists or is planned — `AgentPath` is a codex-rs concept. ⛔ `AgentId` segment 0 is a **route discriminator, not an identity** — `ADR-18-3b-01` D1.)* |
 | **Codex** | Persistence (rollout + spawn edges) | Enables crash recovery and debugging |
 | **Gemini** | Mandatory `complete_task` | Prevents zombie agents; strongest termination guarantee |
 | **Gemini** | Recovery turn on timeout/max-turns | Graceful degradation for partial results |

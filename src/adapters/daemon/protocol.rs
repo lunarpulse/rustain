@@ -42,7 +42,7 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// Current wire protocol version. Bump on ANY breaking frame-shape change so an
 /// older client/daemon is rejected with [`ProtocolError::VersionMismatch`]
 /// rather than mis-parsing (forward-compat for 12.3/12.4).
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -105,6 +105,12 @@ pub struct AttachSnapshot {
     /// (AC6 #5 — "N actions waiting on you"). The transcript-render of the
     /// individual skipped actions is 12.2c; 12.2b emits the count.
     pub blocked_actions_waiting: usize,
+    /// Count of sender-consent cards outstanding and awaiting the designated
+    /// writer (F5). Read-only mirrors render this as a passive "N consent
+    /// decisions pending" notice; only the ReadWrite writer receives the
+    /// actionable card frames.
+    #[serde(default)]
+    pub pending_consent_cards: usize,
 }
 
 /// A protocol-level error reported to the peer (and surfaced to the user).
@@ -187,6 +193,16 @@ pub struct ProposedFact {
     pub fact: crate::domain::models::MemoryFact,
 }
 
+/// Trusted-local resolution of a daemon-owned peer response draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PeerDraftAction {
+    Approve,
+    Edit { content: String },
+    Reject,
+    WriteOwn { content: String },
+}
+
 /// Client → daemon frames.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -245,8 +261,63 @@ pub enum ClientFrame {
     /// `accept: true` = promote all retained proposals; `false` = decline all.
     /// The token must match the daemon's retained entry (confused-deputy guard).
     ConsolidationResolve { token: ProposalToken, accept: bool },
+    ResolvePeerDraft {
+        node: String,
+        action: PeerDraftAction,
+    },
+    /// Same-host, append-only retraction of one persisted agent-composed row.
+    /// Only a trusted-local read-write attachment may dispatch it.
+    /// `target_seq` is `None` on every normal dispatch: the daemon derives the
+    /// journaled disclosure seq itself and merely validates a supplied value.
+    RetractAutoResponse {
+        message_id: String,
+        #[serde(default)]
+        target_seq: Option<u64>,
+    },
+    /// Share one room artifact's signed handle into a Topic with a pinned peer
+    /// (Story 18.4a; code-review D3). TrustedLocal + ReadWrite only.
+    ///
+    /// Routed through the daemon rather than dialed from the CLI because the
+    /// daemon is the one process holding both the Topic store and the bound
+    /// transport — a CLI-side endpoint would sign with the same identity key
+    /// over a second connection and fork the receiver's feed, and its store
+    /// would be dropped at exit, so the sender host would never retain its
+    /// own log.
+    PeerShare {
+        /// The alias to share with, as recorded by `peer add`.
+        alias: String,
+        /// The room artifact whose handle is shared.
+        artifact: String,
+        /// The Topic to share into (a correlation id).
+        topic: String,
+        /// A ≤240-byte human summary; `None` derives one from the artifact.
+        summary: Option<String>,
+    },
+    /// Deliberately acknowledge one recipient-owned durable item.
+    /// Trusted-local + read-write; the daemon also enforces the room-content role.
+    AcknowledgeRecipientItem { item_id: String },
+    /// Deliberately remove one recipient-owned durable item (FR165).
+    /// Trusted-local + read-write; the daemon also enforces the room-content role.
+    /// A new variant is not a breaking frame-shape change: `PROTOCOL_VERSION`
+    /// stays where 19.16's sibling frame left it.
+    RemoveRecipientItem { item_id: String },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
+}
+
+/// The outcome of a [`ClientFrame::PeerShare`] (Story 18.4a).
+///
+/// ⛔ `Advertised` says the handle was advertised, ⛔ never that the peer took
+/// it, agreed with it, or read it: topic gossip is fire-and-forget and nothing
+/// answered. `Refused` carries the operator-ready reason; every refusal arm
+/// says what was **not** done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PeerShareOutcome {
+    /// The signed handle was written to the peer and recorded locally.
+    Advertised,
+    /// Nothing was shared; `reason` is the operator-ready line.
+    Refused { reason: String },
 }
 
 /// Daemon → client frames.
@@ -288,6 +359,8 @@ pub enum DaemonFrame {
     },
     /// Peer envelope was verified and accepted by the daemon wire boundary.
     PeerAccepted { sequence: u64 },
+    /// The outcome of a [`ClientFrame::PeerShare`] (Story 18.4a).
+    PeerShareResult { outcome: PeerShareOutcome },
     /// Acknowledge a clean [`ClientFrame::Detach`].
     Detached,
     /// A protocol-level error (e.g. version mismatch, read-only write attempt).
@@ -470,6 +543,7 @@ mod tests {
                     permission_mode: PermissionMode::Normal,
                     channels: vec![ChannelKind::Terminal],
                     blocked_actions_waiting: 2,
+                    pending_consent_cards: 0,
                 },
             },
             DaemonFrame::Event(RawEvent {

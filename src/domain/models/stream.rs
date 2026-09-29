@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use serde::{Deserialize, Serialize};
 
+use super::diff::WriteDiffState;
 use super::usage::UsageInfo;
 
 /// Reason the model stopped generating.
@@ -35,6 +36,13 @@ pub enum StreamChunk {
         id: String,
         content: String,
         is_error: bool,
+        /// UI-only display-diff state for completed Write calls (Story 19.1
+        /// A3 — populated at the one infrastructure site, turn.rs, by reading
+        /// the pre-write snapshot back through `StoragePort::read_snapshot`).
+        /// Journaled with the raw event → `#[serde(default)]` for replays,
+        /// resolving to `NotCaptured { HistoricalOrReattached }`.
+        #[serde(default)]
+        diff: WriteDiffState,
     },
     Error {
         content: String,

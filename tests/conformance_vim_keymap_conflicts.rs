@@ -291,3 +291,39 @@ fn z_g_chord_emits_scroll_to_top() {
     assert_eq!(handle_input(&mut s, &key('g')), InputAction::ScrollToTop);
     assert!(!s.pending_z);
 }
+
+// ── Story 19.3 (AC3): Ctrl+Q — quit from any focus vs FR22 vim keys ──────
+
+/// Ctrl+Q (Journey 0's quit key) must not collide with `q` or any vim
+/// navigation key: the two bindings are disjoint by focus — Ctrl+Q quits from
+/// input focus where vim chars insert, and plain `q` keeps its chat-focus
+/// Quit meaning unchanged (`legacy_chat_keys_are_unchanged` pins it above).
+#[test]
+fn ctrl_q_quit_binding_does_not_conflict_with_vim_q() {
+    // Ctrl+Q from Input focus with text typed → Quit, and no character is
+    // inserted (vim keys are chat-focus chars; in input focus they type).
+    let mut s = make_state();
+    s.focus = FocusState::Input;
+    s.input_buffer = "draft".to_string();
+    s.cursor_position = 5;
+    assert_eq!(
+        handle_input(&mut s, &sp(DomainKey::CtrlQ)),
+        InputAction::Quit
+    );
+    assert_eq!(
+        s.input_buffer, "draft",
+        "Ctrl+Q must not insert a character"
+    );
+
+    // Plain 'q' in Chat focus still quits — the direct non-conflict control.
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    assert_eq!(handle_input(&mut s, &key('q')), InputAction::Quit);
+
+    // Plain 'q' in Input focus inserts and never quits — the bindings are
+    // disjoint by focus, which is the no-conflict claim itself.
+    let mut s = make_state();
+    s.focus = FocusState::Input;
+    assert_eq!(handle_input(&mut s, &key('q')), InputAction::Consumed);
+    assert_eq!(s.input_buffer, "q");
+}

@@ -1,0 +1,145 @@
+{
+  "scene": "j3-marco",
+  "personas": {
+    "scene-marco": {
+      "turns": [
+        {
+          "expect": "deploy billing to production",
+          "content": [
+            {"type": "tool_use", "name": "activate_skill", "input": {"name": "safe-deploy"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 812, "output_tokens": 24}
+        },
+        {
+          "expect": "Skill 'safe-deploy' activated",
+          "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "printf \"Tool 'Bash' ran: J3-MARCO-%s\\n\" MIDTURN"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 848, "output_tokens": 31}
+        },
+        {
+          "expect": "Tool 'Bash'",
+          "content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "deploy.yaml"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 881, "output_tokens": 22}
+        },
+        {
+          "expect": "service: billing",
+          "content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "migrations/0042_drop_column.sql"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 934, "output_tokens": 27}
+        },
+        {
+          "expect": "ALTER TABLE billing",
+          "content": [
+            {"type": "text", "text": "Breaking migration detected in `migrations/0042_drop_column.sql`. This will drop the `legacy_id` column. Are you sure?"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 1002, "output_tokens": 46}
+        },
+        {
+          "expect": "preview the staging release",
+          "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "helm diff release charts/billing"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 1188, "output_tokens": 24}
+        },
+        {
+          "expect": "HELM-EXECUTED",
+          "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "kubectl get pods"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 1229, "output_tokens": 23}
+        },
+        {
+          "expect": "KUBECTL-EXECUTED",
+          "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "kubectl get pods && printf \"J3-MARCO-%s\\n\" CHAIN-SECOND-RAN"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 1271, "output_tokens": 31}
+        },
+        {
+          "expect": "command not allowed",
+          "content": [
+            {"type": "text", "text": "Standing by on the preview step."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 1316, "output_tokens": 12}
+        }
+      ]
+    },
+    "scene-marco-team": {
+      "turns": [
+        {
+          "expect": "which runbooks are on this machine",
+          "content": [
+            {"type": "tool_use", "name": "activate_skill", "input": {"name": "audit"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 794, "output_tokens": 21}
+        },
+        {
+          "expect": "Skill not found",
+          "content": [
+            {"type": "tool_use", "name": "activate_skill", "input": {"name": "safe-deploy"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 869, "output_tokens": 23}
+        },
+        {
+          "expect": "Skill 'safe-deploy' activated",
+          "content": [
+            {"type": "tool_use", "name": "activate_skill", "input": {"name": "canary-watch"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 903, "output_tokens": 22}
+        },
+        {
+          "expect": "Skill 'canary-watch' activated",
+          "content": [
+            {"type": "text", "text": "The team runbooks are in place."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 941, "output_tokens": 11}
+        },
+        {
+          "expect": "exercise the team runbook disclosure control",
+          "content": [
+            {"type": "text", "text": "Team control complete."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 977, "output_tokens": 10}
+        }
+      ]
+    },
+    "scene-marco-decline": {
+      "turns": [
+        {
+          "expect": "deploy billing to production",
+          "content": [
+            {"type": "tool_use", "name": "activate_skill", "input": {"name": "safe-deploy"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 812, "output_tokens": 24}
+        },
+        {
+          "expect": "not trusted",
+          "content": [
+            {"type": "text", "text": "Understood. I will not use that runbook."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 851, "output_tokens": 14}
+        }
+      ]
+    }
+  }
+}

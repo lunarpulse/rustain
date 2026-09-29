@@ -5,8 +5,9 @@ use std::sync::Arc;
 use rustain::adapters::artifact::FileSystemArtifactStore;
 use rustain::adapters::isolation::CowIsolationProvider;
 use rustain::domain::models::{
-    AgentId, ArtifactKind, CapabilityTokenId, HostBinding, OwnershipKind, PermissionMode,
-    ProvenanceTag, ProvisioningTier, ReviewStatus, ReviewVerdict, RoomEvent, UnifiedDiff,
+    AgentId, ApplyOutcome, ApplyState, ArtifactKind, CapabilityTokenId, HostBinding, JournalRecord,
+    OwnershipKind, PermissionMode, ProvenanceTag, ProvisioningTier, ReviewStatus, ReviewVerdict,
+    RoomEvent, UnifiedDiff,
 };
 use rustain::domain::ports::IsolationProvider;
 use rustain::domain::services::patch_review::{ApplyDecision, MergeBackPolicy, may_apply_patch};
@@ -174,6 +175,7 @@ async fn plan_mode_refuses_merge_back_even_when_reviewed() {
             OwnershipKind::Owned,
             PermissionMode::Plan,
             &MergeBackPolicy::default(),
+            None,
         )
         .await
         .unwrap_err();
@@ -193,6 +195,7 @@ async fn plan_mode_refuses_merge_back_even_when_reviewed() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &MergeBackPolicy::default(),
+            None,
         )
         .await
         .unwrap();
@@ -233,6 +236,7 @@ async fn forged_review_field_cannot_bypass_the_journal_gate() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &MergeBackPolicy::default(),
+            None,
         )
         .await
         .unwrap_err();
@@ -272,6 +276,7 @@ async fn patch_is_durable_reviewed_then_applied_and_journaled() {
                 OwnershipKind::Owned,
                 PermissionMode::Yolo,
                 &MergeBackPolicy::default(),
+                None,
             )
             .await
             .is_err()
@@ -291,6 +296,7 @@ async fn patch_is_durable_reviewed_then_applied_and_journaled() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &MergeBackPolicy::default(),
+            None,
         )
         .await
         .unwrap();
@@ -319,6 +325,60 @@ async fn patch_is_durable_reviewed_then_applied_and_journaled() {
 }
 
 #[tokio::test]
+async fn confirmed_operator_front_door_changes_the_workspace_and_attributes_the_latch() {
+    let workspace = tempfile::tempdir().unwrap();
+    let (service, journal, producer, reviewer) = service(workspace.path()).await;
+    let artifact = service
+        .capture(
+            producer,
+            CapabilityTokenId::root(),
+            vec![ProvenanceTag::UserOriginated],
+            vec![],
+            HostBinding::new("host", "workspace"),
+            &patch("old", "operator"),
+        )
+        .await
+        .unwrap();
+    let reviewed = service
+        .review(artifact, reviewer, ReviewVerdict::Approved)
+        .await
+        .unwrap();
+    let room = journal.project_room("host").await.unwrap();
+    let message = rustain::infrastructure::runtime::artifact_bridge::apply_artifact(
+        &room,
+        &service,
+        &AgentId::local_operator(),
+        &reviewed.id.as_str()[..6],
+        PermissionMode::Yolo,
+        MergeBackPolicy::default(),
+    )
+    .await
+    .expect("operator front door applies");
+    assert!(message.contains("applied to the workspace"), "{message}");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("file.txt")).unwrap(),
+        "operator\n"
+    );
+
+    let projected = journal.project_room("host").await.unwrap();
+    assert_eq!(
+        projected.apply_state().get(&reviewed.id),
+        Some(&ApplyState::Resolved(ApplyOutcome::Applied))
+    );
+    let entries = journal.load().await.expect("journal loads");
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            &entry.record,
+            JournalRecord::Room(RoomEvent::PatchApplyStarted {
+                artifact,
+                applier: Some(actor),
+                ..
+            }) if artifact == &reviewed.id && actor == &AgentId::local_operator()
+        )
+    }));
+}
+
+#[tokio::test]
 async fn configured_user_originated_policy_can_apply_without_attending_reviewer() {
     let workspace = tempfile::tempdir().unwrap();
     let (service, _journal, producer, _reviewer) = service(workspace.path()).await;
@@ -341,6 +401,7 @@ async fn configured_user_originated_policy_can_apply_without_attending_reviewer(
             &MergeBackPolicy {
                 auto_approve_user_originated: true,
             },
+            None,
         )
         .await
         .unwrap();
@@ -393,6 +454,7 @@ async fn binary_and_malformed_patches_are_hard_errors_not_conflicts() {
             OwnershipKind::Owned,
             PermissionMode::Yolo,
             &MergeBackPolicy::default(),
+            None,
         )
         .await
         .unwrap_err();
@@ -449,6 +511,7 @@ async fn concurrent_conflicting_mergeback_serializes_and_one_fails_closed() {
                     OwnershipKind::Owned,
                     PermissionMode::Yolo,
                     &MergeBackPolicy::default(),
+                    None,
                 )
                 .await
         })
@@ -462,6 +525,7 @@ async fn concurrent_conflicting_mergeback_serializes_and_one_fails_closed() {
                     OwnershipKind::Owned,
                     PermissionMode::Yolo,
                     &MergeBackPolicy::default(),
+                    None,
                 )
                 .await
         })

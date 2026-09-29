@@ -313,9 +313,12 @@ fn test_provider_error_other_not_offline() {
 // P0-5: `doctor --json` valid + versioned (AC9)
 // ──────────────────────────────────────────────────
 
+/// Bumped 1.2 -> 1.3 by Story 18.3b: `CheckResultOut` gained the optional
+/// `detail` object carrying the NFR66 policy derivation. Additive and
+/// `skip_serializing_if`-guarded, so every pre-18.3b consumer still parses.
 #[test]
 fn test_doctor_json_schema_version() {
-    assert_eq!(DOCTOR_SCHEMA_VERSION, "1.2");
+    assert_eq!(DOCTOR_SCHEMA_VERSION, "1.3");
 }
 #[test]
 fn test_doctor_json_serialization() {
@@ -363,7 +366,7 @@ fn test_doctor_json_serialization() {
     let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
     // Schema version present
-    assert_eq!(parsed["schema_version"], "1.2");
+    assert_eq!(parsed["schema_version"], "1.3");
     // Checks array with correct count
     let checks = parsed["checks"].as_array().unwrap();
     assert_eq!(checks.len(), 4);
@@ -374,6 +377,16 @@ fn test_doctor_json_serialization() {
         .map(|c| c["status"].as_str().unwrap())
         .collect();
     assert_eq!(statuses, vec!["pass", "warning", "skipped", "fail"]);
+
+    // Story 18.3b — `detail` is additive and `skip_serializing_if`-guarded, so a
+    // check that publishes none must emit NO key at all. This is what keeps the
+    // 1.2 -> 1.3 bump backward compatible for existing consumers.
+    for check in checks {
+        assert!(
+            check.get("detail").is_none(),
+            "a check with no structured detail must not emit a `detail` key: {check}"
+        );
+    }
 
     // Summary
     assert_eq!(parsed["summary"]["passed"], 1);

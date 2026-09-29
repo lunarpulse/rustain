@@ -1,0 +1,30 @@
+{
+  "scene": "openai-wire",
+  "personas": {
+    "scene-ci-or": {
+      "wire": "openai",
+      "turns": [
+        {
+          "expect": "other wire ping",
+          "content": [
+            {"type": "text", "text": "other wire pong"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 17, "output_tokens": 5}
+        }
+      ]
+    },
+    "scene-ci": {
+      "turns": [
+        {
+          "expect": "anthropic wire ping",
+          "content": [
+            {"type": "text", "text": "anthropic wire pong"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 13, "output_tokens": 4}
+        }
+      ]
+    }
+  }
+}

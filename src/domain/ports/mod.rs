@@ -22,6 +22,8 @@ mod channel;
 mod clipboard;
 mod config_store;
 #[allow(unused_imports)]
+mod consent_projection;
+#[allow(unused_imports)]
 mod context;
 #[allow(unused_imports)]
 mod context_assembler;
@@ -29,6 +31,8 @@ mod context_assembler;
 mod event_emitter;
 #[allow(unused_imports)]
 mod execution_sandbox;
+#[allow(unused_imports)]
+mod inbound_peer_runtime;
 #[allow(unused_imports)]
 mod isolation_provider;
 mod ledger_journal_sink;
@@ -38,6 +42,16 @@ mod memory;
 mod node_orchestrator;
 #[allow(unused_imports)]
 mod patch_applier;
+#[allow(unused_imports)]
+mod patch_apply_executor;
+#[allow(unused_imports)]
+mod patch_apply_resolver;
+#[allow(unused_imports)]
+mod patch_review_recorder;
+#[allow(unused_imports)]
+mod peer_interaction_recorder;
+#[allow(unused_imports)]
+mod peer_transport;
 #[allow(unused_imports)]
 mod persona;
 #[allow(unused_imports)]
@@ -50,6 +64,8 @@ mod provider_info;
 mod recall_provider;
 #[allow(unused_imports)]
 mod room_journal;
+#[allow(unused_imports)]
+mod room_role_projection;
 #[allow(unused_imports)]
 mod sandbox;
 #[allow(unused_imports)]
@@ -84,7 +100,8 @@ mod workspace_registry;
 pub use self_update::{BinaryReplacerPort, SelfUpdatePort};
 
 pub use agent_message_bus::{
-    AgentMessageBus, DeliveryError, DeliveryPolicy, RelationshipDeliveryPolicy,
+    AgentMessageBus, DeliveryError, DeliveryPolicy, EffectiveDeliveryPolicy, PeerResponsePolicy,
+    RelationshipDeliveryPolicy,
 };
 pub use agent_transport::{AgentTransport, AgentTransportError};
 pub use approval_persistence::ApprovalPersistencePort;
@@ -98,21 +115,36 @@ pub use catalog_observer::{ObserverError, SubscriptionHandle, SubscriptionId};
 pub use channel::ChannelPort;
 pub use clipboard::ClipboardPort;
 pub use config_store::ConfigStorePort;
+pub use consent_projection::{ConsentProjectionQuery, ConsentState};
 pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
 pub use execution_sandbox::{ExecutionSandbox, ExecutionSandboxError};
+pub use inbound_peer_runtime::{
+    InboundApprovalDecision, InboundApprovalTicket, InboundPeerError, InboundPeerRuntime,
+    InboundPeerTask,
+};
 pub use isolation_provider::IsolationProvider;
 pub use ledger_journal_sink::{LedgerJournalError, LedgerJournalSink};
 pub use memory::MemoryPort;
 pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
 pub use patch_applier::{PatchApplier, PatchApplyError};
+pub use patch_apply_executor::{PatchApplyExecutor, PatchApplyPortError};
+pub use patch_apply_resolver::{PatchApplyResolver, PatchResolvePortError};
+pub use patch_review_recorder::{PatchReviewError, PatchReviewRecorder};
+pub use peer_interaction_recorder::{
+    PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder, TransportRefusalRecord,
+};
+pub use peer_transport::{
+    FrameResponder, InboundFrame, PeerAddress, PeerTransport, PeerTransportError,
+};
 pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};
 pub use provider_info::ProviderInfoPort;
 pub use recall_provider::RecallProviderPort;
-pub use room_journal::{RoomJournal, RoomJournalError};
+pub use room_journal::{RoomJournal, RoomJournalError, RoomJournalReader};
+pub use room_role_projection::{RoomRoleProjectionQuery, RoomRoleState};
 pub use sandbox::SandboxManager;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;

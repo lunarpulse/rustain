@@ -16,7 +16,7 @@
 //! state-machine (existing), prepare_detach with real child (here), and
 //! TUI E2E (deferred — gated on the Ctrl+X chord-UI investigation).
 
-#![cfg(feature = "mcp")]
+#![cfg(feature = "test-fake-mcp")]
 mod common;
 
 use std::collections::BTreeMap;

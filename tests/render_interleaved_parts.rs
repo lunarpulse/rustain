@@ -66,6 +66,8 @@ fn make_msg(id: &str, role: MessageRole) -> ChatMessage {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 
@@ -92,6 +94,7 @@ fn make_result(content: &str, is_error: bool) -> TurnPart {
         output: rustain::domain::models::ToolOutput {
             content: content.to_string(),
             is_error,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
     }
 }
@@ -128,6 +131,7 @@ fn render_text(
             None,
             None, // liveness
             None, // open_prose
+            None, // current_focus
         );
     });
     use ratatui::buffer::Buffer;
@@ -227,6 +231,8 @@ fn user_message_renders_without_gutter() {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
     let conv = make_conversation(vec![um], vec![]);
     let clock = MockClock::at_wall_ms(1_700_000_000_000);

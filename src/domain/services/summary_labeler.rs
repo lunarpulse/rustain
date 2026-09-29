@@ -958,6 +958,7 @@ mod tests {
             output: crate::domain::models::turn::ToolOutput {
                 content: "output".into(),
                 is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
             },
         });
         turn.push_part(|id| TurnPart::Reasoning {

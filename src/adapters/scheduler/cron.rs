@@ -23,7 +23,7 @@ use crate::domain::errors::TransitionError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     ChannelKind, ChatMessage, Conversation, CronConfig, CronJob, HealthSummary, MessageRole,
-    StopReason, StreamChunk, generate_message_id,
+    StopReason, StreamChunk, TurnOrigin, generate_message_id,
 };
 use crate::domain::ports::{ChannelPort, SchedulerPort, StoragePort};
 
@@ -325,13 +325,16 @@ async fn run_job(task: CronJobTask) {
             return;
         }
     };
-    let handle = rt.drive_turn(
-        task.job.prompt.clone(),
-        ChannelKind::Cron,
-        &mut conversation,
-        &job_tx,
-        child_cancel.clone(),
-    );
+    let handle = rt
+        .drive_turn(
+            task.job.prompt.clone(),
+            ChannelKind::Cron,
+            &mut conversation,
+            &job_tx,
+            TurnOrigin::Cron,
+            child_cancel.clone(),
+        )
+        .await;
     if let Err(e) = task.storage.save_conversation(&conversation).await {
         tracing::warn!(job = %task.job.name, error = %e, "cron: saving user message failed");
     }
@@ -393,6 +396,8 @@ async fn run_job(task: CronJobTask) {
             synthetic: false,
             images: vec![],
             origin: ChannelKind::Cron,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         conversation.updated_at = crate::domain::models::session_meta::now_unix();
         conversation.last_response_at = Some(conversation.updated_at);
@@ -417,6 +422,8 @@ async fn run_job(task: CronJobTask) {
             synthetic: true,
             images: vec![],
             origin: ChannelKind::Cron,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
         conversation.updated_at = crate::domain::models::session_meta::now_unix();
         conversation.last_response_at = Some(conversation.updated_at);
@@ -551,14 +558,16 @@ mod tests {
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::{
-        NoOpApprovalPersistence, NoOpMemory, NoOpPersona, NoOpSecurity, NoOpToolSet,
+        NoOpApprovalPersistence, NoOpContext, NoOpMemory, NoOpPersona, NoOpSecurity, NoOpToolSet,
         NoOpUsageLedger,
     };
     use crate::adapters::toolset_adapter::ToolSetAdapter;
     use crate::domain::errors::ProviderError;
     use crate::domain::models::provider::ModelDescriptor;
     use crate::domain::models::{AppConfig, CompletionOptions, MemoryFact, Message, StreamChunk};
-    use crate::domain::ports::{SecurityPort, StoragePort, StreamingProvider, ToolSetPort};
+    use crate::domain::ports::{
+        ContextPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
+    };
     use crate::domain::services::approval_runtime::ApprovalRuntime;
     use crate::domain::services::tool_scheduler::ToolScheduler;
     use arc_swap::ArcSwap;
@@ -926,6 +935,9 @@ mod tests {
             tool_scheduler,
             persona: Arc::new(NoOpPersona),
             context_assembler: Arc::new(ArcSwap::from_pointee(None)),
+            context: Arc::new(ArcSwap::from_pointee(
+                Arc::new(NoOpContext) as Arc<dyn ContextPort>
+            )),
             storage: storage.clone(),
             fs_storage: Arc::new(FileSystemStorage::with_workspace_root(
                 crate::infrastructure::paths::sessions_dir(workspace),
@@ -938,6 +950,8 @@ mod tests {
             ),
             approval,
             workspace: workspace.to_path_buf(),
+            #[cfg(feature = "mcp")]
+            mcp_task_runtimes: Vec::new(),
         })
     }
 
@@ -959,6 +973,7 @@ mod tests {
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(scripted_runtime(
                     provider_for_factory.clone(),
@@ -1002,6 +1017,9 @@ mod tests {
             tool_scheduler,
             persona: Arc::new(NoOpPersona),
             context_assembler: Arc::new(ArcSwap::from_pointee(None)),
+            context: Arc::new(ArcSwap::from_pointee(
+                Arc::new(NoOpContext) as Arc<dyn ContextPort>
+            )),
             storage: storage.clone(),
             fs_storage: Arc::new(FileSystemStorage::with_workspace_root(
                 crate::infrastructure::paths::sessions_dir(workspace),
@@ -1014,6 +1032,8 @@ mod tests {
             ),
             approval,
             workspace: workspace.to_path_buf(),
+            #[cfg(feature = "mcp")]
+            mcp_task_runtimes: Vec::new(),
         })
     }
 
@@ -1040,6 +1060,7 @@ mod tests {
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(scripted_runtime_with_memory_tools(
                     provider_for_factory.clone(),

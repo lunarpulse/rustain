@@ -2,11 +2,12 @@
 //! Pure orchestration: calls port traits, no I/O itself.
 
 use crate::domain::models::{
-    ActiveSkill, ApprovalSource, FileOperation, PermissionMode, ProvenanceTag, TaintDecision,
-    ToolRisk, risk_for_builtin,
+    ActiveSkill, AgentToolRestriction, ApprovalSource, FileOperation, PermissionMode,
+    ProvenanceTag, TaintDecision, ToolPolicy, ToolRestrictionOrigin, ToolRisk,
+    is_allowlist_carve_out, risk_for_builtin,
 };
 use crate::domain::ports::{SecurityPort, ToolSetPort};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 /// Result of a permission chain check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +138,44 @@ pub async fn check_with_source_and_provenance(
     source: Option<&crate::domain::models::tool_call::ApprovalSource>,
     provenance: ProvenanceTag,
 ) -> PermissionDecision {
+    check_with_source_and_provenance_and_restriction(
+        security,
+        tool_name,
+        input,
+        active_skills,
+        None,
+        plan_file,
+        tools_port,
+        source,
+        provenance,
+    )
+    .await
+}
+
+/// Permission check with immutable agent- and skill-origin restrictions.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_with_source_and_provenance_and_restriction(
+    security: &dyn SecurityPort,
+    tool_name: &str,
+    input: &serde_json::Value,
+    active_skills: Option<&[ActiveSkill]>,
+    agent_restriction: Option<&AgentToolRestriction>,
+    plan_file: Option<&std::path::Path>,
+    tools_port: &dyn ToolSetPort,
+    source: Option<&crate::domain::models::tool_call::ApprovalSource>,
+    provenance: ProvenanceTag,
+) -> PermissionDecision {
+    // Story 19.28 review (P1): canonicalize ONCE, here, so every step below
+    // agrees with the executor. `toolset_adapter::execute` dispatches four
+    // builtins in either casing (`"Bash" | "bash"`, `"Read" | "read"`,
+    // `"Write" | "write"`, `"Edit" | "edit"`), so a lowercase alias that this
+    // chain compared raw would skip whichever step used an exact match: the
+    // agent `exclude-tools` gate (`excluded_item_names_tool` is `==`), the
+    // Bash blocklist, and `extract_file_path`'s workspace check. Canonicalizing
+    // at entry — rather than per-step — is what makes "a lowercase call reaches
+    // the same gates" true for all of them at once (AC7, generalized).
+    let tool_name = canonical_tool_name(tool_name);
+
     // Step 0: exit_plan_mode short-circuit
     if tool_name == "exit_plan_mode" {
         return match security.current_mode() {
@@ -182,16 +221,22 @@ pub async fn check_with_source_and_provenance(
         }
     };
 
-    // Step 1: Tool restriction (active skill allowed_tools)
-    // activate_skill is always allowed (carve-out for skill chaining)
-    if tool_name != "activate_skill" {
-        if let Some(deny_reason) = check_allowed_tools(tool_name, active_skills) {
+    // Step 1: Declared tool restrictions. Carve-outs are per-origin: a skill
+    // may activate another skill, while an agent may also delegate. The agent
+    // carve-out is applied INSIDE `check_agent_tools` because it is an
+    // allowlist carve-out — it must not override an explicit exclusion
+    // (Story 19.28 review, P2).
+    if let Some(deny_reason) = check_agent_tools(tool_name, input, agent_restriction) {
+        return PermissionDecision::Deny(deny_reason);
+    }
+    if !is_allowlist_carve_out(ToolRestrictionOrigin::Skill, tool_name) {
+        if let Some(deny_reason) = check_allowed_tools(tool_name, input, active_skills) {
             return PermissionDecision::Deny(deny_reason);
         }
     }
 
     // Step 2: Blocklist check (Bash tool only)
-    if tool_name == "Bash" {
+    if tool_name.eq_ignore_ascii_case("Bash") {
         match input.get("command").and_then(|v| v.as_str()) {
             Some(command) => {
                 if let Err(e) = security.check_blocklist(command) {
@@ -447,39 +492,200 @@ fn extract_file_path(
     Some((path.to_string(), op))
 }
 
-/// Check if the tool is allowed by the active skills' `allowed_tools`.
-/// Returns `Some(deny_reason)` if denied, `None` if allowed or no constraints.
-fn check_allowed_tools(tool_name: &str, active_skills: Option<&[ActiveSkill]>) -> Option<String> {
-    let skills = active_skills?;
-    let constrained: Vec<&Vec<String>> = skills
+/// The builtin names `toolset_adapter::execute` accepts in either casing.
+/// Keep this in lockstep with that dispatch table: a name dual-cased there and
+/// absent here is a gate the lowercase spelling walks past.
+const DUAL_CASED_BUILTINS: &[&str] = &["Bash", "Read", "Write", "Edit"];
+
+/// Map a tool name to the canonical spelling the chain's exact-match steps use.
+fn canonical_tool_name(tool_name: &str) -> &str {
+    DUAL_CASED_BUILTINS
         .iter()
-        .filter_map(|s| s.allowed_tools.as_ref())
-        .collect();
-    if constrained.is_empty() {
+        .find(|canonical| tool_name.eq_ignore_ascii_case(canonical))
+        .copied()
+        .unwrap_or(tool_name)
+}
+
+fn allowlist_allows_execution(
+    tools: &BTreeSet<String>,
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> bool {
+    if !tools.iter().any(|item| {
+        crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
+    }) {
+        return false;
+    }
+    if tool_name != "Bash" {
+        return true;
+    }
+    let command = input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    crate::domain::services::skill_tool_pattern::command_matches_allowed_item_refs(
+        tools.iter().map(String::as_str),
+        tool_name,
+        command,
+    )
+}
+
+fn policy_allows_execution(
+    policy: &ToolPolicy,
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> bool {
+    let tool_name = canonical_tool_name(tool_name);
+    match policy {
+        ToolPolicy::InheritFromParent => true,
+        ToolPolicy::Allowlist { tools } => allowlist_allows_execution(tools, tool_name, input),
+        ToolPolicy::Denylist { tools } => !tools
+            .iter()
+            .any(|item| crate::domain::models::agent::excluded_item_names_tool(item, tool_name)),
+        ToolPolicy::ResolvedAgainstParent { effective, .. } => {
+            allowlist_allows_execution(effective, tool_name, input)
+        }
+    }
+}
+
+/// Whether the restriction NAMES `tool_name` as an exclusion.
+///
+/// `allowlist_carve_outs` exempts a tool from an allowlist it was never named
+/// in — ADR-10-5 S3's "an active agent with `allowed-tools` can still
+/// delegate". ⛔ It must never override a declaration that names the tool to be
+/// excluded: `exclude-tools: [task]` means *no delegation*, and silently
+/// delegating anyway was the fail-open the Story 19.28 code review found (P2).
+fn restriction_excludes_by_name(policy: &ToolPolicy, tool_name: &str) -> bool {
+    match policy {
+        ToolPolicy::Denylist { tools } => tools
+            .iter()
+            .any(|item| crate::domain::models::agent::excluded_item_names_tool(item, tool_name)),
+        // A resolved child keeps its own declaration; the exclusion it named
+        // survives the intersection with the parent's items.
+        ToolPolicy::ResolvedAgainstParent { child, .. } => {
+            restriction_excludes_by_name(child, tool_name)
+        }
+        ToolPolicy::Allowlist { .. } | ToolPolicy::InheritFromParent => false,
+    }
+}
+
+fn check_agent_tools(
+    tool_name: &str,
+    input: &serde_json::Value,
+    restriction: Option<&AgentToolRestriction>,
+) -> Option<String> {
+    let restriction = restriction?;
+    // The agent-origin carve-out (`activate_skill` + `task`, ADR-10-5 S3)
+    // exempts a tool from an allowlist it was never named in — never from an
+    // exclusion that names it (Story 19.28 review, P2).
+    if is_allowlist_carve_out(ToolRestrictionOrigin::Agent, tool_name)
+        && !restriction_excludes_by_name(&restriction.policy, tool_name)
+    {
         return None;
     }
-    let mut iter = constrained.iter();
-    let first = iter.next()?;
-    let mut effective: HashSet<String> = first.iter().cloned().collect();
-    for set in iter {
-        let other: HashSet<String> = set.iter().cloned().collect();
-        effective = effective.intersection(&other).cloned().collect();
+    if policy_allows_execution(&restriction.policy, tool_name, input) {
+        return None;
     }
+    let tool_name = canonical_tool_name(tool_name);
+    let detail = match &restriction.policy {
+        ToolPolicy::Allowlist { tools } => {
+            let items: Vec<&str> = tools.iter().map(String::as_str).collect();
+            if tool_name == "Bash"
+                && tools.iter().any(|item| {
+                    crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(
+                        item, tool_name,
+                    )
+                })
+            {
+                format!("command not allowed. Allowed: [{}]", items.join(", "))
+            } else {
+                format!("not allowed. Allowed: [{}]", items.join(", "))
+            }
+        }
+        ToolPolicy::Denylist { tools } => {
+            let items: Vec<&str> = tools.iter().map(String::as_str).collect();
+            format!("excluded. Excluded: [{}]", items.join(", "))
+        }
+        ToolPolicy::ResolvedAgainstParent { parent, child, .. } => {
+            let parent_items: Vec<&str> = parent.iter().map(String::as_str).collect();
+            let child_items: Vec<&str> = match child.as_ref() {
+                ToolPolicy::Allowlist { tools } | ToolPolicy::Denylist { tools } => {
+                    tools.iter().map(String::as_str).collect()
+                }
+                ToolPolicy::InheritFromParent => vec!["inherit"],
+                ToolPolicy::ResolvedAgainstParent { .. } => vec!["resolved"],
+            };
+            format!(
+                "not allowed by inherited restrictions. Parent: [{}]; Child: [{}]",
+                parent_items.join(", "),
+                child_items.join(", ")
+            )
+        }
+        ToolPolicy::InheritFromParent => return None,
+    };
+    Some(format!(
+        "Tool '{}' {} by agent '{}'",
+        tool_name, detail, restriction.agent_name
+    ))
+}
+/// Check if the tool is allowed by the active skills' `allowed_tools`.
+/// Returns `Some(deny_reason)` if denied, `None` if allowed or no constraints.
+fn check_allowed_tools(
+    tool_name: &str,
+    input: &serde_json::Value,
+    active_skills: Option<&[ActiveSkill]>,
+) -> Option<String> {
+    let tool_name = canonical_tool_name(tool_name);
+    let skills = active_skills?;
+    let mut constrained = skills
+        .iter()
+        .filter_map(|skill| skill.allowed_tools.as_ref());
+    let first = constrained.next()?;
+    let mut effective: HashSet<String> = first.iter().cloned().collect();
+    for set in constrained {
+        effective.retain(|item| set.contains(item));
+    }
+
     if effective.contains(tool_name) {
         return None;
     }
+
     let mut names: Vec<String> = effective.into_iter().collect();
     names.sort();
     let constrained_skill_names: Vec<&str> = skills
         .iter()
-        .filter(|s| s.allowed_tools.is_some())
-        .map(|s| s.name.as_str())
+        .filter(|skill| skill.allowed_tools.is_some())
+        .map(|skill| skill.name.as_str())
         .collect();
     let noun = if constrained_skill_names.len() == 1 {
         "skill"
     } else {
         "skills"
     };
+
+    if tool_name == "Bash"
+        && names.iter().any(|item| {
+            crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
+        })
+    {
+        let command = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if crate::domain::services::skill_tool_pattern::command_matches_allowed_items(
+            &names, tool_name, command,
+        ) {
+            return None;
+        }
+        return Some(format!(
+            "Tool '{}' command not allowed by {} '{}'. Allowed: [{}]",
+            tool_name,
+            noun,
+            constrained_skill_names.join(", "),
+            names.join(", ")
+        ));
+    }
+
     Some(format!(
         "Tool '{}' not allowed by {} '{}'. Allowed: [{}]",
         tool_name,

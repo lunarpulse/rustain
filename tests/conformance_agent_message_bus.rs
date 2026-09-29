@@ -37,11 +37,13 @@ fn ac2_run_child_production_has_no_try_recv_consumption() {
 fn ac5_header_shape_round_trip_no_sequence_by_default() {
     let env = Envelope {
         header: MessageHeader {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             sender: AgentId::parse("parent").unwrap(),
             recipient: AgentId::parse("child").unwrap(),
             correlation_id: CorrelationId::new("corr-42"),
             kind: MessageKind::PeerMessage,
             sequence: None,
+            verified_peer_id: None,
         },
         body: AgentMessage::new("status?"),
     };

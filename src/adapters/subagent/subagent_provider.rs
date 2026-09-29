@@ -15,6 +15,7 @@ pub struct TaskToolContext {
     pub conversation_id: String,
     pub parent_ctx_tokens: u32,
     pub parent_trace: Option<TraceContext>,
+    pub parent_tool_restriction: Option<crate::domain::models::AgentToolRestriction>,
 }
 
 pub struct SubagentProvider {
@@ -243,6 +244,33 @@ impl SubagentProvider {
         let parent_trace: Option<TraceContext> = input
             .get("__parent_trace")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        // Story 19.28 review (P4): the parent restriction is security-bearing,
+        // so a rail that is PRESENT but unreadable must fail closed. `.ok()`
+        // silently degraded a malformed payload to `None`, and `None` means
+        // *no narrowing at all* — the child would launch wider than its parent
+        // on a deserialization error. Absent/`null` still means "this turn
+        // carries no agent restriction", which is the proven-correct case for
+        // ACP, the daemon and `rustain ask`.
+        let parent_tool_restriction: Option<crate::domain::models::AgentToolRestriction> =
+            match input.get("__parent_tool_restriction") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => match serde_json::from_value(value.clone()) {
+                    Ok(restriction) => Some(restriction),
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "Refusing delegation: parent tool restriction present but unreadable"
+                        );
+                        return Ok(ToolResult {
+                            tool_use_id: String::new(),
+                            content: format!(
+                                "Subagent launch refused: the parent's tool restriction could not be read, so the child cannot be proven no wider than its parent ({error})"
+                            ),
+                            is_error: true,
+                        });
+                    }
+                },
+            };
         let conversation_id = input
             .get("__conversation_id")
             .and_then(|v| v.as_str())
@@ -252,6 +280,7 @@ impl SubagentProvider {
         let _ = input.as_object_mut().map(|m| {
             m.remove("__parent_ctx_tokens");
             m.remove("__parent_trace");
+            m.remove("__parent_tool_restriction");
             m.remove("__conversation_id");
         });
 
@@ -413,6 +442,7 @@ impl SubagentProvider {
             tier,
             parent_ctx_tokens,
             parent_trace,
+            parent_tool_restriction.as_ref(),
         );
 
         // 7. Launch

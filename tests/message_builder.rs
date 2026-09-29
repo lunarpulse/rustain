@@ -39,6 +39,8 @@ fn test_build_api_messages_maps_roles() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
         ChatMessage {
             synthetic: false,
@@ -52,6 +54,8 @@ fn test_build_api_messages_maps_roles() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
     ]);
 
@@ -82,6 +86,7 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
         result: Some(ToolResultInfo {
             content: "Plan proposed for user approval".to_string(),
             is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1000),
@@ -101,6 +106,8 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
         ChatMessage {
             synthetic: false,
@@ -114,6 +121,8 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
         ChatMessage {
             synthetic: true,
@@ -127,6 +136,8 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         },
     ]);
 

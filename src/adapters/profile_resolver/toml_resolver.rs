@@ -23,6 +23,22 @@ pub struct TomlProfileResolver {
     resolved: ResolvedProfile,
     config_dir: PathBuf,
     preview_warning_emitted: OnceLock<()>,
+    /// Story 9.9 (AC2 / ruling A17): whole-file MCP config failures, drained by
+    /// the composition root and emitted as `AppEvent::SystemNotice`.
+    ///
+    /// ⛔ Never a `ProfileError`. A fatal MCP parse error means: hand-edit
+    /// `.claude/mcp.json`, save a broken intermediate, and rustain will not
+    /// start **in that workspace** — the directory the file lives in, the shell
+    /// you were about to fix it from. The story written because a bad MCP entry
+    /// silently deleted the operator's servers is not allowed to ship a bad MCP
+    /// entry that stops the operator opening a terminal (Story 9.1 Decision
+    /// Gate 1.5: *"refusing to start is hostile"*).
+    ///
+    /// ⛔ And never a bare `tracing::warn!` either: `tracing` reaches
+    /// `~/.rustain/rustain.log` and never the TUI, which is exactly how
+    /// `emit_transport_warnings`' doc comment came to claim a notice it never
+    /// emitted (ruling A10).
+    mcp_config_notices: Vec<String>,
 }
 
 pub struct FileSystemProfileSource {
@@ -112,10 +128,8 @@ impl TomlProfileResolver {
 
         // Story 17.4a: A2A config is parsed even without the feature so a
         // configured peer can fail loud instead of disappearing.
-        let a2a_path = std::env::current_dir()
-            .unwrap_or_default()
-            .join(".rustain")
-            .join("a2a.json");
+        let roster_root = std::env::current_dir().unwrap_or_default();
+        let a2a_path = roster_root.join(".rustain").join("a2a.json");
         let workspace_a2a = crate::adapters::a2a::config::parse_workspace_a2a_config(&a2a_path)
             .map_err(|error| ProfileError::Parse {
                 path: a2a_path.clone(),
@@ -133,21 +147,37 @@ impl TomlProfileResolver {
             path: config_dir.join(format!("{active_name}.toml")),
             reason: error.to_string(),
         })?;
-        resolved.a2a_peers =
+        let mut a2a_peers =
             crate::adapters::a2a::config::merge_a2a_specs(workspace_a2a, profile_a2a);
+        // Story 19.14 `A27`: the anchor path is resolved once, here, against the
+        // root that located `a2a.json` — for workspace AND profile peers.
+        // ⛔ Never in the A2A client adapter's constructor, which has no root and
+        // must not read `current_dir()` again on the client path.
+        crate::adapters::a2a::config::resolve_ca_cert_paths(&roster_root, &mut a2a_peers);
+        resolved.a2a_peers = a2a_peers;
 
         // Story 9.1: Parse MCP server configs from workspace + profile
+        #[allow(unused_mut)]
+        let mut mcp_config_notices: Vec<String> = Vec::new();
         #[cfg(feature = "mcp")]
         {
+            let workspace_mcp_path = std::env::current_dir()
+                .unwrap_or_default()
+                .join(".claude")
+                .join("mcp.json");
             let workspace_specs =
                 crate::adapters::mcp::workspace_config::parse_workspace_mcp_config(
-                    &std::env::current_dir()
-                        .unwrap_or_default()
-                        .join(".claude")
-                        .join("mcp.json"),
+                    &workspace_mcp_path,
                 )
                 .unwrap_or_else(|e| {
+                    // 9.9 AC2 (A17): LOUD and NON-FATAL. The log line stays for
+                    // the transcript; the notice is what the operator actually
+                    // sees. ⛔ Never `ProfileError::Parse` — see the field doc.
                     tracing::warn!("Failed to parse workspace MCP config: {e}");
+                    mcp_config_notices.push(format!(
+                        "MCP config at {} could not be read — no MCP servers were loaded from it: {e}",
+                        workspace_mcp_path.display()
+                    ));
                     Vec::new()
                 });
 
@@ -200,6 +230,7 @@ impl TomlProfileResolver {
             resolved,
             config_dir,
             preview_warning_emitted: OnceLock::new(),
+            mcp_config_notices,
         })
     }
 
@@ -210,6 +241,17 @@ impl TomlProfileResolver {
         } else {
             None
         }
+    }
+
+    /// Story 9.9 (AC2 / A17): drain the whole-file MCP config notices so the
+    /// composition root can emit them as `AppEvent::SystemNotice`.
+    ///
+    /// ⚑ The production caller is `infrastructure/startup.rs`, which pushes
+    /// these into `accumulated_notices` — the same vector the preview warning
+    /// above rides — and that vector is emitted through
+    /// `event_bus.emit_domain(AppEvent::SystemNotice { level: Warning, .. })`.
+    pub fn take_mcp_config_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.mcp_config_notices)
     }
 }
 

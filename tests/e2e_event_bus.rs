@@ -45,6 +45,7 @@ fn test_cli() -> rustain::adapters::cli::commands::Cli {
         tool_exposure: None,
         skill_exposure: None,
         sandbox_adapter: None,
+        serve_a2a: None,
     }
 }
 
@@ -141,6 +142,7 @@ fn test_app_state_honors_raw_capacity() {
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: std::sync::Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -175,6 +177,11 @@ fn test_app_state_honors_raw_capacity() {
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
         #[cfg(feature = "meta-search")]
         None,
+    );
+    #[cfg(feature = "a2a")]
+    assert!(
+        app_state.a2a_send.is_none(),
+        "the composition root, not AppState::new, must bind the outbound A2A runtime"
     );
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
@@ -222,6 +229,7 @@ fn test_app_state_session_cancel_is_root_token() {
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: std::sync::Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]

@@ -19,6 +19,8 @@ pub mod daily_log_memory;
 pub mod file_scanner;
 pub mod filesystem;
 pub mod importers;
+#[cfg(feature = "p2p")]
+pub mod iroh;
 pub mod isolation;
 pub mod ledger;
 pub mod long_term_memory;
@@ -28,13 +30,24 @@ pub mod model_catalog_cache;
 #[cfg(feature = "models-dev")]
 pub mod models_dev;
 pub mod noop;
+pub mod p2p_config;
+pub mod p2p_reach;
 pub mod palette_registry;
+pub mod pem_tls;
 pub mod persona_adapter;
+pub mod policy;
 pub mod profile_resolver;
 pub mod project_context_loader;
 pub mod project_scoped_memory;
 pub mod provider;
 pub mod rap;
+pub mod relay_config;
+// Story 18.4c-b — the embedded `iroh-relay` server behind `rustain relay serve`
+// (FR159). Feature-gated: the server tree is ~15 crates and stays out of a
+// default build. The CLI surface and the unit renderer are NOT gated (they must
+// be able to say why a build cannot serve), only this composition is.
+#[cfg(feature = "relay-server")]
+pub mod relay_server;
 pub mod sandbox;
 #[cfg(feature = "cron")]
 pub mod scheduler;
@@ -46,6 +59,7 @@ pub mod skill_exposure;
 pub mod skill_provider;
 pub mod skill_registry;
 pub mod subagent;
+pub mod template;
 pub mod tool_exposure;
 pub mod toolset_adapter;
 pub mod tui;
@@ -68,6 +82,9 @@ pub mod mcp;
 
 #[cfg(feature = "mcp")]
 pub mod composite_toolset_adapter;
+
+pub mod composite_context_adapter;
+pub mod peer_context;
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;

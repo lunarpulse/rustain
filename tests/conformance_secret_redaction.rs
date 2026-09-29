@@ -108,6 +108,17 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     let (files, count) = scan_src_for_pattern(".expose_secret()");
 
     let expected: BTreeSet<String> = [
+        // Story 18.1b — the ONE place the served API key is read, and it reads
+        // it only to hash it: `constant_time_secret_eq` feeds both sides through
+        // SHA-256 before comparing with `subtle::ConstantTimeEq`, so the
+        // plaintext never reaches a comparison, a log line, or a `Debug`.
+        "adapters/a2a/auth.rs",
+        // Story 19.14 — the ONE place the A2A CLIENT's credential is read, and it
+        // reads it only to build the `x-api-key` header value, which is marked
+        // sensitive immediately. The plaintext never reaches a refusal string, a
+        // journal row, a log line or a `Debug`; `HeaderValue::from_str` failing is
+        // reported as "no usable credential", ⛔ never as the rejected bytes.
+        "adapters/a2a/client.rs",
         "adapters/auth_store.rs",
         "adapters/anthropic/mod.rs",
         "adapters/openai/mod.rs",
@@ -131,9 +142,10 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 13,
-        "expose_secret() pinned count changed: got {count}, expected 13. \
-         If you added a legitimate call site, update the allowlist AND this count."
+        count, 15,
+        "expose_secret() pinned count changed: got {count}, expected 15. \
+         If you added a legitimate call site, update the allowlist AND this count. \
+         (14 → 15 in Story 19.14: `adapters/a2a/client.rs::credential_header`.)"
     );
 }
 
@@ -188,6 +200,13 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
 
     let expected: BTreeSet<String> = [
         "adapters/a2a/client.rs",
+        // Story 9.9 (ruling A8): the MCP Streamable HTTP connect call. ONE call
+        // site in the file, in the `connect()` transport-preparation block —
+        // every operator-facing string interpolates `RedactedUrl`'s redacting
+        // `Display` form instead, and `conformance_mcp_http_no_credential_leak`
+        // (in `tests/integration_mcp_http.rs`) drives a `user:pass@` URL through
+        // a failed connect and greps every surfaced string for the password.
+        "adapters/mcp/client.rs",
         "infrastructure/provider_factory.rs",
     ]
     .iter()
@@ -204,8 +223,8 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         "expose_url() count is 0 — the matcher is broken"
     );
     assert_eq!(
-        count, 7,
-        "expose_url() pinned count changed: got {count}, expected 7. \
+        count, 8,
+        "expose_url() pinned count changed: got {count}, expected 8. \
          If you added a legitimate call site, update the allowlist AND this count."
     );
 }

@@ -2,7 +2,7 @@
 //!
 //! Canonical source of: display names, signup URLs, key requirements,
 //! and auth methods for each supported provider. Reused by 13.4b/13.4c
-//! and Epic 19's login UX.
+//! and the login UX of Epic 20 (OAuth; numbered 19 until 2026-08-23).
 
 use crate::domain::models::credential::AuthMethod;
 
@@ -19,7 +19,7 @@ pub struct ProviderMeta {
     pub requires_key: bool,
     /// Name of the env var checked for this provider's API key.
     pub api_key_env: &'static str,
-    /// Supported authentication methods (forward-compat scaffold for Epic 19).
+    /// Supported authentication methods (forward-compat scaffold for Epic 20).
     pub auth_methods: &'static [AuthMethod],
 }
 

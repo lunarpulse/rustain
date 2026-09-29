@@ -2,3 +2,10 @@
 # Unmaintained transitive crates remain visible as warnings; direct workspace
 # dependencies still fail. bm25 2.3.2 currently has no fxhash-free release.
 unmaintained = "workspace"
+
+[bans]
+# RUSTSEC-2026-0119: hickory-proto before 0.26.1 permits name-compression CPU
+# exhaustion. iroh 1.0.3 resolves 0.26.1; reject any future downgrade.
+deny = [
+    { crate = "hickory-proto:<0.26.1", reason = "RUSTSEC-2026-0119" },
+]

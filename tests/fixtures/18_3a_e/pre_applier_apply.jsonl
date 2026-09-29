@@ -1,0 +1,2 @@
+{"schema_version":1,"seq":1,"recorded_at_ms":1710000000000,"record":{"kind":"room","payload":{"event":"patch_apply_started","artifact":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","workspace_revision":null}}}
+{"schema_version":1,"seq":2,"recorded_at_ms":1710000000001,"record":{"kind":"room","payload":{"event":"patch_apply_resolved","artifact":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","outcome":"applied"}}}

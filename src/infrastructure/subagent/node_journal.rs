@@ -1,8 +1,11 @@
 //! Durable single-writer JSONL journal for one orchestration room.
 
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
+#[cfg(any(test, feature = "test-instrumentation"))]
+static NODE_JOURNAL_LOAD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 use thiserror::Error;
 
 use crate::domain::models::{
@@ -24,9 +27,31 @@ pub struct NodeJournal {
     room_id: OrchestrationRoomId,
     /// In-process serialization; cross-process safety is the file `flock`.
     append_guard: tokio::sync::Mutex<()>,
+    /// Story 18.2 (AC2, P-2). The sole source of `JournalEntry::
+    /// recorded_at_ms`. Each append reads the wall clock once inside the
+    /// critical section, then clamps it to the last durable nonlegacy stamp.
+    /// Emitters never supply a timestamp, so correct writers cannot persist a
+    /// descending nonlegacy time while `seq` advances.
+    clock: std::sync::Arc<dyn crate::domain::clock::Clock>,
+    /// Story 18.2 structural ratchet — see [`NodeJournal::stamp_reads`].
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    stamp_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl NodeJournal {
+    /// Reset the process-local load counter used by the delivery-path ratchet.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn reset_load_count() {
+        NODE_JOURNAL_LOAD_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Number of [`NodeJournal::load`] calls since the latest reset.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[must_use]
+    pub fn load_count() -> usize {
+        NODE_JOURNAL_LOAD_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Open the workspace's durable orchestration room. The deterministic
     /// workspace-derived id lets the singleton process find the same ordered
     /// log after a crash without a second mutable pointer file.
@@ -67,7 +92,22 @@ impl NodeJournal {
             lock_path,
             room_id,
             append_guard: tokio::sync::Mutex::new(()),
+            clock: std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            stamp_reads: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
+    }
+
+    /// Replace the wall clock used to stamp `recorded_at_ms`.
+    ///
+    /// Builder rather than an `open` parameter: production always wants
+    /// `SystemClock`, and threading a clock argument through 60-odd call sites
+    /// to serve determinism in a handful of tests buys nothing. Follows the
+    /// `NodeTree::with_journal` / `with_host_binding` convention.
+    #[must_use]
+    pub fn with_clock(mut self, clock: std::sync::Arc<dyn crate::domain::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -155,6 +195,9 @@ impl NodeJournal {
         let _guard = self.append_guard.lock().await;
         let path = self.path.clone();
         let lock_path = self.lock_path.clone();
+        let clock = self.clock.clone();
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let stamp_reads = self.stamp_reads.clone();
         tokio::task::spawn_blocking(move || {
             let _lock = FileLock::acquire_exclusive(&lock_path)?;
             let (entries, valid_len, file_len) = parse_journal(&path)?;
@@ -168,6 +211,9 @@ impl NodeJournal {
             if already {
                 return Ok(None);
             }
+            let recorded_at_ms = clamp_recorded_at_ms(&entries, clock.wall_now_ms());
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            stamp_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let entry = append_records_locked(
                 &path,
                 &entries,
@@ -178,6 +224,7 @@ impl NodeJournal {
                     waiting_since,
                     dwell_ms,
                 }],
+                recorded_at_ms,
             )?
             .pop();
             Ok(entry)
@@ -205,6 +252,9 @@ impl NodeJournal {
         let _guard = self.append_guard.lock().await;
         let path = self.path.clone();
         let lock_path = self.lock_path.clone();
+        let clock = self.clock.clone();
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let stamp_reads = self.stamp_reads.clone();
         tokio::task::spawn_blocking(move || {
             let _lock = FileLock::acquire_exclusive(&lock_path)?;
             let (entries, valid_len, file_len) = parse_journal(&path)?;
@@ -262,12 +312,16 @@ impl NodeJournal {
                 })
                 .collect::<Vec<_>>();
             if !records.is_empty() {
+                let recorded_at_ms = clamp_recorded_at_ms(&entries, clock.wall_now_ms());
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                stamp_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 append_records_locked(
                     &path,
                     &entries,
                     valid_len,
                     file_len,
                     vec![JournalRecord::Batch(records)],
+                    recorded_at_ms,
                 )?;
             }
             Ok(true)
@@ -337,13 +391,45 @@ impl NodeJournal {
         let _guard = self.append_guard.lock().await;
         let path = self.path.clone();
         let lock_path = self.lock_path.clone();
+        let clock = self.clock.clone();
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let stamp_reads = self.stamp_reads.clone();
         tokio::task::spawn_blocking(move || {
             let _lock = FileLock::acquire_exclusive(&lock_path)?;
             let (entries, valid_len, file_len) = parse_journal(&path)?;
-            append_records_locked(&path, &entries, valid_len, file_len, records)
+            // Story 18.2 (AC2, P-2): ONE clock read, inside the flock, after
+            // the tail (and therefore `seq`) is known. Clamp it to the last
+            // durable nonlegacy timestamp so a wall-clock rollback cannot
+            // produce descending persisted time.
+            let recorded_at_ms = clamp_recorded_at_ms(&entries, clock.wall_now_ms());
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            stamp_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            append_records_locked(
+                &path,
+                &entries,
+                valid_len,
+                file_len,
+                records,
+                recorded_at_ms,
+            )
         })
         .await
         .expect("journal append task panicked")
+    }
+
+    /// Story 18.2 structural ratchet (Rule 4): how many times this journal has
+    /// read its clock. The invariant "`seq` order never contradicts
+    /// `recorded_at_ms` order" cannot be raced into failure — `flock`
+    /// serializes correct code — so it is proven by counting instead: exactly
+    /// one stamp per append batch, taken inside the lock. A mutant that stamps
+    /// per record, or that stamps at the emitter, changes this count.
+    ///
+    /// Per-instance, never a process-global static: a ratchet an unrelated
+    /// test can trip is not a ratchet.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[must_use]
+    pub fn stamp_reads(&self) -> u64 {
+        self.stamp_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Append a group of records as ONE atomic journal line (`JournalRecord::
@@ -364,6 +450,8 @@ impl NodeJournal {
     /// Load the canonical prefix. A torn or malformed trailing line is ignored;
     /// corruption anywhere before the tail fails closed.
     pub async fn load(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        NODE_JOURNAL_LOAD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _guard = self.append_guard.lock().await;
         let path = self.path.clone();
         let lock_path = self.lock_path.clone();
@@ -421,6 +509,313 @@ impl NodeJournal {
     }
 }
 
+/// Read-only workspace journal opener for observer surfaces.
+///
+/// Unlike [`NodeJournal::open_workspace`], constructing this reader performs
+/// no filesystem writes: it does not create `.rustain/`, the room journal, or
+/// its advisory lock file. A missing journal is the honest empty history for a
+/// workspace that has never orchestrated a subagent.
+#[derive(Clone, Debug)]
+pub struct WorkspaceJournalReader {
+    path: PathBuf,
+    lock_path: PathBuf,
+}
+
+impl WorkspaceJournalReader {
+    /// Address the workspace's deterministic room journal without opening it.
+    #[must_use]
+    pub fn open_workspace(workspace: &Path) -> Self {
+        let room_id = OrchestrationRoomId::parse(format!(
+            "room-{}",
+            crate::infrastructure::paths::workspace_hash(workspace)
+        ))
+        .expect("workspace hash produces a valid room id");
+        Self::open(workspace, room_id)
+    }
+
+    /// Address one room journal without creating or modifying it.
+    #[must_use]
+    pub fn open(workspace: &Path, room_id: OrchestrationRoomId) -> Self {
+        let directory = workspace.join(".rustain").join("rooms");
+        Self {
+            path: directory.join(format!("{}.jsonl", room_id.as_str())),
+            lock_path: directory.join(format!("{}.lock", room_id.as_str())),
+        }
+    }
+
+    fn load_entries_blocking(&self) -> Result<Vec<JournalEntry>, JournalError> {
+        // Do not even open the lock path when the journal does not exist: a
+        // first `team log` must leave an empty workspace byte-for-byte alone.
+        match std::fs::File::open(&self.path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        }
+
+        // Current writers create and lock this sidecar before appending. Legacy
+        // journals may predate it; read those without manufacturing a lock
+        // file. When it exists, open it read-only so a shared flock still
+        // brackets the durable point-in-time read without truncating it.
+        let _lock = FileLock::acquire_existing_shared(&self.lock_path)?;
+        let (entries, _, _) = parse_journal(&self.path)?;
+        Ok(flatten_batches(entries))
+    }
+
+    /// Story 19.16g — the cheap head probe **with** the identity of the file
+    /// it read. Never creates the journal or its lock; a missing journal is
+    /// the empty history (`head == 0`, no stamp).
+    ///
+    /// The head is the tail reader's last valid line, so a malformed suffix
+    /// makes this probe not worst-case O(1), and an interior defect is
+    /// invisible to it — which is why callers compare the stamp as well.
+    ///
+    /// # Errors
+    ///
+    /// I/O failure, or an unlocked legacy journal that changed mid-read.
+    pub fn probe_blocking(&self) -> Result<JournalProbe, JournalError> {
+        let Some(mut observed) = self.open_observed()? else {
+            return Ok(JournalProbe::default());
+        };
+        let len = observed.before.len;
+        let head = latest_valid_seq_in(&mut observed.file, len)?;
+        let stamp = observed.finish()?;
+        Ok(JournalProbe {
+            head,
+            stamp: Some(stamp),
+        })
+    }
+
+    /// Story 19.16g — one full structural read, returning the entries with
+    /// the head and file stamp **of this read**: never a separately probed
+    /// later head, so an older snapshot is never labelled with a newer file
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`RoomJournalReader::load_entries`] refuses (corrupt
+    /// interior line, unsupported schema, sequence gap), plus an unlocked
+    /// legacy journal that changed mid-read.
+    ///
+    /// [`RoomJournalReader::load_entries`]: crate::domain::ports::RoomJournalReader::load_entries
+    pub fn snapshot_blocking(&self) -> Result<JournalSnapshot, JournalError> {
+        let Some(mut observed) = self.open_observed()? else {
+            return Ok(JournalSnapshot::default());
+        };
+        let mut bytes = Vec::new();
+        observed.file.read_to_end(&mut bytes)?;
+        let stamp = observed.finish()?;
+        let (entries, _, _) = parse_entries(&bytes)?;
+        let head = entries.last().map_or(0, |entry| entry.seq);
+        Ok(JournalSnapshot {
+            entries: flatten_batches(entries),
+            head,
+            stamp: Some(stamp),
+        })
+    }
+
+    /// Open the journal and bracket the read: the writers' existing shared
+    /// lock when its sidecar exists; otherwise (a legacy journal) a
+    /// before/after metadata comparison in [`ObservedJournal::finish`].
+    fn open_observed(&self) -> Result<Option<ObservedJournal>, JournalError> {
+        let file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let lock = FileLock::acquire_existing_shared(&self.lock_path)?;
+        let before = JournalFileStamp::of(&file.metadata()?);
+        Ok(Some(ObservedJournal { file, lock, before }))
+    }
+}
+
+/// Story 19.16g — identity and metadata of the journal file one read
+/// observed. Detects ordinary same-head rewrites (a changed row, an interior
+/// corruption, a replaced file); it is **not** an integrity claim — a
+/// same-size rewrite within the filesystem's timestamp granularity, or a
+/// malicious same-size, same-timestamp one, is outside the unsigned
+/// journal's guarantees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JournalFileStamp {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified_ns: i128,
+    changed_ns: i128,
+}
+
+impl JournalFileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        let nanos = |time: std::io::Result<std::time::SystemTime>| {
+            time.ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(-1, |elapsed| elapsed.as_nanos() as i128)
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                len: metadata.len(),
+                modified_ns: nanos(metadata.modified()),
+                changed_ns: i128::from(metadata.ctime()) * 1_000_000_000
+                    + i128::from(metadata.ctime_nsec()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                device: 0,
+                inode: 0,
+                len: metadata.len(),
+                modified_ns: nanos(metadata.modified()),
+                changed_ns: 0,
+            }
+        }
+    }
+}
+
+/// The head a cheap tail probe saw, with the file it came from. `stamp` is
+/// `None` only for a missing journal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JournalProbe {
+    pub head: u64,
+    pub stamp: Option<JournalFileStamp>,
+}
+
+/// One completed full read: its entries plus the head and stamp **of that
+/// read**.
+#[derive(Clone, Debug, Default)]
+pub struct JournalSnapshot {
+    pub entries: Vec<JournalEntry>,
+    pub head: u64,
+    pub stamp: Option<JournalFileStamp>,
+}
+
+struct ObservedJournal {
+    file: std::fs::File,
+    lock: Option<FileLock>,
+    before: JournalFileStamp,
+}
+
+impl ObservedJournal {
+    /// Close the read bracket. Under the writers' shared lock the file cannot
+    /// change; an unlocked legacy read is accepted only when the metadata
+    /// before and after agree.
+    fn finish(self) -> Result<JournalFileStamp, JournalError> {
+        if self.lock.is_none() {
+            let after = JournalFileStamp::of(&self.file.metadata()?);
+            if after != self.before {
+                return Err(JournalError::Io(std::io::Error::other(
+                    "the journal changed during an unlocked read; retry",
+                )));
+            }
+        }
+        Ok(self.before)
+    }
+}
+
+fn latest_valid_seq(path: &Path) -> Result<u64, JournalError> {
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    latest_valid_seq_in(&mut file, len)
+}
+
+fn latest_valid_seq_in(file: &mut std::fs::File, len: u64) -> Result<u64, JournalError> {
+    const CHUNK_BYTES: u64 = 8 * 1024;
+
+    let mut position = len;
+    let mut suffix = Vec::new();
+
+    while position > 0 {
+        let chunk_len = position.min(CHUNK_BYTES);
+        position -= chunk_len;
+        file.seek(std::io::SeekFrom::Start(position))?;
+        let mut combined = vec![0u8; chunk_len as usize];
+        file.read_exact(&mut combined)?;
+        combined.extend_from_slice(&suffix);
+
+        let mut end = combined.len();
+        while let Some(newline) = combined[..end].iter().rposition(|byte| *byte == b'\n') {
+            if let Some(seq) = parse_tail_seq(&combined[newline + 1..end]) {
+                return Ok(seq);
+            }
+            end = newline;
+        }
+        suffix = combined[..end].to_vec();
+    }
+
+    Ok(parse_tail_seq(&suffix).unwrap_or(0))
+}
+
+fn parse_tail_seq(line: &[u8]) -> Option<u64> {
+    let start = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
+    let end = line.iter().rposition(|byte| !byte.is_ascii_whitespace())? + 1;
+    serde_json::from_slice::<JournalEntry>(&line[start..end])
+        .ok()
+        .map(|entry| entry.seq)
+}
+
+#[async_trait::async_trait]
+impl crate::domain::ports::RoomJournalReader for WorkspaceJournalReader {
+    async fn load_entries(
+        &self,
+    ) -> Result<Vec<JournalEntry>, crate::domain::ports::RoomJournalError> {
+        let reader = self.clone();
+        tokio::task::spawn_blocking(move || reader.load_entries_blocking())
+            .await
+            .expect("read-only journal load task panicked")
+            .map_err(|error| crate::domain::ports::RoomJournalError::Read(error.to_string()))
+    }
+
+    async fn latest_seq(&self) -> Result<u64, crate::domain::ports::RoomJournalError> {
+        let reader = self.clone();
+        tokio::task::spawn_blocking(move || {
+            match std::fs::File::open(&reader.path) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                Err(error) => return Err(JournalError::Io(error)),
+            }
+            let _lock = FileLock::acquire_existing_shared(&reader.lock_path)?;
+            latest_valid_seq(&reader.path)
+        })
+        .await
+        .expect("read-only journal head task panicked")
+        .map_err(|error| crate::domain::ports::RoomJournalError::Read(error.to_string()))
+    }
+}
+
+/// Read side of the room journal (Story 18.2, AC3).
+///
+/// Exists so `adapters/tui` and `adapters/cli` can fold the durable stream
+/// without holding a concrete `NodeJournal` — the same inversion
+/// `NodeRoomJournal` performs for the write side.
+///
+/// `load()` is O(whole file) on every call: there is no tail read and no
+/// index. A refreshing viewer must not poll it in a hot loop.
+#[async_trait::async_trait]
+impl crate::domain::ports::RoomJournalReader for NodeJournal {
+    async fn load_entries(
+        &self,
+    ) -> Result<Vec<JournalEntry>, crate::domain::ports::RoomJournalError> {
+        self.load()
+            .await
+            .map_err(|error| crate::domain::ports::RoomJournalError::Read(error.to_string()))
+    }
+
+    async fn latest_seq(&self) -> Result<u64, crate::domain::ports::RoomJournalError> {
+        let path = self.path.clone();
+        let lock_path = self.lock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = FileLock::acquire_existing_shared(&lock_path)?;
+            latest_valid_seq(&path)
+        })
+        .await
+        .expect("journal head task panicked")
+        .map_err(|error| crate::domain::ports::RoomJournalError::Read(error.to_string()))
+    }
+}
+
 /// Story 17.2c (D4): the ledger's durable conservation-head recorder. Each
 /// snapshot is written as its OWN single-record atomic batch (fsynced under the
 /// cross-process flock, torn-tail-safe like every other record), so a caller's
@@ -448,6 +843,7 @@ fn append_records_locked(
     valid_len: usize,
     file_len: usize,
     records: Vec<JournalRecord>,
+    recorded_at_ms: i64,
 ) -> Result<Vec<JournalEntry>, JournalError> {
     // A non-crash mid-write error (ENOSPC/EIO) can leave a torn tail that a
     // later append would concatenate into a corrupt middle record. Truncate to
@@ -467,7 +863,7 @@ fn append_records_locked(
     let mut out = Vec::with_capacity(records.len());
     let mut encoded = Vec::new();
     for record in records {
-        let entry = JournalEntry::new(seq, record);
+        let entry = JournalEntry::new(seq, record, recorded_at_ms);
         encoded.extend_from_slice(&serde_json::to_vec(&entry)?);
         encoded.push(b'\n');
         out.push(entry);
@@ -478,6 +874,19 @@ fn append_records_locked(
     file.write_all(&encoded)?;
     file.sync_all()?;
     Ok(out)
+}
+
+/// Clamp a new wall-clock reading to the last durable nonlegacy timestamp.
+///
+/// The caller holds the cross-process append lock, so the tail inspected here
+/// is the tail this append will follow. `0` is the legacy "timestamp absent"
+/// sentinel and deliberately does not constrain a current clock reading.
+fn clamp_recorded_at_ms(entries: &[JournalEntry], wall_now_ms: i64) -> i64 {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| entry.has_timestamp())
+        .map_or(wall_now_ms, |entry| wall_now_ms.max(entry.recorded_at_ms))
 }
 
 /// An OS advisory file lock (unix `flock`). Released on drop.
@@ -493,6 +902,28 @@ impl FileLock {
 
     fn acquire_shared(path: &Path) -> Result<Self, JournalError> {
         Self::acquire(path, false)
+    }
+
+    /// Acquire a shared lock only if a writer has already created its sidecar.
+    ///
+    /// Observer paths must not create or truncate a lock merely to inspect a
+    /// journal. A missing sidecar is valid for a readable legacy journal.
+    fn acquire_existing_shared(path: &Path) -> Result<Option<Self>, JournalError> {
+        let file = match std::fs::OpenOptions::new().read(true).open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: fd is valid and owned by `file` for the duration.
+            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) };
+            if ret != 0 {
+                return Err(JournalError::Io(std::io::Error::last_os_error()));
+            }
+        }
+        Ok(Some(Self { file }))
     }
 
     fn acquire(path: &Path, exclusive: bool) -> Result<Self, JournalError> {
@@ -553,10 +984,11 @@ fn sync_directory(directory: &Path) -> Result<(), JournalError> {
 }
 
 /// Expand any atomic `JournalRecord::Batch` line into its individual records,
-/// each inheriting the batch line's sequence number. Downstream folds (room
-/// projection, recovery, terminal-proof, obligations) then see a flat stream
-/// and need no batch awareness; the atomicity was already enforced at write
-/// time (one line = all-or-nothing under the torn-tail repair).
+/// each inheriting the batch line's sequence number **and timestamp**.
+/// Downstream folds (room projection, recovery, terminal-proof, obligations)
+/// then see a flat stream and need no batch awareness; the atomicity was
+/// already enforced at write time (one line = all-or-nothing under the
+/// torn-tail repair).
 fn flatten_batches(entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -566,6 +998,7 @@ fn flatten_batches(entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
                     out.push(JournalEntry {
                         schema_version: entry.schema_version,
                         seq: entry.seq,
+                        recorded_at_ms: entry.recorded_at_ms,
                         record,
                     });
                 }
@@ -737,6 +1170,77 @@ mod park_claim_tests {
     }
 }
 
+#[cfg(test)]
+mod workspace_reader_tests {
+    use super::*;
+    use crate::domain::ports::RoomJournalReader as _;
+
+    fn write_one_entry(reader: &WorkspaceJournalReader) -> Vec<u8> {
+        std::fs::create_dir_all(reader.path.parent().unwrap()).unwrap();
+        let entry = JournalEntry::new(
+            1,
+            JournalRecord::AliasBound {
+                node: AgentId::new(),
+                alias: "read-only-fixture".to_owned(),
+            },
+            1_700_000_000_000,
+        );
+        let mut bytes = serde_json::to_vec(&entry).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(&reader.path, &bytes).unwrap();
+        bytes
+    }
+
+    #[tokio::test]
+    async fn read_only_workspace_reader_leaves_a_missing_workspace_unmodified() {
+        let workspace = tempfile::tempdir().unwrap();
+        let reader = WorkspaceJournalReader::open_workspace(workspace.path());
+
+        assert!(reader.load_entries().await.unwrap().is_empty());
+        assert!(
+            !workspace.path().join(".rustain").exists(),
+            "a read-only observer must not create a workspace, journal, or lock"
+        );
+        assert_eq!(reader.latest_seq().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn read_only_workspace_reader_reads_without_creating_or_truncating_locks() {
+        let workspace = tempfile::tempdir().unwrap();
+        let reader = WorkspaceJournalReader::open_workspace(workspace.path());
+        let journal_bytes = write_one_entry(&reader);
+
+        let entries = reader.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(std::fs::read(&reader.path).unwrap(), journal_bytes);
+        assert!(
+            !reader.lock_path.exists(),
+            "a readable legacy journal must not need a lock file"
+        );
+
+        std::fs::write(&reader.lock_path, b"do-not-truncate").unwrap();
+        assert_eq!(reader.load_entries().await.unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read(&reader.lock_path).unwrap(),
+            b"do-not-truncate",
+            "shared observer locking must not truncate an existing writer lock"
+        );
+
+        assert_eq!(reader.latest_seq().await.unwrap(), 1);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&reader.path)
+            .unwrap()
+            .write_all(b"{\"torn\":")
+            .unwrap();
+        assert_eq!(
+            reader.latest_seq().await.unwrap(),
+            1,
+            "a malformed crash tail must not hide the last valid sequence"
+        );
+    }
+}
+
 /// Concrete [`crate::domain::ports::RoomJournal`] over a `NodeJournal` +
 /// the domain-event bus (Story 17.5a, ADR-17-5-01 D2). Durable-first,
 /// bus-second: the journal append must succeed before the bus emit is
@@ -774,15 +1278,24 @@ impl crate::domain::ports::RoomJournal for NodeRoomJournal {
 }
 
 /// 17.5b — `ArtifactSink` impl backed by the real `ArtifactStore` +
-/// `NodeJournal`. The composition root supplies the coordinator `authority`
-/// and `host` (orchestrator-only fields the MCP adapter cannot reach — story
-/// Task 6 / C4). Writes `ArtifactCreated` then `TicketAssigned`,
-/// durable-first / bus-second, mirroring `persist_room_event`.
+/// `NodeJournal`. The composition root supplies the coordinator `authority`,
+/// the `host` and — since 18.3a-b — the `operator` address: orchestrator-only
+/// fields the MCP adapter structurally cannot reach (story Task 6 / C4).
+/// Writes `ArtifactCreated` then `TicketAssigned`, durable-first / bus-second,
+/// mirroring `persist_room_event`.
+///
+/// ⛔ **The `ArtifactSink` trait signature does not change.** The addressee is
+/// a third field of exactly the kind `authority` and `host` already are, so no
+/// port widens (ADR-11-3 rule 3) and no dead method appears (R-9).
 pub struct JournalArtifactSink {
     store: std::sync::Arc<dyn crate::domain::ports::ArtifactStore>,
     room: std::sync::Arc<dyn crate::domain::ports::RoomJournal>,
     authority: crate::domain::models::CapabilityTokenId,
     host: crate::domain::models::HostBinding,
+    /// Durable address of the human this sink files blocking work to
+    /// (18.3a-b, AC1). A constructor parameter, never a setter
+    /// (`ADR-18-3-01` D4): the composition root owns the slot.
+    operator: crate::domain::models::AgentId,
 }
 
 impl JournalArtifactSink {
@@ -791,12 +1304,14 @@ impl JournalArtifactSink {
         room: std::sync::Arc<dyn crate::domain::ports::RoomJournal>,
         authority: crate::domain::models::CapabilityTokenId,
         host: crate::domain::models::HostBinding,
+        operator: crate::domain::models::AgentId,
     ) -> Self {
         Self {
             store,
             room,
             authority,
             host,
+            operator,
         }
     }
 }
@@ -809,7 +1324,9 @@ impl crate::domain::ports::ArtifactSink for JournalArtifactSink {
         node: &crate::domain::models::AgentId,
         body: serde_json::Value,
     ) -> Result<crate::domain::models::ArtifactId, crate::domain::ports::ArtifactSinkError> {
-        use crate::domain::models::{ArtifactKind, EvidenceArtifactDraft, RoomEvent};
+        use crate::domain::models::{
+            ArtifactKind, EvidenceArtifactDraft, RoomEvent, TicketAddressee,
+        };
         use crate::domain::ports::{ArtifactSinkError, RoomJournal};
         let bytes = serde_json::to_vec(&body)
             .map_err(|e| ArtifactSinkError::Write(format!("serialize body: {e}")))?;
@@ -838,6 +1355,12 @@ impl crate::domain::ports::ArtifactSink for JournalArtifactSink {
             .record_event(RoomEvent::TicketAssigned {
                 node: node.clone(),
                 artifact: id.clone(),
+                // FR152: the ticket records **who must act**, and the variant
+                // carries the authority consequence — addressing a human is a
+                // durable attribution and grants nothing.
+                to: Some(TicketAddressee::Operator {
+                    id: self.operator.clone(),
+                }),
             })
             .await
             .map_err(|e| ArtifactSinkError::Write(e.to_string()))?;

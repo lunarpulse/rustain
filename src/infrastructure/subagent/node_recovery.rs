@@ -321,9 +321,9 @@ impl NodeRecovery {
                     parked_set.remove(&node);
                 }
                 JournalRecord::ParkClaimed { .. } | JournalRecord::ParkClaimReleased { .. } => {}
-                // Ledger conservation head is recovered separately by
-                // `AuthorityLedger::recover_from_journal` (17-2c D4); this fold
-                // rebuilds node/room state only.
+                // Ledger conservation heads are recovered separately by
+                // `AuthorityLedger::recover_conservation` (17-2c D4); this
+                // fold rebuilds node/room state only.
                 JournalRecord::LedgerConservation(_) => {}
                 // `load()` flattens atomic batches into individual records, so
                 // a `Batch` never reaches this fold; the arm is defensive.
@@ -548,6 +548,7 @@ mod tests {
                     spec: spec_a.clone(),
                     concurrency: 2,
                 },
+                10,
             ),
             JournalEntry::new(
                 2,
@@ -557,12 +558,14 @@ mod tests {
                     spec: spec_b.clone(),
                     concurrency: 1,
                 },
+                11,
             ),
             JournalEntry::new(
                 3,
                 JournalRecord::Unparked {
                     node: node_a.clone(),
                 },
+                12,
             ),
             // Duplicate Unparked is a no-op (idempotent replay).
             JournalEntry::new(
@@ -570,6 +573,7 @@ mod tests {
                 JournalRecord::Unparked {
                     node: node_a.clone(),
                 },
+                13,
             ),
         ];
         let folded = fold_parked_records(&entries);

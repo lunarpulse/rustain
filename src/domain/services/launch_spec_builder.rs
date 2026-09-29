@@ -23,17 +23,7 @@ impl LaunchSpecBuilder {
             .clone()
             .unwrap_or_else(|| default_model.to_string());
         let tier = ModelTier::CheapAgentic;
-        let tools_allow = match &agent_def.allowed_tools {
-            Some(allow) if !allow.is_empty() => ToolPolicy::Allowlist {
-                tools: allow.iter().cloned().collect(),
-            },
-            _ => match &agent_def.exclude_tools {
-                Some(deny) if !deny.is_empty() => ToolPolicy::Denylist {
-                    tools: deny.iter().cloned().collect(),
-                },
-                _ => ToolPolicy::InheritFromParent,
-            },
-        };
+        let tools_allow = agent_def.tool_policy();
         AgentLaunchSpec {
             prompt,
             effective_model,
@@ -55,21 +45,22 @@ impl LaunchSpecBuilder {
         tier: crate::domain::models::ModelTier,
         parent_ctx_tokens: u32,
         parent_trace: Option<TraceContext>,
+        parent_tool_restriction: Option<&crate::domain::models::AgentToolRestriction>,
     ) -> AgentLaunchSpec {
         let effective_model = agent_def
             .model
             .clone()
             .unwrap_or_else(|| resolved_model.to_string());
-        let tools_allow = match &agent_def.allowed_tools {
-            Some(allow) if !allow.is_empty() => ToolPolicy::Allowlist {
-                tools: allow.iter().cloned().collect(),
-            },
-            _ => match &agent_def.exclude_tools {
-                Some(deny) if !deny.is_empty() => ToolPolicy::Denylist {
-                    tools: deny.iter().cloned().collect(),
-                },
-                _ => ToolPolicy::InheritFromParent,
-            },
+        let child_policy = agent_def.tool_policy();
+        let tools_allow = if let Some(parent) = parent_tool_restriction {
+            let effective = child_policy.resolve(&parent.declared_items);
+            ToolPolicy::ResolvedAgainstParent {
+                effective,
+                parent: parent.declared_items.clone(),
+                child: Box::new(child_policy),
+            }
+        } else {
+            child_policy
         };
         AgentLaunchSpec {
             prompt: prompt.to_string(),
@@ -99,17 +90,7 @@ impl LaunchSpecBuilder {
             .clone()
             .unwrap_or_else(|| default_model.to_string());
         let tier = ModelTier::CheapAgentic;
-        let tools_allow = match &agent_def.allowed_tools {
-            Some(allow) if !allow.is_empty() => ToolPolicy::Allowlist {
-                tools: allow.iter().cloned().collect(),
-            },
-            _ => match &agent_def.exclude_tools {
-                Some(deny) if !deny.is_empty() => ToolPolicy::Denylist {
-                    tools: deny.iter().cloned().collect(),
-                },
-                _ => ToolPolicy::InheritFromParent,
-            },
-        };
+        let tools_allow = agent_def.tool_policy();
         AgentLaunchSpec {
             prompt,
             effective_model,

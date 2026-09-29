@@ -787,7 +787,13 @@ async fn waits_for_cycle_is_rejected_before_dispatch() {
     assert_eq!(runner.launch_count().await, 0);
 }
 
+// `#[serial]` on all three `SIBLING_TRIGGERED_TRANSITIONS` tests below: the counter
+// is a process-global `AtomicUsize`, and two of the three deliberately INCREMENT it.
+// Without serialization they interleave under a loaded parallel run and each reads
+// the others' writes — a false failure with nothing wrong in the code. Same defect
+// class as `cli_config.rs::p0_2a`, both corrected by Story 18.3b.
 #[tokio::test]
+#[serial_test::serial]
 async fn ac2_single_level_completes_with_no_sibling_scheduling() {
     // R1 DISCRIMINATOR: a valid single-level wave completes; the executor NEVER
     // schedules a spoke on another's terminal state (zero sibling-triggered
@@ -849,6 +855,7 @@ async fn ac2_single_level_completes_with_no_sibling_scheduling() {
 /// would leave the counter at 0 and fail here.
 #[cfg(feature = "test-instrumentation")]
 #[test]
+#[serial_test::serial]
 fn ac2_sibling_transition_counter_positive_control() {
     use rustain::infrastructure::orchestrator::{
         SIBLING_TRIGGERED_TRANSITIONS, record_sibling_triggered_transition,
@@ -877,6 +884,7 @@ fn ac2_sibling_transition_counter_positive_control() {
 /// that flip and asserts the counter moves, so the mutant does not slip past.
 #[cfg(feature = "test-instrumentation")]
 #[test]
+#[serial_test::serial]
 fn ac2_scheduler_mutant_bumps_discriminator_and_would_be_caught() {
     use rustain::infrastructure::orchestrator::{
         SIBLING_TRIGGERED_TRANSITIONS, record_sibling_triggered_transition,

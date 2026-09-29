@@ -77,6 +77,7 @@ pub(crate) struct SessionCore {
     registry: Arc<crate::adapters::provider::ProviderRegistry>,
     router: Arc<crate::adapters::provider::ProviderRouter>,
     skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
+    mcp_event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AppEvent>>>,
 }
 
 impl From<AcpCore> for SessionCore {
@@ -88,6 +89,7 @@ impl From<AcpCore> for SessionCore {
             tool_scheduler,
             approval,
             storage,
+            event_rx,
             ledger,
             registry,
             router,
@@ -104,6 +106,7 @@ impl From<AcpCore> for SessionCore {
             ledger,
             registry,
             router,
+            mcp_event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
             skill_activator,
         }
     }
@@ -509,6 +512,8 @@ impl RustainAcpAgent {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -525,6 +530,8 @@ impl RustainAcpAgent {
             synthetic: true,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         }
     }
 
@@ -555,6 +562,7 @@ impl RustainAcpAgent {
             storage,
             ledger,
             selected_model,
+            mcp_event_rx,
             skill_activator,
         ) = {
             let sessions = self.sessions.borrow();
@@ -573,6 +581,7 @@ impl RustainAcpAgent {
                 state.core.storage.clone(),
                 state.core.ledger.clone(),
                 state.selected.clone().map(|(_, model_id)| model_id),
+                state.core.mcp_event_rx.clone(),
                 state.core.skill_activator.clone(),
             )
         };
@@ -626,6 +635,8 @@ impl RustainAcpAgent {
         }
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let mut mcp_event_rx = mcp_event_rx.lock().await;
+        let mut mcp_events_open = true;
         let now = now_unix();
         let mut conversation = match storage.load_conversation(&conversation_id).await {
             Ok(Some(conv)) => conv,
@@ -659,6 +670,8 @@ impl RustainAcpAgent {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
 
         let mut messages = message_builder::build_api_messages(&conversation);
@@ -715,6 +728,17 @@ impl RustainAcpAgent {
             storage.clone(),
             conversation,
             activation_set,
+            // Story 19.28 AC5 / A16 item 1 — proven-correct `None`, stated
+            // rather than left silent. Measured at implementation and
+            // re-measured at the 2026-09-13 code review: `grep -n
+            // "ActiveAgent\|agent_snapshot\|active_agent" adapters/acp/agent.rs`
+            // returns ZERO hits — this surface constructs no `ActiveAgent` and
+            // exposes no field through which a client could supply one, so
+            // there is no restriction to thread. ⛔ Not an oversight — the
+            // absence is structural. Load-bearing-ness is proved by mutant
+            // AC5(b), not by this comment: a fabricated `Some([Read])` here
+            // turns this surface's existing suite RED.
+            None,
             turn_cancel.clone(),
             ledger,
             resolved,
@@ -725,6 +749,14 @@ impl RustainAcpAgent {
             TurnOrigin::Acp {
                 session_id: session_key.clone(),
             },
+            // Story 18.4a scope boundary, ⚑ stated rather than left silent: the
+            // ACP surface holds **no** `ContextPort` reference at all, so no
+            // peer-origin context can enter an ACP turn and there is no bundle
+            // to derive a taint bit from. ⛔ Not an oversight — peer context
+            // injects on the local operator's interactive turn and nowhere
+            // else, which is what FR151 asks for.
+            false,
+            Some(skill_activator),
         ));
         drop(tools);
         drop(tool_scheduler);
@@ -740,7 +772,58 @@ impl RustainAcpAgent {
         let mut assistant_messages: Vec<ChatMessage> = Vec::new();
         let mut assistant_stop_reason = DomainStopReason::EndTurn;
         loop {
+            match mcp_event_rx.try_recv() {
+                Ok(AppEvent::SystemNotice {
+                    level: crate::domain::models::NoticeLevel::Warning,
+                    message,
+                    ..
+                }) => {
+                    let rendered = format!("Warning: {message}");
+                    self.send_session_update(
+                        session_id.clone(),
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::from(rendered.clone()),
+                        )),
+                    )
+                    .await?;
+                    if !assistant_text.is_empty() {
+                        assistant_text.push('\n');
+                    }
+                    assistant_text.push_str(&rendered);
+                }
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    mcp_events_open = false;
+                    break;
+                }
+            }
+        }
+        loop {
             tokio::select! {
+                mcp_event = mcp_event_rx.recv(), if mcp_events_open => {
+                    match mcp_event {
+                        Some(AppEvent::SystemNotice {
+                            level: crate::domain::models::NoticeLevel::Warning,
+                            message,
+                            ..
+                        }) => {
+                            let rendered = format!("Warning: {message}");
+                            self.send_session_update(
+                                session_id.clone(),
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    acp::ContentBlock::from(rendered.clone()),
+                                )),
+                            ).await?;
+                            if !assistant_text.is_empty() {
+                                assistant_text.push('\n');
+                            }
+                            assistant_text.push_str(&rendered);
+                        }
+                        Some(_) => {}
+                        None => mcp_events_open = false,
+                    }
+                }
                 event = event_rx.recv() => {
                     let Some(event) = event else { break; };
                     match event {
@@ -804,10 +887,12 @@ impl RustainAcpAgent {
                                         id,
                                         content,
                                         is_error,
+                                        diff: _,
                                     } => {
                                         let result = ToolResultInfo {
                                             content: content.clone(),
                                             is_error: *is_error,
+                                            diff: crate::domain::models::WriteDiffState::NotAWrite,
                                         };
                                         let status =
                                             Some(if *is_error { "✗ Error" } else { "✓ Success" }.to_string());
@@ -1189,7 +1274,12 @@ impl acp::Agent for RustainAcpAgent {
                     .resume(Some(acp::SessionResumeCapabilities::default()))
                     .close(Some(acp::SessionCloseCapabilities::default())),
             )
-            .prompt_capabilities(acp::PromptCapabilities::new().image(true));
+            .prompt_capabilities(acp::PromptCapabilities::new().image(true))
+            // Story 9.9: an ACP client only offers `McpServer::Http` when the
+            // agent advertises it, so forwarding HTTP in `mcp_servers_from_acp`
+            // without this line would be a mechanism no client can trigger.
+            // ⛔ `sse` stays false — permanently rejected (ADR-06-08).
+            .mcp_capabilities(acp::McpCapabilities::new().http(true).sse(false));
         Ok(acp::InitializeResponse::new(version)
             .agent_info(acp::Implementation::new(
                 "rustain",

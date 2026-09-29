@@ -68,6 +68,7 @@ fn build_conversation(specs: &[TurnSpec]) -> Conversation {
                     output: rustain::domain::models::turn::ToolOutput {
                         content: "ok".into(),
                         is_error: false,
+                        diff: rustain::domain::models::WriteDiffState::NotAWrite,
                     },
                 });
             }
@@ -105,6 +106,8 @@ fn user_chat(content: &str) -> ChatMessage {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 
@@ -131,6 +134,7 @@ fn assistant_chat(t: &Turn) -> ChatMessage {
                     Some(ToolResultInfo {
                         content: "ok".into(),
                         is_error: false,
+                        diff: rustain::domain::models::WriteDiffState::NotAWrite,
                     })
                 } else {
                     None
@@ -154,6 +158,8 @@ fn assistant_chat(t: &Turn) -> ChatMessage {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     }
 }
 

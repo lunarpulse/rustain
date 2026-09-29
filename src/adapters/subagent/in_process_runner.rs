@@ -601,6 +601,72 @@ async fn emit_yield(terminal: NodeState, accumulated_text: &str, yield_tx: &mpsc
     }
 }
 
+fn tool_policy_allows_offer(policy: &crate::domain::models::ToolPolicy, tool_name: &str) -> bool {
+    use crate::domain::models::ToolPolicy;
+    match policy {
+        ToolPolicy::InheritFromParent => true,
+        ToolPolicy::Allowlist { tools } => tools.iter().any(|item| {
+            crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
+        }),
+        ToolPolicy::Denylist { tools } => !tools
+            .iter()
+            .any(|item| crate::domain::models::agent::excluded_item_names_tool(item, tool_name)),
+        ToolPolicy::ResolvedAgainstParent { effective, .. } => effective.iter().any(|item| {
+            crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
+        }),
+    }
+}
+
+fn restriction_from_policy(
+    policy: &crate::domain::models::ToolPolicy,
+    all_tool_names: &[String],
+    agent_name: &str,
+) -> Option<crate::domain::models::AgentToolRestriction> {
+    use crate::domain::models::ToolPolicy;
+    if matches!(policy, ToolPolicy::InheritFromParent) {
+        return None;
+    }
+    let declared_items = match policy {
+        ToolPolicy::Allowlist { tools } => tools.clone(),
+        ToolPolicy::Denylist { tools } => all_tool_names
+            .iter()
+            .filter(|tool_name| {
+                !tools.iter().any(|item| {
+                    crate::domain::models::agent::excluded_item_names_tool(item, tool_name)
+                })
+            })
+            .cloned()
+            .collect(),
+        ToolPolicy::ResolvedAgainstParent { effective, .. } => effective.clone(),
+        ToolPolicy::InheritFromParent => unreachable!(),
+    };
+    Some(crate::domain::models::AgentToolRestriction {
+        agent_name: agent_name.to_string(),
+        policy: policy.clone(),
+        declared_items,
+    })
+}
+
+fn update_child_policy(
+    current: &crate::domain::models::ToolPolicy,
+    allowlist: Vec<String>,
+) -> crate::domain::models::ToolPolicy {
+    use crate::domain::models::ToolPolicy;
+    let child = ToolPolicy::Allowlist {
+        tools: allowlist.into_iter().collect(),
+    };
+    if let ToolPolicy::ResolvedAgainstParent { parent, .. } = current {
+        let effective = child.resolve(parent);
+        ToolPolicy::ResolvedAgainstParent {
+            effective,
+            parent: parent.clone(),
+            child: Box::new(child),
+        }
+    } else {
+        child
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_child(
     spec: AgentLaunchSpec,
@@ -730,11 +796,12 @@ async fn run_child(
         }
     }
 
-    // Story 14-4a (F8/F11) — consent predicate shared by the three Op::Deliver
-    // sites (paused/running/streaming) so the MayRefuse check cannot drift.
-    fn consent_refuses(delivery: &crate::domain::models::AgentDelivery) -> bool {
-        delivery.disposition == crate::domain::models::DeliveryDisposition::MayRefuse
-    }
+    // Story 14-4a (F8/F11) — the consent predicate is shared by the three
+    // Op::Deliver sites (paused/running/streaming) so the MayRefuse check cannot
+    // drift. Story 18.3 (Task 1) hoisted it into the domain as
+    // `may_consent_refuse` so the RAP peer path shares the SAME predicate; this
+    // runner keeps its own semantics — a local subagent runner has no peer
+    // consumer, so a peer delivery that reaches it is always declined.
 
     // Story 14-4a (F10/F11) — emit a MessageRefused receipt for `delivery`,
     // release its reserved budget slot, and log at warn if the receipt itself
@@ -749,16 +816,10 @@ async fn run_child(
         warn_msg: &'static str,
     ) {
         mailbox_budget.release();
-        if let Err(e) = event_bus.emit_domain(crate::domain::events::AppEvent::Subagent(
-            crate::domain::models::SubagentEnvelope::new(
-                delivery.envelope.header.sender.as_str().to_string(),
-                agent_id.clone(),
-                delivery.envelope.header.kind.clone(),
-                crate::domain::models::SubagentEvent::MessageRefused {
-                    correlation_id: delivery.envelope.header.correlation_id.clone(),
-                    reason,
-                },
-            ),
+        if let Err(e) = event_bus.emit_domain(crate::domain::models::refusal_receipt(
+            &delivery.envelope.header,
+            agent_id,
+            reason,
         )) {
             tracing::warn!(error = %e, "{}", warn_msg);
         }
@@ -1017,7 +1078,7 @@ async fn run_child(
                                 // sites (paused/running/streaming) drift-free. Note:
                                 // while paused the bus stamps Queue; non-Queue modes are
                                 // handled uniformly here for parity with the other sites.
-                                if consent_refuses(&delivery) {
+                                if crate::domain::models::may_consent_refuse(delivery.disposition) {
                                     emit_refusal_receipt(
                                         &delivery,
                                         &mailbox_budget,
@@ -1209,9 +1270,8 @@ async fn run_child(
                     child_state.update_metrics(|m| m.effective_model = new_model);
                 }
                 Op::UpdateTools(allowlist) => {
-                    let policy = crate::domain::models::ToolPolicy::Allowlist {
-                        tools: allowlist.into_iter().collect(),
-                    };
+                    let current = child_state.tools_allow.load_full();
+                    let policy = update_child_policy(&current, allowlist);
                     let summary =
                         crate::adapters::subagent::child_state::tool_policy_summary(&policy);
                     child_state.tools_allow.store(Arc::new(policy));
@@ -1253,7 +1313,7 @@ async fn run_child(
                     // Story 14-4a (AC3/F8/F11): consent enforcement — shared
                     // predicate + receipt helper keep the three Op::Deliver
                     // sites (paused/running/streaming) drift-free.
-                    if consent_refuses(&delivery) {
+                    if crate::domain::models::may_consent_refuse(delivery.disposition) {
                         emit_refusal_receipt(
                             &delivery,
                             &mailbox_budget,
@@ -1326,25 +1386,25 @@ async fn run_child(
             continue; // Go back to pause wait loop
         }
 
-        // Build completion options from ChildState
+        // Build completion options from ChildState. Policy patterns use the
+        // same offer matcher as foreground agents and execution.
         let model = (*child_state.effective_model.load_full()).clone();
-        // P9 fix: filter available tools by the current ToolPolicy from ChildState
         let all_tools = tools.available_tools();
+        let all_tool_names: Vec<String> = all_tools.iter().map(|tool| tool.name.clone()).collect();
         let policy = child_state.tools_allow.load_full();
-        let filtered_tools = match (*policy).clone() {
-            crate::domain::models::ToolPolicy::Allowlist { tools: allowed } => all_tools
-                .into_iter()
-                .filter(|t| allowed.contains(&t.name))
-                .collect(),
-            crate::domain::models::ToolPolicy::Denylist { tools: denied } => all_tools
-                .into_iter()
-                .filter(|t| !denied.contains(&t.name))
-                .collect(),
-            crate::domain::models::ToolPolicy::InheritFromParent => all_tools,
-        };
+        // Story 19.28 review (P14): name the delegated agent, not a placeholder
+        // — a child's deny text is the only place an operator sees which
+        // restriction stopped the call.
+        let agent_restriction =
+            restriction_from_policy(&policy, &all_tool_names, subagent_type.as_str());
+        let filtered_tools = all_tools
+            .into_iter()
+            .filter(|tool| tool_policy_allows_offer(&policy, &tool.name))
+            .collect();
         let options = CompletionOptions {
             model,
             max_tokens: 4096,
+            // Children have no skill activation state or prompt plumbing.
             system_prompt: String::new(),
             temperature: None,
             tools: filtered_tools,
@@ -1437,9 +1497,8 @@ async fn run_child(
                             continue;
                         }
                         Some(Op::UpdateTools(allowlist)) => {
-                            let policy = crate::domain::models::ToolPolicy::Allowlist {
-                                tools: allowlist.into_iter().collect(),
-                            };
+                            let current = child_state.tools_allow.load_full();
+                            let policy = update_child_policy(&current, allowlist);
                             let summary = crate::adapters::subagent::child_state::tool_policy_summary(&policy);
                             child_state.tools_allow.store(Arc::new(policy));
                             child_state.update_metrics(|m| m.tools_summary = summary);
@@ -1459,7 +1518,7 @@ async fn run_child(
                             // Story 14-4a (AC3/F8/F11): consent enforcement — shared
                             // predicate + receipt helper keep the three Op::Deliver
                             // sites (paused/running/streaming) drift-free.
-                            if consent_refuses(&delivery) {
+                            if crate::domain::models::may_consent_refuse(delivery.disposition) {
                                 emit_refusal_receipt(
                                     &delivery,
                                     &mailbox_budget,
@@ -1744,7 +1803,26 @@ async fn run_child(
 
                 let terminal = scheduler
                     .clone()
-                    .schedule_with_provenance(source, requests, cancel.clone(), None, provenance)
+                    .schedule_with_provenance_and_restriction(
+                        source,
+                        requests,
+                        cancel.clone(),
+                        // `active_skills: None` — Story 19.28 T0.3 discovery 1,
+                        // proven-correct and re-measured at the 2026-09-13 code
+                        // review: `grep -n "SkillActivationSet\|skill_activator\|
+                        // ActiveSkill\|active_skills\|activate_skill"` over this
+                        // file returns ZERO hits outside this line, and the
+                        // child's `CompletionOptions.system_prompt` is
+                        // `String::new()`, so no skill body or activation set can
+                        // reach a child at all. ⛔ Not an oversight — children
+                        // hold no skill state, so there is nothing to thread.
+                        // ⚠ The skill axis therefore does NOT cross the
+                        // delegation boundary; that gap is filed, not fixed, as
+                        // `DF-19-28-SKILL-RESTRICTION-NOT-INHERITED-BY-CHILDREN`.
+                        None,
+                        agent_restriction.as_ref(),
+                        provenance,
+                    )
                     .await;
 
                 let mut tool_result_messages: Vec<ToolResultMessage> = Vec::new();
@@ -2241,15 +2319,22 @@ mod tests {
             (*registry).clone(),
             Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
         );
+        let mailbox_budget = registry
+            .delivery_target(&agent_id)
+            .await
+            .expect("running child has a delivery target")
+            .mailbox_budget;
         let n = 5usize;
         for i in 0..n {
             let env = Envelope::new(
                 MessageHeader {
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                     sender: AgentId::from_validated("parent"),
                     recipient: agent_id.clone(),
                     correlation_id: CorrelationId::new(format!("c{i}")),
                     kind: MessageKind::PeerMessage,
                     sequence: None,
+                    verified_peer_id: None,
                 },
                 AgentMessage::new(format!("msg-{i}")),
             );
@@ -2300,6 +2385,13 @@ mod tests {
         // (turn-dispatched) release at dispatch, not via receipts — so receipt count
         // may be < n, but the child reaching terminal + debug_assert_eq!(budget, 0)
         // inside drain_mailbox (production code) is the invariant guarantee.
+        assert_eq!(mailbox_budget.reserved_total(), n);
+        assert_eq!(
+            mailbox_budget.released_total(),
+            mailbox_budget.reserved_total(),
+            "turn-dispatch plus terminal-drain releases must conserve every reservation"
+        );
+        assert_eq!(mailbox_budget.current(), 0);
         assert!(
             terminal_receipts > 0 || n == 0,
             "at least some TerminalState receipts must be emitted for un-consumed messages"
@@ -2376,11 +2468,13 @@ mod tests {
         );
         let env = Envelope::new(
             MessageHeader {
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
                 sender: AgentId::from_validated("attacker"),
                 recipient: agent_id.clone(),
                 correlation_id: CorrelationId::new("hostile-1"),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
+                verified_peer_id: None,
             },
             AgentMessage::new("hostile content"),
         );
@@ -2473,11 +2567,13 @@ mod tests {
             &agent_id,
             Envelope::new(
                 MessageHeader {
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                     sender: AgentId::from_validated("sender"),
                     recipient: agent_id.clone(),
                     correlation_id: CorrelationId::new("taint-ingest"),
                     kind: MessageKind::PeerMessage,
                     sequence: None,
+                    verified_peer_id: None,
                 },
                 AgentMessage::new("cross-agent data"),
             ),
@@ -2827,11 +2923,13 @@ mod tests {
         };
         let make_delivery = |content: &str| {
             let header = MessageHeader {
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
                 sender: AgentId::from_validated("parent"),
                 recipient: AgentId::from_validated("child"),
                 correlation_id: CorrelationId::new("corr-1"),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
+                verified_peer_id: None,
             };
             AgentDelivery::new(
                 Envelope {
@@ -3111,11 +3209,21 @@ mod tests {
             .unwrap();
 
         let _ = handle.command_tx.send(Op::ChangeModel("opus".into())).await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        let entries = runner.registry.list().await;
+        let entries = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                let entries = runner.registry.list().await;
+                if entries
+                    .first()
+                    .is_some_and(|entry| entry.effective_model == "opus")
+                {
+                    break entries;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("model update reached registry");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].effective_model, "opus");
 
         handle.cancel.cancel();
     }
@@ -3149,10 +3257,21 @@ mod tests {
             .command_tx
             .send(Op::UpdateTools(vec!["bash".into()]))
             .await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let entries = runner.registry.list().await;
+        let entries = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                let entries = runner.registry.list().await;
+                if entries
+                    .first()
+                    .is_some_and(|entry| entry.tools_summary == "allow: bash")
+                {
+                    break entries;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tool update reached registry");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].tools_summary, "allow: bash");
 
         handle.cancel.cancel();
     }
@@ -4958,6 +5077,7 @@ mod tests {
                 &crate::domain::services::patch_review::MergeBackPolicy {
                     auto_approve_user_originated: true,
                 },
+                None,
             )
             .await;
         assert!(matches!(
@@ -5182,6 +5302,7 @@ mod tests {
                 &crate::domain::services::patch_review::MergeBackPolicy {
                     auto_approve_user_originated: true,
                 },
+                None,
             )
             .await;
         assert!(
@@ -7051,6 +7172,7 @@ mod tests {
                 crate::domain::models::OwnershipKind::Owned,
                 crate::domain::models::PermissionMode::Yolo,
                 &policy,
+                None,
             )
             .await
             .expect("same policy auto-applies real user-originated patch");
@@ -7060,6 +7182,7 @@ mod tests {
                 crate::domain::models::OwnershipKind::Owned,
                 crate::domain::models::PermissionMode::Yolo,
                 &policy,
+                None,
             )
             .await;
         assert!(matches!(
@@ -7241,28 +7364,27 @@ mod tests {
     // t7 proves the STAMP layer (policy.decide differs by policy); these prove the
     // ENFORCEMENT layer (disposition predicate + refusal receipt emission).
     //
-    // consent_refuses() and emit_refusal_receipt() are nested fns inside run_child()
-    // and inaccessible here. We test the same logic inline: the predicate is
-    // `delivery.disposition == MayRefuse`, and the emission is budget.release() +
-    // event_bus.emit_domain(AppEvent::Subagent(MessageRefused{Policy})).
+    // Story 18.3 (Task 1): both tests below used to re-implement the predicate and
+    // hand-build the receipt inline, because `consent_refuses`/`emit_refusal_receipt`
+    // were nested fns inside `run_child()` and unreachable from here — the gap
+    // recorded at 14-4a. That made the predicate test a class-A VACUOUS keystone:
+    // it asserted `MayRefuse == MayRefuse`, a tautology no production mutant can
+    // turn RED. The logic now lives in the domain (`may_consent_refuse` /
+    // `refusal_receipt`), so both tests drive the REAL functions.
 
-    /// AMELIA-1: MayRefuse disposition triggers consent refusal; MustReport does not.
+    /// AMELIA-1: `MayRefuse` permits a consent refusal; `MustReport` does not.
     #[test]
     fn amelia1_consent_disposition_predicate() {
         use crate::domain::models::*;
-        // The production predicate (consent_refuses) is:
-        //   delivery.disposition == DeliveryDisposition::MayRefuse
-        let may_refuse = DeliveryDisposition::MayRefuse;
-        let must_report = DeliveryDisposition::MustReport;
-        assert_eq!(
-            may_refuse,
-            DeliveryDisposition::MayRefuse,
-            "MayRefuse must match the consent-refusal predicate"
+        // Mutant: invert `may_consent_refuse`, or widen it to accept every
+        // disposition -> one of these two assertions turns RED.
+        assert!(
+            may_consent_refuse(DeliveryDisposition::MayRefuse),
+            "a Peer relationship must be permitted to consent-refuse"
         );
-        assert_ne!(
-            must_report,
-            DeliveryDisposition::MayRefuse,
-            "MustReport must NOT match the consent-refusal predicate"
+        assert!(
+            !may_consent_refuse(DeliveryDisposition::MustReport),
+            "an Owned/Self_ recipient owes a report and must NOT consent-refuse"
         );
     }
 
@@ -7282,17 +7404,34 @@ mod tests {
         let agent_id = AgentId::from_validated("recipient");
         let correlation = CorrelationId::new("corr-42");
 
-        // Simulate what emit_refusal_receipt does: release + emit receipt
+        // Drive the REAL receipt constructor. This block used to hand-build the
+        // envelope under a "simulate what emit_refusal_receipt does" comment,
+        // which asserted the test's own copy instead of production behaviour
+        // (Story 18.3, Task 1). Mutant: change the sender/kind/correlation
+        // `refusal_receipt` copies out of the delivery -> the assertions below
+        // turn RED.
+        let delivery = AgentDelivery::new(
+            Envelope::new(
+                MessageHeader {
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
+                    sender: AgentId::from_validated("sender"),
+                    recipient: agent_id.clone(),
+                    correlation_id: correlation.clone(),
+                    kind: MessageKind::PeerMessage,
+                    sequence: None,
+                    verified_peer_id: None,
+                },
+                AgentMessage::new("body"),
+            ),
+            DeliveryMode::Aside,
+            DeliveryDisposition::MayRefuse,
+        );
         budget.release();
-        let _ = event_bus.emit_domain(AppEvent::Subagent(SubagentEnvelope::new(
-            "sender",
-            agent_id.clone(),
-            MessageKind::PeerMessage,
-            SubagentEvent::MessageRefused {
-                correlation_id: correlation.clone(),
-                reason: RefuseReason::Policy,
-            },
-        )));
+        let _ = event_bus.emit_domain(refusal_receipt(
+            &delivery.envelope.header,
+            &agent_id,
+            RefuseReason::Policy,
+        ));
 
         // Budget released
         assert_eq!(
@@ -7340,16 +7479,19 @@ mod tests {
         let delivery = AgentDelivery {
             envelope: Envelope {
                 header: MessageHeader {
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                     sender: AgentId::from_validated("s"),
                     recipient: AgentId::from_validated("r"),
                     correlation_id: CorrelationId::new("c"),
                     kind: MessageKind::PeerMessage,
                     sequence: None,
+                    verified_peer_id: None,
                 },
                 body: AgentMessage::new("x"),
             },
             mode: DeliveryMode::Queue,
             disposition: DeliveryDisposition::MayRefuse,
+            response_policy: Default::default(),
         };
         // This IS the RED-mutant assertion: the disposition check must hold.
         // If someone hardcodes MustReport or removes the check, this fails.
@@ -7361,10 +7503,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn owned_abandonment_self_destruct_is_journaled_cancelled() {
-        tokio::time::pause();
-        let (runner, _registry, _event_rx, tmp) = make_hanging_runner_observable().await;
+        let (runner, registry, _event_rx, tmp) = make_hanging_runner_observable().await;
         let spec = AgentLaunchSpec {
             prompt: "wait for owner disconnect".into(),
             effective_model: "test-model".into(),
@@ -7386,51 +7527,61 @@ mod tests {
             .await
             .expect("launch owned child");
         let agent_id = handle.agent_id.clone();
-        let mut saw_running = false;
-        for _ in 0..64 {
-            tokio::task::yield_now().await;
-            while let Ok(status) = handle.status_rx.try_recv() {
-                saw_running |= status == NodeState::Running;
-            }
-            if saw_running {
-                break;
-            }
-        }
-        assert!(saw_running, "positive control: child entered Running");
+        let running =
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle.status_rx.recv())
+                .await
+                .expect("timed out waiting for child to enter Running")
+                .expect("status channel closed before child entered Running");
+        assert_eq!(
+            running,
+            NodeState::Running,
+            "positive control: child entered Running"
+        );
+
+        // Clone the registry watch before abandonment. Its terminal publication
+        // follows the journal append, making Cancelled the durability barrier.
+        let mut registry_status = registry
+            .status_rx(&agent_id)
+            .await
+            .expect("owned child must have a registry status watch before abandonment");
         drop(handle.parent_disconnect);
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
-        let mut terminal = None;
-        let mut observed = Vec::new();
-        for _ in 0..64 {
-            tokio::time::advance(std::time::Duration::from_millis(100)).await;
-            for _ in 0..32 {
-                tokio::task::yield_now().await;
-            }
-            while let Ok(status) = handle.status_rx.try_recv() {
-                observed.push(status);
-                if status.is_terminal() {
-                    terminal = Some(status);
+
+        let mut waiting_count = 0;
+        let raw_terminal = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match handle.status_rx.recv().await {
+                    Some(NodeState::Waiting) => waiting_count += 1,
+                    Some(NodeState::Cancelled) => break NodeState::Cancelled,
+                    Some(status) => {
+                        panic!("unexpected raw status after owner disconnect: {status:?}")
+                    }
+                    None => panic!("status channel closed before abandonment reached Cancelled"),
                 }
             }
-            if terminal.is_some() {
-                break;
-            }
-        }
+        })
+        .await
+        .expect("timed out waiting for abandonment to reach Cancelled");
         assert_eq!(
-            terminal,
-            Some(NodeState::Cancelled),
-            "Owned disconnect exhausts retries then self-destructs; observed={observed:?}"
-        );
-        assert_eq!(
-            observed
-                .iter()
-                .filter(|state| **state == NodeState::Waiting)
-                .count(),
-            3,
+            waiting_count, 3,
             "exactly three deterministic retries precede self-destruct"
         );
+        assert_eq!(
+            raw_terminal,
+            NodeState::Cancelled,
+            "raw lifecycle must end in Cancelled after abandonment retries"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while *registry_status.borrow_and_update() != NodeState::Cancelled {
+                registry_status
+                    .changed()
+                    .await
+                    .expect("registry status watch closed before durable Cancelled publication");
+            }
+        })
+        .await
+        .expect("timed out waiting for durable Cancelled publication");
+
         let journal = NodeJournal::open_workspace(tmp.path())
             .await
             .expect("reopen journal");
@@ -7650,19 +7801,33 @@ mod tests {
                         "journal PatchReviewed artifact={a} reviewer={r} verdict={verdict:?}"
                     ));
                 }
+                RoomEvent::RemoteEnvelopeDispatched {
+                    peer, task, bytes, ..
+                } => {
+                    lines.push(format!(
+                        "journal RemoteEnvelopeDispatched peer={peer:?} task={task:?} bytes={bytes}"
+                    ));
+                }
                 RoomEvent::RemoteEnvelopeAccepted {
                     peer,
                     node,
                     content_hash,
+                    direction,
+                    ..
                 } => {
                     let n = it.sym(node.as_str());
                     lines.push(format!(
-                        "journal RemoteEnvelopeAccepted peer={peer:?} node={n} content_hash={content_hash:?}"
+                        "journal RemoteEnvelopeAccepted peer={peer:?} node={n} content_hash={content_hash:?} direction={direction:?}"
                     ));
                 }
-                RoomEvent::RemoteEnvelopeRejected { peer, reason } => {
+                RoomEvent::RemoteEnvelopeRejected {
+                    peer,
+                    reason,
+                    direction,
+                    ..
+                } => {
                     lines.push(format!(
-                        "journal RemoteEnvelopeRejected peer={peer:?} reason={reason:?}"
+                        "journal RemoteEnvelopeRejected peer={peer:?} reason={reason:?} direction={direction:?}"
                     ));
                 }
                 RoomEvent::HostBoundUnavailable { node, host } => {
@@ -7677,7 +7842,14 @@ mod tests {
                         "journal McpTaskBound node={n} server={server:?} task={task:?}"
                     ));
                 }
-                RoomEvent::TicketAssigned { node, artifact } => {
+                // 18.3a-b: `to` is bound and ignored so the deterministic
+                // transcript line stays byte-identical. Rendering it here would
+                // move every golden-trace assertion in this file.
+                RoomEvent::TicketAssigned {
+                    node,
+                    artifact,
+                    to: _,
+                } => {
                     let n = it.sym(node.as_str());
                     lines.push(format!(
                         "journal TicketAssigned node={n} artifact={artifact}"
@@ -7692,6 +7864,187 @@ mod tests {
                     lines.push(format!(
                         "journal TicketResolved node={n} artifact={artifact} outcome={outcome:?}"
                     ));
+                }
+                RoomEvent::PeerDisclosure {
+                    peer: _,
+                    node,
+                    task,
+                    disclosed_bytes,
+                } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal PeerDisclosure node={n} task={task:?} disclosed_bytes={disclosed_bytes}"
+                    ));
+                }
+                RoomEvent::AutoResponseRetracted {
+                    target_seq,
+                    retracted_at_ms,
+                } => {
+                    lines.push(format!(
+                        "journal AutoResponseRetracted target_seq={target_seq} retracted_at_ms={retracted_at_ms}"
+                    ));
+                }
+                RoomEvent::PeerDraftResolved {
+                    node,
+                    agent_composed,
+                    sent,
+                } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal PeerDraftResolved node={n} agent_composed={agent_composed} sent={sent}"
+                    ));
+                }
+                RoomEvent::PeerInteractionSurfaced {
+                    peer,
+                    node,
+                    task,
+                    notification,
+                    ..
+                } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal PeerInteractionSurfaced peer={peer:?} node={n} task={task:?} notification={notification}"
+                    ));
+                }
+                RoomEvent::PeerDigestFlushed { flushed_at, count } => {
+                    lines.push(format!(
+                        "journal PeerDigestFlushed flushed_at={flushed_at} count={count}"
+                    ));
+                }
+                RoomEvent::ConsentGranted { sender, granted_at } => {
+                    lines.push(format!(
+                        "journal ConsentGranted sender={sender:?} granted_at={granted_at}"
+                    ));
+                }
+                RoomEvent::ConsentRevoked { sender, revoked_at } => {
+                    lines.push(format!(
+                        "journal ConsentRevoked sender={sender:?} revoked_at={revoked_at}"
+                    ));
+                }
+                RoomEvent::RoomRoleGranted {
+                    peer,
+                    role,
+                    granted_at,
+                } => {
+                    lines.push(format!(
+                        "journal RoomRoleGranted peer={peer:?} role={role:?} granted_at={granted_at}"
+                    ));
+                }
+                RoomEvent::RoomRoleRevoked { peer, revoked_at } => {
+                    lines.push(format!(
+                        "journal RoomRoleRevoked peer={peer:?} revoked_at={revoked_at}"
+                    ));
+                }
+                // 18.3a-d: rendered for completeness. No golden in this file
+                // performs an apply (the flat-root harness runs with
+                // `auto_approve_user_originated: false`), so no pinned
+                // transcript moves.
+                RoomEvent::PatchApplyStarted {
+                    artifact,
+                    workspace_revision,
+                    ..
+                } => {
+                    lines.push(format!(
+                        "journal PatchApplyStarted artifact={artifact:?} workspace_revision={workspace_revision:?}"
+                    ));
+                }
+                RoomEvent::PatchApplyResolved { artifact, outcome } => {
+                    lines.push(format!(
+                        "journal PatchApplyResolved artifact={artifact:?} outcome={outcome:?}"
+                    ));
+                }
+                // 18.3a-f: same reason as the two arms above. No golden in this
+                // file records an operator inspection, so no pinned transcript
+                // moves — but `RoomEvent`'s in-crate matches are exhaustive and
+                // this one must name the variant to compile.
+                RoomEvent::PatchApplyInspected {
+                    artifact,
+                    finding,
+                    inspector,
+                } => {
+                    let i = it.sym(inspector.as_str());
+                    lines.push(format!(
+                        "journal PatchApplyInspected artifact={artifact:?} finding={finding:?} inspector={i}"
+                    ));
+                }
+                // 18.4b: same reason as the arms above. No golden in this file
+                // records a transport-admission act — a fan-out trace has no
+                // `peer` verb in it — but `RoomEvent`'s in-crate matches are
+                // exhaustive and this one must name the variant to compile.
+                RoomEvent::PeerAdmissionRecorded {
+                    alias,
+                    peer,
+                    outcome,
+                } => {
+                    let p = peer.as_ref().map(|peer| it.sym(peer.as_str()));
+                    lines.push(format!(
+                        "journal PeerAdmissionRecorded alias={alias:?} peer={p:?} outcome={outcome:?}"
+                    ));
+                }
+                // 18.4d: same reason. A fan-out trace never sends a peer frame,
+                // but the in-crate match must name the variant to compile.
+                RoomEvent::PeerFrameAttempted {
+                    peer,
+                    correlation,
+                    bytes,
+                    outcome,
+                    refusal,
+                } => {
+                    let p = it.sym(peer.as_str());
+                    lines.push(format!(
+                        "journal PeerFrameAttempted peer={p} correlation={correlation:?} \
+                         bytes={bytes} outcome={outcome:?} refusal={refusal:?}"
+                    ));
+                }
+                // 18.4a: same reason. A fan-out trace observes no peer topic
+                // head, but the in-crate match must name the variant to compile.
+                RoomEvent::PeerEquivocated {
+                    peer,
+                    issuer,
+                    topic,
+                    sequence,
+                    held,
+                    advertised,
+                } => {
+                    let p = peer.as_ref().map(|peer| it.sym(peer.as_str()));
+                    let i = issuer.as_ref().map(|issuer| it.sym(issuer.as_str()));
+                    lines.push(format!(
+                        "journal PeerEquivocated peer={p:?} issuer={i:?} topic={topic:?} \
+                         sequence={sequence} held={held:?} advertised={advertised:?}"
+                    ));
+                }
+                RoomEvent::RecipientItemReceived {
+                    address,
+                    task,
+                    alias,
+                    content,
+                } => {
+                    lines.push(format!(
+                        "journal RecipientItemReceived address={address:?} task={task:?} \
+                         alias={alias:?} content={content:?}"
+                    ));
+                }
+                RoomEvent::RecipientItemAcknowledged { address, alias } => {
+                    lines.push(format!(
+                        "journal RecipientItemAcknowledged address={address:?} alias={alias:?}"
+                    ));
+                }
+                RoomEvent::RecipientItemRemoved { address } => {
+                    lines.push(format!("journal RecipientItemRemoved address={address:?}"));
+                }
+                RoomEvent::RecipientItemRetracted {
+                    address,
+                    retracted_at_ms,
+                    principal_collapsed,
+                } => {
+                    lines.push(format!(
+                        "journal RecipientItemRetracted address={address:?} \
+                         retracted_at_ms={retracted_at_ms} \
+                         principal_collapsed={principal_collapsed}"
+                    ));
+                }
+                RoomEvent::Unrecognized => {
+                    lines.push("journal Unrecognized".to_owned());
                 }
             }
         }
@@ -8133,5 +8486,423 @@ mod tests {
             matches!(exec_err, OrchestrationError::InvalidConcurrency { .. }),
             "executor refusal: {exec_err:?}"
         );
+    }
+
+    struct PolicyProbeProvider {
+        calls: std::sync::atomic::AtomicU32,
+        requested: Vec<(String, serde_json::Value)>,
+        offered: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for PolicyProbeProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                *self.offered.lock().await =
+                    options.tools.into_iter().map(|tool| tool.name).collect();
+                let mut chunks = Vec::with_capacity(self.requested.len() + 1);
+                for (index, (name, input)) in self.requested.iter().enumerate() {
+                    chunks.push(StreamChunk::ToolUse {
+                        id: format!("policy-{index}"),
+                        name: name.clone(),
+                        input: input.clone(),
+                    });
+                }
+                chunks.push(StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::ToolUse,
+                });
+                Ok(Box::pin(futures::stream::iter(chunks)))
+            } else {
+                Ok(Box::pin(futures::stream::iter(vec![
+                    StreamChunk::Text {
+                        content: "done".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: crate::domain::models::StopReason::EndTurn,
+                    },
+                ])))
+            }
+        }
+
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        fn provider_id(&self) -> String {
+            "policy-probe".into()
+        }
+
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            Vec::new()
+        }
+
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct PolicyProbeTools {
+        executed: tokio::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::ToolSetPort for PolicyProbeTools {
+        fn available_tools(&self) -> Vec<crate::domain::models::ToolDefinition> {
+            ["Bash", "Read"]
+                .into_iter()
+                .map(|name| crate::domain::models::ToolDefinition {
+                    name: name.to_string(),
+                    description: name.to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    parallel_safe: false,
+                })
+                .collect()
+        }
+
+        async fn execute(
+            &self,
+            tool_name: &str,
+            input: serde_json::Value,
+            _cancel: CancellationToken,
+        ) -> Result<crate::domain::models::ToolResult, crate::domain::errors::ToolError> {
+            self.executed
+                .lock()
+                .await
+                .push((tool_name.to_string(), input));
+            Ok(crate::domain::models::ToolResult {
+                tool_use_id: String::new(),
+                content: "ok".into(),
+                is_error: false,
+            })
+        }
+    }
+
+    async fn run_policy_probe(
+        policy: crate::domain::models::ToolPolicy,
+        requested: Vec<(String, serde_json::Value)>,
+    ) -> (Vec<String>, Vec<(String, serde_json::Value)>) {
+        use crate::domain::ports::{SecurityPort as _, SubagentRunner as _};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let offered = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(PolicyProbeProvider {
+            calls: std::sync::atomic::AtomicU32::new(0),
+            requested,
+            offered: offered.clone(),
+        }) as Arc<dyn StreamingProvider>;
+        let storage = Arc::new(FileSystemStorage::new(tmp.path().to_path_buf()))
+            as Arc<dyn crate::domain::ports::StoragePort>;
+        let security_adapter = Arc::new(SecurityAdapter::new(tmp.path().to_path_buf()));
+        security_adapter.set_mode(crate::domain::models::PermissionMode::Yolo);
+        let security = security_adapter as Arc<dyn crate::domain::ports::SecurityPort>;
+        let tools = Arc::new(PolicyProbeTools::default());
+        let tool_port = tools.clone() as Arc<dyn crate::domain::ports::ToolSetPort>;
+        let approval = ApprovalRuntime::new(32, Arc::new(NoOpApprovalPersistence));
+        let scheduler =
+            ToolScheduler::new(security.clone(), tool_port.clone(), approval.clone(), 32);
+        let (event_bus, event_rx) = EventBus::new(32);
+        std::mem::forget(event_rx);
+        let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+        let (authority, root_authority) = authority_pair();
+        let runner = InProcessSubagentRunner::new(
+            provider,
+            storage,
+            security,
+            tool_port,
+            approval,
+            scheduler,
+            Arc::new(event_bus),
+            Arc::new(NodeTree::new()),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::SandboxPolicy::Permissive,
+            )),
+            spool,
+            authority,
+            root_authority,
+        );
+        let spec = AgentLaunchSpec {
+            prompt: "exercise delegated policy".into(),
+            effective_model: "test-model".into(),
+            tier: crate::domain::models::ModelTier::CheapAgentic,
+            tools_allow: policy,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+        };
+        let handle = runner
+            .launch(
+                spec,
+                CancellationToken::new(),
+                None,
+                crate::domain::models::AgentId::new(),
+            )
+            .await
+            .unwrap();
+        let mut status = handle.status_rx;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(state) = status.recv().await {
+                if state.is_terminal() {
+                    assert_eq!(state, NodeState::Completed);
+                    return;
+                }
+            }
+            panic!("child status stream ended before terminal");
+        })
+        .await
+        .expect("child completed");
+        let offered = offered.lock().await.clone();
+        let executed = tools.executed.lock().await.clone();
+        (offered, executed)
+    }
+
+    #[tokio::test]
+    async fn story_19_28_child_pattern_policy_is_offered_and_command_enforced() {
+        use std::collections::BTreeSet;
+
+        let own_pattern = crate::domain::models::ToolPolicy::Allowlist {
+            tools: BTreeSet::from(["Bash(kubectl:*)".to_string()]),
+        };
+        let (own_offered, own_executed) = run_policy_probe(
+            own_pattern,
+            vec![
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "kubectl get pods"}),
+                ),
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "helm upgrade billing"}),
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(own_offered, vec!["Bash"]);
+        assert_eq!(own_executed.len(), 1);
+        assert_eq!(own_executed[0].1["command"], "kubectl get pods");
+
+        let parent_items = BTreeSet::from([
+            "Bash(git:*)".to_string(),
+            "Bash(kubectl:*)".to_string(),
+            "Read".to_string(),
+        ]);
+        let parent = crate::domain::models::AgentToolRestriction {
+            agent_name: "parent".into(),
+            policy: crate::domain::models::ToolPolicy::Allowlist {
+                tools: parent_items.clone(),
+            },
+            declared_items: parent_items,
+        };
+        let exact_child = crate::domain::models::AgentDef {
+            name: "child".into(),
+            description: "child".into(),
+            file: PathBuf::new(),
+            allowed_tools: Some(vec!["Bash(kubectl:*)".into(), "Read".into()]),
+            exclude_tools: None,
+            model: None,
+            isolated: false,
+        };
+        let exact_policy =
+            crate::domain::services::launch_spec_builder::LaunchSpecBuilder::from_task_tool(
+                "probe",
+                &exact_child,
+                "model",
+                crate::domain::models::ModelTier::CheapAgentic,
+                0,
+                None,
+                Some(&parent),
+            )
+            .tools_allow;
+        let (offered, executed) = run_policy_probe(
+            exact_policy,
+            vec![
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "kubectl get pods"}),
+                ),
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "helm upgrade billing"}),
+                ),
+                ("Read".into(), serde_json::json!({"file_path": "input.txt"})),
+            ],
+        )
+        .await;
+        assert_eq!(offered, vec!["Bash", "Read"]);
+        assert_eq!(executed.len(), 2);
+        assert_eq!(executed[0].1["command"], "kubectl get pods");
+        assert_eq!(executed[1].0, "Read");
+
+        let broad_child = crate::domain::models::AgentDef {
+            allowed_tools: Some(vec!["Bash".into(), "Read".into()]),
+            ..exact_child
+        };
+        let broad_policy =
+            crate::domain::services::launch_spec_builder::LaunchSpecBuilder::from_task_tool(
+                "probe",
+                &broad_child,
+                "model",
+                crate::domain::models::ModelTier::CheapAgentic,
+                0,
+                None,
+                Some(&parent),
+            )
+            .tools_allow;
+        let (offered, executed) = run_policy_probe(
+            broad_policy,
+            vec![
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "kubectl get pods"}),
+                ),
+                ("Read".into(), serde_json::json!({"file_path": "input.txt"})),
+            ],
+        )
+        .await;
+        assert_eq!(offered, vec!["Read"]);
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].0, "Read");
+    }
+
+    #[tokio::test]
+    async fn story_19_28_child_inherits_parent_without_widening() {
+        use std::collections::BTreeSet;
+
+        let parent_items = BTreeSet::from(["Read".to_string()]);
+        let parent = crate::domain::models::AgentToolRestriction {
+            agent_name: "parent".into(),
+            policy: crate::domain::models::ToolPolicy::Allowlist {
+                tools: parent_items.clone(),
+            },
+            declared_items: parent_items,
+        };
+        let child = crate::domain::models::AgentDef::default_worker();
+        let policy =
+            crate::domain::services::launch_spec_builder::LaunchSpecBuilder::from_task_tool(
+                "probe",
+                &child,
+                "model",
+                crate::domain::models::ModelTier::CheapAgentic,
+                0,
+                None,
+                Some(&parent),
+            )
+            .tools_allow;
+        let (offered, executed) = run_policy_probe(
+            policy,
+            vec![
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": "printf forbidden"}),
+                ),
+                ("Read".into(), serde_json::json!({"file_path": "input.txt"})),
+            ],
+        )
+        .await;
+        assert_eq!(offered, vec!["Read"]);
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].0, "Read");
+
+        let (unrestricted_offered, unrestricted_executed) = run_policy_probe(
+            crate::domain::models::ToolPolicy::InheritFromParent,
+            vec![(
+                "Bash".into(),
+                serde_json::json!({"command": "printf allowed"}),
+            )],
+        )
+        .await;
+        assert!(unrestricted_offered.contains(&"Bash".to_string()));
+        assert_eq!(unrestricted_executed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn story_19_28_child_allow_and_exclude_compose_at_execution() {
+        use crate::domain::models::PlanTaskStatus;
+        use crate::domain::models::plan::{PlanSubTask, PlanTask};
+        use crate::domain::services::launch_spec_builder::LaunchSpecBuilder;
+
+        let agent = crate::domain::models::AgentDef {
+            name: "reader".into(),
+            description: "reader".into(),
+            file: PathBuf::new(),
+            allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+            exclude_tools: Some(vec!["Bash".into()]),
+            model: None,
+            isolated: false,
+        };
+        let task = PlanTask {
+            number: 1,
+            title: "parent".into(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Pending,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
+            delegated_to: None,
+            sub_tasks: vec![],
+        };
+        let sub_task = PlanSubTask {
+            number: 1,
+            title: "child".into(),
+            description: String::new(),
+            status: PlanTaskStatus::Pending,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            delegated_to: None,
+        };
+        let policies = [
+            LaunchSpecBuilder::from_plan_task(&task, &agent, "model", 0, None).tools_allow,
+            LaunchSpecBuilder::from_task_tool(
+                "child",
+                &agent,
+                "model",
+                crate::domain::models::ModelTier::CheapAgentic,
+                0,
+                None,
+                None,
+            )
+            .tools_allow,
+            LaunchSpecBuilder::from_sub_task(&task, &sub_task, &agent, "model", 0, None)
+                .tools_allow,
+        ];
+
+        for policy in policies {
+            let (offered, executed) = run_policy_probe(
+                policy,
+                vec![
+                    (
+                        "Bash".into(),
+                        serde_json::json!({"command": "printf forbidden"}),
+                    ),
+                    ("Read".into(), serde_json::json!({"file_path": "input.txt"})),
+                ],
+            )
+            .await;
+            assert_eq!(offered, vec!["Read"]);
+            assert_eq!(executed.len(), 1);
+            assert_eq!(executed[0].0, "Read");
+        }
     }
 }

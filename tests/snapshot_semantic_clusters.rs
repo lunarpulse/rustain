@@ -333,6 +333,8 @@ fn render_cluster_lineup(
             synthetic: false,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         };
         all_msgs.push(umsg);
         msg_idx += 1;
@@ -358,6 +360,8 @@ fn render_cluster_lineup(
             synthetic: false,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         };
         all_msgs.push(amsg);
         all_turns.push(turn);

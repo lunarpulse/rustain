@@ -35,6 +35,9 @@ tests_tui/
   conftest.py             # fixtures: tui, tui_in_project, build_binary
   harness.py              # RustainTUI class — pexpect wrapper
   keys.py                 # Keyboard constants (Chat, Confirm, Permission, etc.)
+  manual_test_ledger.py   # Plain script: one scripted turn + the ledger rows it minted
+  fixtures/scene_provider.py    # Anthropic-API stand-in: scripted turns, no account
+  fixtures/scenes/smoke.json    # The scene it serves (one text turn, one Write turn)
   test_smoke.py           # Binary existence, --help, startup/shutdown
   test_story_3_x_input.py # Stories 3.1, 3.3, 3.5 — input, palette, help
   test_story_4_3a_fork.py # Story 4-3a — fork conversations
@@ -69,6 +72,47 @@ Each test gets a **temporary workspace directory**. The harness:
 5. Cleans up on teardown
 
 This means tests are fully isolated — no shared state, no leftover sessions.
+
+### Model turns without a provider account (the scene provider)
+
+`fixtures/scene_provider.py` is an Anthropic Messages API stand-in. It serves scripted
+turns over HTTP, so a test can drive a **real model turn** through the real binary with
+no key and no network — that is how `test_story_19_7_scene_provider.py` runs in the
+non-API CI lane. A scene file (`fixtures/scenes/smoke.json`) holds one turn list per
+**persona**, and the persona is the api-key value the binary presents, so several
+personas share one stub process. Each turn declares `expect` (a substring that must
+appear in the last user text), the `content` blocks to serve (`text` or `tool_use`),
+its `stop_reason` and its `usage`. An `expect` mismatch is a **desync**: the stub
+answers an SSE `error` event, logs `"desync": true`, does not advance the turn cursor,
+and exits **1** — a desync is the product sending something the scene did not script.
+The full scene and request-log formats are in the module docstring.
+
+```python
+from fixtures.scene_provider import SceneStub
+
+stub = SceneStub(SCENE, tmp_path / "requests.jsonl").start()   # port 0
+with RustainTUI(env_overrides=stub.env("scene-ci", scratch_home)) as tui:
+    tui.send_message("scene ping")
+assert stub.stop() == 0            # 0 clean, 1 desync or unknown path
+```
+
+`SceneStub.env()` is the authoritative env block and it is **not optional reading**:
+`harness.py` merges `rustain/.env` into the child env, that file exports a real
+`ANTHROPIC_AUTH_TOKEN`, and the binary prefers `AUTH_TOKEN` over `API_KEY` — so a test
+that sets only the api key sends a developer's real credential to whatever it is
+talking to. The `HOME` argument is load-bearing for the same reason: the user-global
+config layer is `dirs::home_dir()/.config/rustain/config.toml`, `RUSTAIN_CONFIG_DIR`
+does **not** move it, and a developer's `[provider.openrouter] enabled = true` there
+makes the binary take the config provider path and ignore `ANTHROPIC_BASE_URL`
+entirely. Assert product-side: the stub's request log, the usage ledger under
+`tui.wp/.rustain_data/usage`, the session files — never on prose the stub was told to
+serve.
+
+`RUSTAIN_TUI_BINARY=<path>` makes the harness spawn that binary instead of building
+`target/debug/rustain` (a release-profile capture uses this). A path that does not
+exist raises `FileNotFoundError` before any build or spawn — never a silent fallback.
+`python3 tests_tui/manual_test_ledger.py` is the plain-script version of all of this:
+one scripted turn, then the ledger rows it minted.
 
 ### Key Mappings
 

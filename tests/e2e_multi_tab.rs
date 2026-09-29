@@ -308,6 +308,7 @@ fn test_height_cache_invalidate_turn() {
         rustain::adapters::tui::state::CachedTurnLayout {
             height: 3,
             block_offsets: vec![],
+            tool_block_offsets: vec![],
         },
     );
     cache.set(
@@ -315,6 +316,7 @@ fn test_height_cache_invalidate_turn() {
         rustain::adapters::tui::state::CachedTurnLayout {
             height: 7,
             block_offsets: vec![],
+            tool_block_offsets: vec![],
         },
     );
     cache.invalidate_turn(&turn_a);
@@ -351,6 +353,8 @@ fn test_chat_message_serializes_with_id() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
+        authorship: Default::default(),
+        retracted_at_ms: None,
     };
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.contains("\"id\":\"test-msg-id\""));

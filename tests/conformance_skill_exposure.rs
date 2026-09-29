@@ -322,6 +322,7 @@ fn test_compose_with_default_config_binds_l1_metadata() {
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: std::sync::Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -377,6 +378,7 @@ fn test_compose_with_static_full_binds_static_full() {
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: std::sync::Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]

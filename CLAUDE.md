@@ -163,7 +163,7 @@ Selective — provider adapters, tools, MCP only:
 
 | Crate | What rustain uses |
 |---|---|
-| `domain` | Provider trait, Tool trait, shared types (building blocks only) |
+| `domain` | Provider trait (`StreamingProvider`), tool ports (`ToolSetPort`, `ToolExposurePort`, `CapabilityProvider`), shared types (building blocks only) |
 | `adapters` | Tool implementations (Bash, Read, Write, Edit, Glob, Grep, WebFetch), McpClientAdapter |
 | `llm-provider` | Provider configuration types |
 

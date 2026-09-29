@@ -1,8 +1,9 @@
-//! Concrete `PatchApplier` backed by a `git apply` shell-out.
+//! Concrete `PatchApplier` backed by `git` shell-outs.
 //!
 //! The domain/use-case layer decides *whether* to apply via the pure
-//! `may_apply_patch` gate; this adapter owns *how* the One-Ring workspace is
-//! mutated. `git` is shell-out only (no `git2`/`gix`).
+//! `may_apply_patch` gate; this adapter is the git-over-workspace seam — it
+//! mutates the One-Ring workspace with `git apply` and reads the workspace
+//! revision with `git rev-parse`. `git` is shell-out only (no `git2`/`gix`).
 
 use std::path::Path;
 use std::process::Stdio;
@@ -57,5 +58,27 @@ impl PatchApplier for GitPatchApplier {
         } else {
             Err(PatchApplyError::Conflict(diagnostic))
         }
+    }
+
+    async fn revision(&self, workspace: &Path) -> Option<String> {
+        // Best effort by contract: `git rev-parse HEAD` fails on a repository
+        // with no commits and outside a repository entirely, and both are
+        // supported workspaces for `git apply`. Every failure mode collapses
+        // to `None` — this value is a preimage witness for the durable apply
+        // record, never an input to control flow.
+        let output = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let revision = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+        (!revision.is_empty()).then_some(revision)
     }
 }

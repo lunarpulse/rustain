@@ -5,6 +5,10 @@ use tokio::sync::broadcast;
 use crate::domain::models::AgentEnvelope;
 use crate::domain::ports::{AgentTransport, AgentTransportError};
 
+/// Broadcast adapter for the in-process [`AgentTransport`] port.
+///
+/// `PeerTransport` is the separate cross-host sibling; this adapter deliberately
+/// has no peer address, accept side, or connection lifecycle.
 #[derive(Debug)]
 pub struct RapTransport {
     tx: broadcast::Sender<AgentEnvelope<Value>>,
@@ -55,6 +59,7 @@ mod tests {
                 AgentId::parse("recipient").unwrap(),
                 CorrelationId::new("corr"),
                 MessageKind::PeerMessage,
+                String::new(),
                 1,
                 2_000,
                 "nonce".to_string(),

@@ -80,6 +80,14 @@ pub struct ComposeContext {
     /// `.await` points without blocking the runtime. Deadlock-free by lock
     /// ordering: writers never nest, and the swap holds only the write lock.
     pub memory_write_gate: Arc<tokio::sync::RwLock<()>>,
+    /// Story 18.4a — the replicated Topic log, shared by the transport that
+    /// fills it and the `"composite"` context adapter that reads it.
+    ///
+    /// ⛔ One `Arc`, threaded rather than constructed twice: two stores is a
+    /// host whose agent reads a different log than the one its transport
+    /// writes, and the profile-reload path re-composes the context port while
+    /// the transport keeps running.
+    pub peer_topic_store: Arc<crate::adapters::rap::PeerTopicStore>,
     #[cfg(feature = "meta-search")]
     pub search_config: crate::domain::models::SearchConfig,
     #[cfg(feature = "meta-search")]
@@ -149,6 +157,7 @@ impl AgentCore {
             channels: Self::wrap(channels),
             scheduler: Self::wrap(scheduler),
             context: Self::wrap(context),
+            peer_topic_store: Arc::clone(&ctx.peer_topic_store),
             agent_message_bus: AgentCore::wrap(Arc::new(
                 crate::infrastructure::agent_message_bus::LocalMessageBus::new(
                     Default::default(),
@@ -685,9 +694,23 @@ pub fn build_scheduler(
 ) -> Result<Arc<dyn SchedulerPort>, AdapterCompositionError> {
     match name {
         "none" => Ok(Arc::new(NoOpScheduler)),
-        #[cfg(feature = "cron")]
-        "cron" => Ok(Arc::new(NoOpScheduler)),
-        #[cfg(not(feature = "cron"))]
+        // ⚠ Story 19.12 A19 — this used to be a `#[cfg(feature = "cron")]` /
+        // `#[cfg(not(...))]` pair whose two arms were BYTE-IDENTICAL
+        // `NoOpScheduler`. A `#[cfg]` split whose branches are the same code is
+        // either dead or a lie; here it was a lie, and it hid the real state:
+        // a profile-composed `cron` scheduler is UNWIRED in every build.
+        //
+        // In a DEFAULT build the profile never reaches here — `profile_loader`
+        // refuses to load it with a remediation command and exit 2
+        // (`profile_loader.rs:249-258`), and the wizard warns at selection time.
+        // With `--features cron` compiled the loader passes and composition
+        // substitutes nothing, silently. The real `CronSchedulerAdapter` (one
+        // production caller: `daemon/mod.rs:506`) runs only under the daemon.
+        //
+        // ⛔ Making the loader refuse `cron` regardless of the compiled feature
+        // was considered and NOT taken: it breaks `--features cron` builds and
+        // asserts a product judgement that belongs to whoever owns the scheduler
+        // port. Recorded as DF-19-12-PROFILE-CRON-UNWIRED.
         "cron" => Ok(Arc::new(NoOpScheduler)),
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Scheduler,
@@ -736,10 +759,41 @@ pub fn build_context(
         }
         // Explicit opt-out — the dormant no-op (no injection at all).
         "noop" => Ok(Arc::new(NoOpContext)),
+        // Story 18.4a (FR151) — local memory context **plus** peer-origin
+        // context, both behind the one `ContextPort` slot.
+        //
+        // ⚑ This arm is the load-bearing half of FR151, and it is a **core
+        // change**. Before it, `build_context` returned exactly one adapter, so
+        // selecting the peer provider would have *replaced* the operator's
+        // local memory context rather than adding to it — a feature that
+        // silently deletes another feature. ⛔ FR151's "zero core change" clause
+        // is false and is not repeated; what is true is that the change is
+        // small and precedented.
+        //
+        // The shape is copied from the toolset dimension's own `"composite"`
+        // arm above, including its recursive-inner-build: the inner adapter is
+        // produced by calling this factory again, so a `default` context built
+        // here and one built directly cannot drift.
+        "composite" => {
+            let local = build_context("default", config, ctx)?;
+            let peer = Arc::new(crate::adapters::peer_context::PeerContextProvider::new(
+                Arc::clone(&ctx.peer_topic_store),
+            ));
+            Ok(Arc::new(
+                crate::adapters::composite_context_adapter::CompositeContextAdapter::new(
+                    local, peer,
+                ),
+            ))
+        }
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Context,
             name: other.to_string(),
-            available: vec!["default".into(), "daily".into(), "noop".into()],
+            available: vec![
+                "default".into(),
+                "daily".into(),
+                "noop".into(),
+                "composite".into(),
+            ],
         }),
     }
 }
@@ -1129,6 +1183,7 @@ pub fn build_daemon_memory(
             Arc::new(NoOpMemory) as Arc<dyn MemoryPort>
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -1152,6 +1207,10 @@ pub(crate) fn daemon_compose_context(
     channel_turn_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::domain::models::ChannelTurnRequest>,
     >,
+    // Story 18.4a — threaded rather than constructed here. The daemon rebuilds
+    // this context on first activity, so a store minted inside would be a
+    // second log the transport never writes to.
+    peer_topic_store: Arc<crate::adapters::rap::PeerTopicStore>,
 ) -> ComposeContext {
     use crate::adapters::sandbox::NoOpSandbox;
     ComposeContext {
@@ -1181,11 +1240,37 @@ pub(crate) fn daemon_compose_context(
             Arc::new(NoOpMemory) as Arc<dyn MemoryPort>
         )),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store,
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
         a2a_peers: Vec::new(),
+    }
+}
+
+/// 18.9b-a D1 (code review, party-mode ruling 2026-09-06, owner-approved):
+/// a daemon whose resolved tools adapter is not the composite cannot host the
+/// a2a provider install — the install below the toolset build is
+/// downcast-guarded, so configured peers silently never surfaced. FR46 holds
+/// in the daemon on every configuration that names peers, so the adapter
+/// upgrades to `"composite"` (the daemon compose ctx carries zero MCP
+/// servers, making the upgraded shape the exact one `coding`-profile daemons
+/// already run) and the substrate widening is disclosed in the returned line.
+/// Impossible configurations (non-`a2a` builds with peers) are refused before
+/// composition by the AC3(a) feature guard in `startup.rs`.
+#[cfg(all(unix, feature = "a2a"))]
+fn resolve_daemon_tools_adapter(tools_name: &str, a2a_peers: usize) -> (String, Option<String>) {
+    if a2a_peers > 0 && tools_name != "composite" {
+        (
+            "composite".to_string(),
+            Some(format!(
+                "tools adapter '{tools_name}' cannot host {a2a_peers} configured A2A peer(s); \
+                 composed the composite toolset instead (builtin-full substrate, no MCP servers)"
+            )),
+        )
+    } else {
+        (tools_name.to_string(), None)
     }
 }
 
@@ -1216,6 +1301,7 @@ pub fn build_daemon_core(
     >,
     _node_tree: crate::infrastructure::subagent::NodeTree,
     _node_journal: Arc<crate::infrastructure::subagent::NodeJournal>,
+    #[cfg(feature = "a2a")] a2a_egress: Arc<crate::adapters::a2a::egress::A2aEgress>,
 ) -> Result<crate::adapters::daemon::runtime::DaemonCore, AdapterCompositionError> {
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
     use crate::adapters::filesystem::FileSystemStorage;
@@ -1233,7 +1319,25 @@ pub fn build_daemon_core(
             .unwrap_or_else(|| default.to_string())
     };
     let persona_name = pick(PortDimension::Persona, "coding");
-    let tools_name = pick(PortDimension::Tools, "builtin-only");
+    // 18.9b-a D1 — see `resolve_daemon_tools_adapter`. Resolved once per boot,
+    // outside the first-activity factory below, so the disclosure fires once.
+    let picked_tools_name = pick(PortDimension::Tools, "builtin-only");
+    #[cfg(feature = "a2a")]
+    let (tools_name, daemon_tools_upgrade_notice) = resolve_daemon_tools_adapter(
+        &picked_tools_name,
+        a2a_egress.provider().peer_bindings().len(),
+    );
+    #[cfg(not(feature = "a2a"))]
+    let tools_name = picked_tools_name;
+    #[cfg(feature = "a2a")]
+    if let Some(notice) = daemon_tools_upgrade_notice {
+        tracing::warn!("daemon toolset upgraded to host A2A peers: {notice}");
+    }
+    let (context_name, context_config) = profile_selection
+        .dimensions
+        .get(&PortDimension::Context)
+        .map(|adapter| (adapter.adapter.clone(), adapter._config.clone()))
+        .unwrap_or_else(|| ("default".to_owned(), None));
 
     // ── Eager parts (cheap, connection-free) ────────────────────────────────
     let memory = build_daemon_memory(workspace, memory_adapter)?;
@@ -1247,12 +1351,18 @@ pub fn build_daemon_core(
     // unreachable, not just administratively avoided.
     let security: Arc<dyn SecurityPort> =
         Arc::new(HeadlessSecurityAdapter::new(workspace.to_path_buf()));
+    // Story 18.4a — minted once, here, and shared by every later composition of
+    // this daemon's context as well as by the verified-peer delivery front door.
+    // ⛔ Not inside `daemon_compose_context`: that runs again on first activity,
+    // so a store built there would be a second log the transport never writes.
+    let peer_topic_store = Arc::new(crate::adapters::rap::PeerTopicStore::new());
     let eager_ctx = daemon_compose_context(
         workspace,
         storage.clone(),
         domain_tx.clone(),
         assembler_name.clone(),
         channel_turn_tx.clone(),
+        Arc::clone(&peer_topic_store),
     );
     let persona = build_persona(&persona_name, None, &eager_ctx)?;
 
@@ -1264,6 +1374,9 @@ pub fn build_daemon_core(
         let security = security.clone();
         let domain_tx = domain_tx.clone();
         let channel_turn_tx = channel_turn_tx.clone();
+        let factory_topic_store = Arc::clone(&peer_topic_store);
+        #[cfg(feature = "a2a")]
+        let a2a_egress = a2a_egress.clone();
         #[cfg(feature = "mcp")]
         let task_node_tree = _node_tree;
         #[cfg(feature = "mcp")]
@@ -1276,6 +1389,7 @@ pub fn build_daemon_core(
                     domain_tx.clone(),
                     assembler_name.clone(),
                     channel_turn_tx.clone(),
+                    Arc::clone(&factory_topic_store),
                 );
                 // Live, connection-holding parts — first activity only.
                 let provider: Arc<dyn StreamingProvider> = {
@@ -1283,6 +1397,12 @@ pub fn build_daemon_core(
                     layer.router as Arc<dyn StreamingProvider>
                 };
                 let tools = build_tools(&tools_name, None, &ctx)?;
+                #[cfg(feature = "a2a")]
+                if let Some(composite) = tools.as_any().downcast_ref::<
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
+                >() {
+                    a2a_egress.install(composite);
+                }
                 // Story 17.5a — deferred MCP Tasks injection preserves the
                 // daemon's lazy provider/tool construction while connecting
                 // every live MCP client to the shared durable node tree.
@@ -1331,6 +1451,7 @@ pub fn build_daemon_core(
                             room,
                             coordinator_authority.id,
                             artifact_host,
+                            crate::domain::models::AgentId::local_operator(),
                         ),
                     );
                     task_runtime.set_artifact_sink(sink);
@@ -1342,6 +1463,11 @@ pub fn build_daemon_core(
                     Vec::new()
                 };
                 let context_assembler = build_context_assembler(&ctx)?;
+                // Story 18.4a (code-review D2): the daemon's interactive
+                // attach-mode turn owns context injection, so compose the
+                // bundle-tier port from the same `ctx` whose topic store the
+                // verified-peer delivery handler fills.
+                let context = build_context(&context_name, context_config.as_ref(), &ctx)?;
                 // Deny-by-default approval (AC6): NoOp persistence so no stale
                 // "always-allow" rule can undermine the unattended deny policy.
                 let approval = crate::domain::services::approval_runtime::ApprovalRuntime::new(
@@ -1371,6 +1497,7 @@ pub fn build_daemon_core(
                     context_assembler: Arc::new(arc_swap::ArcSwap::from_pointee(Some(
                         context_assembler,
                     ))),
+                    context: Arc::new(arc_swap::ArcSwap::from_pointee(context)),
                     storage: storage.clone(),
                     fs_storage,
                     usage_ledger: Arc::new(crate::adapters::ledger::FileUsageLedger::new()),
@@ -1394,6 +1521,7 @@ pub fn build_daemon_core(
         storage,
         security,
         persona,
+        peer_topic_store,
         factory,
     ))
 }
@@ -1527,6 +1655,7 @@ pub fn build_cli_core(
         )
             as Arc<dyn MemoryPort>)),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -1633,6 +1762,7 @@ pub fn build_acp_core(
         )
             as Arc<dyn MemoryPort>)),
         memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -1760,6 +1890,7 @@ mod tests {
             )
                 as Arc<dyn MemoryPort>)),
             memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+            peer_topic_store: Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             #[cfg(feature = "meta-search")]
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]
@@ -2088,6 +2219,76 @@ mod tests {
             source: crate::domain::models::McpServerSource::Workspace,
         }];
         assert!(build_tools("composite", None, &ctx).is_ok());
+    }
+
+    // ── 18.9b-a D1: daemon toolset upgrade predicate ──
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a"))]
+    fn d1_composite_with_peers_is_unchanged_and_silent() {
+        let (name, notice) = resolve_daemon_tools_adapter("composite", 3);
+        assert_eq!(name, "composite");
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a"))]
+    fn d1_non_composite_with_zero_peers_is_unchanged_and_silent() {
+        let (name, notice) = resolve_daemon_tools_adapter("builtin-only", 0);
+        assert_eq!(name, "builtin-only");
+        assert!(
+            notice.is_none(),
+            "zero peers asked for nothing; silence is correct"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a"))]
+    fn d1_builtin_only_with_peers_upgrades_with_disclosure() {
+        let (name, notice) = resolve_daemon_tools_adapter("builtin-only", 2);
+        assert_eq!(name, "composite");
+        let notice = notice.expect("the upgrade must disclose the widening");
+        assert!(
+            notice.contains("builtin-only"),
+            "names the adapter it upgraded from: {notice}"
+        );
+        assert!(
+            notice.contains("composite"),
+            "names what it composed instead: {notice}"
+        );
+        assert!(
+            notice.contains("2"),
+            "names the peer count that forced the upgrade: {notice}"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a"))]
+    fn d1_builtin_full_with_peers_also_upgrades() {
+        let (name, notice) = resolve_daemon_tools_adapter("builtin-full", 1);
+        assert_eq!(name, "composite");
+        assert!(notice.is_some());
+    }
+
+    #[test]
+    #[cfg(all(test, unix, feature = "a2a", feature = "mcp"))]
+    fn d1_upgraded_name_builds_the_installable_composite() {
+        // Winston's identity row: the upgraded name, fed through the same
+        // `build_tools` arm the daemon factory uses, yields the composite —
+        // the exact construction `coding`-profile daemons run (ADR-10-5 S1
+        // pins the zero-MPC compose; this pins the
+        // decision → construction → installable chain the upgrade relies on).
+        let (name, _notice) = resolve_daemon_tools_adapter("builtin-only", 1);
+        assert_eq!(name, "composite");
+        let ctx = test_compose_ctx();
+        let tools = build_tools(&name, None, &ctx).expect("composite builds");
+        assert!(
+            tools
+                .as_any()
+                .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()
+                .is_some(),
+            "the upgraded toolset must be the composite that hosts the a2a install"
+        );
     }
 
     // ── Channels tests ──

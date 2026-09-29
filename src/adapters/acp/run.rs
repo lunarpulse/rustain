@@ -157,6 +157,7 @@ fn with_mcp_task_runtime(
                     room,
                     coordinator_authority.id,
                     artifact_host,
+                    crate::domain::models::AgentId::local_operator(),
                 ));
             task_runtime.set_artifact_sink(sink);
             for client in composite.mcp_clients() {

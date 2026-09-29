@@ -11,6 +11,7 @@ pub mod spool;
 pub use node_handle::{NodeHandle, NodeHandleError};
 pub use node_journal::{
     JournalArtifactSink, JournalError, NodeJournal, NodeRoomJournal, RecoveryError,
+    WorkspaceJournalReader,
 };
 pub use node_recovery::{
     DaemonSingletonLock, NodeRecovery, RecoveredPark, RecoveryReport, current_host_binding,

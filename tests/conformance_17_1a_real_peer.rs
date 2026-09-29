@@ -82,15 +82,21 @@ fn peer_envelope(
     prev_hash: Vec<u8>,
     body: Value,
 ) -> Box<AgentEnvelope<Value>> {
-    let sender = AgentId::from_peer_path(&format!("{}/agent", signer.identity().peer_id.as_str()))
-        .expect("peer-rooted sender");
+    let pid = signer.identity().peer_id.as_str();
+    let sender = AgentId::from_peer_path(&format!("{pid}/agent")).expect("peer-rooted sender");
+    // ⚑ Rooted at the sender's own namespace too — the recipient rule 18.4a
+    // enforces (`DF-18-4d-RECIPIENT-NAMESPACE`); a bare `daemon` recipient is
+    // refused now.
+    let recipient =
+        AgentId::from_peer_path(&format!("{pid}/daemon")).expect("peer-rooted recipient");
     Box::new(
         signer
             .sign(
                 sender,
-                AgentId::parse("daemon").expect("valid recipient"),
+                recipient,
                 CorrelationId::new("real-peer-corr"),
                 MessageKind::PeerMessage,
+                String::new(),
                 sequence,
                 not_after,
                 nonce.to_string(),
@@ -199,6 +205,25 @@ async fn real_daemon_accepts_signed_envelope_and_rejects_mutations() {
 
     let socket = daemon_socket_path(data_dir.path(), workspace.path());
 
+    let signer = IdentityKeyStore::new(data_dir.path())
+        .load_or_generate()
+        .expect("load or generate peer identity key");
+    // Story 18.3d: this test targets signature/replay behavior, so pre-grant
+    // the authenticated sender before the real daemon folds its consent state.
+    let consent_journal =
+        rustain::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .expect("open consent journal");
+    consent_journal
+        .append_room(rustain::domain::models::RoomEvent::ConsentGranted {
+            sender: Some(signer.identity().peer_id.clone()),
+            granted_at: SystemClock::default().wall_now_ms(),
+        })
+        .await
+        .expect("pre-grant real peer");
+    drop(consent_journal);
     // ── Spawn the real daemon (foreground = no detach; it stays alive for the
     //    whole test so a single process answers every assertion below).
     let mut child = spawn_foreground_daemon(workspace.path(), data_dir.path(), config_dir.path())
@@ -243,13 +268,8 @@ async fn real_daemon_accepts_signed_envelope_and_rejects_mutations() {
     };
     assert_eq!(nonce.len(), 32, "challenge nonce must be 32 random bytes");
 
-    // 2. Provision a real identity key via the IdentityKeyStore (the same data
-    //    dir the daemon runs under — a real on-disk Ed25519 key via OsRng, not
-    //    a hardcoded test seed). The daemon (server) never touches this file;
-    //    only client-side attach code loads it, so there is no race.
-    let signer = IdentityKeyStore::new(data_dir.path())
-        .load_or_generate()
-        .expect("load or generate peer identity key");
+    // 2. Reuse the real on-disk Ed25519 identity provisioned before daemon
+    //    startup so the same stable sender is both consented and authenticated.
 
     // 3. Build the proof-bearing Attach — an Ed25519 signature over the
     //    domain-separated transcript via AgentSigner::attach_proof — and send it.

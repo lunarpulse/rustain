@@ -89,25 +89,58 @@ impl SkillActivationSet {
         std::mem::take(&mut self.active)
     }
 
-    pub fn effective_allowed_tools(&self) -> Option<HashSet<String>> {
-        let constrained: Vec<&Vec<String>> = self
+    pub fn effective_allowed_tools(&self, all_tool_names: &[String]) -> Option<HashSet<String>> {
+        let mut constrained = self
             .active
             .iter()
-            .filter_map(|s| s.allowed_tools.as_ref())
-            .collect();
-        if constrained.is_empty() {
-            return None;
-        }
-        let mut iter = constrained.iter();
-        let Some(first) = iter.next() else {
-            return Some(HashSet::new());
-        };
+            .filter_map(|skill| skill.allowed_tools.as_ref());
+        let first = constrained.next()?;
         let mut result: HashSet<String> = first.iter().cloned().collect();
-        for set in iter {
-            let other: HashSet<String> = set.iter().cloned().collect();
-            result = result.intersection(&other).cloned().collect();
+        for set in constrained {
+            result.retain(|item| set.contains(item));
         }
-        Some(result)
+        if result.is_empty() {
+            // A genuinely empty raw intersection (cross-skill disjoint, or an
+            // `allowed-tools: []` declaration) keeps its pre-expansion
+            // meaning: an empty filter, surfaced by the caller as the
+            // disjoint/empty warning.
+            return Some(result);
+        }
+        let expanded: HashSet<String> = result
+            .iter()
+            .filter_map(|item| {
+                let pattern =
+                    crate::domain::services::skill_tool_pattern::parse_allowed_tool_pattern(item)?;
+                // Story 19.11 review: expand only items this build actually
+                // enforces — Bash patterns with a well-formed specifier.
+                // A non-Bash pattern (e.g. `Read(docs/*)`) has no
+                // execution-time command gate; expanding it would offer a
+                // tool that is then denied on every call while the FR42-a
+                // disclosure names nothing. Such items stay out of the
+                // offered set and are disclosed as unmatched instead.
+                if !crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(
+                    item,
+                    pattern.tool_name,
+                ) {
+                    return None;
+                }
+                if !all_tool_names.iter().any(|name| name == pattern.tool_name) {
+                    return None;
+                }
+                Some(pattern.tool_name.to_string())
+            })
+            .collect();
+        if expanded.is_empty() {
+            // Story 19.11 review: a skill whose every declared item is
+            // unmatchable in this catalogue (e.g. `allowed-tools: Glob`)
+            // must take the FR42-a disclosure branch, as it did before
+            // pattern expansion — not the turn-fatal disjoint branch. The
+            // raw strings never equal a catalogue name, so the offered set
+            // is unchanged either way (carve-outs only); only the notice
+            // path differs.
+            return Some(result);
+        }
+        Some(expanded)
     }
 
     #[allow(dead_code)]
@@ -483,7 +516,26 @@ mod tests {
     #[test]
     fn effective_allowed_tools_none_plus_none() {
         let set = SkillActivationSet::new();
-        assert!(set.effective_allowed_tools().is_none());
+        assert!(set.effective_allowed_tools(&[]).is_none());
+    }
+
+    #[test]
+    fn effective_allowed_tools_expands_skill_patterns_after_raw_intersection() {
+        let mut set = SkillActivationSet::new();
+        set.push(ActiveSkill {
+            name: "a".to_string(),
+            directory: PathBuf::from("/tmp/a"),
+            allowed_tools: Some(vec![
+                "Bash(kubectl:*)".to_string(),
+                "Bash(helm:*)".to_string(),
+            ]),
+            body: String::new(),
+            arguments: String::new(),
+            activation_depth: 1,
+            source: SkillSource::GlobalAgents,
+        });
+        let effective = set.effective_allowed_tools(&["Bash".to_string()]).unwrap();
+        assert_eq!(effective, HashSet::from(["Bash".to_string()]));
     }
 
     #[test]
@@ -507,7 +559,7 @@ mod tests {
             activation_depth: 2,
             source: SkillSource::GlobalAgents,
         });
-        let effective = set.effective_allowed_tools().unwrap();
+        let effective = set.effective_allowed_tools(&["Read".to_string()]).unwrap();
         assert!(effective.contains("Read"));
     }
 
@@ -532,7 +584,9 @@ mod tests {
             activation_depth: 2,
             source: SkillSource::GlobalAgents,
         });
-        let effective = set.effective_allowed_tools().unwrap();
+        let effective = set
+            .effective_allowed_tools(&["Read".to_string(), "Grep".to_string(), "Write".to_string()])
+            .unwrap();
         assert!(effective.contains("Read"));
         assert!(!effective.contains("Grep"));
         assert!(!effective.contains("Write"));
@@ -559,7 +613,7 @@ mod tests {
             activation_depth: 2,
             source: SkillSource::GlobalAgents,
         });
-        let effective = set.effective_allowed_tools().unwrap();
+        let effective = set.effective_allowed_tools(&["Read".to_string()]).unwrap();
         assert!(effective.is_empty());
     }
 
@@ -584,7 +638,9 @@ mod tests {
             activation_depth: 2,
             source: SkillSource::GlobalAgents,
         });
-        let effective = set.effective_allowed_tools().unwrap();
+        let effective = set
+            .effective_allowed_tools(&["Read".to_string(), "Bash".to_string()])
+            .unwrap();
         assert!(effective.is_empty());
     }
 

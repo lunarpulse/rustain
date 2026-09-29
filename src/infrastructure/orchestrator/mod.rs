@@ -23,11 +23,13 @@
 //! defeat was validating the root token, which always passes).
 
 use crate::domain::services::dag;
+mod artifact_review;
 mod merge_back;
 mod result_contract;
 mod result_store;
 mod window;
 
+pub use artifact_review::JournalPatchReview;
 pub use merge_back::{MergeBackError, PatchMergeBack};
 pub use result_contract::{
     SPOKE_SUMMARY_MAX_BYTES, SpokeYield, YieldError, first_paragraph, retry_on_schema_failure,
@@ -2289,6 +2291,7 @@ impl WaveCtx {
                                                 OwnershipKind::Owned,
                                                 mode,
                                                 &ctx.merge_back_policy,
+                                                None,
                                             )
                                             .await
                                         {
@@ -3557,6 +3560,7 @@ mod tests {
                 crate::domain::models::OwnershipKind::Owned,
                 crate::domain::models::PermissionMode::Yolo,
                 &crate::domain::services::patch_review::MergeBackPolicy::default(),
+                None,
             )
             .await
         });
@@ -3567,6 +3571,7 @@ mod tests {
                 crate::domain::models::OwnershipKind::Owned,
                 crate::domain::models::PermissionMode::Yolo,
                 &crate::domain::services::patch_review::MergeBackPolicy::default(),
+                None,
             )
             .await
         });

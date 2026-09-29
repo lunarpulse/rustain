@@ -141,6 +141,7 @@ pub struct LocalTurnDriver {
     security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
     tool_scheduler: Arc<ToolScheduler>,
+    skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
     persona: Arc<dyn PersonaPort>,
     context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
     context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
@@ -164,6 +165,7 @@ impl LocalTurnDriver {
         security: Arc<dyn SecurityPort>,
         tools: Arc<dyn ToolSetPort>,
         tool_scheduler: Arc<ToolScheduler>,
+        skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
         persona: Arc<dyn PersonaPort>,
         context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
         context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
@@ -181,6 +183,7 @@ impl LocalTurnDriver {
             security,
             tools,
             tool_scheduler,
+            skill_activator,
             persona,
             context,
             context_assembler,
@@ -228,6 +231,7 @@ impl LocalTurnDriver {
         let security = &self.security;
         let tools = &self.tools;
         let tool_scheduler = &self.tool_scheduler;
+        let skill_activator = &self.skill_activator;
         let persona = &self.persona;
         let context = &self.context;
         let context_assembler = &self.context_assembler;
@@ -265,6 +269,8 @@ impl LocalTurnDriver {
             synthetic,
             images: persisted_refs,
             origin: crate::domain::models::ChannelKind::Terminal,
+            authorship: Default::default(),
+            retracted_at_ms: None,
         });
 
         // Build messages list for provider via the Story 11.0a Message-tier assembler
@@ -402,6 +408,18 @@ impl LocalTurnDriver {
         // the session toggle is OFF (AC7).
         handlers::context_command::inject_assembled_context(state, context, &text, &mut messages)
             .await;
+        // Story 18.4a (FR151) — the taint bridge. The bundle the front door just
+        // cached is the only place that knows whether this turn is carrying a
+        // teammate's assertions, and `has_peer_origin` recomputes the bit from
+        // each entry's `ContextSource`. ⛔ Never read from a peer-supplied field:
+        // there is none, which is what makes 17.1b's Vex rule — *"a peer must
+        // not assert `tainted:false` to clear its own taint"* — structural here.
+        //
+        // ⚑ Gated on the injection toggle (code-review P7): the front door
+        // early-returns when injection is off WITHOUT clearing the cached
+        // bundle, so an unguarded read would keep every later turn tainted by
+        // a bundle that was never injected into it.
+        let context_tainted = context_taint_for_turn(state);
 
         let all_tool_defs = tools.available_tools();
         let persona_prompt = persona.system_prompt(workspace_path);
@@ -419,7 +437,10 @@ impl LocalTurnDriver {
         let agent_filter = agent_snapshot
             .as_ref()
             .and_then(|a| a.effective_tool_filter(&all_tool_names));
-        let skill_filter = activation.effective_allowed_tools();
+        let agent_restriction = agent_snapshot
+            .as_ref()
+            .and_then(|agent| agent.tool_restriction(&all_tool_names));
+        let skill_filter = activation.effective_allowed_tools(&all_tool_names);
         let combined: Option<std::collections::HashSet<String>> = match (agent_filter, skill_filter)
         {
             (None, None) => None,
@@ -427,22 +448,199 @@ impl LocalTurnDriver {
             (None, Some(s)) => Some(s),
             (Some(a), Some(s)) => Some(a.intersection(&s).cloned().collect()),
         };
-        if let Some(ref allowed) = combined {
+        if let Some(allowed) = &combined {
             if allowed.is_empty() {
                 domain_tx.send(AppEvent::SystemNotice {
                     conversation_id: Some(conversation.id.clone()),
                     level: crate::domain::models::NoticeLevel::Warning,
                     message: "Active agent and skill tool filters are disjoint — no tools available for this turn".to_string(),
                 }).ok();
+            } else {
+                // Story 19.2 (FR42-a): a tool restriction this build cannot
+                // honour is disclosed on the turn it bites — never dropped
+                // silently. An item that matches no tool in THIS turn's
+                // catalogue (a pattern this build does not expand, a typo, an
+                // MCP tool whose server is down) is named.
+                //
+                // ⚑ Code review (19.2): computed over the DECLARED items, not
+                // over `combined`. An agent that declares only `exclude-tools`
+                // yields a catalogue-derived filter, so intersecting it with a
+                // skill's pattern item DROPPED that item before it could be
+                // disclosed — FR42-a's silence, one layer down. `BTreeSet`
+                // gives dedup + deterministic order in one step.
+                // ⚑ `activate_skill` is excluded: the driver force-adds it
+                // below when the catalogue omits it, so naming it "unavailable"
+                // would contradict the same turn's own offer.
+                let mut unmatched: std::collections::BTreeSet<&str> =
+                    std::collections::BTreeSet::new();
+                for item in activation
+                    .active_skills()
+                    .iter()
+                    .filter_map(|skill| skill.allowed_tools.as_ref())
+                    .flatten()
+                    .map(String::as_str)
+                {
+                    if item != "activate_skill"
+                        && !all_tool_names.iter().any(|tool_name| {
+                            crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(
+                                item, tool_name,
+                            )
+                        })
+                    {
+                        unmatched.insert(item);
+                    }
+                }
+                if let Some(agent) = agent_snapshot.as_ref() {
+                    if let Some(agent_allowed) = agent.allowed_tools.as_ref() {
+                        unmatched.extend(
+                            agent_allowed
+                                .iter()
+                                .map(String::as_str)
+                                .filter(|item| *item != "activate_skill")
+                                .filter(|item| {
+                                    !all_tool_names.iter().any(|tool_name| {
+                                        crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(
+                                            item, tool_name,
+                                        )
+                                    })
+                                }),
+                        );
+                    }
+                    if let Some(agent_excluded) = agent.exclude_tools.as_ref() {
+                        unmatched
+                            .extend(agent_excluded.iter().map(String::as_str).filter(|item| {
+                            crate::domain::services::skill_tool_pattern::parse_allowed_tool_pattern(
+                                item,
+                            )
+                            .is_none_or(|pattern| {
+                                pattern.specifier.is_some()
+                                    || !all_tool_names
+                                        .iter()
+                                        .any(|tool_name| tool_name == pattern.tool_name)
+                            })
+                        }));
+                    }
+                }
+                let unmatched: Vec<&str> = unmatched.into_iter().collect();
+                if !unmatched.is_empty() {
+                    let constrained_skill_names: Vec<&str> = activation
+                        .active_skills()
+                        .iter()
+                        .filter(|s| s.allowed_tools.is_some())
+                        .map(|s| s.name.as_str())
+                        .collect();
+                    let verb = if unmatched.len() == 1 { "is" } else { "are" };
+                    let message = if constrained_skill_names.is_empty() {
+                        format!(
+                            "Active tool restriction cannot be honoured in full: [{}] {} unavailable for this turn.",
+                            unmatched.join(", "),
+                            verb
+                        )
+                    } else {
+                        let noun = if constrained_skill_names.len() == 1 {
+                            "skill"
+                        } else {
+                            "skills"
+                        };
+                        format!(
+                            "Tool restriction from {} '{}' cannot be honoured in full: [{}] {} unavailable for this turn.",
+                            noun,
+                            constrained_skill_names.join(", "),
+                            unmatched.join(", "),
+                            verb
+                        )
+                    };
+                    // `Advisory`, NOT `Warning`: this discloses something about a
+                    // turn that is still valid. A `Warning` would make the TUI
+                    // consumer abort the very turn being described.
+                    domain_tx
+                        .send(AppEvent::SystemNotice {
+                            conversation_id: Some(conversation.id.clone()),
+                            level: crate::domain::models::NoticeLevel::Advisory,
+                            message,
+                        })
+                        .ok();
+                }
+                // Story 19.28 code review (P5) — ✅ owner-ruled 2026-09-13:
+                // FR42-a also covers a restriction this build honours only
+                // per-origin. When BOTH origins declare command specifiers for
+                // the same tool and share no declared item, the bare tool is
+                // still offered (each origin admits it on its own) but every
+                // command must satisfy BOTH specifier sets — so the conjunction
+                // admits nothing the operator can predict from either
+                // declaration. Before the agent axis honoured patterns, this
+                // configuration surfaced as the empty-`combined` Warning above;
+                // pattern-aware filters made `combined` non-empty and the
+                // conflict silent until the model tripped over a run of
+                // per-command denials.
+                //
+                // Equality is raw declared-item comparison — the same semantics
+                // `check_allowed_tools` and `SkillActivationSet::effective_allowed_tools`
+                // already use to compose multiple origins (A14: raw item
+                // intersection, fail-closed and precedented). It errs LOUD:
+                // `Bash(kube:*)` vs `Bash(kubectl:*)` is reported even though
+                // some commands satisfy both. That is the direction FR42-a's
+                // ⛔ "never treats an unmatchable restriction as no restriction"
+                // points, and it never suppresses a tool or a command.
+                if let Some(agent) = agent_snapshot.as_ref() {
+                    let agent_items: Vec<&str> = agent
+                        .allowed_tools
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(String::as_str)
+                        .collect();
+                    let skill_items: Vec<&str> = activation
+                        .active_skills()
+                        .iter()
+                        .filter_map(|skill| skill.allowed_tools.as_ref())
+                        .flatten()
+                        .map(String::as_str)
+                        .collect();
+                    let mut conflicts: Vec<String> = Vec::new();
+                    for tool_name in all_tool_names.iter().map(String::as_str) {
+                        let agent_specs = specifier_items_for(&agent_items, tool_name);
+                        let skill_specs = specifier_items_for(&skill_items, tool_name);
+                        if agent_specs.is_empty()
+                            || skill_specs.is_empty()
+                            || agent_specs.iter().any(|item| skill_specs.contains(item))
+                        {
+                            continue;
+                        }
+                        conflicts.push(format!(
+                            "{} (agent declares [{}], skill declares [{}])",
+                            tool_name,
+                            agent_specs.join(", "),
+                            skill_specs.join(", ")
+                        ));
+                    }
+                    if !conflicts.is_empty() {
+                        domain_tx
+                            .send(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation.id.clone()),
+                                level: crate::domain::models::NoticeLevel::Advisory,
+                                message: format!(
+                                    "Agent and skill command restrictions cannot both be honoured for {}. The tool stays offered, and every command must satisfy both restrictions — a command admitted by only one of them is denied.",
+                                    conflicts.join("; ")
+                                ),
+                            })
+                            .ok();
+                    }
+                }
             }
         }
         let tool_defs = match combined {
             Some(allowed) => {
                 let mut filtered: Vec<_> = all_tool_defs
                     .into_iter()
-                    .filter(|t| tool_survives_allowlist(&t.name, &allowed))
+                    .filter(|t| {
+                        tool_survives_allowlist(&t.name, &allowed)
+                            && !agent_excludes_by_name(agent_snapshot.as_ref(), &t.name)
+                    })
                     .collect();
-                if !filtered.iter().any(|t| t.name == "activate_skill") {
+                if !filtered.iter().any(|t| t.name == "activate_skill")
+                    && !agent_excludes_by_name(agent_snapshot.as_ref(), "activate_skill")
+                {
                     let act_tool = crate::domain::models::ToolDefinition {
                         name: "activate_skill".to_string(),
                         description: "Activate an Agent Skill to gain its procedural instructions and tool restrictions. Arg: name of the skill to activate (must match a discovered skill).".to_string(),
@@ -561,6 +759,7 @@ impl LocalTurnDriver {
             storage.clone(),
             conversation.clone(),
             activation_set,
+            agent_restriction,
             turn_cancel,
             usage_ledger.clone(),
             resolved,
@@ -569,6 +768,8 @@ impl LocalTurnDriver {
             parent_trace,
             session_id,
             TurnOrigin::Interactive,
+            context_tainted,
+            Some(skill_activator.clone()),
         ));
         *active_turn = Some(handle);
 
@@ -589,20 +790,77 @@ impl TurnDriver for LocalTurnDriver {
     }
 }
 
-/// Whether a tool survives an agent/skill allowlist, preserving the skill-chaining
-/// (`activate_skill`) carve-out. ADR-10-5 S3 extends this with a `task` delegation
-/// carve-out so an active agent with `allowed-tools` can still delegate to subagents.
+/// Whether a tool survives the merged agent/skill allowlist. The driver reads
+/// the union of the per-origin carve-outs; execution reads each origin's list.
 pub(crate) fn tool_survives_allowlist(
     name: &str,
     allowed: &std::collections::HashSet<String>,
 ) -> bool {
-    allowed.contains(name) || name == "activate_skill" || name == "task"
+    allowed.contains(name) || crate::domain::models::is_any_allowlist_carve_out(name)
+}
+
+/// Whether the active agent NAMES this tool in `exclude-tools`.
+///
+/// `tool_survives_allowlist`'s carve-out union exempts a tool from an allowlist
+/// it was never named in. ⛔ It must not resurrect a tool the operator
+/// explicitly excluded — `exclude-tools: [task]` offering `task` anyway was the
+/// offer-side half of the Story 19.28 code review's P2 fail-open, and the
+/// `activate_skill` back-fill below it was a second route to the same place.
+pub(crate) fn agent_excludes_by_name(
+    agent: Option<&crate::domain::models::ActiveAgent>,
+    tool_name: &str,
+) -> bool {
+    agent.is_some_and(|agent| {
+        agent.exclude_tools.as_ref().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| crate::domain::models::agent::excluded_item_names_tool(item, tool_name))
+        })
+    })
+}
+
+/// The specifier-bearing declared items in `items` that name `tool_name`.
+///
+/// Bare items (`Read`, `Bash`) are excluded: they carry no command specifier,
+/// so they cannot conflict with another origin's specifier — they simply admit
+/// the whole tool. Only `Tool(specifier)` items participate (Story 19.28 code
+/// review, P5).
+fn specifier_items_for<'a>(items: &[&'a str], tool_name: &str) -> Vec<&'a str> {
+    items
+        .iter()
+        .copied()
+        .filter(|item| {
+            crate::domain::services::skill_tool_pattern::parse_allowed_tool_pattern(item)
+                .is_some_and(|pattern| {
+                    pattern.tool_name == tool_name && pattern.specifier.is_some()
+                })
+        })
+        .collect()
+}
+
+/// Whether the context actually injected into this turn carries peer-origin
+/// material. The toggle is part of the predicate: `inject_assembled_context`
+/// intentionally returns early while OFF and retains the prior bundle for
+/// `/context show`; that cache must not taint a turn it never entered
+/// (code-review P7).
+fn context_taint_for_turn(state: &TuiState) -> bool {
+    state.context_injection_on
+        && state
+            .last_context_bundle
+            .as_ref()
+            .is_some_and(crate::domain::models::ContextBundle::has_peer_origin)
 }
 
 #[cfg(test)]
 mod turn_driver_allowlist_tests {
-    use super::tool_survives_allowlist;
     use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use super::{context_taint_for_turn, tool_survives_allowlist};
+    use crate::adapters::tui::state::TuiState;
+    use crate::domain::models::{
+        ContextBundle, ContextSource, PeerId, ProvenancedEntry, Relevance, RetrievalMethod,
+    };
 
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -623,6 +881,19 @@ mod turn_driver_allowlist_tests {
     }
 
     #[test]
+    fn offer_carve_outs_are_derived_from_every_origin_list() {
+        let allowed = HashSet::new();
+        for origin in [
+            crate::domain::models::ToolRestrictionOrigin::Skill,
+            crate::domain::models::ToolRestrictionOrigin::Agent,
+        ] {
+            for name in crate::domain::models::allowlist_carve_outs(origin) {
+                assert!(tool_survives_allowlist(name, &allowed));
+            }
+        }
+    }
+
+    #[test]
     fn non_carved_out_tool_filtered_out() {
         let allowed = set(&["Read"]);
         assert!(!tool_survives_allowlist("Bash", &allowed));
@@ -632,5 +903,60 @@ mod turn_driver_allowlist_tests {
     fn explicitly_allowed_tool_survives() {
         let allowed = set(&["Read", "Bash"]);
         assert!(tool_survives_allowlist("Bash", &allowed));
+    }
+
+    /// Story 19.2 AC2(a): a scalar `allowed-tools: Read Grep` restricts the
+    /// offer-time set to the honoured items plus BOTH carve-outs
+    /// (`activate_skill`, `task` — A6); `Bash` is filtered out. The allowed
+    /// set is derived through the real parser, so reverting the scalar branch
+    /// (A2) turns this RED too, not only the parse tests.
+    #[test]
+    fn scalar_allowlist_filters_offer_time_exactly() {
+        let parsed = crate::domain::services::frontmatter::extract_list_field(
+            "allowed-tools: Read Grep",
+            "allowed-tools",
+        )
+        .expect("scalar form must parse");
+        let allowed: HashSet<String> = parsed.into_iter().collect();
+        for offered in ["Read", "Grep", "activate_skill", "task"] {
+            assert!(
+                tool_survives_allowlist(offered, &allowed),
+                "{offered} must survive a scalar Read Grep allowlist"
+            );
+        }
+        assert!(
+            !tool_survives_allowlist("Bash", &allowed),
+            "Bash must be filtered out at offer time"
+        );
+    }
+
+    #[test]
+    fn context_toggle_off_ignores_a_stale_peer_bundle() {
+        // Code-review P7: `/context off` short-circuits assembly and leaves the
+        // prior cached bundle available for `/context show`; that old bundle
+        // must not prompt a destructive dispatch on the current, un-injected
+        // turn.
+        let peer = PeerId::from_public_key(&[7u8; 32]).expect("valid peer");
+        let bundle = ContextBundle {
+            entries: vec![ProvenancedEntry {
+                source: ContextSource::Peer(peer),
+                content: Arc::from("peer claim"),
+                timestamp: 0,
+                retrieval_method: RetrievalMethod::Structural,
+                relevance: Relevance::Unscored,
+            }],
+            diagnostics: Default::default(),
+        };
+        let mut state = TuiState::new(80, 24);
+        state.last_context_bundle = Some(bundle);
+        assert!(
+            context_taint_for_turn(&state),
+            "the injected peer bundle taints"
+        );
+        state.context_injection_on = false;
+        assert!(
+            !context_taint_for_turn(&state),
+            "the cached bundle is not the current turn's context while injection is off"
+        );
     }
 }
