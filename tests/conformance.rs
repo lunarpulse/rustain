@@ -881,6 +881,8 @@ fn the_removal_transparency_glyph_is_unique_among_shipped_kinds() {
         TransparencyKind::RecipientItemReceived,
         TransparencyKind::RecipientItemAcknowledged,
         TransparencyKind::RecipientItemRetracted,
+        TransparencyKind::RecipientItemReplied,
+        TransparencyKind::PeerReplyObserved,
         TransparencyKind::InteractionSurfaced,
         TransparencyKind::DigestFlushed,
         TransparencyKind::Unknown,
@@ -904,6 +906,60 @@ fn the_removal_transparency_glyph_is_unique_among_shipped_kinds() {
             .expect_err("an unknown kind is still refused");
     assert!(rejected.contains("item-removed"), "{rejected}");
     let _ = filter;
+}
+
+/// Story 19.18 `AC10(b)` — the two reply kinds' glyphs collide with nothing,
+/// each tested as the SUBJECT (a subject-pinned array proves only its own
+/// glyph), and both are filterable by the labels they render.
+#[test]
+fn the_reply_transparency_glyphs_are_unique_among_shipped_kinds() {
+    use rustain::domain::services::transparency::{TransparencyFilter, TransparencyKind};
+
+    let all = [
+        TransparencyKind::Accepted,
+        TransparencyKind::Rejected,
+        TransparencyKind::Dispatched,
+        TransparencyKind::AwaitingApproval,
+        TransparencyKind::StatusQueried,
+        TransparencyKind::Disclosed,
+        TransparencyKind::ConsentGranted,
+        TransparencyKind::ConsentRevoked,
+        TransparencyKind::RoomRoleGranted,
+        TransparencyKind::RoomRoleRevoked,
+        TransparencyKind::TransportAdmission,
+        TransparencyKind::PeerFrameAttempted,
+        TransparencyKind::PeerEquivocated,
+        TransparencyKind::RecipientItemReceived,
+        TransparencyKind::RecipientItemAcknowledged,
+        TransparencyKind::RecipientItemRemoved,
+        TransparencyKind::RecipientItemRetracted,
+        TransparencyKind::RecipientItemReplied,
+        TransparencyKind::PeerReplyObserved,
+        TransparencyKind::InteractionSurfaced,
+        TransparencyKind::DigestFlushed,
+        TransparencyKind::Unknown,
+    ];
+    for (subject, glyph, label) in [
+        (TransparencyKind::RecipientItemReplied, "↩", "item-replied"),
+        (TransparencyKind::PeerReplyObserved, "↪", "reply-observed"),
+    ] {
+        assert_eq!(subject.glyph(), glyph);
+        assert_eq!(subject.label(), label);
+        for other in all.iter().filter(|other| **other != subject) {
+            assert_ne!(
+                subject.glyph(),
+                other.glyph(),
+                "a shared glyph makes two decisions one row in a monochrome ledger: {} vs {}",
+                subject.label(),
+                other.label()
+            );
+        }
+        TransparencyFilter::parse(&format!("kind={label}"))
+            .expect("the new kind is accepted by the filter grammar");
+        let rejected = TransparencyFilter::parse("kind=item-answered")
+            .expect_err("an unknown kind is still refused");
+        assert!(rejected.contains(label), "{rejected}");
+    }
 }
 
 /// Story 19.16d AC5(a) — the retract kind's glyph collides with nothing, tested
@@ -943,6 +999,8 @@ fn the_retract_transparency_glyph_is_unique_among_shipped_kinds() {
         TransparencyKind::RecipientItemReceived,
         TransparencyKind::RecipientItemAcknowledged,
         TransparencyKind::RecipientItemRemoved,
+        TransparencyKind::RecipientItemReplied,
+        TransparencyKind::PeerReplyObserved,
         TransparencyKind::InteractionSurfaced,
         TransparencyKind::DigestFlushed,
         TransparencyKind::Unknown,

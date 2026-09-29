@@ -58,6 +58,26 @@ pub enum A2aAdmissionPolicy {
     Allow,
 }
 
+/// Story 19.18 `AC12` (`OQ1` = a, `A17`) — whether this host serves thread
+/// reads and follow-up references to **API-key** callers.
+///
+/// Off by default: an API-key-derived principal cannot exclude a co-holder of
+/// the same key, and nothing tells this host how many peers hold one
+/// (`verify` does not report which configured key matched). Setting
+/// `"credential-scoped"` is the operator asserting "each peer has its own
+/// key". A value this build cannot name fails CLOSED (treated as off, and the
+/// startup line says so). Loopback callers are unaffected.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThreadReads {
+    #[default]
+    Off,
+    CredentialScoped,
+    #[serde(other)]
+    Unknown,
+}
+
 /// The `server` block of `.rustain/a2a.json`.
 ///
 /// Parsed without the `a2a` feature so a misconfigured build fails loudly at
@@ -84,6 +104,10 @@ pub struct A2aServerConfig {
     pub advertised_host: Option<String>,
     #[serde(default)]
     pub tls: Option<A2aTlsConfig>,
+    /// Story 19.18 `AC12` — thread access for API-key callers. Absent means
+    /// [`ThreadReads::Off`].
+    #[serde(default, rename = "threadReads", alias = "thread_reads")]
+    pub thread_reads: Option<ThreadReads>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

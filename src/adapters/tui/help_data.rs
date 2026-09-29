@@ -257,6 +257,21 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {
+                    key: "/team reply <item-id> <text…>",
+                    description: "Answer an item that arrived on this host (daemon-attached session)",
+                    available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
+                    key: "/team thread <peer-id> <item-id>",
+                    description: "Read one thread on a peer's host (a2a feature)",
+                    available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
+                    key: "/team followup <peer-id> <turn-id> <text…>",
+                    description: "Answer a turn in a thread on a peer's host (a2a feature)",
+                    available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
                     key: "/team trust",
                     description: "List effective peer-consent grants (journaled vs TOML-implied)",
                     available: true,

@@ -152,7 +152,7 @@ impl CapabilityProvider for A2aProvider {
             client.clone(),
             endpoint.url().to_owned(),
         ));
-        let message = super::driver::build_message(&input);
+        let message = super::driver::build_message(&input, None);
         match runtime
             .delegate(spec, trust, &capability_id.tool, transport, message, cancel)
             .await

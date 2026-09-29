@@ -66,8 +66,8 @@ use crate::domain::models::{
 use crate::domain::ports::{InboundApprovalTicket, InboundPeerRuntime, InboundPeerTask};
 
 use super::admission::{
-    A2aAdmissionPolicy, AdmissionRequest, AdmissionVerdict, SubmitterTrust, admit,
-    admit_item_retract,
+    A2aAdmissionPolicy, AdmissionRequest, AdmissionVerdict, SubmitterTrust, ThreadReads, admit,
+    admit_item_retract, admit_thread_access,
 };
 use super::auth::{
     A2aServerAuth, A2aServerSecurity, API_KEY_HEADER, AuthOutcome, BindDecision, BindEvidence,
@@ -114,6 +114,22 @@ const ITEM_REMOVED: &str = "Item already removed by its recipient; nothing was m
 const RETRACT_NOTIFICATION_REFUSED: &str = "x-rustain-items/retract is not accepted as a \
      notification by this server's profile; send it with a string or number id so its result \
      can be returned";
+
+use super::MAX_THREAD_TURNS;
+
+/// Story 19.18 `AC4(d)` — the serialized-byte budget for one thread read.
+/// Derivation: the client reads at most 1 MiB (`client::MAX_CARD_BYTES`);
+/// 128 KiB of headroom covers the JSON-RPC envelope and the response's own
+/// keys. ⛔ Without a byte budget one oversized immutable turn would make
+/// every later read fail `BodyTooLarge` forever (`M27`).
+const MAX_THREAD_RESPONSE_BYTES: usize = 896 * 1024;
+
+/// Story 19.18 `P9` — a single turn whose serialized size exceeds this is
+/// served withheld, never dropped. Derivation: half the response budget, so
+/// the always-served root and the newest turn fit together; the worst legal
+/// turn — a 64 KiB body of control characters escaped at ~6× per byte
+/// (`\u0001`) — serializes to ~384 KiB plus its keys, below this bound.
+const MAX_THREAD_TURN_BYTES: usize = MAX_THREAD_RESPONSE_BYTES / 2;
 
 pub use super::auth::BindDecision as ServerBindDecision;
 
@@ -269,7 +285,7 @@ pub async fn serve(
         recipient_entries.last().map_or(0, |entry| entry.seq),
     ));
     let item_allocator = Arc::new(RecipientItemAllocator::from_addresses(
-        recipient_items.snapshot().keys().cloned(),
+        recipient_items.snapshot().items.keys().cloned(),
     ));
     let state = ServerState {
         registry: config.registry,
@@ -818,6 +834,11 @@ async fn dispatch(
             let principal = caller.key.pseudonymous_peer_id();
             items_retract(state, principal, caller.trust, &params, echo).await
         }
+        // Story 19.18 `AC4(a)` — the per-item thread read. A notification
+        // carries no response, so it answers `Null` and reads nothing, like
+        // the list (its refresh is a journal read nobody would receive).
+        super::ITEMS_THREAD_METHOD if notification => Ok(serde_json::Value::Null),
+        super::ITEMS_THREAD_METHOD => items_thread(state, caller, &params, echo).await,
         _ => Err(JsonRpcErrorResponse::new(
             echo,
             CODE_METHOD_NOT_FOUND,
@@ -870,6 +891,7 @@ async fn message_send(
         ));
     }
     let peer_id = caller.key.pseudonymous_peer_id();
+    let in_reply_to = follow_up_reference(state, caller, params, &echo).await?;
 
     // ── Decision core. Effect-free: no lock, no node, no journal write. ──
     let verdict = admit(
@@ -900,17 +922,84 @@ async fn message_send(
                 .await;
             Ok(rejected_task_json(&task_id, &reason, &state.signer))
         }
-        AdmissionVerdict::Accept => {
-            start_task(state, caller, task_id, message, message_type, false)
-                .await
-                .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason))
-        }
-        AdmissionVerdict::AcceptPendingApproval => {
-            start_task(state, caller, task_id, message, message_type, true)
-                .await
-                .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason))
-        }
+        AdmissionVerdict::Accept => start_task(
+            state,
+            caller,
+            task_id,
+            message,
+            message_type,
+            in_reply_to,
+            false,
+        )
+        .await
+        .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason)),
+        AdmissionVerdict::AcceptPendingApproval => start_task(
+            state,
+            caller,
+            task_id,
+            message,
+            message_type,
+            in_reply_to,
+            true,
+        )
+        .await
+        .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason)),
     }
+}
+
+/// Story 19.18 `AC5(a)(b)` — read and validate the follow-up carrier
+/// ([`super::REPLY_TO_METADATA_KEY`]) **before** admission's side effects.
+///
+/// - Absent (or `null`) ⇒ `None`: an ordinary root item, unchanged.
+/// - Not a non-empty string within `MAX_PEER_ID_BYTES` ⇒ `-32602`, nothing
+///   written (the invalid-params precedent).
+/// - Present ⇒ the thread-access gate first (`AC12`: an API-key caller with
+///   thread access off gets `-32040` and nothing is written), then the
+///   reference must resolve inside the CALLER's principal to an item or a
+///   reply turn on this host. Lookup first, refresh only on a miss. A miss is
+///   ONE error — `CODE_TASK_NOT_FOUND` with `ITEM_NOT_FOUND` — for not-yours
+///   and never-existed alike (R21), and ⛔ mints nothing.
+async fn follow_up_reference(
+    state: &ServerState,
+    caller: &Caller,
+    params: &serde_json::Value,
+    echo: &serde_json::Value,
+) -> Result<Option<String>, JsonRpcErrorResponse> {
+    let reference = match params.pointer(&format!(
+        "/message/metadata/{}",
+        super::REPLY_TO_METADATA_KEY
+    )) {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(value) => value
+            .as_str()
+            .filter(|reference| {
+                !reference.is_empty()
+                    && reference.len() <= crate::domain::services::transparency::MAX_PEER_ID_BYTES
+            })
+            .ok_or_else(|| {
+                JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params")
+            })?,
+    };
+    admit_thread_access(caller.trust, state.security.thread_reads).map_err(|reason| {
+        JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason)
+    })?;
+    let principal =
+        crate::domain::models::ItemPrincipal::A2aPseudonym(caller.key.pseudonymous_peer_id());
+    if !state
+        .recipient_items
+        .resolves_in_principal(&principal, reference)
+        && (!refresh_recipient_items(state).await
+            || !state
+                .recipient_items
+                .resolves_in_principal(&principal, reference))
+    {
+        return Err(JsonRpcErrorResponse::new(
+            echo.clone(),
+            CODE_TASK_NOT_FOUND,
+            ITEM_NOT_FOUND,
+        ));
+    }
+    Ok(Some(reference.to_owned()))
 }
 
 /// Admit a task: register the store entry, then either run it or park it on a
@@ -928,6 +1017,7 @@ async fn start_task(
     task_id: String,
     text: String,
     message_type: SemanticMessageType,
+    in_reply_to: Option<String>,
     needs_approval: bool,
 ) -> Result<serde_json::Value, String> {
     let runtime = state
@@ -962,6 +1052,7 @@ async fn start_task(
             text,
             peer_id,
             message_type,
+            in_reply_to,
             needs_approval,
         )
         .await;
@@ -985,6 +1076,7 @@ async fn setup_task(
     text: String,
     peer_id: PeerId,
     message_type: SemanticMessageType,
+    in_reply_to: Option<String>,
     needs_approval: bool,
 ) -> Result<serde_json::Value, String> {
     if needs_approval || runtime.enforces_sender_consent() {
@@ -1037,6 +1129,7 @@ async fn setup_task(
                 text,
                 peer_id,
                 message_type,
+                in_reply_to,
                 pending,
                 ticket,
             ));
@@ -1092,6 +1185,7 @@ async fn setup_task(
         text,
         peer_id.clone(),
         message_type,
+        in_reply_to,
         None,
     )
     .await?;
@@ -1191,6 +1285,7 @@ async fn watch_pending_approval(
     text: String,
     peer_id: PeerId,
     message_type: SemanticMessageType,
+    in_reply_to: Option<String>,
     pending: PendingTaskRecord,
     ticket: InboundApprovalTicket,
 ) {
@@ -1237,6 +1332,7 @@ async fn watch_pending_approval(
         text,
         peer_id,
         message_type,
+        in_reply_to,
         Some(pending),
     )
     .await;
@@ -1251,6 +1347,7 @@ async fn launch(
     text: String,
     peer_id: PeerId,
     message_type: SemanticMessageType,
+    in_reply_to: Option<String>,
     pending: Option<PendingTaskRecord>,
 ) -> Result<(), String> {
     let address = match state
@@ -1273,6 +1370,9 @@ async fn launch(
         task: task.id.clone(),
         alias: None,
         content: text.clone(),
+        // Story 19.18 `AC5(c)` — the reference `message_send` already
+        // resolved inside this caller's principal, stored raw.
+        in_reply_to,
     };
     // The fold lock (19.16b review): the durable append and the in-place
     // `apply` must be atomic against the read-side refresh's load +
@@ -1571,6 +1671,13 @@ async fn items_list(
             if let Some(retracted_at_ms) = item.retracted_at_ms {
                 row["retractedAtMs"] = serde_json::Value::from(retracted_at_ms);
             }
+            // Story 19.18 `AC4(f)` (`P7`/`Q4`) — the board's reply signal, a
+            // flat sibling scalar emitted only when ≥ 1: the wire stays
+            // three-state and a reply-less row is byte-identical to 19.16d's.
+            let replies = state.recipient_items.reply_count(&item.address);
+            if replies > 0 {
+                row["replyCount"] = serde_json::Value::from(replies);
+            }
             row
         })
         .collect::<Vec<_>>();
@@ -1597,6 +1704,191 @@ async fn items_list(
 /// about who acted; ⛔ no second code path computes it.
 fn principal_collapsed(trust: SubmitterTrust) -> bool {
     matches!(trust, SubmitterTrust::Loopback)
+}
+
+// ── x-rustain-items/thread ──────────────────────────────────────────────────
+
+/// Serve one thread of the calling principal's (Story 19.18, `AC4`).
+///
+/// # What it guarantees, in order
+///
+/// 1. **`itemId` is the only parameter**, hand-read — unknown fields are
+///    ignored (`AD-1826`); empty or oversized ⇒ `-32602`.
+/// 2. **The thread-access gate first** (`AC12`): an API-key caller with
+///    thread access off is refused `-32040` before any fold or lookup, so
+///    the refusal leaks nothing about the id (`M44`).
+/// 3. **The fold is refreshed unconditionally**, as `items_list` does: reply
+///    turns are written on the DAEMON rail, which never applies this
+///    projection in place, so a lookup-first read would serve a thread
+///    without its newest answer. An unchanged journal costs one O(1) probe.
+/// 4. **Principal first** (`A6`, R21): the join indexes only this caller's
+///    items and turns; not-yours and never-existed leave through ONE site
+///    with ONE message. A removed root is a tombstone turn, not not-found.
+/// 5. **Side-effect free** (`AC4(e)`): ⛔ nothing here writes.
+/// 6. **Bounded by count and bytes, newest wins** (`P9`, `Q8`): the root is
+///    always served (withheld if it alone is over the per-turn bound), then
+///    the newest turns that fit; `omittedBefore` counts the non-root turns
+///    not served.
+/// 7. **Reply content passes the disclosure scrub** every served task payload
+///    passes; a body that fails it is served `contentWithheld`, no content.
+///
+/// ⛔ Private, reachable only through `dispatch` (Rule 2).
+async fn items_thread(
+    state: &ServerState,
+    caller: &Caller,
+    params: &serde_json::Value,
+    echo: serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcErrorResponse> {
+    let item_id = params
+        .get("itemId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| {
+            !id.is_empty() && id.len() <= crate::domain::services::transparency::MAX_PEER_ID_BYTES
+        })
+        .ok_or_else(|| {
+            JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params")
+        })?;
+    admit_thread_access(caller.trust, state.security.thread_reads).map_err(|reason| {
+        JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason)
+    })?;
+    refresh_recipient_items(state).await;
+    let principal =
+        crate::domain::models::ItemPrincipal::A2aPseudonym(caller.key.pseudonymous_peer_id());
+    let Some((root, turns)) = state.recipient_items.thread(&principal, item_id) else {
+        return Err(JsonRpcErrorResponse::new(
+            echo,
+            CODE_TASK_NOT_FOUND,
+            ITEM_NOT_FOUND,
+        ));
+    };
+    let (served, omitted_before) = bounded_thread(state, &root, &turns);
+    Ok(serde_json::json!({
+        "root": root,
+        "turns": served,
+        "omittedBefore": omitted_before,
+        "principalCollapsed": principal_collapsed(caller.trust),
+    }))
+}
+
+/// Serialize one thread under the count and byte budgets, newest turns
+/// winning (`P9`). Returns the served turns in thread order and how many
+/// non-root turns were left out before them.
+fn bounded_thread(
+    state: &ServerState,
+    root: &str,
+    turns: &[crate::adapters::policy::recipient_item::ThreadTurn],
+) -> (Vec<serde_json::Value>, usize) {
+    let serialized = |ordinal: usize, turn| {
+        let mut value = thread_turn_json(state, ordinal, turn);
+        if serde_json::to_vec(&value).map_or(usize::MAX, |bytes| bytes.len())
+            > MAX_THREAD_TURN_BYTES
+        {
+            withhold_turn_content(&mut value);
+        }
+        let bytes = serde_json::to_vec(&value).map_or(usize::MAX, |bytes| bytes.len());
+        (value, bytes)
+    };
+    // The dense ordinal is the turn's position in the WHOLE thread, so an
+    // omitted prefix is visible as a gap. ⛔ `journal_order` never reaches
+    // the wire (19.16b `AC1(f)`).
+    let root_index = turns.iter().position(|turn| turn.id() == root);
+    let (root_json, mut spent) = match root_index {
+        Some(index) => {
+            let (value, bytes) = serialized(index, &turns[index]);
+            (Some(value), bytes)
+        }
+        None => (None, 0),
+    };
+    let others: Vec<usize> = (0..turns.len())
+        .filter(|index| Some(*index) != root_index)
+        .collect();
+    let mut newest = Vec::new();
+    for &index in others.iter().rev() {
+        if newest.len() + 1 >= MAX_THREAD_TURNS {
+            break;
+        }
+        let (value, bytes) = serialized(index, &turns[index]);
+        if spent.saturating_add(bytes) > MAX_THREAD_RESPONSE_BYTES {
+            break;
+        }
+        spent += bytes;
+        newest.push((index, value));
+    }
+    let omitted_before = others.len() - newest.len();
+    let mut served: Vec<(usize, serde_json::Value)> = newest;
+    if let (Some(index), Some(value)) = (root_index, root_json) {
+        served.push((index, value));
+    }
+    served.sort_by_key(|(index, _)| *index);
+    (
+        served.into_iter().map(|(_, value)| value).collect(),
+        omitted_before,
+    )
+}
+
+/// One served turn (`AC4(c)`). Items carry `task` (the asker's `you` check
+/// matches on it), their three-state wire name and — unless removed — their
+/// content; reply turns carry the recorded authorship and scrubbed content.
+fn thread_turn_json(
+    state: &ServerState,
+    ordinal: usize,
+    turn: &crate::adapters::policy::recipient_item::ThreadTurn,
+) -> serde_json::Value {
+    use crate::adapters::policy::recipient_item::ThreadTurn;
+    use crate::domain::models::RecipientItemState;
+
+    match turn {
+        ThreadTurn::Item(item) => {
+            let mut value = serde_json::json!({
+                "turnId": item.address.item().as_str(),
+                "kind": "item",
+                "task": item.task,
+                "state": item.state.wire_name(),
+                "ordinal": ordinal,
+            });
+            if let Some(parent) = &item.in_reply_to {
+                value["inReplyTo"] = serde_json::Value::from(parent.as_str());
+            }
+            match &item.state {
+                RecipientItemState::Received { content }
+                | RecipientItemState::Acknowledged { content } => {
+                    value["content"] = serde_json::Value::from(content.as_str());
+                }
+                RecipientItemState::Removed { .. } => {}
+            }
+            if let Some(retracted_at_ms) = item.retracted_at_ms {
+                value["retractedAtMs"] = serde_json::Value::from(retracted_at_ms);
+            }
+            value
+        }
+        ThreadTurn::Reply(reply) => {
+            let mut value = serde_json::json!({
+                "turnId": reply.address.turn().as_str(),
+                "kind": "reply",
+                "inReplyTo": reply.answers.as_str(),
+                "authorship": reply.authorship.wire_name(),
+                "ordinal": ordinal,
+            });
+            if super::projection::withholds(
+                &reply.content,
+                state.workspace.as_path(),
+                &state.scrub_fragments,
+            ) {
+                withhold_turn_content(&mut value);
+            } else {
+                value["content"] = serde_json::Value::from(reply.content.as_str());
+            }
+            value
+        }
+    }
+}
+
+/// Replace a turn's body with the withheld marker — ⛔ never drop the turn.
+fn withhold_turn_content(value: &mut serde_json::Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.remove("content");
+        object.insert("contentWithheld".to_owned(), serde_json::Value::Bool(true));
+    }
 }
 
 // ── x-rustain-items/retract ─────────────────────────────────────────────────
@@ -2031,6 +2323,45 @@ fn retract_ownership_disclosures(auth: Option<&A2aServerAuth>) -> Vec<&'static s
     }
 }
 
+/// Story 19.18 `AC12(c)` (`P11(iii)`) — the thread posture, stated at
+/// startup whenever API keys are configured: off by default, or on with the
+/// same co-holder caveat the retract disclosure carries. ⛔ A legibility
+/// statement, never a security claim.
+const THREAD_ACCESS_OFF_DISCLOSURE: &str = "A2A threads: thread reads and follow-up references \
+     are refused for API-key callers on this host (server.threadReads is off, the default) — an \
+     API-key principal cannot exclude another holder of the same key. Loopback callers are \
+     served.";
+
+const THREAD_ACCESS_CREDENTIAL_SCOPED_DISCLOSURE: &str = "A2A threads: thread reads and \
+     follow-up references are served to API-key callers (server.threadReads = \
+     \"credential-scoped\"): every caller presenting a configured key is one principal, so where \
+     peers share a key any of them can read and add to a thread another began. This setting \
+     asserts each peer has its own key.";
+
+/// Story 19.18 `AC12(a)` — an unrecognised `threadReads` value fails closed.
+const THREAD_ACCESS_UNKNOWN_WARNING: &str = "A2A threads: server.threadReads names a value this \
+     build does not recognise; thread access for API-key callers is treated as off.";
+
+/// The startup lines for the thread posture. Pure, like
+/// [`retract_ownership_disclosures`], so the mapping is provable without a
+/// socket.
+fn thread_access_disclosures(
+    auth: Option<&A2aServerAuth>,
+    thread_reads: ThreadReads,
+) -> Vec<&'static str> {
+    let mut lines = Vec::new();
+    if thread_reads == ThreadReads::Unknown {
+        lines.push(THREAD_ACCESS_UNKNOWN_WARNING);
+    }
+    if auth.is_some() {
+        lines.push(match thread_reads {
+            ThreadReads::CredentialScoped => THREAD_ACCESS_CREDENTIAL_SCOPED_DISCLOSURE,
+            ThreadReads::Off | ThreadReads::Unknown => THREAD_ACCESS_OFF_DISCLOSURE,
+        });
+    }
+    lines
+}
+
 async fn run_inner(
     addr: String,
     app_config: AppConfig,
@@ -2089,6 +2420,13 @@ async fn run_inner(
     for line in retract_ownership_disclosures(auth.as_ref()) {
         tracing::warn!("{line}");
     }
+    let thread_reads = server_config
+        .as_ref()
+        .and_then(|config| config.thread_reads)
+        .unwrap_or_default();
+    for line in thread_access_disclosures(auth.as_ref(), thread_reads) {
+        tracing::warn!("{line}");
+    }
     let tls = match server_config
         .as_ref()
         .and_then(|config| config.tls.as_ref())
@@ -2103,7 +2441,11 @@ async fn run_inner(
         }
         None => None,
     };
-    let security = A2aServerSecurity { tls, auth };
+    let security = A2aServerSecurity {
+        tls,
+        auth,
+        thread_reads,
+    };
 
     let signer =
         IdentityKeyStore::new(crate::infrastructure::paths::data_dir()?).load_or_generate()?;
@@ -2352,6 +2694,50 @@ mod tests {
     fn the_collapse_disclosure_is_present_on_loopback_and_absent_behind_a_key() {
         assert!(principal_collapsed(SubmitterTrust::Loopback));
         assert!(!principal_collapsed(SubmitterTrust::ApiKey));
+    }
+
+    /// Story 19.18 `AC12(c)`/`K21(4)` — the thread posture lines: an unknown
+    /// value always warns and is treated as off; with keys configured the
+    /// posture is stated either way.
+    #[test]
+    fn the_thread_access_disclosure_follows_the_configured_posture() {
+        let keys = A2aServerAuth::ApiKey {
+            keys: vec!["key-0".into()],
+        };
+        assert!(thread_access_disclosures(None, ThreadReads::Off).is_empty());
+        assert_eq!(
+            thread_access_disclosures(None, ThreadReads::Unknown),
+            vec![THREAD_ACCESS_UNKNOWN_WARNING]
+        );
+        assert_eq!(
+            thread_access_disclosures(Some(&keys), ThreadReads::Off),
+            vec![THREAD_ACCESS_OFF_DISCLOSURE]
+        );
+        assert_eq!(
+            thread_access_disclosures(Some(&keys), ThreadReads::Unknown),
+            vec![THREAD_ACCESS_UNKNOWN_WARNING, THREAD_ACCESS_OFF_DISCLOSURE]
+        );
+        assert_eq!(
+            thread_access_disclosures(Some(&keys), ThreadReads::CredentialScoped),
+            vec![THREAD_ACCESS_CREDENTIAL_SCOPED_DISCLOSURE]
+        );
+        for line in [
+            THREAD_ACCESS_OFF_DISCLOSURE,
+            THREAD_ACCESS_CREDENTIAL_SCOPED_DISCLOSURE,
+            THREAD_ACCESS_UNKNOWN_WARNING,
+        ] {
+            let lower = line.to_ascii_lowercase();
+            for banned in [
+                "authenticated",
+                "tamper",
+                "signed",
+                "audit",
+                "proof",
+                "evidence",
+            ] {
+                assert!(!lower.contains(banned), "{banned:?} in {line:?}");
+            }
+        }
     }
 
     /// Story 19.16d `Q1` + owner answer 5 — the startup posture lines: none

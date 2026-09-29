@@ -232,8 +232,9 @@ pub use plan::{
     PlanTaskStatus, TaskResult,
 };
 pub use recipient_item::{
-    ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, RecipientItemAllocator,
-    RecipientItemState, RecipientItemView, RetractOutcome,
+    ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, MAX_REPLY_BYTES, RecipientItemAllocator,
+    RecipientItemState, RecipientItemView, ReplyAuthorship, ReplyTurnId, ReplyTurnView,
+    RetractOutcome, TurnAddress, claim_reply_turn_id, fresh_reply_turn_candidate,
 };
 pub use redacted_url::RedactedUrl;
 #[allow(unused_imports)]

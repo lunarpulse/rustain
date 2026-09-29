@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use super::PeerId;
+use super::{AgentId, PeerId};
 
 /// Recipient-minted opaque item identifier.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -188,6 +188,11 @@ pub struct RecipientItemView {
     /// remove-then-retract never carries one — observably different, which is
     /// honest.
     pub retracted_at_ms: Option<i64>,
+    /// Story 19.18 `A5` — the id this item answers, when it arrived as a
+    /// follow-up (`x-rustain-in-reply-to`), stored raw (`AD-1824`). A
+    /// creation-time attribute of THIS item, ⛔ never a transition on the
+    /// item it names (`AD-1827`).
+    pub in_reply_to: Option<String>,
 }
 
 /// What the retract predicate says about one item. The retract is its own
@@ -294,6 +299,144 @@ impl RecipientItemAllocator {
     }
 }
 
+/// Story 19.18 `P14` — a reply turn's host-minted id (`rr_…`). A distinct type
+/// from [`ItemId`], so an item lookup can never be handed a reply-turn id: the
+/// item-only [`ItemAddress`] and [`ItemId::from_replay`] stay item-only.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReplyTurnId(String);
+
+impl ReplyTurnId {
+    /// Reconstruct an identifier already present in the durable journal.
+    #[must_use]
+    pub fn from_replay(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Story 19.18 — a reply turn's complete address. The principal is the
+/// **answered item's** (the thread lives under the asker's principal, `A1`),
+/// so the served thread read filters it exactly like an item.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TurnAddress {
+    principal: ItemPrincipal,
+    turn: ReplyTurnId,
+}
+
+impl TurnAddress {
+    /// A turn answering `answered`: it inherits that item's principal. There
+    /// is intentionally no constructor taking a free-standing principal.
+    #[must_use]
+    pub fn answering(answered: &ItemAddress, turn: ReplyTurnId) -> Self {
+        Self {
+            principal: answered.principal.clone(),
+            turn,
+        }
+    }
+
+    #[must_use]
+    pub fn principal(&self) -> &ItemPrincipal {
+        &self.principal
+    }
+
+    #[must_use]
+    pub fn turn(&self) -> &ReplyTurnId {
+        &self.turn
+    }
+}
+
+/// Story 19.18 `A14` — who authored a reply turn: a carried value recorded
+/// with the act, ⛔ never inferred from response mode or text. A value
+/// written by a newer build folds to [`Self::Unknown`], which renders no mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplyAuthorship {
+    HumanWritten,
+    AgentComposed,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl ReplyAuthorship {
+    /// The wire token the thread read serves.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::HumanWritten => "human-written",
+            Self::AgentComposed => "agent-composed",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parse a served token; anything unnamed is [`Self::Unknown`].
+    #[must_use]
+    pub fn from_wire(token: &str) -> Self {
+        match token {
+            "human-written" => Self::HumanWritten,
+            "agent-composed" => Self::AgentComposed,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// One reply turn, reconstructed solely from its durable
+/// `RecipientItemReplied` record. ⛔ No act changes it after the append: the
+/// reply turn's act set is closed (`AD-1829`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyTurnView {
+    pub address: TurnAddress,
+    /// The item this turn answers — always an item, never another turn.
+    pub answers: ItemId,
+    pub content: String,
+    pub authorship: ReplyAuthorship,
+    /// The peer-response node whose card this turn resolved, when it came
+    /// through a draft resolution (`Q1`). At most one turn per node.
+    pub via_node: Option<AgentId>,
+    /// Same scheme as [`RecipientItemView::journal_order`], and drawn from
+    /// the SAME counter, so items and turns share one order (`Q3`).
+    pub journal_order: u64,
+}
+
+/// Story 19.18 `AC2(b)` — the largest reply turn this host records.
+/// Derivation: never larger than an inbound item (`MAX_TASK_TEXT_BYTES`,
+/// 64 KiB, `a2a/admission.rs` — a compile-time assertion there holds the two
+/// together), so a thread's worst turn is bounded by the same number as its
+/// root. The asker enforces it again on read (`P12`).
+pub const MAX_REPLY_BYTES: usize = 64 * 1024;
+
+/// A fresh reply-turn candidate: a distinct `rr_` prefix, so it can never
+/// equal an `ri_` item id by construction, and 32 nanoid characters so it is
+/// unguessable and independent of every sender-supplied value (19.16 `A5`).
+#[must_use]
+pub fn fresh_reply_turn_candidate() -> String {
+    format!("rr_{}", nanoid::nanoid!(32))
+}
+
+/// Claim a reply-turn id. A candidate already present in durable history is
+/// **refused, never re-minted** — the `ItemIdCollision` rule: a caller must
+/// never receive a different id than the one paired with its durable record.
+/// Pure, with the candidate injected, so a collision is forced
+/// deterministically in a test.
+///
+/// # Errors
+///
+/// [`ItemIdCollision`] when `taken` reports the candidate as already present.
+pub fn claim_reply_turn_id(
+    candidate: String,
+    taken: impl Fn(&str) -> bool,
+) -> Result<ReplyTurnId, ItemIdCollision> {
+    if taken(&candidate) {
+        return Err(ItemIdCollision);
+    }
+    Ok(ReplyTurnId(candidate))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +470,19 @@ mod tests {
                 .await,
             Err(ItemIdCollision)
         );
+    }
+
+    #[test]
+    fn a_reply_turn_id_collision_is_refused_without_reminting() {
+        let taken = |id: &str| id == "rr_fixed";
+        assert_eq!(
+            claim_reply_turn_id("rr_fixed".to_owned(), taken),
+            Err(ItemIdCollision)
+        );
+        assert_eq!(
+            claim_reply_turn_id("rr_other".to_owned(), taken),
+            Ok(ReplyTurnId::from_replay("rr_other"))
+        );
+        assert!(fresh_reply_turn_candidate().starts_with("rr_"));
     }
 }

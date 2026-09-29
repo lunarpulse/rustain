@@ -211,7 +211,7 @@ mod trust_anchor_tests {
     /// The typed refusal cause delivered to the command renderer.
     async fn refusal(egress: &A2aEgress, alias: &str) -> String {
         let RecipientOutcome::Unreachable { cause: Some(cause) } =
-            deliver_text(egress.runtime(), alias, "hello").await
+            deliver_text(egress.runtime(), alias, "hello", None).await
         else {
             panic!("an anchored refusal must be an unreachable outcome with a cause");
         };

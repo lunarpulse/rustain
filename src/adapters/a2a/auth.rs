@@ -182,6 +182,9 @@ impl std::fmt::Debug for A2aTlsMaterial {
 pub struct A2aServerSecurity {
     pub tls: Option<A2aTlsMaterial>,
     pub auth: Option<A2aServerAuth>,
+    /// Story 19.18 `AC12` — thread access for API-key callers, carried with
+    /// the credential posture it qualifies. Defaults to off.
+    pub thread_reads: super::config::ThreadReads,
 }
 
 impl A2aServerSecurity {
@@ -423,6 +426,7 @@ mod tests {
         let security = A2aServerSecurity {
             tls: None,
             auth: Some(auth),
+            ..A2aServerSecurity::default()
         };
         let rendered = format!("{security:?}");
         assert!(!rendered.contains("s3cret-key"), "{rendered}");

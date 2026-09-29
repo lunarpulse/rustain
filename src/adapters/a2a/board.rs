@@ -140,6 +140,10 @@ pub struct BoardItem {
     /// When the sender's retract was recorded on the recipient's host
     /// (Story 19.16d) — the first sender-side reader of `retractedAtMs`.
     pub retracted_at_ms: Option<i64>,
+    /// How many reply turns the recipient recorded for this item (Story
+    /// 19.18 `AC4(f)`), `None` while it has none — the board's pull-only
+    /// reply signal. ⛔ Never an outcome token: the wire stays three-state.
+    pub reply_count: Option<u64>,
 }
 
 /// An item's state word, from the closed set the read verb serves. ⛔ Matched,
@@ -498,6 +502,11 @@ fn parse_peer_items(
                 retracted_at_ms: item
                     .get("retractedAtMs")
                     .and_then(serde_json::Value::as_i64),
+                // Story 19.18: absent while the item has no reply turn.
+                reply_count: item
+                    .get("replyCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|count| *count > 0),
             })
         })
         .collect();
@@ -514,7 +523,7 @@ pub fn mark_clock(retracted_at_ms: i64) -> String {
 }
 
 /// One picker row, in the ratified grammar (`DESIGN.md` `board-item-row`):
-/// `    item {id} · arrival {n} · task {task} · {state}[ · [retracted HH:MM]]`.
+/// `    item {id} · arrival {n} · task {task} · {state}[ · [retracted HH:MM]][ · {n} replies]`.
 ///
 /// 🔴 The single sanitize point for peer text on this path (`AD-1824`,
 /// Story 19.16f `F12`): the in-chat block now keeps `'\n'` as structure, so an
@@ -540,6 +549,10 @@ pub fn render_item_row(item: &BoardItem) -> String {
     row.push_str(item.state.word());
     if let Some(ms) = item.retracted_at_ms {
         row.push_str(&format!(" · [retracted {}]", mark_clock(ms)));
+    }
+    // Story 19.18 `P5(g)` — the ratified suffix, pulled with the board.
+    if let Some(count) = item.reply_count {
+        row.push_str(&format!(" · {count} replies"));
     }
     row
 }
@@ -1055,7 +1068,28 @@ mod tests {
             state: BoardItemState::Received,
             ordinal,
             retracted_at_ms: None,
+            reply_count: None,
         }
+    }
+
+    /// Story 19.18 `K18` (render half) — a replied item carries the ratified
+    /// suffix; a reply-less item renders byte-identically to 19.16f.
+    ///
+    /// `M36` → RED: omit `replyCount` — the suffix never renders.
+    #[test]
+    fn a_replied_item_row_names_its_reply_count() {
+        let mut replied = item("ri_q", 0);
+        let plain = render_item_row(&replied);
+        assert!(!plain.contains("replies"), "{plain}");
+        replied.reply_count = parse_peer_items(
+            &serde_json::json!({ "items": [{
+                "itemId": "ri_q", "task": "task-7f2a", "state": "received",
+                "ordinal": 0, "replyCount": 1,
+            }]}),
+            None,
+        )[0]
+        .reply_count;
+        assert_eq!(render_item_row(&replied), format!("{plain} · 1 replies"));
     }
 
     /// Story 19.16f AC1(a) — the item id is REACHABLE: the board carries a

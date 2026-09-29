@@ -545,81 +545,76 @@ pub async fn team_command(
             }
         }
         TeamCommandArgs::Send { recipients, text } => {
-            use crate::adapters::tui::handlers::team_command::show_team_send;
-
-            state.team_send_next_id += 1;
-            let block_id = format!("team-send-{}", state.team_send_next_id);
+            start_team_send(state, conversation_id, app_state, recipients, text, None);
+        }
+        // Story 19.18 `AC7` — a follow-up IS a 19.17 delivery, N = 1, with the
+        // reply-to carrier: the same validation, block, settle handler, rows
+        // and outcome words. ⛔ No second send path (`M21`).
+        TeamCommandArgs::Followup {
+            peer,
+            turn_id,
+            text,
+        } => {
+            start_team_send(
+                state,
+                conversation_id,
+                app_state,
+                vec![peer],
+                text,
+                Some(turn_id),
+            );
+        }
+        // Story 19.18 `AC6` — rail 3 SERVES the thread read: the only rail
+        // holding this session's own A2A egress. Spawned, never awaited
+        // inline; the answer arrives as `TeamThreadReady` and replaces the
+        // stable `team-thread` block in place.
+        TeamCommandArgs::Thread { peer, item_id } => {
+            use crate::adapters::tui::handlers::team_command::{
+                TEAM_THREAD_READING, show_team_thread,
+            };
             #[cfg(feature = "a2a")]
             {
-                use crate::adapters::tui::handlers::team_command::{
-                    TeamSendRow, render_team_send_rows,
-                };
                 let Some(runtime) = app_state.a2a_send.clone() else {
-                    show_team_send(
+                    show_team_thread(
                         state,
-                        &block_id,
-                        "· A2A send runtime is not configured for this session.".to_owned(),
+                        "· no A2A send runtime is configured for this session, so there is no \
+                         peer to read a thread from."
+                            .to_owned(),
                     );
                     return;
                 };
-                let known = runtime.known_peer_ids();
-                let unknown: Vec<_> = recipients
-                    .iter()
-                    .filter(|peer| !known.contains(peer))
-                    .cloned()
-                    .collect();
-                if !unknown.is_empty() {
-                    let refusal = crate::adapters::a2a::send::SendError::UnknownPeer {
-                        peer: unknown.join(", "),
-                        known,
-                    }
-                    .to_string();
-                    show_team_send(state, &block_id, refusal);
-                    return;
-                }
-                let rows: Vec<_> = recipients
-                    .iter()
-                    .map(|alias| TeamSendRow {
-                        alias: alias.clone(),
-                        outcome: None,
-                    })
-                    .collect();
-                show_team_send(state, &block_id, render_team_send_rows(&rows));
-                state.team_send_blocks.insert(block_id.clone(), rows);
-                let event_bus = app_state.event_bus.clone();
-                let conversation_id = conversation_id.to_owned();
-                let cancel = app_state.session_cancel.child_token();
-                tokio::spawn(async move {
-                    crate::adapters::a2a::send::deliver_to_recipients(
-                        &runtime,
-                        &recipients,
-                        &text,
-                        cancel.clone(),
-                        |index, outcome| {
-                            if !cancel.is_cancelled() {
-                                let _ = event_bus.emit_domain(
-                                    crate::domain::events::AppEvent::TeamSendSettled {
-                                        conversation_id: conversation_id.clone(),
-                                        block_id: block_id.clone(),
-                                        index,
-                                        outcome,
-                                    },
-                                );
-                            }
-                        },
-                    )
-                    .await;
-                });
+                show_team_thread(state, TEAM_THREAD_READING.to_owned());
+                // Detached, like every rail-3 spawn: the session token owns
+                // its lifetime; the handle exists for the `K11` keystone.
+                drop(spawn_team_thread(
+                    runtime,
+                    app_state.event_bus.clone(),
+                    conversation_id.to_owned(),
+                    peer,
+                    item_id,
+                    app_state.session_cancel.child_token(),
+                ));
             }
             #[cfg(not(feature = "a2a"))]
             {
-                let _ = (recipients, text);
-                show_team_send(
+                let _ = (peer, item_id, TEAM_THREAD_READING);
+                show_team_thread(
                     state,
-                    &block_id,
-                    handler::team_send_unavailable().to_owned(),
+                    "· `/team thread` needs the `a2a` feature; this build was compiled without \
+                     it."
+                    .to_owned(),
                 );
             }
+        }
+        // Story 19.18 `AC9(b)` — answering an item needs the daemon that
+        // holds it. ⛔ Not a silent `=> {}`: the ack/remove refusal shape.
+        TeamCommandArgs::Reply { .. } => {
+            emit_team_warning(
+                state,
+                conversation_id,
+                app_state,
+                "Replying to a recipient item requires a daemon-attached session.".to_owned(),
+            );
         }
         TeamCommandArgs::Acknowledge { item_id: _ } => {
             emit_team_warning(
@@ -662,6 +657,173 @@ pub async fn team_command(
             Ok(message) => handler::show_team_status(state, message),
             Err(message) => emit_team_warning(state, conversation_id, app_state, message),
         },
+    }
+}
+
+/// The rail-3 addressed send (Story 19.17), shared by `/team send` and Story
+/// 19.18's `/team followup` (N = 1, `reply_to` set): ⛔ one send path, one
+/// block, one settle handler, one journal discipline (`A9`, `M21`).
+fn start_team_send(
+    state: &mut TuiState,
+    conversation_id: &str,
+    app_state: &AppState,
+    recipients: Vec<String>,
+    text: String,
+    reply_to: Option<String>,
+) {
+    #[cfg(not(feature = "a2a"))]
+    use crate::adapters::tui::handlers::team_command as handler;
+    use crate::adapters::tui::handlers::team_command::show_team_send;
+
+    state.team_send_next_id += 1;
+    let block_id = format!("team-send-{}", state.team_send_next_id);
+    #[cfg(feature = "a2a")]
+    {
+        use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
+        let Some(runtime) = app_state.a2a_send.clone() else {
+            show_team_send(
+                state,
+                &block_id,
+                "· A2A send runtime is not configured for this session.".to_owned(),
+            );
+            return;
+        };
+        let known = runtime.known_peer_ids();
+        let unknown: Vec<_> = recipients
+            .iter()
+            .filter(|peer| !known.contains(peer))
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            let refusal = crate::adapters::a2a::send::SendError::UnknownPeer {
+                peer: unknown.join(", "),
+                known,
+            }
+            .to_string();
+            show_team_send(state, &block_id, refusal);
+            return;
+        }
+        let rows: Vec<_> = recipients
+            .iter()
+            .map(|alias| TeamSendRow {
+                alias: alias.clone(),
+                outcome: None,
+            })
+            .collect();
+        show_team_send(state, &block_id, render_team_send_rows(&rows));
+        state.team_send_blocks.insert(block_id.clone(), rows);
+        let event_bus = app_state.event_bus.clone();
+        let conversation_id = conversation_id.to_owned();
+        let cancel = app_state.session_cancel.child_token();
+        tokio::spawn(async move {
+            crate::adapters::a2a::send::deliver_to_recipients(
+                &runtime,
+                &recipients,
+                &text,
+                reply_to.as_deref(),
+                cancel.clone(),
+                |index, outcome| {
+                    if !cancel.is_cancelled() {
+                        let _ = event_bus.emit_domain(
+                            crate::domain::events::AppEvent::TeamSendSettled {
+                                conversation_id: conversation_id.clone(),
+                                block_id: block_id.clone(),
+                                index,
+                                outcome,
+                            },
+                        );
+                    }
+                },
+            )
+            .await;
+        });
+    }
+    #[cfg(not(feature = "a2a"))]
+    {
+        let _ = (recipients, text, reply_to, conversation_id, app_state);
+        show_team_send(
+            state,
+            &block_id,
+            handler::team_send_unavailable().to_owned(),
+        );
+    }
+}
+
+/// Story 19.18 `AC6` — the thread spawn's body: read, settle against the
+/// ledger (journaling each peer turn once), render. `pub`: the front-door
+/// keystones await exactly what the operator's spawn awaits.
+#[cfg(feature = "a2a")]
+pub async fn team_thread_message(
+    runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
+    peer: &str,
+    item_id: &str,
+) -> String {
+    let credentialed = runtime
+        .peer_binding(peer)
+        .is_some_and(|(spec, _)| spec.auth.is_some());
+    let read = crate::adapters::a2a::send::read_thread(runtime, peer, item_id).await;
+    crate::adapters::tui::handlers::team_command::render_team_thread(
+        peer,
+        item_id,
+        &read,
+        credentialed,
+    )
+}
+
+/// Story 19.18 `AC6(a)` — the rail-3 thread spawn: session-scoped, and a
+/// cancelled session publishes nothing further (`K11`). Returns the handle so
+/// the in-crate keystone can await it instead of waiting on a timer.
+#[cfg(feature = "a2a")]
+fn spawn_team_thread(
+    runtime: std::sync::Arc<crate::adapters::a2a::driver::A2aDelegationRuntime>,
+    event_bus: std::sync::Arc<crate::infrastructure::runtime::event_bus::EventBus>,
+    conversation_id: String,
+    peer: String,
+    item_id: String,
+    cancel: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let message = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            message = team_thread_message(&runtime, &peer, &item_id) => message,
+        };
+        if cancel.is_cancelled() {
+            return;
+        }
+        let _ = event_bus.emit_domain(crate::domain::events::AppEvent::TeamThreadReady {
+            conversation_id,
+            message,
+        });
+    })
+}
+
+/// Story 19.18 `AC6(a)` — the `TeamThreadReady` arm: replace the issuing
+/// tab's `team-thread` block IN PLACE, even when that tab is inactive — the
+/// `team_send_settled` cross-tab path. ⛔ Not the board's background path,
+/// which stores an `Advisory` notice (`A12`, `M16`).
+pub fn team_thread_ready(
+    active_conversation_id: &str,
+    state: &mut TuiState,
+    tab_manager: &mut crate::domain::models::tab::TabManager,
+    conversation_id: &str,
+    message: String,
+) {
+    use crate::adapters::tui::handlers::team_command::{TEAM_THREAD_BLOCK_ID, show_team_thread};
+
+    if conversation_id == active_conversation_id {
+        show_team_thread(state, message);
+    } else if let Some(tab) = tab_manager.find_by_conversation_mut(conversation_id) {
+        tab.feedback_blocks.insert(
+            TEAM_THREAD_BLOCK_ID.to_owned(),
+            crate::domain::models::FeedbackBlock {
+                id: TEAM_THREAD_BLOCK_ID.to_owned(),
+                level: crate::domain::models::FeedbackLevel::Info,
+                message,
+                actions: Vec::new(),
+            },
+        );
+        state.needs_redraw = true;
     }
 }
 
@@ -801,12 +963,11 @@ pub async fn team_retract_preview(
         item_id: item.to_owned(),
         task,
         body: format!(
-            "Retract on {alias}'s host\n\n{rows}\n\n\
-             This host addresses {alias} with one credential and cannot tell which operator \
-             sent this item.\n\n\
+            "Retract on {alias}'s host\n\n{rows}\n\n{}\n\n\
              This marks the item on their host. It does not delete it, and there is no \
              un-retract. What they already read, they already read.\n\n\
-             {key_line}"
+             {key_line}",
+            crate::adapters::tui::handlers::team_command::one_credential_sentence(&alias)
         ),
         armed,
     })
@@ -1566,6 +1727,112 @@ mod tests {
         );
     }
 
+    /// Story 19.18 `K11` — a thread answer for a background tab replaces THAT
+    /// tab's single `team-thread` block and leaves the visible tab's alone.
+    ///
+    /// `M20` → RED: publish to the active conversation instead.
+    #[test]
+    fn a_background_thread_answer_replaces_only_its_issuing_tabs_block() {
+        use crate::adapters::tui::handlers::team_command::TEAM_THREAD_BLOCK_ID;
+
+        let mut tabs = crate::domain::models::tab::TabManager::default();
+        let issuing = tabs.active_tab().conversation.id.clone();
+        tabs.create_tab();
+        let active = tabs.active_tab().conversation.id.clone();
+        let mut state = TuiState::new(120, 40);
+        crate::adapters::tui::handlers::team_command::show_team_thread(
+            &mut state,
+            "visible tab's own thread".to_owned(),
+        );
+        team_thread_ready(&active, &mut state, &mut tabs, &issuing, "first".to_owned());
+        team_thread_ready(
+            &active,
+            &mut state,
+            &mut tabs,
+            &issuing,
+            "second".to_owned(),
+        );
+        assert_eq!(
+            state.feedback_blocks[TEAM_THREAD_BLOCK_ID].message,
+            "visible tab's own thread"
+        );
+        let tab = tabs.find_by_conversation(&issuing).expect("issuing tab");
+        assert_eq!(tab.feedback_blocks[TEAM_THREAD_BLOCK_ID].message, "second");
+        assert_eq!(
+            tab.feedback_blocks[TEAM_THREAD_BLOCK_ID].level,
+            crate::domain::models::FeedbackLevel::Info
+        );
+        assert_eq!(
+            tab.feedback_blocks
+                .keys()
+                .filter(|id| id.starts_with("team-thread"))
+                .count(),
+            1,
+            "one block per tab, replaced — never stacked"
+        );
+        team_thread_ready(&active, &mut state, &mut tabs, &active, "mine".to_owned());
+        assert_eq!(state.feedback_blocks[TEAM_THREAD_BLOCK_ID].message, "mine");
+    }
+
+    /// Story 19.18 `K11` (cancel half) — a cancelled session publishes
+    /// nothing further. The test awaits the spawned task's handle, then
+    /// `try_recv`s: ⛔ no timing wait. Positive control: an uncancelled spawn
+    /// publishes exactly one `TeamThreadReady`.
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn a_cancelled_thread_read_publishes_nothing() {
+        use crate::infrastructure::runtime::event_bus::EventBus;
+
+        struct Accepting;
+        #[async_trait::async_trait]
+        impl crate::domain::ports::RoomJournal for Accepting {
+            async fn record_event(
+                &self,
+                _event: crate::domain::models::RoomEvent,
+            ) -> Result<(), crate::domain::ports::RoomJournalError> {
+                Ok(())
+            }
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = std::sync::Arc::new(crate::adapters::a2a::driver::A2aDelegationRuntime::new(
+            crate::infrastructure::subagent::NodeTree::new(),
+            std::sync::Arc::new(Accepting),
+            tx,
+        ));
+        let (event_bus, mut domain_rx) = EventBus::new(16);
+        let event_bus = std::sync::Arc::new(event_bus);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        spawn_team_thread(
+            runtime.clone(),
+            event_bus.clone(),
+            "conv".to_owned(),
+            "nobody".to_owned(),
+            "ri_q".to_owned(),
+            cancel,
+        )
+        .await
+        .expect("spawned read");
+        assert!(
+            domain_rx.try_recv().is_err(),
+            "a cancelled read publishes nothing"
+        );
+        spawn_team_thread(
+            runtime,
+            event_bus,
+            "conv".to_owned(),
+            "nobody".to_owned(),
+            "ri_q".to_owned(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("spawned read");
+        assert!(matches!(
+            domain_rx.try_recv(),
+            Ok(crate::domain::events::AppEvent::TeamThreadReady { .. })
+        ));
+    }
+
     #[cfg(feature = "a2a")]
     #[test]
     fn a_background_team_send_settlement_updates_only_its_issuing_tab() {
@@ -1761,7 +2028,7 @@ mod credential_tests {
 
         /// The delivery seam production settles independently for each recipient.
         async fn send(&self, alias: &str, text: &str) -> RecipientOutcome {
-            deliver_text(self.egress.runtime(), alias, text).await
+            deliver_text(self.egress.runtime(), alias, text, None).await
         }
 
         async fn rejected_rows(&self) -> Vec<String> {

@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::domain::models::{
-    ItemAddress, JournalEntry, JournalRecord, RecipientItemState, RecipientItemView, RoomEvent,
+    AgentId, ItemAddress, ItemPrincipal, JournalEntry, JournalRecord, RecipientItemState,
+    RecipientItemView, ReplyTurnView, RoomEvent, TurnAddress,
 };
 
 // The single-writer ratchet's counter is **per thread**, deliberately.
@@ -39,17 +40,212 @@ pub fn reset_recipient_item_transition_count() {
     ITEM_TRANSITION_COUNT.with(|count| count.set(0));
 }
 
+/// Story 19.18 `P10`/`Q3` — the ONE snapshot behind the one `ArcSwap`: items
+/// and reply turns fold in the same loop, under the same order index, so a
+/// thread read is a join over one projection and ⛔ there is no second store
+/// (a separate store could not share the fold's watermark or its lock).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecipientItemSnapshot {
+    pub items: HashMap<ItemAddress, RecipientItemView>,
+    pub replies: HashMap<TurnAddress, ReplyTurnView>,
+}
+
+impl RecipientItemSnapshot {
+    /// The next live-apply order: one past the highest order over BOTH maps
+    /// (`Q3`). Items-only would let a live item tie with, or sort before, a
+    /// reply turn that was applied first — and a restart would then reorder
+    /// the thread.
+    fn next_order(&self) -> u64 {
+        self.items
+            .values()
+            .map(|item| item.journal_order)
+            .chain(self.replies.values().map(|turn| turn.journal_order))
+            .max()
+            .map_or(0, |max| max + 1)
+    }
+}
+
+/// One turn of a served thread (Story 19.18 `AC4(b)`): an item (the root or
+/// a follow-up) or a reply turn, in the one fold order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ThreadTurn {
+    Item(RecipientItemView),
+    Reply(ReplyTurnView),
+}
+
+impl ThreadTurn {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Item(item) => item.address.item().as_str(),
+            Self::Reply(turn) => turn.address.turn().as_str(),
+        }
+    }
+
+    #[must_use]
+    pub fn journal_order(&self) -> u64 {
+        match self {
+            Self::Item(item) => item.journal_order,
+            Self::Reply(turn) => turn.journal_order,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ThreadMemberRef<'a> {
+    Item(&'a RecipientItemView),
+    Reply(&'a ReplyTurnView),
+}
+
+impl<'a> ThreadMemberRef<'a> {
+    fn journal_order(self) -> u64 {
+        match self {
+            Self::Item(item) => item.journal_order,
+            Self::Reply(turn) => turn.journal_order,
+        }
+    }
+
+    fn to_thread_turn(self) -> ThreadTurn {
+        match self {
+            Self::Item(item) => ThreadTurn::Item(item.clone()),
+            Self::Reply(turn) => ThreadTurn::Reply(turn.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ThreadIndexNode<'a> {
+    parent: Option<&'a str>,
+    member: ThreadMemberRef<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum ThreadRoot<'a> {
+    Terminal(&'a str),
+    Cycle {
+        cycle: usize,
+        entry: usize,
+        distance: usize,
+    },
+}
+
+impl<'a> ThreadRoot<'a> {
+    fn parent(self) -> Self {
+        match self {
+            Self::Terminal(root) => Self::Terminal(root),
+            Self::Cycle {
+                cycle,
+                entry,
+                distance,
+            } => Self::Cycle {
+                cycle,
+                entry,
+                distance: distance + 1,
+            },
+        }
+    }
+}
+
+fn resolve_thread_roots<'a>(
+    index: &HashMap<&'a str, ThreadIndexNode<'a>>,
+) -> HashMap<&'a str, &'a str> {
+    // A cycle's result depends on the bounded walk's remaining hops. Retain
+    // its entry and each predecessor's distance so every root is resolved once
+    // without changing that cycle-safe behavior.
+    let mut roots: HashMap<&'a str, ThreadRoot<'a>> = HashMap::with_capacity(index.len());
+    let mut cycles = Vec::<Vec<&str>>::new();
+    let mut path = Vec::new();
+    let mut positions = HashMap::with_capacity(index.len());
+
+    for (walk, &start) in index.keys().enumerate() {
+        if roots.contains_key(start) {
+            continue;
+        }
+
+        path.clear();
+        let mut current = start;
+        loop {
+            if let Some(&root) = roots.get(current) {
+                let mut successor = root;
+                for &member in path.iter().rev() {
+                    successor = successor.parent();
+                    roots.insert(member, successor);
+                }
+                break;
+            }
+
+            if let Some(&(_, cycle_start)) =
+                positions.get(current).filter(|(seen, _)| *seen == walk)
+            {
+                let cycle = path[cycle_start..].to_vec();
+                let cycle_id = cycles.len();
+                for (entry, &member) in cycle.iter().enumerate() {
+                    roots.insert(
+                        member,
+                        ThreadRoot::Cycle {
+                            cycle: cycle_id,
+                            entry,
+                            distance: 0,
+                        },
+                    );
+                }
+                cycles.push(cycle);
+
+                let mut successor = *roots
+                    .get(path[cycle_start])
+                    .expect("cycle members have a root");
+                for &member in path[..cycle_start].iter().rev() {
+                    successor = successor.parent();
+                    roots.insert(member, successor);
+                }
+                break;
+            }
+
+            positions.insert(current, (walk, path.len()));
+            path.push(current);
+            match index.get(current).and_then(|node| node.parent) {
+                Some(parent) if parent != current && index.contains_key(parent) => current = parent,
+                _ => {
+                    for &member in &path {
+                        roots.insert(member, ThreadRoot::Terminal(current));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    let walk_limit = index.len();
+    roots
+        .into_iter()
+        .map(|(member, root)| {
+            let root = match root {
+                ThreadRoot::Terminal(root) => root,
+                ThreadRoot::Cycle {
+                    cycle,
+                    entry,
+                    distance,
+                } => {
+                    let members = &cycles[cycle];
+                    members[(entry + walk_limit.saturating_sub(distance)) % members.len()]
+                }
+            };
+            (member, root)
+        })
+        .collect()
+}
+
 /// Lock-free read projection over recipient-item journal records.
 #[derive(Clone)]
 pub struct JournalRecipientItemProjection {
-    items: Arc<arc_swap::ArcSwap<HashMap<ItemAddress, RecipientItemView>>>,
+    snapshot: Arc<arc_swap::ArcSwap<RecipientItemSnapshot>>,
 }
 
 impl std::fmt::Debug for JournalRecipientItemProjection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("JournalRecipientItemProjection")
-            .field("items", &self.snapshot())
+            .field("snapshot", &self.snapshot())
             .finish()
     }
 }
@@ -65,7 +261,9 @@ impl Eq for JournalRecipientItemProjection {}
 impl Default for JournalRecipientItemProjection {
     fn default() -> Self {
         Self {
-            items: Arc::new(arc_swap::ArcSwap::from_pointee(HashMap::new())),
+            snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(
+                RecipientItemSnapshot::default(),
+            )),
         }
     }
 }
@@ -73,24 +271,20 @@ impl Default for JournalRecipientItemProjection {
 impl JournalRecipientItemProjection {
     #[must_use]
     pub fn from_entries(entries: &[JournalEntry]) -> Self {
-        let mut items = HashMap::new();
+        let mut snapshot = RecipientItemSnapshot::default();
         for (index, entry) in entries.iter().enumerate() {
             if let JournalRecord::Room(event) = &entry.record {
-                transition_recipient_item(&mut items, index as u64, event);
+                transition_recipient_item(&mut snapshot, index as u64, event);
             }
         }
         Self {
-            items: Arc::new(arc_swap::ArcSwap::from_pointee(items)),
+            snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(snapshot)),
         }
     }
 
     pub fn apply(&self, event: &RoomEvent) {
-        self.items.rcu(|current| {
-            let order = current
-                .values()
-                .map(|item| item.journal_order)
-                .max()
-                .map_or(0, |max| max + 1);
+        self.snapshot.rcu(|current| {
+            let order = current.next_order();
             let mut next = (**current).clone();
             transition_recipient_item(&mut next, order, event);
             Arc::new(next)
@@ -99,18 +293,19 @@ impl JournalRecipientItemProjection {
 
     pub fn replace_from(&self, entries: &[JournalEntry]) {
         let replacement = Self::from_entries(entries);
-        self.items.store(replacement.items.load_full());
+        self.snapshot.store(replacement.snapshot.load_full());
     }
 
     #[must_use]
     pub fn get(&self, address: &ItemAddress) -> Option<RecipientItemView> {
-        self.items.load().get(address).cloned()
+        self.snapshot.load().items.get(address).cloned()
     }
 
     #[must_use]
     pub fn find_by_id(&self, id: &str) -> Option<RecipientItemView> {
-        let snapshot = self.items.load();
+        let snapshot = self.snapshot.load();
         let mut matches = snapshot
+            .items
             .values()
             .filter(|item| item.address.item().as_str() == id);
         let found = matches.next().cloned();
@@ -132,17 +327,14 @@ impl JournalRecipientItemProjection {
     /// 19.16c the only writer of item state, and the fold must keep folding
     /// removals so the tombstone stays addressable to its own host.
     #[must_use]
-    pub fn find_by_task(
-        &self,
-        principal: &crate::domain::models::ItemPrincipal,
-        task: &str,
-    ) -> Option<RecipientItemView> {
+    pub fn find_by_task(&self, principal: &ItemPrincipal, task: &str) -> Option<RecipientItemView> {
         // A resent `messageId` mints one item per execution, so several items
         // can share `(principal, task)`. The task a restart recovers is always
         // the latest execution — bind the newest item, never an arbitrary
         // `HashMap` match.
-        self.items
+        self.snapshot
             .load()
+            .items
             .values()
             .filter(|item| {
                 item.address.principal() == principal
@@ -168,12 +360,10 @@ impl JournalRecipientItemProjection {
     /// the read that has to report a tombstone (`AD-1822`), not the read that
     /// re-binds a task to one.
     #[must_use]
-    pub fn find_by_principal(
-        &self,
-        principal: &crate::domain::models::ItemPrincipal,
-    ) -> Vec<RecipientItemView> {
-        let snapshot = self.items.load();
+    pub fn find_by_principal(&self, principal: &ItemPrincipal) -> Vec<RecipientItemView> {
+        let snapshot = self.snapshot.load();
         let mut owned = snapshot
+            .items
             .values()
             .filter(|item| item.address.principal() == principal)
             .cloned()
@@ -184,9 +374,127 @@ impl JournalRecipientItemProjection {
         owned
     }
 
+    /// Story 19.18 `AC4(f)` — how many reply turns directly answer `item`
+    /// (the board's `· <n> replies`). Same principal by construction: a
+    /// turn's address inherits its answered item's principal.
     #[must_use]
-    pub fn snapshot(&self) -> Arc<HashMap<ItemAddress, RecipientItemView>> {
-        self.items.load_full()
+    pub fn reply_count(&self, item: &ItemAddress) -> usize {
+        self.snapshot
+            .load()
+            .replies
+            .values()
+            .filter(|turn| {
+                turn.address.principal() == item.principal() && &turn.answers == item.item()
+            })
+            .count()
+    }
+
+    /// Story 19.18 `Q1` — the reply turn that resolved `node`'s card, if one
+    /// is durable. The journal, not the draft controller, holds "one turn
+    /// per node".
+    #[must_use]
+    pub fn reply_for_node(&self, node: &AgentId) -> Option<ReplyTurnView> {
+        self.snapshot
+            .load()
+            .replies
+            .values()
+            .find(|turn| turn.via_node.as_ref() == Some(node))
+            .cloned()
+    }
+
+    /// Whether any reply turn — under ANY principal — already holds `id`.
+    /// The uniqueness half of reply-turn minting (`AC2(d)`).
+    #[must_use]
+    pub fn holds_reply_turn_id(&self, id: &str) -> bool {
+        self.snapshot
+            .load()
+            .replies
+            .keys()
+            .any(|address| address.turn().as_str() == id)
+    }
+
+    /// Whether `id` names an item or a reply turn **of this principal** —
+    /// the follow-up reference check (`AC5(b)`). ⛔ Another principal's id is
+    /// `false`, byte-identical to one that never existed (R21).
+    #[must_use]
+    pub fn resolves_in_principal(&self, principal: &ItemPrincipal, id: &str) -> bool {
+        let snapshot = self.snapshot.load();
+        snapshot
+            .items
+            .keys()
+            .any(|address| address.principal() == principal && address.item().as_str() == id)
+            || snapshot
+                .replies
+                .keys()
+                .any(|address| address.principal() == principal && address.turn().as_str() == id)
+    }
+
+    /// Story 19.18 `AC4(b)` — one principal's thread containing `id`, in the
+    /// one fold order, or `None` when `id` names nothing of this principal.
+    ///
+    /// ⛔ **Principal first** (`A6`): only this principal's items and turns
+    /// are indexed, so another principal's id is absent — byte-identical to
+    /// one that never existed — and an `in_reply_to` into another principal's
+    /// thread ends the walk instead of crossing into it.
+    ///
+    /// `id` resolves to its **root** by walking `in_reply_to` (items) and
+    /// `answers` (turns) upward. The walk is bounded by the index size and
+    /// cycle-safe; a missing parent ends it. Roots are memoized over the
+    /// borrowed index, then only returned turns are cloned from the snapshot.
+    #[must_use]
+    pub fn thread(&self, principal: &ItemPrincipal, id: &str) -> Option<(String, Vec<ThreadTurn>)> {
+        let snapshot = self.snapshot.load();
+        let mut index = HashMap::new();
+        for item in snapshot
+            .items
+            .values()
+            .filter(|item| item.address.principal() == principal)
+        {
+            index.insert(
+                item.address.item().as_str(),
+                ThreadIndexNode {
+                    parent: item.in_reply_to.as_deref(),
+                    member: ThreadMemberRef::Item(item),
+                },
+            );
+        }
+        for turn in snapshot
+            .replies
+            .values()
+            .filter(|turn| turn.address.principal() == principal)
+        {
+            index.insert(
+                turn.address.turn().as_str(),
+                ThreadIndexNode {
+                    parent: Some(turn.answers.as_str()),
+                    member: ThreadMemberRef::Reply(turn),
+                },
+            );
+        }
+        if !index.contains_key(id) {
+            return None;
+        }
+
+        let roots = resolve_thread_roots(&index);
+        let root = roots.get(id).copied()?;
+        let mut members: Vec<ThreadMemberRef<'_>> = index
+            .iter()
+            .filter(|(member, _)| roots.get(*member) == Some(&root))
+            .map(|(_, node)| node.member)
+            .collect();
+        members.sort_by_key(|member| member.journal_order());
+        Some((
+            root.to_owned(),
+            members
+                .into_iter()
+                .map(ThreadMemberRef::to_thread_turn)
+                .collect(),
+        ))
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> Arc<RecipientItemSnapshot> {
+        self.snapshot.load_full()
     }
 }
 
@@ -275,11 +583,8 @@ pub fn next_item_state(current: &RecipientItemState, act: RecipientItemAct) -> I
     }
 }
 
-fn transition_recipient_item(
-    items: &mut HashMap<ItemAddress, RecipientItemView>,
-    order: u64,
-    event: &RoomEvent,
-) {
+fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, event: &RoomEvent) {
+    let items = &mut snapshot.items;
     #[cfg(any(test, feature = "test-instrumentation"))]
     if matches!(
         event,
@@ -293,6 +598,7 @@ fn transition_recipient_item(
             task,
             alias,
             content,
+            in_reply_to,
         } => {
             items
                 .entry(address.clone())
@@ -305,6 +611,7 @@ fn transition_recipient_item(
                     },
                     journal_order: order,
                     retracted_at_ms: None,
+                    in_reply_to: in_reply_to.clone(),
                 });
         }
         // The legality verdict gates the WHOLE arm, never just the state
@@ -357,6 +664,31 @@ fn transition_recipient_item(
                 item.mark_retracted(*retracted_at_ms);
             }
         }
+        // Story 19.18 `A4`/`P10` — a reply turn folds into the SAME snapshot,
+        // under the same order counter, and ⛔ never touches the answered
+        // item (`AD-1827`). Not compile-forced (`RoomEvent` is
+        // `#[non_exhaustive]`), so without this arm every turn would vanish
+        // on a cold re-fold and a restart would lose it (`M22`). The first
+        // record for an address wins, like `RecipientItemReceived`.
+        RoomEvent::RecipientItemReplied {
+            address,
+            answers,
+            content,
+            authorship,
+            via_node,
+        } => {
+            snapshot
+                .replies
+                .entry(address.clone())
+                .or_insert_with(|| ReplyTurnView {
+                    address: address.clone(),
+                    answers: answers.clone(),
+                    content: content.clone(),
+                    authorship: *authorship,
+                    via_node: via_node.clone(),
+                    journal_order: order,
+                });
+        }
         _ => {}
     }
 }
@@ -392,6 +724,7 @@ mod tests {
             task: "sender-task".to_owned(),
             alias: None,
             content: "content".to_owned(),
+            in_reply_to: None,
         });
         reset_recipient_item_transition_count();
         projection.apply(&RoomEvent::RecipientItemAcknowledged {
@@ -430,6 +763,7 @@ mod tests {
                     task: "sender-task".to_owned(),
                     alias: Some("arrival-alias".to_owned()),
                     content: "peer content".to_owned(),
+                    in_reply_to: None,
                 },
             ),
             entry(
@@ -489,6 +823,7 @@ mod tests {
             task: "sender-task".to_owned(),
             alias: None,
             content: "peer content".to_owned(),
+            in_reply_to: None,
         };
         let entries = vec![
             entry(1, received(&acked)),
@@ -510,5 +845,164 @@ mod tests {
             2,
             "one acknowledgement and one removal are two instrumented transitions"
         );
+    }
+
+    fn thread_fixture() -> (Vec<RoomEvent>, crate::domain::models::ItemPrincipal) {
+        use crate::domain::models::{ReplyAuthorship, ReplyTurnId, TurnAddress};
+
+        let asker = PeerId::from_public_key(&[31; 32]).unwrap();
+        let other = PeerId::from_public_key(&[32; 32]).unwrap();
+        let item =
+            |peer: &PeerId, id: &str, reply_to: Option<&str>| RoomEvent::RecipientItemReceived {
+                address: ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay(id)),
+                task: format!("task-{id}"),
+                alias: None,
+                content: format!("content {id}"),
+                in_reply_to: reply_to.map(str::to_owned),
+            };
+        let reply = |answered: &str, turn: &str| RoomEvent::RecipientItemReplied {
+            address: TurnAddress::answering(
+                &ItemAddress::from_a2a_ingress(asker.clone(), ItemId::from_replay(answered)),
+                ReplyTurnId::from_replay(turn),
+            ),
+            answers: ItemId::from_replay(answered),
+            content: format!("reply {turn}"),
+            authorship: ReplyAuthorship::HumanWritten,
+            via_node: None,
+        };
+        let events = vec![
+            item(&asker, "ri_q", None),
+            reply("ri_q", "rr_1"),
+            reply("ri_q", "rr_2"),
+            item(&asker, "ri_f", Some("rr_1")),
+            reply("ri_f", "rr_3"),
+            // Another principal names the asker's root: never in its thread.
+            item(&other, "ri_x", Some("ri_q")),
+            // An unrelated root of the asker's.
+            item(&asker, "ri_new", None),
+        ];
+        (
+            events,
+            crate::domain::models::ItemPrincipal::A2aPseudonym(asker),
+        )
+    }
+
+    fn thread_ids(
+        projection: &JournalRecipientItemProjection,
+        principal: &crate::domain::models::ItemPrincipal,
+        id: &str,
+    ) -> Option<(String, Vec<String>)> {
+        projection.thread(principal, id).map(|(root, turns)| {
+            (
+                root,
+                turns.iter().map(|turn| turn.id().to_owned()).collect(),
+            )
+        })
+    }
+
+    /// Story 19.18 `K20` — interleaved live `apply` of items and reply turns
+    /// yields the same thread order as a cold `from_entries` refold, and live
+    /// orders are unique across BOTH maps.
+    ///
+    /// `M43` → RED: take the next live order from items only — a reply
+    /// applied after an item ties with the next item, so the orders are not
+    /// unique (and a restart would reorder the thread).
+    #[test]
+    fn live_apply_order_matches_a_cold_refold_across_items_and_turns() {
+        let (events, principal) = thread_fixture();
+        let live = JournalRecipientItemProjection::default();
+        for event in &events {
+            live.apply(event);
+        }
+        let entries: Vec<JournalEntry> = events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| entry(index as u64 + 1, event.clone()))
+            .collect();
+        let cold = JournalRecipientItemProjection::from_entries(&entries);
+        for id in ["ri_q", "rr_2", "ri_f", "rr_3", "ri_new"] {
+            assert_eq!(
+                thread_ids(&live, &principal, id),
+                thread_ids(&cold, &principal, id),
+                "{id}"
+            );
+        }
+        let snapshot = live.snapshot();
+        let mut orders: Vec<u64> = snapshot
+            .items
+            .values()
+            .map(|item| item.journal_order)
+            .chain(snapshot.replies.values().map(|turn| turn.journal_order))
+            .collect();
+        let total = orders.len();
+        orders.sort_unstable();
+        orders.dedup();
+        assert_eq!(orders.len(), total, "one order over both maps (`Q3`)");
+    }
+
+    /// Story 19.18 `AC4(b)` — any member resolves to the root, the thread is
+    /// the root's whole chain in fold order, and another principal's item is
+    /// never in it — nor addressable at all (R21).
+    ///
+    /// `M09` (unit half) → RED: drop the principal filter — `ri_x` joins.
+    #[test]
+    fn a_thread_is_one_principals_chain_in_fold_order() {
+        let (events, principal) = thread_fixture();
+        let entries: Vec<JournalEntry> = events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| entry(index as u64 + 1, event.clone()))
+            .collect();
+        let projection = JournalRecipientItemProjection::from_entries(&entries);
+        let expected = (
+            "ri_q".to_owned(),
+            ["ri_q", "rr_1", "rr_2", "ri_f", "rr_3"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        for member in ["ri_q", "rr_1", "rr_2", "ri_f", "rr_3"] {
+            assert_eq!(
+                thread_ids(&projection, &principal, member),
+                Some(expected.clone())
+            );
+        }
+        assert_eq!(
+            thread_ids(&projection, &principal, "ri_new"),
+            Some(("ri_new".to_owned(), vec!["ri_new".to_owned()]))
+        );
+        assert_eq!(thread_ids(&projection, &principal, "ri_x"), None);
+        assert_eq!(thread_ids(&projection, &principal, "ri_never"), None);
+        assert_eq!(
+            projection.reply_count(&ItemAddress::from_a2a_ingress(
+                match &principal {
+                    crate::domain::models::ItemPrincipal::A2aPseudonym(peer) => peer.clone(),
+                    _ => unreachable!(),
+                },
+                ItemId::from_replay("ri_q"),
+            )),
+            2
+        );
+        assert!(projection.resolves_in_principal(&principal, "rr_3"));
+        assert!(!projection.resolves_in_principal(&principal, "ri_x"));
+    }
+
+    /// Story 19.18 `AC4(b)` — the chain walk is bounded and cycle-safe: two
+    /// items naming each other (a journal no front door writes) terminate.
+    #[test]
+    fn a_reply_cycle_terminates() {
+        let peer = PeerId::from_public_key(&[33; 32]).unwrap();
+        let item = |id: &str, reply_to: &str| RoomEvent::RecipientItemReceived {
+            address: ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay(id)),
+            task: id.to_owned(),
+            alias: None,
+            content: id.to_owned(),
+            in_reply_to: Some(reply_to.to_owned()),
+        };
+        let projection = JournalRecipientItemProjection::from_entries(&[
+            entry(1, item("ri_a", "ri_b")),
+            entry(2, item("ri_b", "ri_a")),
+        ]);
+        let principal = crate::domain::models::ItemPrincipal::A2aPseudonym(peer);
+        assert!(projection.thread(&principal, "ri_a").is_some());
     }
 }

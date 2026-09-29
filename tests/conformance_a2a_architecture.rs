@@ -214,6 +214,9 @@ fn every_public_a2a_enum_is_non_exhaustive() {
             "PendingAuth".to_owned(),
             "PinnedKeyAlgorithm".to_owned(),
             "SubmitterTrust".to_owned(),
+            // Story 19.18 `AC12`: the thread-access setting; an unrecognised
+            // value already folds to `Unknown` and fails closed.
+            "ThreadReads".to_owned(),
             "TrustTier".to_owned(),
         ])
     );

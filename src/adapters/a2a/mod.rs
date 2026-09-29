@@ -23,6 +23,24 @@ pub const ITEMS_LIST_METHOD: &str = "x-rustain-items/list";
 /// same constant so a one-side respelling cannot compile silently.
 #[cfg(feature = "a2a")]
 pub const ITEMS_RETRACT_METHOD: &str = "x-rustain-items/retract";
+/// Story 19.18 `A5` — the follow-up carrier: a `message/send` metadata key
+/// naming the item or reply-turn id this new item answers. Written by
+/// `build_message` from a separate Rust parameter (⛔ never from
+/// model-controlled `input`), read by the served `message_send`. One constant
+/// for both sides, so a one-side respelling cannot compile silently.
+#[cfg(feature = "a2a")]
+pub const REPLY_TO_METADATA_KEY: &str = "x-rustain-in-reply-to";
+/// Story 19.18 `AC4(a)` — the per-item thread read, served by the
+/// ANSWERING host. Namespaced for the same reason as [`ITEMS_LIST_METHOD`].
+/// Side-effect free; one operator act on one item, ⛔ never a poll.
+#[cfg(feature = "a2a")]
+pub const ITEMS_THREAD_METHOD: &str = "x-rustain-items/thread";
+/// Story 19.18 `AC4(d)`/`P12` — most turns one thread read carries, root
+/// included: the served side's cap and the asker's distrust bound, one
+/// number. A thread is a conversation an operator reads in chat; past this
+/// the newest turns win and the cut is stated.
+#[cfg(feature = "a2a")]
+pub const MAX_THREAD_TURNS: usize = 50;
 
 pub mod config;
 

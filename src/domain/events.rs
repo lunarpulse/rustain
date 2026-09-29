@@ -147,6 +147,14 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         message: String,
     },
+    /// Story 19.18 `AC6` — a `/team thread` read finished: replace the issuing
+    /// tab's stable `team-thread` block in place (even when that tab is
+    /// inactive). A view event, like `TeamBoardReady` — ⛔ never a
+    /// `SystemNotice`, never a model turn. Produced only by the rail-3 spawn.
+    TeamThreadReady {
+        conversation_id: ConversationId,
+        message: String,
+    },
     /// Story 19.17: one independently settled row in a rail-three send block.
     #[cfg(feature = "a2a")]
     TeamSendSettled {

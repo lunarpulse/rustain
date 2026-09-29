@@ -1585,6 +1585,7 @@ fn api_key_security(key: &str) -> A2aServerSecurity {
         auth: Some(A2aServerAuth::ApiKey {
             keys: vec![key.into()],
         }),
+        thread_reads: Default::default(),
     }
 }
 
@@ -2633,6 +2634,7 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
             task: task_id.to_owned(),
             alias: None,
             content: "survive the restart".to_owned(),
+            in_reply_to: None,
         },
     )
     .await
@@ -2864,6 +2866,7 @@ async fn wildcard_bind_requires_an_advertised_authority_even_with_tls_and_auth()
                 auth: Some(A2aServerAuth::ApiKey {
                     keys: vec!["configured-key".into()],
                 }),
+                thread_reads: Default::default(),
             },
             runtime: None,
             transparency: Arc::new(TransparencySink::inert()),
@@ -2893,6 +2896,7 @@ async fn a_non_loopback_listener_serves_only_over_tls_and_only_with_the_key() {
         auth: Some(A2aServerAuth::ApiKey {
             keys: vec!["s3cret-key".into(), "second-key".into()],
         }),
+        thread_reads: Default::default(),
     };
 
     let workspace = tempfile::tempdir().expect("workspace");
@@ -3488,6 +3492,7 @@ async fn ac4_a_restart_never_rebinds_an_orphaned_task_to_a_removed_item() {
             task: task_id.to_owned(),
             alias: None,
             content: "content the recipient later disposed of".to_owned(),
+            in_reply_to: None,
         },
     )
     .await

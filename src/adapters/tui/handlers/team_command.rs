@@ -22,7 +22,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [<peer-id>] | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send <peer-id>[,<peer-id>…] <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [<peer-id>] | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
 
 /// Three verbs retract three different objects (`…addendum-team-messaging.md:116`),
 /// so every refusal of one names the others **by object** (Story 19.16f
@@ -106,6 +106,24 @@ pub enum TeamCommandArgs {
         peer: String,
         item_id: String,
     },
+    /// Story 19.18 `G3` — answer an item that arrived on THIS host (rail 4
+    /// only). The body is the raw remainder after the id, verbatim.
+    Reply {
+        item_id: String,
+        text: String,
+    },
+    /// Story 19.18 — read one thread on a peer's host (rail 3 only).
+    Thread {
+        peer: String,
+        item_id: String,
+    },
+    /// Story 19.18 — add a turn to a thread on a peer's host (rail 3 only):
+    /// a 19.17 delivery carrying the id it answers.
+    Followup {
+        peer: String,
+        turn_id: String,
+        text: String,
+    },
     Trust,
     Untrust(String),
     Status,
@@ -155,10 +173,53 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
             }
             // FR54-a: only the verb and the recipient-list token delimit the
             // body; preserve its internal whitespace exactly as typed.
-            let text = raw_remainder_after_peer(arg, recipient_token).ok_or_else(|| {
+            let text = raw_remainder_after_tokens(arg, 1).ok_or_else(|| {
                 format!("Missing message text after peers `{recipient_token}`. Use: {USAGE}")
             })?;
             Ok(TeamCommandArgs::Send { recipients, text })
+        }
+        // Story 19.18 `AC1` — bodies are located by TOKEN POSITION, ⛔ never
+        // by searching for the id (an id may recur inside the body). An empty
+        // or whitespace-only body is refused on purpose.
+        "reply" => {
+            let item_id = tokens
+                .next()
+                .ok_or_else(|| format!("Missing item id after '/team reply'. Use: {USAGE}"))?;
+            let text = raw_remainder_after_tokens(arg, 1).ok_or_else(|| {
+                format!("Missing reply text after item `{item_id}`. Use: {USAGE}")
+            })?;
+            Ok(TeamCommandArgs::Reply {
+                item_id: item_id.to_owned(),
+                text,
+            })
+        }
+        "thread" => {
+            let (Some(peer), Some(item_id), None) = (tokens.next(), tokens.next(), tokens.next())
+            else {
+                return Err(format!(
+                    "'/team thread' takes exactly a peer id and an item id. Use: {USAGE}"
+                ));
+            };
+            Ok(TeamCommandArgs::Thread {
+                peer: peer.to_owned(),
+                item_id: item_id.to_owned(),
+            })
+        }
+        "followup" => {
+            let (Some(peer), Some(turn_id)) = (tokens.next(), tokens.next()) else {
+                return Err(format!(
+                    "'/team followup' takes a peer id, the id it answers and a message. Use: \
+                     {USAGE}"
+                ));
+            };
+            let text = raw_remainder_after_tokens(arg, 2).ok_or_else(|| {
+                format!("Missing message text after `{peer} {turn_id}`. Use: {USAGE}")
+            })?;
+            Ok(TeamCommandArgs::Followup {
+                peer: peer.to_owned(),
+                turn_id: turn_id.to_owned(),
+                text,
+            })
         }
         "ack" => {
             let item_id = tokens
@@ -232,20 +293,21 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
     }
 }
 
-/// The message body after the verb and recipient-list token. Locate the
-/// token by its position, never by its contents (which may occur in `send`).
-fn raw_remainder_after_peer(arg: &str, recipients: &str) -> Option<String> {
-    let after_verb = arg
-        .char_indices()
-        .find(|(_, ch)| ch.is_whitespace())
-        .map(|(index, _)| index)?;
-    let peer_start = after_verb + arg[after_verb..].find(|ch: char| !ch.is_whitespace())?;
-    let after_peer = peer_start + recipients.len();
-    let body_start = arg[after_peer..]
-        .char_indices()
-        .find(|(_, ch)| !ch.is_whitespace())
-        .map(|(idx, _)| after_peer + idx)?;
-    Some(arg[body_start..].to_owned())
+/// The message body after the verb and `tokens` more whitespace-delimited
+/// tokens, verbatim (FR54-a). Tokens are located by their POSITION, never by
+/// their contents, which may recur inside the body (the 19.17 `M01` defect).
+/// `None` when the body is empty — an empty body is refused, not sent.
+fn raw_remainder_after_tokens(arg: &str, tokens: usize) -> Option<String> {
+    let mut rest = arg;
+    // The verb, then each positional token: skip leading whitespace, then the
+    // token's non-whitespace run.
+    for _ in 0..=tokens {
+        rest = rest.trim_start();
+        let token_end = rest.find(char::is_whitespace)?;
+        rest = &rest[token_end..];
+    }
+    let body = rest.trim_start();
+    (!body.is_empty()).then(|| body.to_owned())
 }
 
 #[cfg(not(feature = "a2a"))]
@@ -552,7 +614,7 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
             Some(RecipientOutcome::AskedQuestion { task_id }) => (
                 " ",
                 Cow::Owned(format!(
-                    "asked a question this verb cannot answer (task `{}` cancelled) — multi-turn arrives with 19.18",
+                    "asked a question this verb cannot answer (task `{}` cancelled) — this peer uses A2A input-required, which rustain does not continue yet",
                     sanitize_disclosable(task_id, MAX_PEER_ID_BYTES)
                 )),
                 None,
@@ -573,6 +635,158 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
         text.pop();
     }
     text
+}
+
+/// Story 19.16f's unconditional credential sentence, shared by the retract
+/// card and (Story 19.18 `P5(h)`) the thread block: this host addresses a
+/// peer with one credential, so the peer cannot separate this host's
+/// operators. ⛔ A legibility statement, never a claim about who acted.
+pub fn one_credential_sentence(alias: &str) -> String {
+    format!(
+        "This host addresses {alias} with one credential and cannot tell which operator sent \
+         this item."
+    )
+}
+
+/// Stable id for the thread block (Story 19.18 `AC6(a)`): one per tab,
+/// replaced on every read. ⛔ Never a stacked `wfb-N`, never a Warning, never
+/// a `SystemNotice` (`A12`).
+pub const TEAM_THREAD_BLOCK_ID: &str = "team-thread";
+
+/// The thread block's in-flight line, in the board's pre-outcome shape.
+pub const TEAM_THREAD_READING: &str = "  reading…";
+
+/// The thread block (`G5(a)`, ratified with `P5`). Every peer-influenced
+/// field is sanitized ONCE here (`A11`), and every body line is indented under
+/// its turn header, so a newline in a body can never forge a header (`M15`).
+/// Line breaks are kept (19.15 P2).
+#[cfg(feature = "a2a")]
+pub fn render_team_thread(
+    alias: &str,
+    item_id: &str,
+    read: &crate::adapters::a2a::send::ThreadRead,
+    credentialed: bool,
+) -> String {
+    use std::fmt::Write;
+
+    use crate::adapters::a2a::send::ThreadRead;
+    use crate::domain::models::{MAX_REPLY_BYTES, ReplyAuthorship};
+    use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+
+    let alias = sanitize_disclosable(alias, MAX_PEER_ID_BYTES);
+    let (thread, mine) = match read {
+        ThreadRead::Read { thread, mine } => (thread, mine),
+        ThreadRead::NotFound => return format!("thread not found on {alias}'s host"),
+        ThreadRead::AccessOff => {
+            return format!("thread access is off on {alias}'s host — its operator can enable it");
+        }
+        ThreadRead::UnknownPeer { known } => {
+            return crate::adapters::a2a::send::SendError::UnknownPeer {
+                peer: alias,
+                known: known.clone(),
+            }
+            .to_string();
+        }
+        ThreadRead::Failed(outcome) => {
+            return format!(
+                "thread · {alias} · {}\n{}",
+                sanitize_disclosable(item_id, MAX_PEER_ID_BYTES),
+                render_team_send_rows(&[TeamSendRow {
+                    alias: alias.clone(),
+                    outcome: Some(outcome.clone()),
+                }])
+            );
+        }
+    };
+    let labels: Vec<&str> = thread
+        .turns
+        .iter()
+        .zip(mine.iter().copied().chain(std::iter::repeat(false)))
+        .map(|(turn, mine)| {
+            if turn.reply {
+                alias.as_str()
+            } else if mine {
+                "you"
+            } else {
+                "another sender"
+            }
+        })
+        .collect();
+    let width = labels
+        .iter()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+    let mut text = format!(
+        "thread · {alias} · {}",
+        sanitize_disclosable(&thread.root, MAX_PEER_ID_BYTES)
+    );
+    for (turn, label) in thread.turns.iter().zip(labels) {
+        let _ = write!(
+            text,
+            "\n  {label:width$}  {}",
+            sanitize_disclosable(&turn.turn_id, MAX_PEER_ID_BYTES)
+        );
+        if turn.reply && turn.authorship == ReplyAuthorship::AgentComposed {
+            text.push_str("  [agent-composed]");
+        }
+        if turn.removed {
+            text.push_str("  removed");
+        }
+        if let Some(ms) = turn.retracted_at_ms {
+            let _ = write!(
+                text,
+                "  [retracted {}]",
+                crate::adapters::a2a::board::mark_clock(ms)
+            );
+        }
+        if !turn.removed {
+            match &turn.content {
+                Some(content) => {
+                    for line in content.split('\n') {
+                        text.push_str("\n      ");
+                        text.push_str(&sanitize_disclosable(line, MAX_REPLY_BYTES));
+                    }
+                }
+                None => {
+                    text.push_str("\n      ");
+                    text.push_str(crate::adapters::a2a::projection::HOST_BOUND_UNAVAILABLE_TEXT);
+                }
+            }
+        }
+        if turn.turn_id == thread.root && thread.omitted_before > 0 {
+            let _ = write!(
+                text,
+                "\n  {} earlier turns not shown — the full thread is on {alias}'s host",
+                thread.omitted_before
+            );
+        }
+    }
+    if credentialed {
+        text.push('\n');
+        text.push_str(&one_credential_sentence(&alias));
+    }
+    if thread.principal_collapsed {
+        text.push('\n');
+        text.push_str(crate::adapters::a2a::board::COLLAPSED_PRINCIPAL_DISCLOSURE);
+    }
+    text
+}
+
+/// Replace the stable `team-thread` block, at Info level, keyless.
+pub fn show_team_thread(state: &mut TuiState, message: String) {
+    state.feedback_blocks.insert(
+        TEAM_THREAD_BLOCK_ID.to_owned(),
+        crate::domain::models::FeedbackBlock {
+            id: TEAM_THREAD_BLOCK_ID.to_owned(),
+            level: crate::domain::models::FeedbackLevel::Info,
+            message,
+            actions: Vec::new(),
+        },
+    );
+    state.active_feedback_id = Some(TEAM_THREAD_BLOCK_ID.to_owned());
+    state.needs_redraw = true;
 }
 
 pub fn show_team_send(state: &mut TuiState, block_id: &str, message: String) {
@@ -1159,6 +1373,201 @@ mod tests {
         assert_eq!(
             state.feedback_blocks[TEAM_RETRACT_BLOCK_ID].message,
             "Another confirmation is already awaiting your answer. Nothing was sent for this one."
+        );
+    }
+
+    /// Story 19.18 `K01` — the three verbs on the shared parser, bodies
+    /// located by TOKEN POSITION and kept verbatim.
+    ///
+    /// `M01` → RED: locate the reply body with `find(item_id)` — `"reply r r
+    /// hi"` then yields `"r hi"`. `M02` → RED: accept an empty body as `""`.
+    /// `M28` → RED: slice the followup body with `find(turn_id)` — `"followup
+    /// u rr_u hi"` then yields the wrong body.
+    #[test]
+    fn reply_thread_and_followup_parse_by_token_position() {
+        assert_eq!(
+            parse_team_command(Some("reply ri_x  two  words")),
+            Ok(TeamCommandArgs::Reply {
+                item_id: "ri_x".to_owned(),
+                text: "two  words".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse_team_command(Some("reply r r hi")),
+            Ok(TeamCommandArgs::Reply {
+                item_id: "r".to_owned(),
+                text: "r hi".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse_team_command(Some("thread b ri_x")),
+            Ok(TeamCommandArgs::Thread {
+                peer: "b".to_owned(),
+                item_id: "ri_x".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse_team_command(Some("followup b rr_y hi\tthere")),
+            Ok(TeamCommandArgs::Followup {
+                peer: "b".to_owned(),
+                turn_id: "rr_y".to_owned(),
+                text: "hi\tthere".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse_team_command(Some("followup u rr_u hi")),
+            Ok(TeamCommandArgs::Followup {
+                peer: "u".to_owned(),
+                turn_id: "rr_u".to_owned(),
+                text: "hi".to_owned(),
+            })
+        );
+        // The turn id recurs inside the verb itself (`follow`-`u`-`p`).
+        assert_eq!(
+            parse_team_command(Some("followup b u  two")),
+            Ok(TeamCommandArgs::Followup {
+                peer: "b".to_owned(),
+                turn_id: "u".to_owned(),
+                text: "two".to_owned(),
+            })
+        );
+        for refused in [
+            "reply ri_x",
+            "reply ri_x   ",
+            "reply",
+            "followup b rr_y",
+            "followup b",
+            "thread b",
+            "thread b ri_x extra",
+        ] {
+            let error = parse_team_command(Some(refused)).expect_err(refused);
+            assert!(error.contains(USAGE), "{refused}: {error}");
+        }
+        // Positive control: a multi-line, non-ASCII body is byte-identical.
+        assert_eq!(
+            parse_team_command(Some("reply ri_x Καλημέρα 🌕\n second")),
+            Ok(TeamCommandArgs::Reply {
+                item_id: "ri_x".to_owned(),
+                text: "Καλημέρα 🌕\n second".to_owned(),
+            })
+        );
+        // The shared helper still serves `/team send` (N = 1).
+        assert_eq!(
+            parse_team_command(Some("send a,a2 a2  hello")),
+            Ok(TeamCommandArgs::Send {
+                recipients: vec!["a".to_owned(), "a2".to_owned()],
+                text: "a2  hello".to_owned(),
+            })
+        );
+    }
+
+    #[cfg(feature = "a2a")]
+    fn served_thread(
+        turns: Vec<crate::adapters::a2a::send::ServedTurn>,
+    ) -> crate::adapters::a2a::send::ServedThread {
+        crate::adapters::a2a::send::ServedThread {
+            root: "ri_q".to_owned(),
+            turns,
+            omitted_before: 0,
+            principal_collapsed: false,
+        }
+    }
+
+    #[cfg(feature = "a2a")]
+    fn served_turn(id: &str, reply: bool, content: &str) -> crate::adapters::a2a::send::ServedTurn {
+        crate::adapters::a2a::send::ServedTurn {
+            turn_id: id.to_owned(),
+            reply,
+            task: (!reply).then(|| "t-1".to_owned()),
+            in_reply_to: None,
+            removed: false,
+            content: Some(content.to_owned()),
+            content_hash: None,
+            authorship: crate::domain::models::ReplyAuthorship::HumanWritten,
+            retracted_at_ms: None,
+        }
+    }
+
+    /// Story 19.18 `K09` (render units) — the `G5(a)` block: every body line
+    /// indented under its header and sanitized once; `[agent-composed]` only
+    /// for that recorded value.
+    ///
+    /// `M15` → RED: render a body line unindented — `"  you       ri_fake"`
+    /// forges a header. `M29` → RED: skip `sanitize_disclosable` — `\x1b[2K`
+    /// reaches the block. `M30` → RED: render `[agent-composed]` for an
+    /// `Unknown` authorship (a newer build's `"future-value"`).
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn the_thread_block_indents_sanitizes_and_marks_only_recorded_authorship() {
+        use crate::adapters::a2a::send::ThreadRead;
+        use crate::domain::models::ReplyAuthorship;
+
+        let mut agent = served_turn("rr_1", true, "use the outbox\n  you       ri_fake");
+        agent.authorship = ReplyAuthorship::AgentComposed;
+        let mut future = served_turn("rr_2", true, "later\u{1b}[2K");
+        future.authorship = ReplyAuthorship::from_wire("future-value");
+        let read = ThreadRead::Read {
+            thread: served_thread(vec![served_turn("ri_q", false, "question"), agent, future]),
+            mine: vec![true, false, false],
+        };
+        assert_eq!(
+            render_team_thread("marcus", "ri_q", &read, false),
+            concat!(
+                "thread · marcus · ri_q\n",
+                "  you       ri_q\n",
+                "      question\n",
+                "  marcus    rr_1  [agent-composed]\n",
+                "      use the outbox\n",
+                "        you       ri_fake\n",
+                "  marcus    rr_2\n",
+                "      later[2K"
+            )
+        );
+    }
+
+    /// Story 19.18 `P5(a)`/`P9`/`P5(h)` — a turn this host cannot prove it
+    /// sent renders `another sender`; the truncation line follows the root;
+    /// the credential sentence and the collapse disclosure close the block.
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn the_thread_block_states_truncation_attribution_and_its_caveats() {
+        use crate::adapters::a2a::send::ThreadRead;
+
+        let mut thread = served_thread(vec![
+            served_turn("ri_q", false, "question"),
+            served_turn("rr_9", true, "newest"),
+        ]);
+        thread.omitted_before = 3;
+        thread.principal_collapsed = true;
+        let rendered = render_team_thread(
+            "marcus",
+            "ri_q",
+            &ThreadRead::Read {
+                thread,
+                mine: vec![false, false],
+            },
+            true,
+        );
+        assert!(
+            rendered.starts_with(concat!(
+                "thread · marcus · ri_q\n",
+                "  another sender  ri_q\n",
+                "      question\n",
+                "  3 earlier turns not shown — the full thread is on marcus's host\n",
+                "  marcus          rr_9\n",
+                "      newest\n",
+            )),
+            "{rendered}"
+        );
+        assert!(rendered.contains(&one_credential_sentence("marcus")));
+        assert!(rendered.ends_with(crate::adapters::a2a::board::COLLAPSED_PRINCIPAL_DISCLOSURE));
+        assert_eq!(
+            render_team_thread("marcus", "ri_nope", &ThreadRead::NotFound, false),
+            "thread not found on marcus's host"
+        );
+        assert_eq!(
+            render_team_thread("marcus", "ri_q", &ThreadRead::AccessOff, false),
+            "thread access is off on marcus's host — its operator can enable it"
         );
     }
 }

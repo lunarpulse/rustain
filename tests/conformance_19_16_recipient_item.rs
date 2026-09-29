@@ -1,4 +1,7 @@
-use rustain::domain::models::{ItemAddress, ItemId, ItemPrincipal, PeerId, RoomEvent};
+use rustain::domain::models::{
+    AgentId, ContentHash, DispatchAct, ItemAddress, ItemId, ItemPrincipal, PeerId, ReplyAuthorship,
+    ReplyTurnId, RoomEvent, TurnAddress,
+};
 
 fn peer(seed: u8) -> PeerId {
     PeerId::from_public_key(&[seed; 32]).expect("fixed key")
@@ -13,6 +16,7 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
             task: "sender-message-1".to_owned(),
             alias: None,
             content: "review the patch".to_owned(),
+            in_reply_to: None,
         },
         RoomEvent::RecipientItemAcknowledged {
             address: address.clone(),
@@ -50,6 +54,157 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
         );
         assert_eq!(decoded, event, "every field survives the round trip");
     }
+}
+
+#[test]
+fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none() {
+    let address = ItemAddress::from_a2a_ingress(peer(18), ItemId::from_replay("ri_question"));
+    let content_hash = ContentHash::from_bytes([0x18; 32]);
+
+    let received = RoomEvent::RecipientItemReceived {
+        address: address.clone(),
+        task: "follow-up-task".to_owned(),
+        alias: Some("peer eighteen".to_owned()),
+        content: "follow-up question".to_owned(),
+        in_reply_to: Some("rr_previous".to_owned()),
+    };
+    let mut legacy_received = serde_json::to_value(&received).expect("serialize received item");
+    assert_eq!(legacy_received["in_reply_to"], "rr_previous");
+    legacy_received
+        .as_object_mut()
+        .expect("event object")
+        .remove("in_reply_to");
+    assert!(matches!(
+        serde_json::from_value::<RoomEvent>(legacy_received).expect("pre-reply journal replays"),
+        RoomEvent::RecipientItemReceived {
+            in_reply_to: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        serde_json::from_value::<RoomEvent>(
+            serde_json::to_value(received).expect("serialize received item")
+        )
+        .expect("received item replays"),
+        RoomEvent::RecipientItemReceived {
+            in_reply_to: Some(in_reply_to),
+            ..
+        } if in_reply_to == "rr_previous"
+    ));
+
+    let dispatched = RoomEvent::RemoteEnvelopeDispatched {
+        peer: peer(19),
+        task: Some("outbound-task".to_owned()),
+        bytes: 17,
+        act: DispatchAct::Task,
+        content_hash: Some(content_hash.clone()),
+    };
+    let mut legacy_dispatched =
+        serde_json::to_value(&dispatched).expect("serialize outbound dispatch");
+    assert_eq!(
+        legacy_dispatched["content_hash"],
+        serde_json::to_value(&content_hash).expect("serialize content hash")
+    );
+    legacy_dispatched
+        .as_object_mut()
+        .expect("event object")
+        .remove("content_hash");
+    assert!(matches!(
+        serde_json::from_value::<RoomEvent>(legacy_dispatched)
+            .expect("pre-content-hash dispatch replays"),
+        RoomEvent::RemoteEnvelopeDispatched {
+            content_hash: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        serde_json::from_value::<RoomEvent>(
+            serde_json::to_value(dispatched).expect("serialize outbound dispatch")
+        )
+        .expect("outbound dispatch replays"),
+        RoomEvent::RemoteEnvelopeDispatched {
+            content_hash: Some(persisted_hash),
+            ..
+        } if persisted_hash == content_hash
+    ));
+
+    let replied = RoomEvent::RecipientItemReplied {
+        address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_answer")),
+        answers: address.item().clone(),
+        content: "durable answer".to_owned(),
+        authorship: ReplyAuthorship::AgentComposed,
+        via_node: Some(AgentId::parse("reply-node").expect("valid reply node")),
+    };
+    let mut legacy_replied = serde_json::to_value(&replied).expect("serialize reply turn");
+    assert_eq!(legacy_replied["via_node"], "reply-node");
+    legacy_replied
+        .as_object_mut()
+        .expect("event object")
+        .remove("via_node");
+    assert!(matches!(
+        serde_json::from_value::<RoomEvent>(legacy_replied).expect("pre-via-node reply replays"),
+        RoomEvent::RecipientItemReplied { via_node: None, .. }
+    ));
+    assert!(matches!(
+        serde_json::from_value::<RoomEvent>(
+            serde_json::to_value(replied).expect("serialize reply turn")
+        )
+        .expect("reply turn replays"),
+        RoomEvent::RecipientItemReplied {
+            answers,
+            content,
+            authorship: ReplyAuthorship::AgentComposed,
+            via_node: Some(via_node),
+            ..
+        } if answers.as_str() == "ri_question"
+            && content == "durable answer"
+            && via_node.as_str() == "reply-node"
+    ));
+
+    let observed = RoomEvent::PeerReplyObserved {
+        peer: peer(20),
+        turn: "rr_remote".to_owned(),
+        answers: Some("ri_question".to_owned()),
+        content: Some("peer answer".to_owned()),
+        content_hash: Some(content_hash.clone()),
+    };
+    let mut legacy_observed = serde_json::to_value(&observed).expect("serialize observed reply");
+    assert_eq!(
+        legacy_observed["content_hash"],
+        serde_json::to_value(&content_hash).expect("serialize content hash")
+    );
+    for field in ["answers", "content", "content_hash"] {
+        legacy_observed
+            .as_object_mut()
+            .expect("event object")
+            .remove(field);
+    }
+    assert!(matches!(
+        serde_json::from_value::<RoomEvent>(legacy_observed)
+            .expect("pre-observed-reply journal replays"),
+        RoomEvent::PeerReplyObserved {
+            answers: None,
+            content: None,
+            content_hash: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        serde_json::from_value::<RoomEvent>(
+            serde_json::to_value(observed).expect("serialize observed reply")
+        )
+        .expect("observed reply replays"),
+        RoomEvent::PeerReplyObserved {
+            turn,
+            answers: Some(answers),
+            content: Some(content),
+            content_hash: Some(persisted_hash),
+            ..
+        } if turn == "rr_remote"
+            && answers == "ri_question"
+            && content == "peer answer"
+            && persisted_hash == content_hash
+    ));
 }
 
 #[test]
@@ -110,6 +265,7 @@ fn recipient_item_fold_replays_acknowledgement_and_is_idempotent() {
         task: "sender-task".to_owned(),
         alias: None,
         content: "durable content".to_owned(),
+        in_reply_to: None,
     };
     let acknowledged = RoomEvent::RecipientItemAcknowledged {
         address: address.clone(),
@@ -160,6 +316,7 @@ fn replacing_from_the_journal_discards_an_in_memory_divergence() {
         task: "sender-task".to_owned(),
         alias: None,
         content: "durable content".to_owned(),
+        in_reply_to: None,
     };
     let entries = vec![entry(1, received.clone())];
     let projection = JournalRecipientItemProjection::from_entries(&entries);
@@ -197,6 +354,7 @@ fn find_by_task_binds_the_newest_item_when_a_message_id_is_resent() {
         task: "resent-message-id".to_owned(),
         alias: None,
         content: "durable content".to_owned(),
+        in_reply_to: None,
     };
     let entries = vec![
         entry(1, received(first)),

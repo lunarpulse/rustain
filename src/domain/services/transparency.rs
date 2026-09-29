@@ -179,6 +179,19 @@ pub enum TransparencyKind {
     /// `transparency_row` arm, the `kind=` parse arm **and** its valid-kinds
     /// string, and coverage.
     RecipientItemRetracted,
+    /// Story 19.18 — this host's operator answered a recipient item: a reply
+    /// turn recorded on this, the ANSWERING, host. ⛔ Nothing was sent: the
+    /// asker reads it by pulling the thread (`A2`).
+    ///
+    /// Touch points paid: this variant, `glyph()`, `label()`, the
+    /// `transparency_row` arm, the `kind=` parse arm **and** its valid-kinds
+    /// string, and the two glyph arrays in `tests/conformance.rs`.
+    RecipientItemReplied,
+    /// Story 19.18 `A13` — this host (the ASKER) received one peer-authored
+    /// reply turn by reading a thread; recorded once per turn (FR95).
+    /// ⛔ Distinct from [`Self::RecipientItemReplied`]: that is the answering
+    /// host's own act, this is the asker's receipt of it.
+    PeerReplyObserved,
     /// Interaction became visible in the audit spine before interruption routing.
     InteractionSurfaced,
     /// A batch of prior digest-tier interactions was shown to the operator.
@@ -229,6 +242,11 @@ impl TransparencyKind {
             // inverse in the shipped fold. Unused by every other kind and by
             // the ownership glyph set. ⛔ Never rendered without its label.
             Self::RecipientItemRetracted => "⇠",
+            // ↩ / ↪ (Story 19.18) are unused by every other kind and by the
+            // ownership glyph set: an answer written here, and an answer
+            // received from a peer's thread.
+            Self::RecipientItemReplied => "↩",
+            Self::PeerReplyObserved => "↪",
             Self::InteractionSurfaced => "!",
             Self::DigestFlushed => "≋",
             // No wildcard: a kind added without a glyph must not quietly
@@ -258,6 +276,8 @@ impl TransparencyKind {
             Self::RecipientItemAcknowledged => "item-acknowledged",
             Self::RecipientItemRemoved => "item-removed",
             Self::RecipientItemRetracted => "item-retracted",
+            Self::RecipientItemReplied => "item-replied",
+            Self::PeerReplyObserved => "reply-observed",
             Self::InteractionSurfaced => "surfaced",
             Self::DigestFlushed => "digest-flushed",
             // No wildcard: a kind added without a label must not print
@@ -394,6 +414,7 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             task,
             bytes,
             act,
+            ..
         } => (
             TransparencyKind::Dispatched,
             Direction::Outbound,
@@ -664,6 +685,34 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             item_principal_label(address.principal()),
             Some(address.item().as_str().to_owned()),
             format!("the sender retracted item {}", address.item().as_str()),
+        ),
+        // Story 19.18 — the answering host's own reply turn. ⛔ Not compile-
+        // forced (the match ends in `_ => return None`), so without this arm
+        // the turn would vanish from `/team log`. The summary names only
+        // host-minted ids: ⛔ never the reply text, and ⛔ never "sent" or
+        // "delivered" — nothing left this host (`A2`).
+        RoomEvent::RecipientItemReplied {
+            address, answers, ..
+        } => (
+            TransparencyKind::RecipientItemReplied,
+            Direction::Unknown,
+            item_principal_label(address.principal()),
+            Some(answers.as_str().to_owned()),
+            format!(
+                "reply {} recorded for item {} — its sender sees it when they read the thread",
+                address.turn().as_str(),
+                answers.as_str()
+            ),
+        ),
+        // Story 19.18 `A13` — the asker's receipt of one peer reply turn.
+        // ⛔ The summary carries zero peer-chosen bytes: the turn id rides the
+        // sanitized `task` field like every other peer correlation.
+        RoomEvent::PeerReplyObserved { peer, turn, .. } => (
+            TransparencyKind::PeerReplyObserved,
+            Direction::Inbound,
+            peer.as_str().to_owned(),
+            Some(turn.clone()),
+            "a peer's reply turn was received by reading its thread".to_owned(),
         ),
         // Retractions mutate the prior projected row in `fold_transparency`;
         // they never create a second visible row.
@@ -954,6 +1003,8 @@ impl TransparencyFilter {
                         "item-acknowledged" => TransparencyKind::RecipientItemAcknowledged,
                         "item-removed" => TransparencyKind::RecipientItemRemoved,
                         "item-retracted" => TransparencyKind::RecipientItemRetracted,
+                        "item-replied" => TransparencyKind::RecipientItemReplied,
+                        "reply-observed" => TransparencyKind::PeerReplyObserved,
                         // `DF-19-16C-UNFILTERABLE-TRANSPARENCY-KINDS`, paid by
                         // Story 19.16b: these four RENDER but could not be
                         // named in `kind=`. ⛔ Not "fixed" by tabulating
@@ -972,7 +1023,8 @@ impl TransparencyFilter {
                                  consent-revoked, room-role-granted, room-role-revoked, \
                                  transport-admission, peer-frame, peer-equivocated, \
                                  item-received, item-acknowledged, item-removed, \
-                                 item-retracted, surfaced, digest-flushed, unknown"
+                                 item-retracted, item-replied, reply-observed, surfaced, \
+                                 digest-flushed, unknown"
                             ));
                         }
                     }));
@@ -1354,6 +1406,7 @@ mod tests {
                 task: Some("sender-message-1".to_owned()),
                 bytes: "Καλημέρα 🌕".len(),
                 act: crate::domain::models::DispatchAct::Task,
+                content_hash: None,
             },
         );
         let row = transparency_row(&entry).expect("dispatch projects");

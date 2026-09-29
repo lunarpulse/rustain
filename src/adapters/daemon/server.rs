@@ -171,6 +171,14 @@ fn recipient_ack_gate(
 
 /// The daemon attach server. Holds the lazily-built core, the per-process
 /// conversation, the connection registry, and the daemon-owned event bus.
+/// The shipped not-found sentence every recipient-item act refuses with.
+const RECIPIENT_ITEM_NOT_FOUND: &str = "recipient item not found";
+/// The shipped tombstone sentence every recipient-item act refuses with.
+const RECIPIENT_ITEM_REMOVED: &str = "recipient item already removed";
+/// The conversation-row id prefix of a peer-response card.
+#[cfg(feature = "a2a")]
+const PEER_RESPONSE_ROW_PREFIX: &str = "peer-response-";
+
 pub struct AttachServer {
     core: Arc<DaemonCore>,
     conversation: Arc<Mutex<Conversation>>,
@@ -233,6 +241,9 @@ pub struct AttachServer {
     /// direct A2A front door's response-mode query.
     delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
     pending_drafts: Arc<super::response_modes::PendingDraftController>,
+    /// Serializes card resolutions with direct replies so the node-to-turn
+    /// check and append cannot race another operator connection.
+    peer_reply_serial: Mutex<()>,
     pending_consent: Option<Arc<super::consent::PendingConsentManager>>,
     pending_consent_cards:
         Arc<Mutex<std::collections::HashMap<crate::domain::models::RequestId, DaemonFrame>>>,
@@ -626,6 +637,7 @@ impl AttachServer {
             peer_bus,
             delivery_policy,
             pending_drafts: Arc::new(super::response_modes::PendingDraftController::default()),
+            peer_reply_serial: Mutex::new(()),
             pending_consent,
             pending_consent_cards: Arc::new(Mutex::new(std::collections::HashMap::new())),
             pending_peer_nodes: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -1182,16 +1194,31 @@ impl AttachServer {
         writer.abort();
     }
 
+    /// Resolve one peer-response card. Story 19.18 `AC3`: a resolution that
+    /// SENDS also records one reply turn answering the node's item, BEFORE
+    /// `PeerDraftResolved`; returns that turn's id (`None` when nothing was
+    /// recorded — a reject, a duplicate, or a node with no item).
     async fn resolve_peer_draft(
         &self,
         node_id: &AgentId,
         resolution: super::response_modes::DraftResolution,
-    ) -> Result<(), String> {
+    ) -> Result<Option<crate::domain::models::ReplyTurnId>, String> {
+        let _guard = self.peer_reply_serial.lock().await;
+        self.resolve_peer_draft_locked(node_id, resolution, None)
+            .await
+    }
+
+    async fn resolve_peer_draft_locked(
+        &self,
+        node_id: &AgentId,
+        resolution: super::response_modes::DraftResolution,
+        preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
+    ) -> Result<Option<crate::domain::models::ReplyTurnId>, String> {
         // AC3 — resolutions are idempotent: a duplicate frame over an already
         // settled draft is a no-op, never an error and never a second send.
         match self.pending_drafts.state(node_id.as_str()).await {
             Some(super::response_modes::DraftState::Sent { .. })
-            | Some(super::response_modes::DraftState::Rejected) => return Ok(()),
+            | Some(super::response_modes::DraftState::Rejected) => return Ok(None),
             Some(super::response_modes::DraftState::Ready { .. }) => {}
             Some(super::response_modes::DraftState::Drafting { .. }) => {
                 return Err("peer draft is still being composed".to_owned());
@@ -1247,6 +1274,27 @@ impl AttachServer {
             .room_journal
             .as_ref()
             .ok_or_else(|| "room journal is unavailable".to_owned())?;
+        // Story 19.18 `AC3(a)` — the reply turn first, then
+        // `PeerDraftResolved`. The two appends cannot be atomic, so the order
+        // fixes the partial-failure meaning: a failed turn append restores the
+        // card and sends nothing; a turn that stands is a durable answer the
+        // operator chose, and a retry replays only the remaining steps.
+        let recorded_turn = match self
+            .reply_turn_for_resolution(node_id, &content, authorship, sent, preloaded)
+            .await
+        {
+            Ok(turn) => turn,
+            Err(error) => {
+                let restored = self
+                    .pending_drafts
+                    .restore_ready(node_id.as_str(), original)
+                    .await;
+                if !restored {
+                    tracing::error!(node = %node_id, "failed to roll back draft after a refused reply turn");
+                }
+                return Err(error);
+            }
+        };
         if let Err(error) = journal
             .record_event(crate::domain::models::RoomEvent::PeerDraftResolved {
                 node: node_id.clone(),
@@ -1318,7 +1366,112 @@ impl AttachServer {
                 .await;
         }
         self.node_tree.deregister(node_id).await;
-        Ok(())
+        Ok(recorded_turn)
+    }
+
+    /// Story 19.18 `AC3(a)`/`Q1` — the reply-turn half of a card resolution.
+    ///
+    /// Reads the journal once and joins the node to its item through the
+    /// fold (`P4`). **One turn per node, enforced by the journal**: when the
+    /// fold already holds a turn with this `via_node` (a retry after a
+    /// partial failure, or a card answered by `/team reply` and then
+    /// resolved again), nothing is appended — the same content replays the
+    /// remaining steps, and a different text or a reject is refused (`M37`).
+    /// A reject with no turn, and a node with no item, record nothing.
+    #[cfg(feature = "a2a")]
+    async fn reply_turn_for_resolution(
+        &self,
+        node_id: &AgentId,
+        content: &str,
+        authorship: super::response_modes::DraftAuthorship,
+        sent: bool,
+        preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
+    ) -> Result<Option<crate::domain::models::ReplyTurnId>, String> {
+        use crate::domain::models::{
+            ReplyAuthorship, RoomEvent, TurnAddress, claim_reply_turn_id,
+            fresh_reply_turn_candidate,
+        };
+
+        let reader = self
+            .room_journal_reader
+            .as_ref()
+            .ok_or_else(|| "room journal reader is unavailable".to_owned())?;
+        let journal = self
+            .room_journal
+            .as_ref()
+            .ok_or_else(|| "room journal is unavailable".to_owned())?;
+        let loaded;
+        let projection = if let Some(projection) = preloaded {
+            projection
+        } else {
+            let entries = reader
+                .load_entries()
+                .await
+                .map_err(|error| error.to_string())?;
+            loaded =
+                crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
+            &loaded
+        };
+        if let Some(existing) = projection.reply_for_node(node_id) {
+            if sent && existing.content == content {
+                return Ok(Some(existing.address.turn().clone()));
+            }
+            return Err(
+                "this card was already answered with a recorded reply; only that same answer can \
+                 be resent"
+                    .to_owned(),
+            );
+        }
+        if !sent {
+            return Ok(None);
+        }
+        if content.len() > crate::domain::models::MAX_REPLY_BYTES {
+            return Err(format!(
+                "reply is longer than {} bytes — shorten it",
+                crate::domain::models::MAX_REPLY_BYTES
+            ));
+        }
+        let Some(item) = crate::adapters::a2a::exec::recipient_item_for_node(&projection, node_id)
+        else {
+            tracing::info!(node = %node_id, "peer response resolved for a node with no recipient item; no reply turn recorded");
+            return Ok(None);
+        };
+        let turn = claim_reply_turn_id(fresh_reply_turn_candidate(), |id| {
+            projection.holds_reply_turn_id(id)
+        })
+        .map_err(|error| error.to_string())?;
+        journal
+            .record_event(RoomEvent::RecipientItemReplied {
+                address: TurnAddress::answering(&item.address, turn.clone()),
+                answers: item.address.item().clone(),
+                content: content.to_owned(),
+                authorship: match authorship {
+                    super::response_modes::DraftAuthorship::AgentComposed => {
+                        ReplyAuthorship::AgentComposed
+                    }
+                    super::response_modes::DraftAuthorship::HumanWritten => {
+                        ReplyAuthorship::HumanWritten
+                    }
+                },
+                via_node: Some(node_id.clone()),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Some(turn))
+    }
+
+    /// Without the `a2a` feature no inbound A2A node exists, so no card
+    /// resolution can answer a recipient item.
+    #[cfg(not(feature = "a2a"))]
+    async fn reply_turn_for_resolution(
+        &self,
+        _node_id: &AgentId,
+        _content: &str,
+        _authorship: super::response_modes::DraftAuthorship,
+        _sent: bool,
+        _preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
+    ) -> Result<Option<crate::domain::models::ReplyTurnId>, String> {
+        Ok(None)
     }
 
     /// Execute one operator share act against the running daemon (Story 18.4a;
@@ -1520,6 +1673,52 @@ impl AttachServer {
     )> {
         use crate::adapters::policy::recipient_item::{ItemActOutcome, next_item_state};
 
+        let (item, _projection, journal) = self
+            .find_recipient_item(conn_id, mode, tier, act.noun(), item_id)
+            .await?;
+        match next_item_state(&item.state, act) {
+            ItemActOutcome::Applied(_) => Some((item, journal)),
+            // Already there: the shipped silence, preserved exactly.
+            ItemActOutcome::Idempotent => None,
+            // Told, never swallowed — and deliberately NOT the not-found
+            // string, because a tombstone the operator cannot distinguish
+            // from a never-minted id is the collapse AD-1822 forbids.
+            // `Removed` is the only state any act is refused from today; a
+            // future terminal state must mint its own sentence here rather
+            // than inherit one that would be false.
+            ItemActOutcome::Refused(_) => {
+                self.send_to(
+                    conn_id,
+                    DaemonFrame::Error(ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned())),
+                )
+                .await;
+                None
+            }
+        }
+    }
+
+    /// The gate + load + find prefix every recipient-item act shares —
+    /// acknowledge, remove (through [`Self::resolve_item_for_edit`]) and Story
+    /// 19.18's reply. Extracted, ⛔ never copied: one gate, one journal load,
+    /// one lookup by id, and the refusal strings byte-identical to the ones
+    /// ack/remove shipped with. `noun` names the act in the gate's refusals.
+    ///
+    /// Sends its own refusal frame on every failure path; `None` means the
+    /// client has been told. Returns the item, the one fold it was found in
+    /// (the reply reuses it for id minting and the card lookup — no second
+    /// load), and the journal to append to.
+    async fn find_recipient_item(
+        &self,
+        conn_id: u64,
+        mode: AttachMode,
+        tier: ConnectionTier,
+        noun: &str,
+        item_id: &str,
+    ) -> Option<(
+        crate::domain::models::RecipientItemView,
+        crate::adapters::policy::JournalRecipientItemProjection,
+        Arc<dyn crate::domain::ports::RoomJournal>,
+    )> {
         let acting = AgentId::local_operator();
         match recipient_ack_gate(mode, tier, &acting) {
             RecipientAckGate::Allow => {}
@@ -1532,8 +1731,7 @@ impl AttachServer {
                 self.send_to(
                     conn_id,
                     DaemonFrame::Error(ProtocolError::PeerVerification(format!(
-                        "recipient {} is same-host trusted-local only",
-                        act.noun()
+                        "recipient {noun} is same-host trusted-local only"
                     ))),
                 )
                 .await;
@@ -1543,8 +1741,7 @@ impl AttachServer {
                 self.send_to(
                     conn_id,
                     DaemonFrame::Error(ProtocolError::PeerVerification(format!(
-                        "room role does not permit durable recipient {}",
-                        act.noun()
+                        "room role does not permit durable recipient {noun}"
                     ))),
                 )
                 .await;
@@ -1588,33 +1785,229 @@ impl AttachServer {
             self.send_to(
                 conn_id,
                 DaemonFrame::Error(ProtocolError::Malformed(
-                    "recipient item not found".to_owned(),
+                    RECIPIENT_ITEM_NOT_FOUND.to_owned(),
                 )),
             )
             .await;
             return None;
         };
-        match next_item_state(&item.state, act) {
-            ItemActOutcome::Applied(_) => Some((item, Arc::clone(journal))),
-            // Already there: the shipped silence, preserved exactly.
-            ItemActOutcome::Idempotent => None,
-            // Told, never swallowed — and deliberately NOT the not-found
-            // string, because a tombstone the operator cannot distinguish
-            // from a never-minted id is the collapse AD-1822 forbids.
-            // `Removed` is the only state any act is refused from today; a
-            // future terminal state must mint its own sentence here rather
-            // than inherit one that would be false.
-            ItemActOutcome::Refused(_) => {
+        Some((item, projection, Arc::clone(journal)))
+    }
+
+    /// Story 19.18 `AC2` — the `/team reply` arm: record one reply turn
+    /// answering a recipient item on THIS host. ⛔ No egress, no push, and no
+    /// write on the answered item (`A2`, `A4`).
+    ///
+    /// Order: shared gate + load + find → legality (a tombstone is refused;
+    /// a retracted item is answerable) → size → author-time scrub (`P13`) →
+    /// (d′) a persisted pending card for this item is resolved as `WriteOwn`
+    /// with the same text (one act, one turn, the card clears) → otherwise one
+    /// direct `RecipientItemReplied`. The confirmation frame is sent only
+    /// after the turn is durable (`M25`); every refusal writes zero rows.
+    async fn reply_to_recipient_item(
+        &self,
+        conn_id: u64,
+        mode: AttachMode,
+        tier: ConnectionTier,
+        item_id: &str,
+        text: String,
+    ) {
+        let refuse = |message: String| DaemonFrame::Error(ProtocolError::Malformed(message));
+        #[cfg(not(feature = "a2a"))]
+        {
+            // A reply turn is served only over A2A, and the author-time scrub
+            // is the A2A disclosure predicate: a build without the feature
+            // records nothing it could never serve.
+            let _ = (mode, tier, item_id, text);
+            self.send_to(
+                conn_id,
+                refuse(
+                    "`/team reply` needs the `a2a` feature; this build was compiled without it."
+                        .to_owned(),
+                ),
+            )
+            .await;
+        }
+        #[cfg(feature = "a2a")]
+        {
+            use crate::domain::models::{
+                MAX_REPLY_BYTES, RecipientItemState, ReplyAuthorship, RoomEvent, TurnAddress,
+                claim_reply_turn_id, fresh_reply_turn_candidate,
+            };
+
+            let _reply_guard = self.peer_reply_serial.lock().await;
+            let Some((item, projection, journal)) = self
+                .find_recipient_item(conn_id, mode, tier, "reply", item_id)
+                .await
+            else {
+                return;
+            };
+            if matches!(item.state, RecipientItemState::Removed { .. }) {
+                self.send_to(conn_id, refuse(RECIPIENT_ITEM_REMOVED.to_owned()))
+                    .await;
+                return;
+            }
+            if text.trim().is_empty() {
+                self.send_to(conn_id, refuse("reply text is empty".to_owned()))
+                    .await;
+                return;
+            }
+            if text.len() > MAX_REPLY_BYTES {
                 self.send_to(
                     conn_id,
-                    DaemonFrame::Error(ProtocolError::Malformed(
-                        "recipient item already removed".to_owned(),
+                    refuse(format!(
+                        "reply is longer than {MAX_REPLY_BYTES} bytes — shorten it"
                     )),
                 )
                 .await;
-                None
+                return;
+            }
+            // `P13` — the served thread withholds a body that fails the
+            // disclosure predicate; a HUMAN reply that would fail it is
+            // refused here instead of being recorded and then served withheld.
+            let fragments =
+                crate::domain::ports::InboundPeerRuntime::disclosure_forbidden_fragments(self)
+                    .await;
+            if crate::adapters::a2a::projection::withholds(&text, &self.core.workspace, &fragments)
+            {
+                self.send_to(
+                    conn_id,
+                    refuse(
+                        "this reply names a host path, which peers are never shown — rephrase it"
+                            .to_owned(),
+                    ),
+                )
+                .await;
+                return;
+            }
+            // (d′) `P4`/`Q1` — a persisted pending card for this item is
+            // answered through the card, so the host never holds two truths
+            // about one question.
+            if let Some(node) = self.pending_card_for_item(&projection, &item).await {
+                match self
+                    .resolve_peer_draft_locked(
+                        &node,
+                        super::response_modes::DraftResolution::WriteOwn(text),
+                        Some(&projection),
+                    )
+                    .await
+                {
+                    Ok(Some(turn)) => {
+                        self.send_to(
+                            conn_id,
+                            DaemonFrame::RecipientItemReplyRecorded {
+                                item_id: item_id.to_owned(),
+                                turn_id: turn.as_str().to_owned(),
+                            },
+                        )
+                        .await;
+                    }
+                    Ok(None) => {
+                        self.send_to(
+                            conn_id,
+                            DaemonFrame::Error(ProtocolError::Internal(
+                                "the pending card resolved without a reply turn".to_owned(),
+                            )),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        self.send_to(conn_id, DaemonFrame::Error(ProtocolError::Internal(error)))
+                            .await;
+                    }
+                }
+                return;
+            }
+            let turn = match claim_reply_turn_id(fresh_reply_turn_candidate(), |id| {
+                projection.holds_reply_turn_id(id)
+            }) {
+                Ok(turn) => turn,
+                Err(error) => {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let turn_id = turn.as_str().to_owned();
+            if let Err(error) = journal
+                .record_event(RoomEvent::RecipientItemReplied {
+                    address: TurnAddress::answering(&item.address, turn),
+                    answers: item.address.item().clone(),
+                    content: text,
+                    authorship: ReplyAuthorship::HumanWritten,
+                    via_node: None,
+                })
+                .await
+            {
+                self.send_to(
+                    conn_id,
+                    DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
+                )
+                .await;
+                return;
+            }
+            self.send_to(
+                conn_id,
+                DaemonFrame::RecipientItemReplyRecorded {
+                    item_id: item_id.to_owned(),
+                    turn_id,
+                },
+            )
+            .await;
+        }
+    }
+
+    /// Story 19.18 `AC3(c)` (`Q1`) — the pending peer-response card for
+    /// `item`, found from the **persisted** conversation rows: a
+    /// `peer-response-<node>` row still in a pending shape, whose node id
+    /// joins through the journal fold to this item. ⛔ Never `pending_drafts`
+    /// alone: that map is empty after a restart until a resolve rebuilds it,
+    /// so a memory-only lookup would miss the card and leave it pending
+    /// beside a direct turn — two truths about one question (`M41`).
+    #[cfg(feature = "a2a")]
+    async fn pending_card_for_item(
+        &self,
+        projection: &crate::adapters::policy::JournalRecipientItemProjection,
+        item: &crate::domain::models::RecipientItemView,
+    ) -> Option<AgentId> {
+        let nodes: Vec<(String, bool)> = {
+            let conversation = self.conversation.lock().await;
+            conversation
+                .messages
+                .iter()
+                .filter_map(|message| {
+                    let node = message.id.strip_prefix(PEER_RESPONSE_ROW_PREFIX)?;
+                    let drafting = message.content == super::response_modes::DRAFTING_PLACEHOLDER;
+                    (drafting
+                        || super::response_modes::pending_draft_content(&message.content).is_some())
+                    .then(|| (node.to_owned(), drafting))
+                })
+                .collect()
+        };
+        for (node, drafting) in nodes {
+            let Ok(node) = AgentId::parse(&node) else {
+                continue;
+            };
+            if drafting
+                && !matches!(
+                    self.pending_drafts.state(node.as_str()).await,
+                    Some(super::response_modes::DraftState::Drafting { .. })
+                )
+            {
+                // A drafting placeholder left by a crashed process is not
+                // resolvable; its item must remain directly answerable.
+                continue;
+            }
+            if crate::adapters::a2a::exec::recipient_item_for_node(projection, &node)
+                .is_some_and(|answered| answered.address == item.address)
+            {
+                return Some(node);
             }
         }
+        None
     }
 
     /// Returns `true` if the connection should detach.
@@ -1990,6 +2383,10 @@ impl AttachServer {
                     .await;
                 }
             }
+            ClientFrame::ReplyToRecipientItem { item_id, text } => {
+                self.reply_to_recipient_item(conn_id, mode, tier, &item_id, text)
+                    .await;
+            }
             ClientFrame::PeerShare {
                 alias,
                 artifact,
@@ -2296,6 +2693,7 @@ impl AttachServer {
                 // while a draft is pending appends to the conversation and
                 // rides the existing card — no duplicate inference, no
                 // duplicate row id.
+                let reply_guard = self.peer_reply_serial.lock().await;
                 if !self.pending_drafts.begin(recipient.as_str()).await {
                     let mut conversation = self.conversation.lock().await;
                     conversation.messages.push(peer_transcript_message(
@@ -2330,6 +2728,7 @@ impl AttachServer {
                         return Err(error.to_string());
                     }
                 }
+                drop(reply_guard);
                 let (ingested_tx, ingested_rx) = tokio::sync::oneshot::channel();
                 let server = self.clone();
                 tokio::spawn(async move {
@@ -4811,6 +5210,7 @@ mod tests {
                 task: "sender-task".to_owned(),
                 alias: None,
                 content: "review".to_owned(),
+                in_reply_to: None,
             })
             .await
             .unwrap();
@@ -4893,6 +5293,7 @@ mod tests {
                     task: format!("{item_id}-sender-task"),
                     alias: alias.map(ToOwned::to_owned),
                     content: (*content).to_owned(),
+                    in_reply_to: None,
                 })
                 .await
                 .unwrap();
@@ -5525,6 +5926,7 @@ mod tests {
         assert!(
             before
                 .snapshot()
+                .items
                 .keys()
                 .any(|address| address == &tombstone.address),
             "the tombstone keeps its key in the allocator's seed set"
@@ -6180,6 +6582,142 @@ mod tests {
             std::iter::from_fn(|| domain_rx.try_recv().ok())
                 .all(|event| !matches!(event, AppEvent::SystemNotice { .. })),
             "urgency must not be encoded as NoticeLevel"
+        );
+    }
+
+    #[cfg(feature = "a2a")]
+    async fn reply_card_fixture(
+        workspace: &std::path::Path,
+        card_content: &str,
+    ) -> (Arc<AttachServer>, Arc<RecordingJournal>, AgentId) {
+        use crate::adapters::a2a::exec::{SubmitterKey, mint_inbound_node_id};
+        use crate::domain::models::{ItemAddress, ItemId, RoomEvent};
+
+        let submitter = SubmitterKey::loopback();
+        let node = mint_inbound_node_id(&submitter, "reply-task");
+        let conversation = Arc::new(Mutex::new(Conversation {
+            messages: vec![ChatMessage {
+                id: format!("peer-response-{}", node.as_str()),
+                role: MessageRole::Assistant,
+                content: card_content.to_owned(),
+                synthetic: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        let journal = Arc::new(RecordingJournal::default());
+        journal
+            .record_event(RoomEvent::RecipientItemReceived {
+                address: ItemAddress::from_a2a_ingress(
+                    submitter.pseudonymous_peer_id(),
+                    ItemId::from_replay("ri_reply-test"),
+                ),
+                task: "reply-task".to_owned(),
+                alias: None,
+                content: "question".to_owned(),
+                in_reply_to: None,
+            })
+            .await
+            .unwrap();
+        let (core, _storage) = mock_core(workspace, vec![]);
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        (
+            journaled_server(core, conversation, domain_tx, journal.clone()),
+            journal,
+            node,
+        )
+    }
+
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn drafting_card_blocks_a_direct_reply_but_a_crashed_draft_does_not() {
+        use crate::adapters::daemon::response_modes::DRAFTING_PLACEHOLDER;
+        use crate::adapters::policy::JournalRecipientItemProjection;
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, journal, node) = reply_card_fixture(tmp.path(), DRAFTING_PLACEHOLDER).await;
+        assert!(server.pending_drafts.begin(node.as_str()).await);
+        let projection = JournalRecipientItemProjection::from_entries(
+            &crate::domain::ports::RoomJournalReader::load_entries(journal.as_ref())
+                .await
+                .unwrap(),
+        );
+        let item = projection.find_by_id("ri_reply-test").unwrap();
+        assert_eq!(
+            server.pending_card_for_item(&projection, &item).await,
+            Some(node.clone())
+        );
+        assert!(
+            server
+                .resolve_peer_draft(
+                    &node,
+                    crate::adapters::daemon::response_modes::DraftResolution::WriteOwn(
+                        "human answer".to_owned()
+                    )
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(journal.events.lock().await.len(), 1);
+        server.pending_drafts.abandon(node.as_str()).await;
+        assert_eq!(server.pending_card_for_item(&projection, &item).await, None);
+    }
+
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn draft_reply_size_refusal_preserves_card_and_journal() {
+        use crate::adapters::daemon::response_modes::{
+            DRAFT_APPROVAL_PREFIX, DraftResolution, DraftState,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let card = format!("{DRAFT_APPROVAL_PREFIX}draft");
+        let (server, journal, node) = reply_card_fixture(tmp.path(), &card).await;
+        assert!(server.pending_drafts.begin(node.as_str()).await);
+        assert!(server.pending_drafts.complete(node.as_str(), "draft").await);
+        let large = "x".repeat(crate::domain::models::MAX_REPLY_BYTES + 1);
+        assert!(
+            server
+                .resolve_peer_draft(&node, DraftResolution::Edit(large))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            server.pending_drafts.state(node.as_str()).await,
+            Some(DraftState::Ready {
+                content: "draft".to_owned()
+            })
+        );
+        assert_eq!(journal.events.lock().await.len(), 1);
+    }
+
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn concurrent_card_resolutions_record_only_one_answer() {
+        use crate::adapters::daemon::response_modes::{DRAFT_APPROVAL_PREFIX, DraftResolution};
+        let tmp = tempfile::tempdir().unwrap();
+        let card = format!("{DRAFT_APPROVAL_PREFIX}draft");
+        let (server, journal, node) = reply_card_fixture(tmp.path(), &card).await;
+        assert!(server.pending_drafts.begin(node.as_str()).await);
+        assert!(server.pending_drafts.complete(node.as_str(), "draft").await);
+        let (first, second) = tokio::join!(
+            server.resolve_peer_draft(&node, DraftResolution::Approve),
+            server.resolve_peer_draft(&node, DraftResolution::WriteOwn("human answer".to_owned()))
+        );
+        assert_eq!(
+            usize::from(first.unwrap().is_some()) + usize::from(second.unwrap().is_some()),
+            1
+        );
+        assert_eq!(
+            journal
+                .events
+                .lock()
+                .await
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    crate::domain::models::RoomEvent::RecipientItemReplied { .. }
+                ))
+                .count(),
+            1
         );
     }
 

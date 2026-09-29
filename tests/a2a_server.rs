@@ -1329,6 +1329,7 @@ async fn seed_item(
         task: task.to_owned(),
         alias: None,
         content: format!("content for {item_id}"),
+        in_reply_to: None,
     })
     .await
     .expect("seed the recipient item");
@@ -1447,6 +1448,7 @@ async fn ac1_the_read_verb_serves_only_the_callers_own_set_through_the_real_fron
             task: "task-acked-gone".to_owned(),
             alias: None,
             content: "content".to_owned(),
+            in_reply_to: None,
         })
         .await
         .expect("seed received");
@@ -1981,6 +1983,7 @@ async fn ac3b2_an_unreachable_roster_peer_renders_warned_never_declined() {
             task: Some("task-board-live".to_owned()),
             bytes: 8,
             act: rustain::domain::models::DispatchAct::Task,
+            content_hash: None,
         },
     )
     .await
@@ -2129,6 +2132,7 @@ async fn ac3_the_board_is_assembled_from_remote_reads_not_the_local_projection()
             task: Some("task-board-sent".to_owned()),
             bytes: 8,
             act: rustain::domain::models::DispatchAct::Task,
+            content_hash: None,
         },
     )
     .await
@@ -2249,6 +2253,7 @@ async fn ac3g_the_board_row_answers_for_the_dispatched_task_not_the_newest_bag()
             task: Some("task-ours".to_owned()),
             bytes: 8,
             act: rustain::domain::models::DispatchAct::Task,
+            content_hash: None,
         },
     )
     .await
@@ -2347,6 +2352,7 @@ async fn ac2c_the_board_carries_the_collapse_disclosure_from_a_loopback_peer() {
             task: Some("task-collapse".to_owned()),
             bytes: 8,
             act: rustain::domain::models::DispatchAct::Task,
+            content_hash: None,
         },
     )
     .await

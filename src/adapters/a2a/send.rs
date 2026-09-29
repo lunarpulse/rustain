@@ -50,16 +50,20 @@ impl std::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-fn outbound_message(text: &str) -> serde_json::Value {
-    build_message(&serde_json::json!({ "message": text }))
+fn outbound_message(text: &str, reply_to: Option<&str>) -> serde_json::Value {
+    build_message(&serde_json::json!({ "message": text }), reply_to)
 }
 
 /// Drive N independent sends and report each row as it settles. The callback
 /// runs on the caller's task; it never waits for an unrelated recipient.
+///
+/// Story 19.18 `A9`: `reply_to` is `Some` only for `/team followup` (N = 1),
+/// the one addition to the 19.17 delivery — ⛔ no second send path.
 pub async fn deliver_to_recipients<F>(
     runtime: &A2aDelegationRuntime,
     recipients: &[String],
     text: &str,
+    reply_to: Option<&str>,
     cancel: CancellationToken,
     mut on_settle: F,
 ) where
@@ -69,7 +73,7 @@ pub async fn deliver_to_recipients<F>(
 
     let pending = FuturesUnordered::new();
     for (index, peer) in recipients.iter().enumerate() {
-        pending.push(async move { (index, deliver_text(runtime, peer, text).await) });
+        pending.push(async move { (index, deliver_text(runtime, peer, text, reply_to).await) });
     }
     tokio::pin!(pending);
     loop {
@@ -124,6 +128,7 @@ pub async fn deliver_text(
     runtime: &A2aDelegationRuntime,
     peer_id: &str,
     text: &str,
+    reply_to: Option<&str>,
 ) -> RecipientOutcome {
     use super::lifecycle::A2aTaskTransport;
 
@@ -165,7 +170,7 @@ pub async fn deliver_text(
             };
         }
     };
-    let message = outbound_message(text);
+    let message = outbound_message(text, reply_to);
     let task_id = message["message"]["messageId"]
         .as_str()
         .expect("build_message creates messageId")
@@ -175,7 +180,7 @@ pub async fn deliver_text(
     let result = transport
         .send_after(message, || async {
             runtime
-                .journal_send_dispatch(&spec, &task_id, text.len())
+                .journal_send_dispatch(&spec, &task_id, text)
                 .await
                 .map_err(|_| A2aError::JournalDispatch)?;
             dispatched.store(true, Ordering::Relaxed);
@@ -228,6 +233,19 @@ pub async fn deliver_text(
             outcome
         }
         Err(A2aError::JournalDispatch) => RecipientOutcome::NotSent,
+        // Story 19.18 `AC12(d)` — the ONE precise change to the post-hook
+        // classification: a `-32040` is the recipient's policy refusing the
+        // message, which TM-02 names `declined`. Every other JSON-RPC error
+        // proves neither delivery nor refusal and stays `no usable answer`.
+        Err(A2aError::JsonRpc { code, message })
+            if super::jsonrpc::JsonRpcErrorKind::classify(code)
+                == super::jsonrpc::JsonRpcErrorKind::RefusedByPolicy =>
+        {
+            let _ = runtime
+                .journal_send_rejected(&spec, &task_id, &message)
+                .await;
+            RecipientOutcome::Declined
+        }
         Err(error) if !dispatched.load(Ordering::Relaxed) => {
             let cause = send_preflight_cause(peer_id, &error);
             let _ = runtime
@@ -652,6 +670,240 @@ fn retract_success(result: &serde_json::Value) -> RetractOutcome {
     }
 }
 
+// ── Story 19.18 · the asker's thread read ───────────────────────────────────
+//
+// The served verb is `x-rustain-items/thread` on the ANSWERING host; this side
+// reads it, bounds it (the asker does not trust the answering host, `P12`),
+// settles it against its own ledger and journals each peer reply turn once.
+// ⛔ Nothing here polls: one operator act, one read.
+
+/// One served turn after the asker's distrust bounds. Fields hold the wire
+/// values raw; the render is the single sanitize point (`AD-1824`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedTurn {
+    pub turn_id: String,
+    /// `true` for a reply turn (the peer's words), `false` for an item turn.
+    pub reply: bool,
+    /// An item turn's `task` — the one the `you` check matches.
+    pub task: Option<String>,
+    pub in_reply_to: Option<String>,
+    /// An item turn the recipient removed: rendered with no body.
+    pub removed: bool,
+    /// The body, or `None` when the host withheld it or it exceeded this
+    /// host's bound (`MAX_REPLY_BYTES`).
+    pub content: Option<String>,
+    /// Hash of the body this host received, when it received one.
+    pub content_hash: Option<crate::domain::models::ContentHash>,
+    pub authorship: crate::domain::models::ReplyAuthorship,
+    pub retracted_at_ms: Option<i64>,
+}
+
+/// One served thread, bounded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedThread {
+    pub root: String,
+    pub turns: Vec<ServedTurn>,
+    /// Non-root turns the host (or this host's own bound) left out.
+    pub omitted_before: usize,
+    /// Fails SAFE: an absent flag is read as collapsed, like the board.
+    pub principal_collapsed: bool,
+}
+
+/// What one `/team thread` read produced.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ThreadRead {
+    /// The thread, with — per turn — whether an item turn may render `you`.
+    Read {
+        thread: ServedThread,
+        mine: Vec<bool>,
+    },
+    /// `-32001`: no thread this credential can address — byte-identical
+    /// whether it never existed or is another principal's (R21).
+    NotFound,
+    /// `-32040`: the peer serves no threads to API-key callers (`AC12`).
+    AccessOff,
+    /// The roster names no such peer (the shipped `UnknownPeer` sentence).
+    UnknownPeer { known: Vec<String> },
+    /// Any other failure, in 19.17's outcome vocabulary — ⛔ no new cause
+    /// words: `unreachable` (with its cause line) or `no usable answer`.
+    Failed(RecipientOutcome),
+}
+
+/// Read one thread on `peer_id`'s host and settle it against this host's
+/// ledger. The sole production caller is the rail-3 `/team thread` spawn.
+pub async fn read_thread(
+    runtime: &A2aDelegationRuntime,
+    peer_id: &str,
+    item_id: &str,
+) -> ThreadRead {
+    use super::jsonrpc::JsonRpcErrorKind;
+
+    let Some((spec, client)) = runtime.peer_binding(peer_id) else {
+        return ThreadRead::UnknownPeer {
+            known: runtime.known_peer_ids(),
+        };
+    };
+    let card = match client.card_slot().await {
+        CardSlot::Ready(card, _) => card,
+        CardSlot::AnchorRefused(cause) => {
+            return ThreadRead::Failed(RecipientOutcome::Unreachable {
+                cause: Some(SendCause::Ratified(
+                    anchor_error(&spec.id, &cause).to_string(),
+                )),
+            });
+        }
+        CardSlot::Pending | CardSlot::Unavailable => {
+            return ThreadRead::Failed(RecipientOutcome::Unreachable {
+                cause: Some(SendCause::Ratified(
+                    SendError::CardNotCached {
+                        peer: peer_id.to_owned(),
+                    }
+                    .to_string(),
+                )),
+            });
+        }
+    };
+    let endpoint = match resolve_jsonrpc_endpoint(&card) {
+        Ok(endpoint) => endpoint,
+        Err(source) => {
+            return ThreadRead::Failed(RecipientOutcome::Unreachable {
+                cause: Some(SendCause::PeerInfluenced(
+                    SendError::Endpoint {
+                        peer: peer_id.to_owned(),
+                        source,
+                    }
+                    .to_string(),
+                )),
+            });
+        }
+    };
+    let transport = TaskClient::new(client, endpoint.url().to_owned());
+    let result = match transport.read_thread(item_id).await {
+        Ok(result) => result,
+        Err(A2aError::JsonRpc { code, .. }) => {
+            return match JsonRpcErrorKind::classify(code) {
+                JsonRpcErrorKind::TaskNotFound => ThreadRead::NotFound,
+                JsonRpcErrorKind::RefusedByPolicy => ThreadRead::AccessOff,
+                _ => ThreadRead::Failed(RecipientOutcome::NoUsableAnswer),
+            };
+        }
+        Err(error) => {
+            return ThreadRead::Failed(match send_error_class(&error) {
+                SendErrorClass::Connect => RecipientOutcome::Unreachable { cause: None },
+                SendErrorClass::Trust => RecipientOutcome::Unreachable {
+                    cause: Some(SendCause::Ratified(error.to_string())),
+                },
+                SendErrorClass::Unproven => RecipientOutcome::NoUsableAnswer,
+            });
+        }
+    };
+    let Some(thread) = parse_thread(&result) else {
+        return ThreadRead::Failed(RecipientOutcome::NoUsableAnswer);
+    };
+    let observed: Vec<super::driver::ObservedTurn<'_>> = thread
+        .turns
+        .iter()
+        .map(|turn| {
+            if turn.reply {
+                super::driver::ObservedTurn::Reply {
+                    turn: &turn.turn_id,
+                    answers: turn.in_reply_to.as_deref(),
+                    content: turn.content.as_deref(),
+                    content_hash: turn.content_hash,
+                }
+            } else {
+                super::driver::ObservedTurn::Item {
+                    task: turn.task.as_deref(),
+                    content_hash: turn.content_hash,
+                }
+            }
+        })
+        .collect();
+    let mine = runtime.settle_thread(&spec, &observed).await;
+    ThreadRead::Read { thread, mine }
+}
+
+/// Parse and bound one served thread (`P12`). `None` when the answer is not a
+/// thread this build can read: no `turns` array, a turn with no id or an id
+/// over `MAX_PEER_ID_BYTES`, or a kind this build cannot name — ⛔ never
+/// rendered as if it were a partial thread.
+pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
+    use crate::domain::models::{MAX_REPLY_BYTES, ReplyAuthorship};
+    use crate::domain::services::transparency::MAX_PEER_ID_BYTES;
+
+    let bounded = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| text.len() <= MAX_PEER_ID_BYTES)
+            .map(str::to_owned)
+    };
+    let root = bounded(result.get("root"))?;
+    let mut turns = Vec::new();
+    for turn in result.get("turns")?.as_array()? {
+        let turn_id = turn
+            .get("turnId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= MAX_PEER_ID_BYTES)?
+            .to_owned();
+        let reply = match turn.get("kind").and_then(serde_json::Value::as_str)? {
+            "item" => false,
+            "reply" => true,
+            _ => return None,
+        };
+        let served = turn.get("content").and_then(serde_json::Value::as_str);
+        let content_hash = served.map(super::driver::text_content_hash);
+        let content = served
+            .filter(|content| content.len() <= MAX_REPLY_BYTES)
+            .map(str::to_owned);
+        turns.push(ServedTurn {
+            turn_id,
+            reply,
+            task: bounded(turn.get("task")),
+            in_reply_to: bounded(turn.get("inReplyTo")),
+            removed: turn.get("state").and_then(serde_json::Value::as_str) == Some("removed"),
+            content,
+            content_hash,
+            authorship: turn
+                .get("authorship")
+                .and_then(serde_json::Value::as_str)
+                .map_or(ReplyAuthorship::Unknown, ReplyAuthorship::from_wire),
+            retracted_at_ms: turn
+                .get("retractedAtMs")
+                .and_then(serde_json::Value::as_i64),
+        });
+    }
+    let mut omitted_before = result
+        .get("omittedBefore")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(0);
+    // A hostile host can serve more than it promised: keep the root and the
+    // newest turns under the shared bound, and count the rest as omitted.
+    if turns.len() > super::MAX_THREAD_TURNS {
+        let root_turn = turns
+            .iter()
+            .position(|turn| turn.turn_id == root)
+            .map(|index| turns.remove(index));
+        let keep = super::MAX_THREAD_TURNS - usize::from(root_turn.is_some());
+        let cut = turns.len() - keep;
+        omitted_before = omitted_before.saturating_add(cut);
+        turns.drain(..cut);
+        if let Some(root_turn) = root_turn {
+            turns.insert(0, root_turn);
+        }
+    }
+    Some(ServedThread {
+        root,
+        turns,
+        omitted_before,
+        principal_collapsed: result
+            .get("principalCollapsed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -669,6 +921,7 @@ mod tests {
 
     use super::{
         RecipientOutcome, SendCause, classify_first_answer, deliver_text, outbound_message,
+        parse_thread,
     };
 
     struct AcceptingJournal;
@@ -708,7 +961,7 @@ mod tests {
     async fn configured_peer_without_cached_card_refuses_without_on_demand_fetch() {
         let known = peer("known");
         let client = Arc::new(client::A2aClientAdapter::new(&known, None).expect("client"));
-        let outcome = deliver_text(&runtime(vec![(known, client)]), "known", "hello").await;
+        let outcome = deliver_text(&runtime(vec![(known, client)]), "known", "hello", None).await;
         let RecipientOutcome::Unreachable {
             cause: Some(SendCause::Ratified(text)),
         } = outcome
@@ -739,7 +992,7 @@ mod tests {
             .with_peer_bindings(vec![(spec, client)].into());
 
         assert_eq!(
-            deliver_text(&runtime, "questions", "hello").await,
+            deliver_text(&runtime, "questions", "hello", None).await,
             RecipientOutcome::NoUsableAnswer
         );
         let methods: Vec<_> = fixture
@@ -771,7 +1024,7 @@ mod tests {
     #[test]
     fn outbound_message_preserves_exact_unicode_text_in_one_text_part() {
         let text = "  Καλημέρα 🌕\nsecond line  ";
-        let message = outbound_message(text);
+        let message = outbound_message(text, None);
         let parts = message["message"]["parts"]
             .as_array()
             .expect("message parts");
@@ -835,5 +1088,57 @@ mod tests {
                 "an oversized remote task id never authorizes acceptance or cancellation"
             );
         }
+    }
+
+    /// Story 19.18 `K19` (in-crate half, recorded as such: no tampering proxy
+    /// is constructible in the front-door harness) — the asker's distrust
+    /// bounds on a served thread (`P12`). An oversized turn id makes the
+    /// answer unusable; an oversized body is withheld with its hash kept;
+    /// more than `MAX_THREAD_TURNS` turns keep the root and the newest.
+    #[test]
+    fn a_served_thread_is_bounded_before_it_is_believed() {
+        use crate::adapters::a2a::MAX_THREAD_TURNS;
+        use crate::domain::models::MAX_REPLY_BYTES;
+        use crate::domain::services::transparency::MAX_PEER_ID_BYTES;
+
+        let turn = |id: &str, kind: &str, content: &str| serde_json::json!({ "turnId": id, "kind": kind, "content": content, "ordinal": 0 });
+        let oversized_id = serde_json::json!({
+            "root": "ri_q",
+            "turns": [turn(&"x".repeat(MAX_PEER_ID_BYTES + 1), "item", "hi")],
+            "omittedBefore": 0,
+        });
+        assert!(
+            parse_thread(&oversized_id).is_none(),
+            "an oversized turn id is refused"
+        );
+        let huge = "y".repeat(MAX_REPLY_BYTES + 1);
+        let oversized_body = serde_json::json!({
+            "root": "ri_q",
+            "turns": [turn("ri_q", "item", "q"), turn("rr_1", "reply", &huge)],
+            "omittedBefore": 0,
+            "principalCollapsed": false,
+        });
+        let parsed = parse_thread(&oversized_body).expect("usable");
+        assert_eq!(parsed.turns[1].content, None, "withheld, never believed");
+        assert!(parsed.turns[1].content_hash.is_some(), "its hash is kept");
+        assert!(!parsed.principal_collapsed);
+        let flood: Vec<_> = std::iter::once(turn("ri_q", "item", "q"))
+            .chain(
+                (0..MAX_THREAD_TURNS + 5).map(|index| turn(&format!("rr_{index}"), "reply", "a")),
+            )
+            .collect();
+        let parsed =
+            parse_thread(&serde_json::json!({ "root": "ri_q", "turns": flood })).expect("usable");
+        assert_eq!(parsed.turns.len(), MAX_THREAD_TURNS);
+        assert_eq!(parsed.turns[0].turn_id, "ri_q");
+        assert_eq!(
+            parsed.turns.last().map(|turn| turn.turn_id.clone()),
+            Some(format!("rr_{}", MAX_THREAD_TURNS + 4))
+        );
+        assert_eq!(parsed.omitted_before, 6);
+        assert!(parsed.principal_collapsed, "an absent flag fails safe");
+        let unknown_kind =
+            serde_json::json!({ "root": "ri_q", "turns": [turn("ri_q", "verdict", "x")] });
+        assert!(parse_thread(&unknown_kind).is_none());
     }
 }

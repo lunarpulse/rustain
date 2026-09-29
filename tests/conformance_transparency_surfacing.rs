@@ -119,6 +119,10 @@ fn the_palette_row_names_the_cross_host_retract_and_the_narrowed_board() {
     for verb in [
         "/team retract <peer-id> <item-id>",
         "/team board [<peer-id>]",
+        // Story 19.18 `AC1(c)`.
+        "/team reply <item-id> <text…>",
+        "/team thread <peer-id> <item-id>",
+        "/team followup <peer-id> <turn-id> <text…>",
     ] {
         assert!(entry.description.contains(verb), "{verb}: {entry:?}");
         assert!(

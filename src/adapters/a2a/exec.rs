@@ -541,6 +541,25 @@ pub fn parse_inbound_node_id(node_id: &AgentId) -> Option<(SubmitterKey, String)
     Some((SubmitterKey::from_encoded(peer), task))
 }
 
+/// Story 19.18 `P4` — the recipient item an inbound peer-response node
+/// answers, derived from the **journal** fold through the existing join:
+/// node id → `(submitter, task)` → pseudonymous principal → `find_by_task`.
+///
+/// ⛔ No in-memory node→item map: a restart would wipe it, and a card can
+/// still be resolved after one. `find_by_task` skips tombstones, which is
+/// the reply's tombstone legality. `None` for a node that is not an inbound
+/// A2A node, or whose task minted no item (pre-19.16).
+#[must_use]
+pub fn recipient_item_for_node(
+    projection: &crate::adapters::policy::JournalRecipientItemProjection,
+    node_id: &AgentId,
+) -> Option<crate::domain::models::RecipientItemView> {
+    let (submitter, task) = parse_inbound_node_id(node_id)?;
+    let principal =
+        crate::domain::models::ItemPrincipal::A2aPseudonym(submitter.pseudonymous_peer_id());
+    projection.find_by_task(&principal, &task)
+}
+
 /// The opaque reason a task resolves `failed` before its local turn can start.
 ///
 /// Startup diagnostics can name node-tree limits, agent ids, journals, or

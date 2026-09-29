@@ -301,6 +301,11 @@ pub enum ClientFrame {
     /// A new variant is not a breaking frame-shape change: `PROTOCOL_VERSION`
     /// stays where 19.16's sibling frame left it.
     RemoveRecipientItem { item_id: String },
+    /// Story 19.18 `AC2(a)` — answer one recipient-owned item with a reply
+    /// turn recorded on THIS host (`/team reply`). Trusted-local + read-write
+    /// + room-content role, the ack/remove gate. ⛔ Nothing leaves the host:
+    /// the asker reads the turn by pulling the thread.
+    ReplyToRecipientItem { item_id: String, text: String },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
 }
@@ -361,6 +366,10 @@ pub enum DaemonFrame {
     PeerAccepted { sequence: u64 },
     /// The outcome of a [`ClientFrame::PeerShare`] (Story 18.4a).
     PeerShareResult { outcome: PeerShareOutcome },
+    /// Story 19.18 `AC2(e)` — a `/team reply` turn is durable. Sent to the
+    /// issuing connection only AFTER the append succeeded (`M25`); ⛔ never
+    /// "sent" or "delivered" — nothing left this host.
+    RecipientItemReplyRecorded { item_id: String, turn_id: String },
     /// Acknowledge a clean [`ClientFrame::Detach`].
     Detached,
     /// A protocol-level error (e.g. version mismatch, read-only write attempt).

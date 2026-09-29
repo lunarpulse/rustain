@@ -98,13 +98,7 @@ impl<V: ProjectionViewer> RoomProjection<V> {
     ) -> Self {
         let disclosure = match text.map(str::trim).filter(|text| !text.is_empty()) {
             None => Disclosure::None,
-            Some(text)
-                if mentions_host_root(text, host_root)
-                    || contains_forbidden_fragment(text, forbidden)
-                    || contains_absolute_path_token(text) =>
-            {
-                Disclosure::HostBoundUnavailable
-            }
+            Some(text) if withholds(text, host_root, forbidden) => Disclosure::HostBoundUnavailable,
             Some(text) => Disclosure::Text(text.to_owned()),
         };
         Self {
@@ -145,11 +139,7 @@ impl<V: ProjectionViewer> RoomProjection<V> {
 
         let text = match &self.disclosure {
             Disclosure::Text(text) => Some(text.clone()),
-            Disclosure::HostBoundUnavailable => Some(
-                "host-bound-unavailable: the result references state bound to a host that is not \
-                 reachable from this disclosure"
-                    .to_owned(),
-            ),
+            Disclosure::HostBoundUnavailable => Some(HOST_BOUND_UNAVAILABLE_TEXT.to_owned()),
             Disclosure::None => None,
         };
 
@@ -184,6 +174,25 @@ impl<V: ProjectionViewer> RoomProjection<V> {
         task
     }
 }
+
+/// The one disclosure predicate [`RoomProjection::disclose`] applies: `true`
+/// when `text` quotes the workspace root, contains a host-sensitive fragment,
+/// or contains an absolute-path-looking token. Story 19.18 serves reply-turn
+/// content through exactly this predicate (`AC4(c)`) and refuses a human
+/// reply that would fail it at authoring time (`P13`) — ⛔ never a second
+/// scrub.
+#[must_use]
+pub fn withholds(text: &str, host_root: &Path, forbidden: &[String]) -> bool {
+    mentions_host_root(text, host_root)
+        || contains_forbidden_fragment(text, forbidden)
+        || contains_absolute_path_token(text)
+}
+
+/// The wording a host-withheld body renders as — the served task payload's own
+/// `HostBoundUnavailable` sentence, so a withheld reply turn reads exactly
+/// like a withheld task result.
+pub const HOST_BOUND_UNAVAILABLE_TEXT: &str = "host-bound-unavailable: the result references \
+     state bound to a host that is not reachable from this disclosure";
 
 /// Does `text` quote the workspace root (or a path under it)?
 ///

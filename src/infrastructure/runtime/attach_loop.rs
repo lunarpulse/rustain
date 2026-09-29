@@ -678,6 +678,30 @@ fn after_attached_draw(state: &mut TuiState, drawn: bool, visible_feedback_ids: 
     }
 }
 
+/// Story 19.18 `P15` — the Info block a daemon frame renders on the attached
+/// client, or `None` for a frame with no feedback. Pure, so the mapping is
+/// unit-provable without a socket. Reuses the `peer-retract` block shape: a
+/// stable, keyless Info block (⛔ never a Warning, never a model turn).
+fn daemon_frame_feedback(frame: &DaemonFrame) -> Option<crate::domain::models::FeedbackBlock> {
+    use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+
+    match frame {
+        DaemonFrame::RecipientItemReplyRecorded { item_id, turn_id } => {
+            Some(crate::domain::models::FeedbackBlock {
+                id: "team-reply".to_owned(),
+                level: crate::domain::models::FeedbackLevel::Info,
+                message: format!(
+                    "reply recorded for {} as {} — the asker sees it when they read the thread",
+                    sanitize_disclosable(item_id, MAX_PEER_ID_BYTES),
+                    sanitize_disclosable(turn_id, MAX_PEER_ID_BYTES)
+                ),
+                actions: vec![],
+            })
+        }
+        _ => None,
+    }
+}
+
 fn attached_team_line(text: &str) -> AttachedTeamLine {
     use crate::adapters::tui::handlers::team_command::{TeamCommandArgs, parse_team_command};
 
@@ -733,6 +757,24 @@ fn attached_team_line(text: &str) -> AttachedTeamLine {
         // Story 19.17: the attached client has no per-session A2A send egress.
         Ok(TeamCommandArgs::Send { .. }) => AttachedTeamLine::Refused(
             "'/team send' needs this session's own A2A egress — run it in a non-attached \
+             session."
+                .to_owned(),
+        ),
+        // Story 19.18 `AC9(a)` — the recipient answers an item that arrived
+        // on THIS host: the one new verb rail 4 serves, as a daemon frame.
+        Ok(TeamCommandArgs::Reply { item_id, text }) => {
+            AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem { item_id, text })
+        }
+        // Story 19.18 `AC9(a)` — the asker's verbs read and write a PEER's
+        // host over this session's own egress, which an attached session does
+        // not hold. ⛔ Never a fall-through to the model (`M24`).
+        Ok(TeamCommandArgs::Thread { .. }) => AttachedTeamLine::Refused(
+            "'/team thread' needs this session's own A2A egress — run it in a non-attached \
+             session."
+                .to_owned(),
+        ),
+        Ok(TeamCommandArgs::Followup { .. }) => AttachedTeamLine::Refused(
+            "'/team followup' needs this session's own A2A egress — run it in a non-attached \
              session."
                 .to_owned(),
         ),
@@ -1329,6 +1371,14 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                         state.needs_redraw = true;
                     }
                     Ok(Some(DaemonFrame::Detached)) => break Ok(()),
+                    // Story 19.18 `P15` — a recorded reply renders its Info
+                    // confirmation; ⛔ never the catch-all below (`M40`).
+                    Ok(Some(frame @ DaemonFrame::RecipientItemReplyRecorded { .. })) => {
+                        if let Some(block) = daemon_frame_feedback(&frame) {
+                            state.feedback_blocks.insert(block.id.clone(), block);
+                            state.needs_redraw = true;
+                        }
+                    }
                     // AttachAck/History are not expected post-handshake; ignore.
                     Ok(Some(_)) => {}
                     Ok(None) => {
@@ -1948,6 +1998,9 @@ mod tests {
             | ClientFrame::AcknowledgeRecipientItem { .. }
             // Removal disposes of a recipient-owned durable ITEM, not memory.
             | ClientFrame::RemoveRecipientItem { .. }
+            // Story 19.18: a reply turn is a durable room record on the
+            // answering host, not memory.
+            | ClientFrame::ReplyToRecipientItem { .. }
             | ClientFrame::PeerEnvelope(_)
             | ClientFrame::Detach => {}
         }
@@ -2417,5 +2470,61 @@ mod tests {
             rx.try_recv(),
             Ok(ClientFrame::AcknowledgeRecipientItem { .. })
         ));
+    }
+
+    /// Story 19.18 `K14` — one intercept row per new verb. `/team reply` is a
+    /// daemon frame; the asker's verbs refuse aloud; nothing new falls
+    /// through to the model.
+    ///
+    /// `M24` → RED: delete the `Thread` refusal arm — it falls to
+    /// `PassThrough` and becomes a model prompt.
+    #[test]
+    fn reply_is_a_frame_and_the_askers_verbs_refuse_on_the_attached_rail() {
+        match attached_team_line("/team reply ri_x hi  there") {
+            AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem { item_id, text }) => {
+                assert_eq!(item_id, "ri_x");
+                assert_eq!(text, "hi  there");
+            }
+            other => panic!("expected the reply frame, got {other:?}"),
+        }
+        for (line, verb) in [
+            ("/team thread b ri_x", "'/team thread'"),
+            ("/team followup b rr_y hi", "'/team followup'"),
+        ] {
+            let AttachedTeamLine::Refused(reason) = attached_team_line(line) else {
+                panic!("{line} must refuse aloud on the attached rail");
+            };
+            assert!(reason.starts_with(verb), "{reason}");
+            assert!(reason.contains("own A2A egress"), "{reason}");
+        }
+        assert!(matches!(
+            attached_team_line("/teamwork"),
+            AttachedTeamLine::PassThrough
+        ));
+        // Positive control: the shipped acknowledgement frame is unchanged.
+        assert!(matches!(
+            attached_team_line("/team ack ri_x"),
+            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+        ));
+    }
+
+    /// Story 19.18 `P15` — the recorded-reply frame renders the ratified Info
+    /// confirmation; other frames render nothing here.
+    ///
+    /// `M40` → RED: fall through to the read loop's catch-all — no block.
+    #[test]
+    fn a_recorded_reply_frame_renders_its_info_confirmation() {
+        let block = daemon_frame_feedback(&DaemonFrame::RecipientItemReplyRecorded {
+            item_id: "ri_q".to_owned(),
+            turn_id: "rr_1".to_owned(),
+        })
+        .expect("a recorded reply renders feedback");
+        assert_eq!(block.level, crate::domain::models::FeedbackLevel::Info);
+        assert_eq!(
+            block.message,
+            "reply recorded for ri_q as rr_1 — the asker sees it when they read the thread"
+        );
+        assert!(!block.message.contains("sent") && !block.message.contains("delivered"));
+        assert!(daemon_frame_feedback(&DaemonFrame::Detached).is_none());
     }
 }

@@ -79,6 +79,20 @@ impl TaskClient {
     /// ([`super::board::collect_board`]) and the retract's confirm-time preview
     /// ([`super::send::preview_item_retract`]) — hold the concrete type, and a
     /// trait method made seven doubles answer for a seam they never exercised.
+    /// Story 19.18 `AC6` — read one thread on the peer's host
+    /// ([`super::ITEMS_THREAD_METHOD`]). Params are `{"itemId"}` only: the
+    /// served verb derives the principal from the authenticated caller. Sole
+    /// production caller: the rail-3 `/team thread` spawn
+    /// ([`super::send::read_thread`]).
+    pub async fn read_thread(&self, item_id: &str) -> Result<serde_json::Value, A2aError> {
+        let request = JsonRpcRequest::new(
+            self.next_id(),
+            super::ITEMS_THREAD_METHOD,
+            serde_json::json!({ "itemId": item_id }),
+        );
+        self.client.post_jsonrpc(&self.endpoint, &request).await
+    }
+
     pub async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
         // ⛔ No parameters: the served verb derives the principal from the
         // authenticated caller, and a `peerId` parameter would be the
@@ -253,6 +267,71 @@ pub struct A2aDelegationRuntime {
     /// never by a second fan-out (the refresh floor would refuse one, and a
     /// retract is not a board read).
     last_board: Arc<tokio::sync::Mutex<Option<super::board::BoardView>>>,
+    /// Story 19.18 `A13`/`Q2` — the per-process thread ledger: which peer
+    /// reply turns this host already journaled, and which `(peer, task,
+    /// content hash)` it dispatched. Seeded ONCE per process from the sender
+    /// journal on the first thread read (the story's one new whole-journal
+    /// read), then kept current by this runtime's own appends — ⛔ never one
+    /// read per call. `tokio::sync` because seeding spans the journal read.
+    thread_ledger: Arc<tokio::sync::Mutex<Option<ThreadLedger>>>,
+}
+
+/// Story 19.18 — what the asker already knows about its threads.
+#[derive(Debug, Default)]
+struct ThreadLedger {
+    /// `(peer identity, turn id)` of every `PeerReplyObserved` row.
+    observed: std::collections::HashSet<(String, String)>,
+    /// `(peer identity, task, content hash)` of every text dispatch row.
+    dispatched: std::collections::HashSet<(String, String, ContentHash)>,
+}
+
+impl ThreadLedger {
+    fn from_entries(entries: &[crate::domain::models::JournalEntry]) -> Self {
+        let mut ledger = Self::default();
+        for entry in entries {
+            match &entry.record {
+                crate::domain::models::JournalRecord::Room(RoomEvent::PeerReplyObserved {
+                    peer,
+                    turn,
+                    ..
+                }) => {
+                    ledger
+                        .observed
+                        .insert((peer.as_str().to_owned(), turn.clone()));
+                }
+                crate::domain::models::JournalRecord::Room(
+                    RoomEvent::RemoteEnvelopeDispatched {
+                        peer,
+                        task: Some(task),
+                        act: crate::domain::models::DispatchAct::Task,
+                        content_hash: Some(hash),
+                        ..
+                    },
+                ) => {
+                    ledger
+                        .dispatched
+                        .insert((peer.as_str().to_owned(), task.clone(), *hash));
+                }
+                _ => {}
+            }
+        }
+        ledger
+    }
+}
+
+/// Story 19.18 — one served turn as the asker's ledger needs it: an item turn
+/// is checked against the dispatch set, a reply turn is journaled once.
+pub(crate) enum ObservedTurn<'a> {
+    Item {
+        task: Option<&'a str>,
+        content_hash: Option<ContentHash>,
+    },
+    Reply {
+        turn: &'a str,
+        answers: Option<&'a str>,
+        content: Option<&'a str>,
+        content_hash: Option<ContentHash>,
+    },
 }
 
 /// Serializes the running failure count with its notification. Concurrent
@@ -288,6 +367,7 @@ impl A2aDelegationRuntime {
             journal_reader: None,
             board_in_flight: Arc::new(tokio::sync::Mutex::new(())),
             last_board: Arc::new(tokio::sync::Mutex::new(None)),
+            thread_ledger: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
     /// Supply the journal's read side for the board's dispatch-ledger probe
@@ -373,19 +453,110 @@ impl A2aDelegationRuntime {
         .await
     }
 
+    /// Story 19.17 + 19.18 `Q2`: the dispatch row carries the outbound
+    /// text's size AND its hash — never the text — so a later thread read
+    /// can label a served item turn `you` only when both its task and its
+    /// content match what this host sent.
     pub(crate) async fn journal_send_dispatch(
         &self,
         spec: &A2aPeerSpec,
         task: &str,
-        bytes: usize,
+        text: &str,
     ) -> Result<(), DelegationError> {
+        let peer = spec.resolved_identity();
+        let task = sanitize_disclosable(task, MAX_PEER_ID_BYTES);
+        let hash = text_content_hash(text);
         self.emit_room(RoomEvent::RemoteEnvelopeDispatched {
-            peer: spec.resolved_identity(),
-            task: Some(sanitize_disclosable(task, MAX_PEER_ID_BYTES)),
-            bytes,
+            peer: peer.clone(),
+            task: Some(task.clone()),
+            bytes: text.len(),
             act: crate::domain::models::DispatchAct::Task,
+            content_hash: Some(hash),
         })
-        .await
+        .await?;
+        // Kept current by this path's own appends (`A13`): a send after the
+        // ledger was seeded is a `you` source too. Before seeding, the seed
+        // reads this row from the journal.
+        if let Some(ledger) = self.thread_ledger.lock().await.as_mut() {
+            ledger
+                .dispatched
+                .insert((peer.as_str().to_owned(), task, hash));
+        }
+        Ok(())
+    }
+
+    /// Story 19.18 `AC6(b)`/`A13` — settle one served thread against the
+    /// asker's ledger. Returns, per turn, whether an item turn may render
+    /// `you`: its task AND its content hash must match a `(peer, task, hash)`
+    /// this host dispatched to THIS peer (`Q2`; a task match alone is
+    /// forgeable, `M42`). Every reply turn not yet observed is journaled
+    /// once as `PeerReplyObserved` (FR95), including across an asker restart
+    /// — the ledger is seeded from the journal (`M23`). At most
+    /// `MAX_THREAD_TURNS` rows per read (`P12`).
+    pub(crate) async fn settle_thread(
+        &self,
+        spec: &A2aPeerSpec,
+        turns: &[ObservedTurn<'_>],
+    ) -> Vec<bool> {
+        let peer = spec.resolved_identity();
+        let mut guard = self.thread_ledger.lock().await;
+        if guard.is_none() {
+            match self.journal_reader.as_ref() {
+                Some(reader) => match reader.load_entries().await {
+                    Ok(entries) => *guard = Some(ThreadLedger::from_entries(&entries)),
+                    Err(error) => {
+                        tracing::warn!(%error, "thread ledger unreadable; turns render as another sender and nothing is journaled this read");
+                        return vec![false; turns.len()];
+                    }
+                },
+                None => *guard = Some(ThreadLedger::default()),
+            }
+        }
+        let Some(ledger) = guard.as_mut() else {
+            return vec![false; turns.len()];
+        };
+        let mut journaled = 0usize;
+        let mut mine = Vec::with_capacity(turns.len());
+        for turn in turns {
+            match turn {
+                ObservedTurn::Item { task, content_hash } => {
+                    mine.push(match (task, content_hash) {
+                        (Some(task), Some(hash)) => ledger.dispatched.contains(&(
+                            peer.as_str().to_owned(),
+                            (*task).to_owned(),
+                            *hash,
+                        )),
+                        _ => false,
+                    })
+                }
+                ObservedTurn::Reply {
+                    turn,
+                    answers,
+                    content,
+                    content_hash,
+                } => {
+                    mine.push(false);
+                    let key = (peer.as_str().to_owned(), (*turn).to_owned());
+                    if ledger.observed.contains(&key) || journaled >= super::MAX_THREAD_TURNS {
+                        continue;
+                    }
+                    let appended = self
+                        .emit_room(RoomEvent::PeerReplyObserved {
+                            peer: peer.clone(),
+                            turn: (*turn).to_owned(),
+                            answers: answers.map(str::to_owned),
+                            content: content.map(str::to_owned),
+                            content_hash: *content_hash,
+                        })
+                        .await;
+                    if appended.is_ok() {
+                        journaled += 1;
+                        ledger.observed.insert(key);
+                    }
+                }
+            }
+        }
+        mine
     }
 
     pub(crate) async fn journal_send_accepted(
@@ -460,6 +631,7 @@ impl A2aDelegationRuntime {
                 act: crate::domain::models::DispatchAct::ItemRetract {
                     item: sanitize_disclosable(item, MAX_PEER_ID_BYTES),
                 },
+                content_hash: None,
             })
             .await;
     }
@@ -595,6 +767,9 @@ impl A2aDelegationRuntime {
             task: submitted_task.clone(),
             bytes: submitted_bytes,
             act: crate::domain::models::DispatchAct::Task,
+            // The model rail is byte-identical on the wire and in the
+            // journal (19.17 `AC3(e)`): no thread reads its dispatch rows.
+            content_hash: None,
         })
         .await?;
 
@@ -1115,9 +1290,17 @@ fn project_rap_to_node_state(state: RapTaskState) -> Option<NodeState> {
     }
 }
 
-fn content_hash(value: &serde_json::Value) -> ContentHash {
+fn content_hash<T: serde::Serialize + ?Sized>(value: &T) -> ContentHash {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
     ContentHash::from_bytes(Sha256::digest(&bytes).into())
+}
+
+/// Story 19.18 `Q2` — the shipped [`content_hash`] of one outbound or served
+/// text: the same bytes as hashing `Value::String(text)`, with no copy. The
+/// asker computes it for its dispatch row and for a served item turn, so the
+/// two agree exactly when the texts do.
+pub(crate) fn text_content_hash(text: &str) -> ContentHash {
+    content_hash(text)
 }
 
 fn outbound_message_fact(message: &serde_json::Value) -> (Option<String>, usize) {
@@ -1154,7 +1337,12 @@ fn next_message_nanos(now: u64, last: &AtomicU64) -> u64 {
 /// token is re-emitted under its canonical spelling; absence/empty omits the
 /// carrier key entirely (the receiver resolves absence to Unknown); any other
 /// token is dropped with a warning — never forwarded raw.
-pub fn build_message(input: &serde_json::Value) -> serde_json::Value {
+///
+/// Story 19.18 `AC7(b)`: `reply_to` is a SEPARATE Rust parameter written
+/// under [`super::REPLY_TO_METADATA_KEY`]. ⛔ It is never read from `input`,
+/// which carries model-controlled tool arguments: the model rail passes
+/// `None` and its wire is byte-identical to 19.17's.
+pub fn build_message(input: &serde_json::Value, reply_to: Option<&str>) -> serde_json::Value {
     let text = input
         .get("message")
         .and_then(serde_json::Value::as_str)
@@ -1181,6 +1369,12 @@ pub fn build_message(input: &serde_json::Value) -> serde_json::Value {
         metadata.insert(
             super::MESSAGE_TYPE_METADATA_KEY.to_owned(),
             serde_json::Value::String(token.to_owned()),
+        );
+    }
+    if let Some(reply_to) = reply_to {
+        metadata.insert(
+            super::REPLY_TO_METADATA_KEY.to_owned(),
+            serde_json::Value::String(reply_to.to_owned()),
         );
     }
     serde_json::json!({
@@ -1218,20 +1412,53 @@ mod tests {
 
     #[test]
     fn build_message_emits_the_exact_semantic_type_metadata_key() {
-        let typed = build_message(&serde_json::json!({
-            "message": "review this",
-            "message_type": "consultation"
-        }));
+        let typed = build_message(
+            &serde_json::json!({
+                "message": "review this",
+                "message_type": "consultation"
+            }),
+            None,
+        );
         assert_eq!(
             typed.pointer("/message/metadata/x-rustain-message-type"),
             Some(&serde_json::Value::String("consultation".to_owned()))
         );
 
-        let untyped = build_message(&serde_json::json!({ "message": "review this" }));
+        let untyped = build_message(&serde_json::json!({ "message": "review this" }), None);
         assert_eq!(
             untyped.pointer("/message/metadata/x-rustain-message-type"),
             None,
             "D3: absence already resolves to Unknown on receipt, so the key is omitted"
+        );
+    }
+
+    /// Story 19.18 `AC7(b)` — the reply-to carrier comes ONLY from the
+    /// separate Rust parameter. Model-controlled `input` naming the carrier —
+    /// under its wire key or a camelCase spelling — never produces it, and the
+    /// model rail (`None`) is byte-identical on the wire.
+    #[test]
+    fn the_reply_to_carrier_is_written_only_from_its_parameter() {
+        let hostile = serde_json::json!({
+            "message": "review this",
+            "x-rustain-in-reply-to": "rr_forged",
+            "inReplyTo": "rr_forged",
+        });
+        let model = build_message(&hostile, None);
+        assert_eq!(
+            model.pointer("/message/metadata/x-rustain-in-reply-to"),
+            None
+        );
+        assert_eq!(
+            model.pointer("/message/metadata"),
+            Some(&serde_json::json!({}))
+        );
+        let follow_up = build_message(
+            &serde_json::json!({ "message": "and retries?" }),
+            Some("rr_1"),
+        );
+        assert_eq!(
+            follow_up.pointer("/message/metadata/x-rustain-in-reply-to"),
+            Some(&serde_json::Value::String("rr_1".to_owned()))
         );
     }
 
@@ -1241,10 +1468,13 @@ mod tests {
         // D3: the closed domain holds on emit too — an unrecognized token is
         // never forwarded raw; the carrier key is omitted so the receiver
         // resolves Unknown, and the drop warns once, naming the token.
-        let dropped = build_message(&serde_json::json!({
-            "message": "review this",
-            "message_type": "urgent_escalation"
-        }));
+        let dropped = build_message(
+            &serde_json::json!({
+                "message": "review this",
+                "message_type": "urgent_escalation"
+            }),
+            None,
+        );
         assert_eq!(
             dropped.pointer("/message/metadata/x-rustain-message-type"),
             None,
@@ -1255,10 +1485,13 @@ mod tests {
             "the warn must name the dropped token"
         );
 
-        let empty = build_message(&serde_json::json!({
-            "message": "review this",
-            "message_type": ""
-        }));
+        let empty = build_message(
+            &serde_json::json!({
+                "message": "review this",
+                "message_type": ""
+            }),
+            None,
+        );
         assert_eq!(
             empty.pointer("/message/metadata/x-rustain-message-type"),
             None,
@@ -2455,6 +2688,104 @@ mod tests {
             status_of(&tree.list().await, &node_id),
             NodeState::Suspended,
             "an unreachable peer must never speculatively resurrect Running"
+        );
+    }
+
+    /// Story 19.18 `K19`/`K10`/`K13(3)` (in-crate half, recorded as such) —
+    /// the asker's ledger over a real journal:
+    /// - an item turn renders `you` only when its task AND content hash match
+    ///   a dispatch row for THIS peer (`M42` task-only → RED on the altered
+    ///   text; `M38` kind-alone → RED on the unrelated task);
+    /// - a peer reply turn is journaled once, the second read appends zero
+    ///   (`M18`), and a NEW runtime over the same journal — an asker restart —
+    ///   appends zero too (`M23`: a process-local set with no durable seed
+    ///   journals twice).
+    #[tokio::test]
+    async fn the_thread_ledger_labels_by_task_and_hash_and_journals_each_turn_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(dir.path()).await.unwrap());
+        let runtime = || {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(journal.clone(), None));
+            A2aDelegationRuntime::new(NodeTree::new(), room, tx)
+                .with_journal_reader(journal.clone())
+        };
+        let peer = spec("marcus", false);
+        let asker = runtime();
+        asker
+            .journal_send_dispatch(&peer, "task-q", "question")
+            .await
+            .unwrap();
+        let hash = |text: &str| Some(text_content_hash(text));
+        let turns = [
+            ObservedTurn::Item {
+                task: Some("task-q"),
+                content_hash: hash("question"),
+            },
+            ObservedTurn::Item {
+                task: Some("task-q"),
+                content_hash: hash("words put in the asker's mouth"),
+            },
+            ObservedTurn::Item {
+                task: Some("someone-elses-task"),
+                content_hash: hash("question"),
+            },
+            ObservedTurn::Reply {
+                turn: "rr_1",
+                answers: Some("ri_q"),
+                content: Some("answer"),
+                content_hash: hash("answer"),
+            },
+        ];
+        assert_eq!(
+            asker.settle_thread(&peer, &turns).await,
+            vec![true, false, false, false]
+        );
+        let observed = |entries: &[crate::domain::models::JournalEntry]| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.record,
+                        JournalRecord::Room(RoomEvent::PeerReplyObserved { turn, content, .. })
+                            if turn == "rr_1" && content.as_deref() == Some("answer")
+                    )
+                })
+                .count()
+        };
+        let reader: Arc<dyn crate::domain::ports::RoomJournalReader> = journal.clone();
+        assert_eq!(observed(&reader.load_entries().await.unwrap()), 1);
+        asker.settle_thread(&peer, &turns).await;
+        assert_eq!(
+            observed(&reader.load_entries().await.unwrap()),
+            1,
+            "second read"
+        );
+        // A dispatch AFTER the ledger was seeded is a `you` source too.
+        asker
+            .journal_send_dispatch(&peer, "task-f", "and retries?")
+            .await
+            .unwrap();
+        let later = [ObservedTurn::Item {
+            task: Some("task-f"),
+            content_hash: hash("and retries?"),
+        }];
+        assert_eq!(asker.settle_thread(&peer, &later).await, vec![true]);
+        let restarted = runtime();
+        assert_eq!(
+            restarted.settle_thread(&peer, &turns).await,
+            vec![true, false, false, false]
+        );
+        assert_eq!(
+            observed(&reader.load_entries().await.unwrap()),
+            1,
+            "an asker restart re-journals nothing"
+        );
+        // Another peer's dispatch never labels this peer's turn `you`.
+        let other = spec("jun", false);
+        assert_eq!(
+            restarted.settle_thread(&other, &turns[..1]).await,
+            vec![false]
         );
     }
 }

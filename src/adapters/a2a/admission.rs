@@ -10,7 +10,7 @@
 /// Re-exported so callers name one policy type. It lives in
 /// [`super::config`] because that module parses without the `a2a` feature and a
 /// misconfigured build must fail loudly rather than ignore the operator.
-pub use super::config::A2aAdmissionPolicy;
+pub use super::config::{A2aAdmissionPolicy, ThreadReads};
 
 /// Whether the submitter cleared the transport's credential gate, and how.
 ///
@@ -53,6 +53,9 @@ pub enum AdmissionVerdict {
 /// shell so the bound is testable without a socket; the body limit upstream is a
 /// byte cap on the whole request, which a single enormous instruction fits under.
 pub const MAX_TASK_TEXT_BYTES: usize = 64 * 1024;
+
+// Story 19.18 `AC2(b)` — a reply turn is never larger than an inbound item.
+const _: () = assert!(crate::domain::models::MAX_REPLY_BYTES <= MAX_TASK_TEXT_BYTES);
 
 /// Decide whether to admit an inbound task. Pure.
 #[must_use]
@@ -133,6 +136,37 @@ pub fn admit_item_retract(policy: A2aAdmissionPolicy, trust: SubmitterTrust) -> 
              accepted: {credential}"
         )),
         A2aAdmissionPolicy::Allow => Ok(()),
+    }
+}
+
+/// Story 19.18 `AC12` — the one fixed refusal a thread read or a follow-up
+/// reference receives from an API-key caller while thread access is off.
+pub const THREAD_ACCESS_OFF: &str = "thread access for API-key callers is off on this host — \
+     its operator can enable it with a2a.json server.threadReads = \"credential-scoped\"";
+
+/// Decide whether a caller may read a thread or post a follow-up reference
+/// (Story 19.18 `AC12`, `A17`). Pure, and consulted **before** any fold,
+/// lookup or mutation, so a refused caller learns nothing about whether the
+/// id exists (`M44`).
+///
+/// - Loopback → allowed: every local caller already runs code here, and the
+///   response discloses the collapse (19.16b `A13`).
+/// - API key + `credential-scoped` → allowed.
+/// - API key + `off` or a value this build cannot name → refused. ⛔ Never
+///   fail open on `Unknown` (`M46`).
+///
+/// # Errors
+///
+/// Returns [`THREAD_ACCESS_OFF`], disclosed verbatim, when refused.
+pub fn admit_thread_access(
+    trust: SubmitterTrust,
+    setting: ThreadReads,
+) -> Result<(), &'static str> {
+    match (trust, setting) {
+        (SubmitterTrust::Loopback, _) | (SubmitterTrust::ApiKey, ThreadReads::CredentialScoped) => {
+            Ok(())
+        }
+        (SubmitterTrust::ApiKey, ThreadReads::Off | ThreadReads::Unknown) => Err(THREAD_ACCESS_OFF),
     }
 }
 
@@ -229,5 +263,46 @@ mod tests {
             assert_eq!(parsed, expected);
         }
         assert!(serde_json::from_str::<A2aAdmissionPolicy>("\"yolo\"").is_err());
+    }
+
+    /// Story 19.18 `K21` (in-crate half) — the gate over every
+    /// `(trust, setting)` cell. `M45` (default on) and `M46` (`Unknown` on)
+    /// both turn this RED.
+    #[test]
+    fn thread_access_is_refused_by_default_for_api_key_callers() {
+        assert_eq!(ThreadReads::default(), ThreadReads::Off);
+        for setting in [
+            ThreadReads::Off,
+            ThreadReads::CredentialScoped,
+            ThreadReads::Unknown,
+        ] {
+            assert_eq!(
+                admit_thread_access(SubmitterTrust::Loopback, setting),
+                Ok(()),
+                "loopback is served under {setting:?}"
+            );
+        }
+        assert_eq!(
+            admit_thread_access(SubmitterTrust::ApiKey, ThreadReads::default()),
+            Err(THREAD_ACCESS_OFF)
+        );
+        assert_eq!(
+            admit_thread_access(SubmitterTrust::ApiKey, ThreadReads::Unknown),
+            Err(THREAD_ACCESS_OFF)
+        );
+        assert_eq!(
+            admit_thread_access(SubmitterTrust::ApiKey, ThreadReads::CredentialScoped),
+            Ok(())
+        );
+        for (raw, expected) in [
+            ("\"off\"", ThreadReads::Off),
+            ("\"credential-scoped\"", ThreadReads::CredentialScoped),
+            ("\"shared\"", ThreadReads::Unknown),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<ThreadReads>(raw).expect(raw),
+                expected
+            );
+        }
     }
 }

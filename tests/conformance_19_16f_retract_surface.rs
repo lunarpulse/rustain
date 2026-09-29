@@ -86,6 +86,7 @@ async fn seed_item(room: &dyn RoomJournal, item_id: &str, task: &str, state: Rec
         task: task.to_owned(),
         alias: None,
         content: format!("content for {item_id}"),
+        in_reply_to: None,
     })
     .await
     .expect("seed the recipient item");
@@ -435,6 +436,7 @@ async fn the_typed_retract_reaches_the_recipients_durable_mark_through_the_confi
             task: Some("task-live".to_owned()),
             bytes: 8,
             act: DispatchAct::Task,
+            content_hash: None,
         })
         .await
         .expect("seed the sender's dispatch");
@@ -539,6 +541,7 @@ async fn a_landed_retract_re_renders_the_remembered_board_with_its_mark() {
             task: Some("task-mark".to_owned()),
             bytes: 8,
             act: DispatchAct::Task,
+            content_hash: None,
         })
         .await
         .expect("seed the sender's dispatch");
@@ -1021,6 +1024,7 @@ async fn a_narrowed_board_renders_every_item_and_the_full_board_states_its_cap()
                 task: Some(task.clone()),
                 bytes: 1,
                 act: DispatchAct::Task,
+                content_hash: None,
             })
             .await
             .expect("seed dispatch");

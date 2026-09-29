@@ -115,8 +115,10 @@ fn test_e2e_help_overlay_shows_categories() {
     // from 116→121 in Story 18.3a-c (`/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E),
     // and from 121→126 in Story 18.4b (5 `/peer` sub-verbs; ⛔ no chord — this
     // story mints none, so only the COMMANDS category grew),
-    // and from 126→127 in Story 19.3 (GENERAL: Ctrl+Q — quit from any focus).
-    let mut h = TestHarness::with_size(100, 127);
+    // and from 126→127 in Story 19.3 (GENERAL: Ctrl+Q — quit from any focus),
+    // and from 127→130 in Story 19.18 (COMMANDS: `/team reply`, `/team thread`,
+    // `/team followup`).
+    let mut h = TestHarness::with_size(100, 130);
 
     h.press_key(DomainKey::Esc);
     h.type_char('?');
@@ -245,8 +247,10 @@ fn test_e2e_help_overlay_shows_tmux_warning() {
     // 120→126 (Story 18.3a: `/room` viewer + 3 role sub-verbs + Ctrl+X, R),
     // 126→131 (Story 18.3a-c: `/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E),
     // 131→136 (Story 18.4b: 5 `/peer` sub-verbs, COMMANDS category only),
-    // 136→137 (Story 18.9 review: `/team send` binding, COMMANDS category).
-    let mut h = TestHarness::with_size(100, 137);
+    // 136→137 (Story 18.9 review: `/team send` binding, COMMANDS category),
+    // 137→140 (Story 19.18: `/team reply`, `/team thread`, `/team followup`,
+    // COMMANDS category only).
+    let mut h = TestHarness::with_size(100, 140);
     h.press_key(DomainKey::Esc);
     h.type_char('?');
 

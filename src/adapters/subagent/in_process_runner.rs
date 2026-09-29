@@ -8018,6 +8018,7 @@ mod tests {
                     task,
                     alias,
                     content,
+                    ..
                 } => {
                     lines.push(format!(
                         "journal RecipientItemReceived address={address:?} task={task:?} \
@@ -8041,6 +8042,30 @@ mod tests {
                         "journal RecipientItemRetracted address={address:?} \
                          retracted_at_ms={retracted_at_ms} \
                          principal_collapsed={principal_collapsed}"
+                    ));
+                }
+                RoomEvent::RecipientItemReplied {
+                    address,
+                    answers,
+                    content,
+                    authorship,
+                    via_node,
+                } => {
+                    lines.push(format!(
+                        "journal RecipientItemReplied address={address:?} answers={answers:?} \
+                         content={content:?} authorship={authorship:?} via_node={via_node:?}"
+                    ));
+                }
+                RoomEvent::PeerReplyObserved {
+                    peer,
+                    turn,
+                    answers,
+                    content,
+                    content_hash,
+                } => {
+                    lines.push(format!(
+                        "journal PeerReplyObserved peer={peer:?} turn={turn:?} \
+                         answers={answers:?} content={content:?} content_hash={content_hash:?}"
                     ));
                 }
                 RoomEvent::Unrecognized => {

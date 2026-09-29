@@ -193,13 +193,67 @@ Address one or more roster IDs as a comma list, followed by the verbatim message
 
 Every listed ID must be a configured, distinct, non-empty roster ID. An empty segment, duplicate, unknown ID, or missing body refuses the whole action before network I/O and writes no journal row. A roster ID containing `,` is therefore not addressable by this verb.
 
-The action creates one stable, keyless `Info` block with one row per alias in the order typed. It has no header or aggregate result. Each recipient settles independently at its **first** `message/send` answer: `● delivered` means that answer carried a non-empty recipient item ID; `✗ declined` is a send-time rejection; `⚠ unreachable` names a send that did not land, with a named preflight cause on its indented line when available. Tokenless rows name `sending…`, `awaiting their approval` (`auth-required` without an item), `accepted — this peer keeps no item id`, `no usable answer — '/team board' shows whether it arrived`, `asked a question this verb cannot answer … — multi-turn arrives with 19.18`, or `not sent — this host could not record the attempt`. The recipient's `server.admission` defaults to `deny`, so an unconfigured recipient declines a team message.
+The action creates one stable, keyless `Info` block with one row per alias in the order typed. It has no header or aggregate result. Each recipient settles independently at its **first** `message/send` answer: `● delivered` means that answer carried a non-empty recipient item ID; `✗ declined` is a send-time rejection (including a `-32040` policy refusal); `⚠ unreachable` names a send that did not land, with a named preflight cause on its indented line when available. Tokenless rows name `sending…`, `awaiting their approval` (`auth-required` without an item), `accepted — this peer keeps no item id`, `no usable answer — '/team board' shows whether it arrived`, `asked a question this verb cannot answer (task … cancelled) — this peer uses A2A input-required, which rustain does not continue yet`, or `not sent — this host could not record the attempt`. The recipient's `server.admission` defaults to `deny`, so an unconfigured recipient declines a team message.
 
 There is exactly one `message/send` attempt per recipient and no automatic retry or queue. To send again, re-type `/team send` with the recipients you choose; the block has no retry control. A recipient with an item ID is delivered even when its first answer is `auth-required`: this rail does not poll or cancel that task. An item-less `input-required` triggers a single-turn `tasks/cancel`; if that cleanup fails or its answer is not `canceled`, the row says `no usable answer` rather than claiming cancellation. A peer that answers with an A2A Message instead of a task, and no item ID, is `accepted — this peer keeps no item id`.
 
-Each recipient is journaled independently. A request that may leave the host records `dispatched` before its POST; a delivered or accepted answer adds `accepted`; a proved rejection, a connection that never opened, or a post-dispatch credential/trust-anchor refusal adds `refused`; and an approval-needed or no-usable-answer row (including a timeout, HTTP or JSON-RPC error, or unreadable answer after dispatch) remains dispatch-only. A pre-I/O refusal writes one outbound `refused` row and no `dispatched` row. If durable dispatch recording fails, nothing is sent and no row is written. An accepted answer contributes a content hash, not stored reply text; a decline stores its sanitized reason. `/team send` never renders a peer reply and never materializes an `a2a-peer` node in the Agents panel. FR169 replies are the later answer channel.
+Each recipient is journaled independently. A request that may leave the host records `dispatched` before its POST; a delivered or accepted answer adds `accepted`; a proved rejection (including JSON-RPC `-32040`), a connection that never opened, or a post-dispatch credential/trust-anchor refusal adds `refused`; and an approval-needed or no-usable-answer row (including a timeout, HTTP or other JSON-RPC error, or unreadable answer after dispatch) remains dispatch-only. A pre-I/O refusal writes one outbound `refused` row and no `dispatched` row. If durable dispatch recording fails, nothing is sent and no row is written. An accepted answer contributes a content hash, not stored reply text; a decline stores its sanitized reason. `/team send` never renders a peer reply and never materializes an `a2a-peer` node in the Agents panel. FR169 replies use `/team thread` as the later answer channel.
 
 `/team send` exists only in the interactive, non-attached TUI. On the attached rail it refuses aloud: `'/team send' needs this session's own A2A egress — run it in a non-attached session.` There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
+
+## Replying to a team message (FR169)
+
+⚑ **Updated 2026-09-29 (Story 19.18).** A thread lives on the answering host: the
+original `/team send` mints its root item there, a reply is a durable reply turn
+there, and a follow-up is a new item there that names the turn it answers. The
+asker pulls that host; there is no reverse `message/send`, push, notification,
+background thread poll, or `tasks/get` reply channel.
+
+Use the verb on the rail that holds its object:
+
+- `/team reply <item-id> <text…>` is rail 4 only. It answers an item received
+  on this host. Rail 3 refuses it because a recipient item needs a
+  daemon-attached session.
+- `/team thread <peer-id> <item-id>` and
+  `/team followup <peer-id> <turn-id> <text…>` are rail 3 only. Rail 4 refuses
+  them because they need that session's A2A egress.
+- `/team board <peer-id>` is the asker's discovery step: its correlated item
+  row supplies the root item id to paste into `/team thread`.
+
+`/team reply` records a reply turn on the answering host. When it finds a
+persisted pending peer-response card for that item, it resolves that card as
+the operator's own answer (`WriteOwn`) and records one turn; otherwise it
+records a direct turn. A later `ResolvePeerDraft` for the same node in the same
+process is an idempotent no-op; after restart it is refused as already settled.
+On restart, turns and follow-up links are rebuilt from the journal; the waiting
+node still fails, but the item remains answerable with `/team reply`.
+
+The answering host records received items (including raw
+`x-rustain-in-reply-to` links), reply turns, and the existing draft-resolution
+row. The asker records a `PeerReplyObserved` row once for each peer turn it
+first reads; its dispatch row carries the sent-content hash used for the
+`you` label. A turn is `you` only when both its task id and content hash match
+one of this asker's dispatches to that peer. All other item turns, including
+ones whose dispatch row predates 19.18 and has no hash, render as
+`another sender`.
+
+Thread reads are side-effect free on the answering host and bounded to the root
+plus the newest fitting turns: at most 50 turns, an 896 KiB response budget, and
+a 448 KiB per-turn budget; an over-budget body is shown as withheld. Reply text
+is limited to 65,536 bytes. The root is always present and `omittedBefore`
+counts non-root turns. The rendered block is titled `thread · <alias> · <root>`;
+it names only the configured peer alias, never a person.
+
+### Thread access with API keys
+
+`server.threadReads` in `.rustain/a2a.json` is `"off"` by default or
+`"credential-scoped"` to opt in. An unknown value is treated as off and produces
+a startup warning. The opt-in asserts that each peer has its own key; the host
+cannot discover whether key holders share one. With the default, an API-key
+caller is refused before a thread lookup or follow-up mutation. Loopback is
+always served, and the thread block discloses its collapsed principal. Story
+19.18c's per-item capability nonce and Story 19.18d's per-peer credential
+binding are the follow-up hardening rows.
 
 ## The `log: N` reminder
 

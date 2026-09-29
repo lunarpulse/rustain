@@ -6268,6 +6268,7 @@ pub async fn run(
                     // ⛔ never route through the turn-fatal Warning path.
                     AppEvent::TeamRetractPreviewReady { conversation_id: c, preview } => crate::infrastructure::runtime::transparency_bridge::team_retract_preview_ready(conversation.id.clone(), &mut state, &mut tab_manager, c, preview),
                     AppEvent::TeamRetractAnswered { conversation_id: c, message, board } => crate::infrastructure::runtime::transparency_bridge::team_retract_answered(conversation.id.clone(), &mut state, &mut tab_manager, c, message, board),
+                    AppEvent::TeamThreadReady { conversation_id: c, message } => crate::infrastructure::runtime::transparency_bridge::team_thread_ready(&conversation.id, &mut state, &mut tab_manager, &c, message),
                     AppEvent::TeamBoardReady { conversation_id: board_conv_id, message: board_msg } => {
                         if board_conv_id == conversation.id {
                             crate::adapters::tui::handlers::team_command::show_team_board(

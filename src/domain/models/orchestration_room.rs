@@ -17,7 +17,7 @@ use crate::domain::models::invocation_fingerprint::InvocationFingerprint;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::peer_frame::FrameRefusal;
 use crate::domain::models::peer_identity::PeerId;
-use crate::domain::models::recipient_item::ItemAddress;
+use crate::domain::models::recipient_item::{ItemAddress, ItemId, ReplyAuthorship, TurnAddress};
 use crate::domain::models::room_role::RoomRole;
 use crate::domain::models::team_policy::{InteractionPolicySnapshot, NotificationUrgency};
 use crate::domain::models::ticket_addressee::TicketAddressee;
@@ -484,6 +484,13 @@ pub enum RoomEvent {
         /// before this field existed replays as [`DispatchAct::Task`].
         #[serde(default, skip_serializing_if = "DispatchAct::is_task")]
         act: DispatchAct,
+        /// Story 19.18 `Q2` — the hash of the outbound text, so the asker's
+        /// thread render can label a served item turn `you` only when both
+        /// its task AND its content match what this host sent. `None` on
+        /// every row written before 19.18 (those turns render `another
+        /// sender`) and on a retract row, which sends no text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_hash: Option<ContentHash>,
     },
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.
@@ -892,6 +899,13 @@ pub enum RoomEvent {
         #[serde(default)]
         alias: Option<String>,
         content: String,
+        /// Story 19.18 `A5` — the item or reply-turn id this follow-up
+        /// answers, carried by `x-rustain-in-reply-to` and stored raw
+        /// (`AD-1824`). Validated inside the caller's principal before the
+        /// item was minted. `None` serializes byte-identically to a pre-19.18
+        /// line, so the pinned fixtures do not move.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_reply_to: Option<String>,
     },
     /// A local human deliberately acknowledged a recipient-owned item.
     RecipientItemAcknowledged {
@@ -953,6 +967,50 @@ pub enum RoomEvent {
         /// statement about attribution, never a claim about who acted.
         #[serde(default)]
         principal_collapsed: bool,
+    },
+    /// Story 19.18 `A4` — the recipient answered one of its items: a **reply
+    /// turn**, a new record in its own right. ⛔ Never a write on the
+    /// answered item (`AD-1827`): the item-state machine stays three states
+    /// and 2 acts.
+    ///
+    /// Written on the ANSWERING host by the daemon reply arm (`/team reply`,
+    /// directly or by resolving a pending card) and by a sending draft
+    /// resolution. Served to the asker by `x-rustain-items/thread`; ⛔ never
+    /// pushed. Every byte except `content` is host-minted.
+    RecipientItemReplied {
+        /// The turn's address: the answered item's principal plus a host-
+        /// minted `rr_` id.
+        address: TurnAddress,
+        /// The item this turn answers.
+        answers: ItemId,
+        /// The reply text, stored raw (`AD-1824`); scrubbed at serve time.
+        content: String,
+        /// Carried from the act that authored the turn (`A14`).
+        #[serde(default)]
+        authorship: ReplyAuthorship,
+        /// The peer-response node whose card this turn resolved (`Q1`): the
+        /// journal — not the draft controller — enforces one turn per node.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via_node: Option<AgentId>,
+    },
+    /// Story 19.18 `A13` — the ASKER's host received one peer-authored reply
+    /// turn by reading a thread (FR95: record what was received). Appended
+    /// once per `(peer, turn)`, never per read.
+    PeerReplyObserved {
+        /// The roster peer's resolved identity the thread was read from.
+        peer: PeerId,
+        /// The peer-minted reply-turn id (bounded on read).
+        turn: String,
+        /// The item id the turn answers, as the peer served it.
+        #[serde(default)]
+        answers: Option<String>,
+        /// The raw reply text, or `None` when the peer withheld it or it
+        /// exceeded this host's bound (then only the hash is kept).
+        #[serde(default)]
+        content: Option<String>,
+        /// Hash of the text this host received, when it received any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_hash: Option<ContentHash>,
     },
     /// An `event` tag this build does not recognise.
     ///
@@ -1369,7 +1427,12 @@ impl OrchestrationRoom {
             | RoomEvent::RecipientItemReceived { .. }
             | RoomEvent::RecipientItemAcknowledged { .. }
             | RoomEvent::RecipientItemRemoved { .. }
-            | RoomEvent::RecipientItemRetracted { .. } => {}
+            | RoomEvent::RecipientItemRetracted { .. }
+            | RoomEvent::RecipientItemReplied { .. }
+            // An asker-side receipt of a peer's reply turn: a fact about one
+            // peer's served thread, not a room node. It renders through the
+            // transparency projection.
+            | RoomEvent::PeerReplyObserved { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent
