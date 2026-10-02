@@ -87,6 +87,8 @@ async fn seed_item(room: &dyn RoomJournal, item_id: &str, task: &str, state: Rec
         alias: None,
         content: format!("content for {item_id}"),
         in_reply_to: None,
+        capability_hash: None,
+        reply_capability_matched: false,
     })
     .await
     .expect("seed the recipient item");
@@ -191,12 +193,18 @@ struct Sender {
 async fn sender(peers: Vec<A2aPeerSpec>) -> Sender {
     let journal = journal().await;
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    // Story 19.18c: a production-shaped `Ready` key; the retract rail is the
+    // subject (its hand-seeded items are legacy, so no capability is needed).
+    let keys = tempfile::tempdir().expect("item capability key dir");
     let egress = A2aEgress::compose(
         peers,
         NodeTree::new(),
         journal.room.clone(),
         journal.journal.clone(),
         event_tx,
+        rustain::adapters::a2a::item_capability::load_item_capability_key(Ok(keys
+            .path()
+            .to_path_buf())),
     )
     .expect("compose the sender egress");
     tokio::time::timeout(SETTLE, egress.await_cards_settled())
@@ -437,6 +445,7 @@ async fn the_typed_retract_reaches_the_recipients_durable_mark_through_the_confi
             bytes: 8,
             act: DispatchAct::Task,
             content_hash: None,
+            endpoint: None,
         })
         .await
         .expect("seed the sender's dispatch");
@@ -542,6 +551,7 @@ async fn a_landed_retract_re_renders_the_remembered_board_with_its_mark() {
             bytes: 8,
             act: DispatchAct::Task,
             content_hash: None,
+            endpoint: None,
         })
         .await
         .expect("seed the sender's dispatch");
@@ -1025,6 +1035,7 @@ async fn a_narrowed_board_renders_every_item_and_the_full_board_states_its_cap()
                 bytes: 1,
                 act: DispatchAct::Task,
                 content_hash: None,
+                endpoint: None,
             })
             .await
             .expect("seed dispatch");

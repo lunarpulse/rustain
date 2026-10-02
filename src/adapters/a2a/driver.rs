@@ -44,11 +44,29 @@ use crate::infrastructure::subagent::{AgentHandle, MailboxBudget, NodeTree};
 
 use super::client::A2aClientAdapter;
 use super::error::A2aError;
+use super::item_capability::{
+    ItemCapability, ItemCapabilityKey, ItemCapabilityKeyState, derive_item_capability,
+};
 use super::jsonrpc::JsonRpcRequest;
 use super::lifecycle::{
     A2aTaskTransport, LifecycleOutcome, PollConfig, TaskSnapshot, poll_from_snapshot,
 };
 use super::task::A2aTaskState;
+
+/// Story 19.18c `A9` — the one `(messageId, capability)` a [`TaskClient`] may
+/// present: the message it just sent. ⛔ Never derived for a peer-supplied id.
+#[derive(Clone, Debug)]
+pub struct OwnTask {
+    message_id: String,
+    capability: ItemCapability,
+}
+
+impl OwnTask {
+    #[must_use]
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+}
 
 /// A live JSON-RPC transport bound to one resolved endpoint. Generates a
 /// monotonic correlation id per call.
@@ -56,6 +74,21 @@ pub struct TaskClient {
     client: Arc<A2aClientAdapter>,
     endpoint: String,
     next_id: AtomicU64,
+    own_task: Option<OwnTask>,
+}
+
+/// Story 19.18c — `params` of an `x-rustain-items/*` verb: `{"itemId"}` plus
+/// `capability` when this host derived one for the item. Unknown fields are
+/// ignored by an older host (`AD-1826`), so its items stay legacy.
+pub(crate) fn item_verb_params(
+    item_id: &str,
+    capability: Option<&ItemCapability>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({ "itemId": item_id });
+    if let Some(capability) = capability {
+        params["capability"] = serde_json::Value::from(capability.as_wire_str());
+    }
+    params
 }
 
 impl TaskClient {
@@ -64,35 +97,67 @@ impl TaskClient {
             client,
             endpoint,
             next_id: AtomicU64::new(1),
+            own_task: None,
         }
+    }
+
+    /// Story 19.18c `A9` — bind this transport to the message it sends, so
+    /// its `tasks/get`/`tasks/cancel` present the capability **only** for
+    /// that message's id. Consuming, set before the transport is shared:
+    /// ⛔ no interior mutability.
+    #[must_use]
+    pub fn with_own_task(mut self, own_task: OwnTask) -> Self {
+        self.own_task = Some(own_task);
+        self
     }
 
     fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Read this caller's own recipient-item set on the peer (Story 19.16b
-    /// `AC1`, [`super::ITEMS_LIST_METHOD`]).
-    ///
-    /// On the **inherent** impl, not [`A2aTaskTransport`] (Story 19.16f
-    /// `AC2`, `P11`): both production callers — the board's per-peer read
-    /// ([`super::board::collect_board`]) and the retract's confirm-time preview
-    /// ([`super::send::preview_item_retract`]) — hold the concrete type, and a
-    /// trait method made seven doubles answer for a seam they never exercised.
+    /// `tasks/*` params: `{"id"}`, plus `metadata[x-rustain-item-capability]`
+    /// (`P8`: the A2A extension slot) iff `task_id` is this transport's own
+    /// message id (`A9`). A hostile peer that answers another id gets nothing.
+    fn task_params(&self, task_id: &str) -> serde_json::Value {
+        let mut params = serde_json::json!({ "id": task_id });
+        if let Some(own) = &self.own_task
+            && own.message_id == task_id
+        {
+            params["metadata"] = serde_json::json!({
+                super::ITEM_CAPABILITY_METADATA_KEY: own.capability.as_wire_str(),
+            });
+        }
+        params
+    }
+
     /// Story 19.18 `AC6` — read one thread on the peer's host
-    /// ([`super::ITEMS_THREAD_METHOD`]). Params are `{"itemId"}` only: the
-    /// served verb derives the principal from the authenticated caller. Sole
+    /// ([`super::ITEMS_THREAD_METHOD`]). Params are `{"itemId"}` plus, when
+    /// this host derived one (Story 19.18c `A10`), `capability`: the served
+    /// verb derives the principal from the authenticated caller. Sole
     /// production caller: the rail-3 `/team thread` spawn
     /// ([`super::send::read_thread`]).
-    pub async fn read_thread(&self, item_id: &str) -> Result<serde_json::Value, A2aError> {
+    pub async fn read_thread(
+        &self,
+        item_id: &str,
+        capability: Option<&ItemCapability>,
+    ) -> Result<serde_json::Value, A2aError> {
         let request = JsonRpcRequest::new(
             self.next_id(),
             super::ITEMS_THREAD_METHOD,
-            serde_json::json!({ "itemId": item_id }),
+            item_verb_params(item_id, capability),
         );
         self.client.post_jsonrpc(&self.endpoint, &request).await
     }
 
+    /// Read this caller's own recipient-item set on the peer (Story 19.16b
+    /// `AC1`, [`super::ITEMS_LIST_METHOD`]).
+    ///
+    /// On the **inherent** impl, not [`A2aTaskTransport`] (Story 19.16f
+    /// `AC2`, `P11`): its production callers — the board's per-peer read
+    /// ([`super::board::collect_board`]), the retract's confirm-time preview
+    /// ([`super::send::preview_item_retract`]) and Story 19.18c's capability
+    /// resolver — hold the concrete type, and a trait method made seven
+    /// doubles answer for a seam they never exercised.
     pub async fn list_items(&self) -> Result<serde_json::Value, A2aError> {
         // ⛔ No parameters: the served verb derives the principal from the
         // authenticated caller, and a `peerId` parameter would be the
@@ -110,26 +175,25 @@ impl TaskClient {
     /// [`super::ITEMS_RETRACT_METHOD`]). The sole production caller is the
     /// accepted retract card's dispatch ([`super::send::retract_item_on_peer`]).
     ///
-    /// Params are `{"itemId"}` and nothing else — the principal is the
-    /// authenticated caller's, derived server-side. The request carries an
-    /// `id` (`next_id`): the served arm refuses the notification form with
-    /// `-32600`, because a write whose answer nobody reads is a write nobody
-    /// can be told the outcome of. `before_send` runs after every deterministic
-    /// no-I/O refusal, immediately before the request can leave this host.
+    /// `params` come from [`item_verb_params`]: `{"itemId"}` plus, for an item
+    /// this host sent under a capability (Story 19.18c `D2`), `capability` —
+    /// the principal is the authenticated caller's, derived server-side. The
+    /// caller builds them so the journaled dispatch counts the bytes actually
+    /// sent. The request carries an `id` (`next_id`): the served arm refuses
+    /// the notification form with `-32600`, because a write whose answer
+    /// nobody reads is a write nobody can be told the outcome of.
+    /// `before_send` runs after every deterministic no-I/O refusal,
+    /// immediately before the request can leave this host.
     pub async fn retract_item<F, Fut>(
         &self,
-        item_id: &str,
+        params: serde_json::Value,
         before_send: F,
     ) -> Result<serde_json::Value, A2aError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), A2aError>>,
     {
-        let request = JsonRpcRequest::new(
-            self.next_id(),
-            super::ITEMS_RETRACT_METHOD,
-            serde_json::json!({ "itemId": item_id }),
-        );
+        let request = JsonRpcRequest::new(self.next_id(), super::ITEMS_RETRACT_METHOD, params);
         self.client
             .post_jsonrpc_after(&self.endpoint, &request, before_send)
             .await
@@ -163,20 +227,13 @@ impl A2aTaskTransport for TaskClient {
     }
 
     async fn tasks_get(&self, task_id: &str) -> Result<serde_json::Value, A2aError> {
-        let request = JsonRpcRequest::new(
-            self.next_id(),
-            "tasks/get",
-            serde_json::json!({ "id": task_id }),
-        );
+        let request = JsonRpcRequest::new(self.next_id(), "tasks/get", self.task_params(task_id));
         self.client.post_jsonrpc(&self.endpoint, &request).await
     }
 
     async fn tasks_cancel(&self, task_id: &str) -> Result<serde_json::Value, A2aError> {
-        let request = JsonRpcRequest::new(
-            self.next_id(),
-            "tasks/cancel",
-            serde_json::json!({ "id": task_id }),
-        );
+        let request =
+            JsonRpcRequest::new(self.next_id(), "tasks/cancel", self.task_params(task_id));
         self.client.post_jsonrpc(&self.endpoint, &request).await
     }
 }
@@ -274,6 +331,17 @@ pub struct A2aDelegationRuntime {
     /// read), then kept current by this runtime's own appends — ⛔ never one
     /// read per call. `tokio::sync` because seeding spans the journal read.
     thread_ledger: Arc<tokio::sync::Mutex<Option<ThreadLedger>>>,
+    /// Story 19.18c `PQ1` — this host's item-capability key, loaded by the
+    /// composition root and injected through `A2aEgress::compose` (`A3`).
+    item_capability: ItemCapabilityKeyState,
+}
+
+/// Story 19.18c `PQ2` — one own dispatch row: whom it went to and, for an
+/// unpinned send, the digest of the roster origin it went to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnDispatch {
+    peer: String,
+    endpoint: Option<String>,
 }
 
 /// Story 19.18 — what the asker already knows about its threads.
@@ -283,6 +351,12 @@ struct ThreadLedger {
     observed: std::collections::HashSet<(String, String)>,
     /// `(peer identity, task, content hash)` of every text dispatch row.
     dispatched: std::collections::HashSet<(String, String, ContentHash)>,
+    /// Story 19.18c `A11` — task → every `DispatchAct::Task` row that sent
+    /// it, the model rail's included (it carries no content hash).
+    own_tasks: std::collections::HashMap<String, Vec<OwnDispatch>>,
+    /// `(peer identity, reply-turn id)` → answered item and the binding
+    /// observed at read time. An unpinned peer can later be renamed.
+    answers: std::collections::HashMap<(String, String), (String, Option<String>)>,
 }
 
 impl ThreadLedger {
@@ -293,29 +367,93 @@ impl ThreadLedger {
                 crate::domain::models::JournalRecord::Room(RoomEvent::PeerReplyObserved {
                     peer,
                     turn,
+                    answers,
+                    endpoint,
                     ..
                 }) => {
                     ledger
                         .observed
                         .insert((peer.as_str().to_owned(), turn.clone()));
+                    if let Some(item) = answers {
+                        ledger.answers.insert(
+                            (peer.as_str().to_owned(), turn.clone()),
+                            (item.clone(), endpoint.clone()),
+                        );
+                    }
                 }
                 crate::domain::models::JournalRecord::Room(
                     RoomEvent::RemoteEnvelopeDispatched {
                         peer,
                         task: Some(task),
                         act: crate::domain::models::DispatchAct::Task,
-                        content_hash: Some(hash),
+                        content_hash,
+                        endpoint,
                         ..
                     },
                 ) => {
-                    ledger
-                        .dispatched
-                        .insert((peer.as_str().to_owned(), task.clone(), *hash));
+                    if let Some(hash) = content_hash {
+                        ledger
+                            .dispatched
+                            .insert((peer.as_str().to_owned(), task.clone(), *hash));
+                    }
+                    ledger.record_own(
+                        task.clone(),
+                        OwnDispatch {
+                            peer: peer.as_str().to_owned(),
+                            endpoint: endpoint.clone(),
+                        },
+                    );
                 }
                 _ => {}
             }
         }
         ledger
+    }
+
+    fn record_own(&mut self, task: String, row: OwnDispatch) {
+        let rows = self.own_tasks.entry(task).or_default();
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+    }
+
+    fn owns(&self, task: &str, current: &A2aPeerSpec, origin_digest: Option<&str>) -> bool {
+        self.own_tasks.get(task).is_some_and(|rows| {
+            rows.iter().any(|row| {
+                dispatch_row_is_own(&row.peer, row.endpoint.as_deref(), current, origin_digest)
+            })
+        })
+    }
+}
+
+/// Story 19.18c `PQ2` (B widened) — whether one dispatch row is this host's
+/// own send to alias `current`'s present binding. Pure; the sole production
+/// caller is the capability resolver ([`A2aDelegationRuntime::own_task_capability`]).
+///
+/// - A row with **no** `endpoint` (a pinned send, or a pre-19.18c row that
+///   granted nothing): own iff its peer is the alias's current **pin** — a
+///   pinned peer survives renames and moves; a replaced or removed pin cuts it.
+/// - A row **with** an `endpoint` (an unpinned send): own iff its peer is the
+///   alias pseudonym (a move or a pin-add survives) **or** its endpoint is the
+///   current origin's digest (a rename survives).
+///
+/// ⚠ Disclosed: an unpinned alias re-pointed at another host, or reused for
+/// another peer, receives this host's capabilities for the old host's items;
+/// a rename AND a move together orphan them. Pinning removes both.
+pub(crate) fn dispatch_row_is_own(
+    row_peer: &str,
+    row_endpoint: Option<&str>,
+    current: &A2aPeerSpec,
+    current_origin_digest: Option<&str>,
+) -> bool {
+    match row_endpoint {
+        None => current
+            .pinned_identity()
+            .is_some_and(|pin| pin.as_str() == row_peer),
+        Some(endpoint) => {
+            current.alias_pseudonym().as_str() == row_peer
+                || current_origin_digest == Some(endpoint)
+        }
     }
 }
 
@@ -368,6 +506,7 @@ impl A2aDelegationRuntime {
             board_in_flight: Arc::new(tokio::sync::Mutex::new(())),
             last_board: Arc::new(tokio::sync::Mutex::new(None)),
             thread_ledger: Arc::new(tokio::sync::Mutex::new(None)),
+            item_capability: ItemCapabilityKeyState::Disabled,
         }
     }
     /// Supply the journal's read side for the board's dispatch-ledger probe
@@ -383,6 +522,162 @@ impl A2aDelegationRuntime {
     pub(crate) fn with_peer_bindings(mut self, peer_bindings: A2aPeerBindings) -> Self {
         self.peer_bindings = peer_bindings;
         self
+    }
+    /// Story 19.18c `A3` — the key state the composition root loaded. Set
+    /// once by `A2aEgress::compose`; ⛔ never read from the filesystem here.
+    pub(crate) fn with_item_capability(mut self, state: ItemCapabilityKeyState) -> Self {
+        self.item_capability = state;
+        self
+    }
+
+    /// Story 19.18c `PQ1` — the key an outbound `message/send` to `spec`
+    /// carries: `Some` when usable, `None` when disabled (pre-19.18c tests) or
+    /// when the key is unusable but the peer is **uncredentialed** (only a
+    /// no-credential listener can accept that send, and there every caller is
+    /// one principal already, 19.16b `A13`).
+    ///
+    /// # Errors
+    ///
+    /// [`A2aError::ItemCapabilityKeyUnusable`] for a credentialed peer while
+    /// the key cannot be used: the send is refused, never sent legacy.
+    pub(crate) fn outbound_item_key(
+        &self,
+        spec: &A2aPeerSpec,
+    ) -> Result<Option<Arc<ItemCapabilityKey>>, A2aError> {
+        match &self.item_capability {
+            ItemCapabilityKeyState::Ready(key) => Ok(Some(key.clone())),
+            ItemCapabilityKeyState::Disabled => Ok(None),
+            ItemCapabilityKeyState::Unusable { path, cause } => {
+                if spec.auth.is_some() {
+                    Err(A2aError::ItemCapabilityKeyUnusable {
+                        path: path.clone(),
+                        cause: cause.clone(),
+                    })
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// Story 19.18c `PQ2` — the dispatch row's `endpoint` for a send to
+    /// `spec`: the roster origin's digest for an **unpinned** peer, `None`
+    /// for a pinned one. ⛔ Never the raw URL.
+    fn dispatch_endpoint(&self, spec: &A2aPeerSpec) -> Option<String> {
+        if spec.pinned_identity().is_some() {
+            return None;
+        }
+        self.peer_binding(&spec.id)
+            .map(|(_, client)| client.origin_digest())
+    }
+
+    /// The per-process ledger, seeded from the sender journal on first use
+    /// (19.18 `A13`). `None` when the journal cannot be read.
+    async fn seeded_ledger(&self) -> Option<tokio::sync::MutexGuard<'_, Option<ThreadLedger>>> {
+        let mut guard = self.thread_ledger.lock().await;
+        if guard.is_none() {
+            match self.journal_reader.as_ref() {
+                Some(reader) => match reader.load_entries().await {
+                    Ok(entries) => *guard = Some(ThreadLedger::from_entries(&entries)),
+                    Err(error) => {
+                        tracing::warn!(%error, "thread ledger unreadable; turns render as another sender, nothing is journaled and no capability is derived this read");
+                        return None;
+                    }
+                },
+                None => *guard = Some(ThreadLedger::default()),
+            }
+        }
+        Some(guard)
+    }
+
+    /// Story 19.18c `A9`/`A10` step 3 — the capability of `task` on `spec`'s
+    /// host, **only** when this host dispatched that task to that peer (the
+    /// `PQ2` own-row rule). `None` when the key is not usable, the task is
+    /// not own, or it is not a task this host could have minted. On a miss
+    /// the journal is re-read once for this call: a sibling process sharing
+    /// the key (the TUI or the daemon, `A3`) may have sent it after the seed.
+    pub(crate) async fn own_task_capability(
+        &self,
+        spec: &A2aPeerSpec,
+        task: &str,
+    ) -> Option<ItemCapability> {
+        let ItemCapabilityKeyState::Ready(key) = &self.item_capability else {
+            return None;
+        };
+        // A dispatch row holds the sanitized task; a served task that
+        // sanitization would change is not one this host minted.
+        if task.is_empty() || sanitize_disclosable(task, MAX_PEER_ID_BYTES) != task {
+            return None;
+        }
+        let origin_digest = self
+            .peer_binding(&spec.id)
+            .map(|(_, client)| client.origin_digest());
+        let mut guard = self.seeded_ledger().await?;
+        let own = guard
+            .as_ref()
+            .is_some_and(|ledger| ledger.owns(task, spec, origin_digest.as_deref()));
+        let own = own || {
+            let reader = self.journal_reader.as_ref()?;
+            let entries = reader.load_entries().await.ok()?;
+            let fresh = ThreadLedger::from_entries(&entries);
+            let own = fresh.owns(task, spec, origin_digest.as_deref());
+            *guard = Some(fresh);
+            own
+        };
+        own.then(|| derive_item_capability(key, task))
+    }
+
+    /// Story 19.18c `A10` step 1 — the item a reply turn `turn` served by
+    /// `spec` answers, from this host's `PeerReplyObserved` rows. `None` when
+    /// this host never observed the turn (read the thread first).
+    pub(crate) async fn answered_item(&self, spec: &A2aPeerSpec, turn: &str) -> Option<String> {
+        let origin_digest = self
+            .peer_binding(&spec.id)
+            .map(|(_, client)| client.origin_digest());
+        let current_peer = spec.resolved_identity();
+        let mut guard = self.seeded_ledger().await?;
+        for attempt in 0..2 {
+            let ledger = guard.as_ref()?;
+            if let Some((_, (item, _))) =
+                ledger.answers.iter().find(|((peer, observed_turn), _)| {
+                    peer == current_peer.as_str() && observed_turn == turn
+                })
+            {
+                return Some(item.clone());
+            }
+            let mut candidates =
+                ledger
+                    .answers
+                    .iter()
+                    .filter(|((peer, observed_turn), (_, endpoint))| {
+                        observed_turn == turn
+                            && dispatch_row_is_own(
+                                peer,
+                                endpoint.as_deref(),
+                                spec,
+                                origin_digest.as_deref(),
+                            )
+                    });
+            if let Some((_, (item, _))) = candidates.next() {
+                // More than one old binding with this peer-minted turn id is
+                // ambiguous. Do not select a HashMap iteration-order winner.
+                if candidates.next().is_some() {
+                    return None;
+                }
+                return Some(item.clone());
+            }
+            if attempt == 0 {
+                let entries = self.journal_reader.as_ref()?.load_entries().await.ok()?;
+                *guard = Some(ThreadLedger::from_entries(&entries));
+            }
+        }
+        None
+    }
+
+    /// Whether any key is usable for resolving a capability (`A10`). Under
+    /// `Unusable` thread, follow-up and retract resolution present none.
+    pub(crate) fn resolves_capabilities(&self) -> bool {
+        matches!(self.item_capability, ItemCapabilityKeyState::Ready(_))
     }
 
     pub(crate) fn peer_binding(
@@ -456,7 +751,8 @@ impl A2aDelegationRuntime {
     /// Story 19.17 + 19.18 `Q2`: the dispatch row carries the outbound
     /// text's size AND its hash — never the text — so a later thread read
     /// can label a served item turn `you` only when both its task and its
-    /// content match what this host sent.
+    /// content match what this host sent. Story 19.18c `PQ2`: an unpinned
+    /// send also records the roster origin's digest (`endpoint`).
     pub(crate) async fn journal_send_dispatch(
         &self,
         spec: &A2aPeerSpec,
@@ -466,21 +762,30 @@ impl A2aDelegationRuntime {
         let peer = spec.resolved_identity();
         let task = sanitize_disclosable(task, MAX_PEER_ID_BYTES);
         let hash = text_content_hash(text);
+        let endpoint = self.dispatch_endpoint(spec);
         self.emit_room(RoomEvent::RemoteEnvelopeDispatched {
             peer: peer.clone(),
             task: Some(task.clone()),
             bytes: text.len(),
             act: crate::domain::models::DispatchAct::Task,
             content_hash: Some(hash),
+            endpoint: endpoint.clone(),
         })
         .await?;
         // Kept current by this path's own appends (`A13`): a send after the
-        // ledger was seeded is a `you` source too. Before seeding, the seed
-        // reads this row from the journal.
+        // ledger was seeded is a `you` source and an own task too. Before
+        // seeding, the seed reads this row from the journal.
         if let Some(ledger) = self.thread_ledger.lock().await.as_mut() {
             ledger
                 .dispatched
-                .insert((peer.as_str().to_owned(), task, hash));
+                .insert((peer.as_str().to_owned(), task.clone(), hash));
+            ledger.record_own(
+                task,
+                OwnDispatch {
+                    peer: peer.as_str().to_owned(),
+                    endpoint,
+                },
+            );
         }
         Ok(())
     }
@@ -499,19 +804,10 @@ impl A2aDelegationRuntime {
         turns: &[ObservedTurn<'_>],
     ) -> Vec<bool> {
         let peer = spec.resolved_identity();
-        let mut guard = self.thread_ledger.lock().await;
-        if guard.is_none() {
-            match self.journal_reader.as_ref() {
-                Some(reader) => match reader.load_entries().await {
-                    Ok(entries) => *guard = Some(ThreadLedger::from_entries(&entries)),
-                    Err(error) => {
-                        tracing::warn!(%error, "thread ledger unreadable; turns render as another sender and nothing is journaled this read");
-                        return vec![false; turns.len()];
-                    }
-                },
-                None => *guard = Some(ThreadLedger::default()),
-            }
-        }
+        let endpoint = self.dispatch_endpoint(spec);
+        let Some(mut guard) = self.seeded_ledger().await else {
+            return vec![false; turns.len()];
+        };
         let Some(ledger) = guard.as_mut() else {
             return vec![false; turns.len()];
         };
@@ -543,6 +839,7 @@ impl A2aDelegationRuntime {
                     let appended = self
                         .emit_room(RoomEvent::PeerReplyObserved {
                             peer: peer.clone(),
+                            endpoint: endpoint.clone(),
                             turn: (*turn).to_owned(),
                             answers: answers.map(str::to_owned),
                             content: content.map(str::to_owned),
@@ -551,6 +848,11 @@ impl A2aDelegationRuntime {
                         .await;
                     if appended.is_ok() {
                         journaled += 1;
+                        if let Some(item) = answers {
+                            ledger
+                                .answers
+                                .insert(key.clone(), ((*item).to_owned(), endpoint.clone()));
+                        }
                         ledger.observed.insert(key);
                     }
                 }
@@ -632,6 +934,8 @@ impl A2aDelegationRuntime {
                     item: sanitize_disclosable(item, MAX_PEER_ID_BYTES),
                 },
                 content_hash: None,
+                // A retract dispatched no task: it never grants a capability.
+                endpoint: None,
             })
             .await;
     }
@@ -762,16 +1066,29 @@ impl A2aDelegationRuntime {
         tracing::info!(peer = %spec.id, ?trust, "dispatching A2A delegation");
 
         let (submitted_task, submitted_bytes) = outbound_message_fact(&message);
+        let endpoint = self.dispatch_endpoint(&spec);
         self.emit_room(RoomEvent::RemoteEnvelopeDispatched {
             peer: peer.clone(),
             task: submitted_task.clone(),
             bytes: submitted_bytes,
             act: crate::domain::models::DispatchAct::Task,
-            // The model rail is byte-identical on the wire and in the
-            // journal (19.17 `AC3(e)`): no thread reads its dispatch rows.
+            // The model rail carries no content hash (19.17 `AC3(e)`): no
+            // `you` label reads its rows. Story 19.18c: they are own tasks.
             content_hash: None,
+            endpoint: endpoint.clone(),
         })
         .await?;
+        if let Some(task) = submitted_task.clone()
+            && let Some(ledger) = self.thread_ledger.lock().await.as_mut()
+        {
+            ledger.record_own(
+                task,
+                OwnDispatch {
+                    peer: peer.as_str().to_owned(),
+                    endpoint,
+                },
+            );
+        }
 
         // The submit fact is durable before the POST. A first-hop transport
         // failure has no node yet, so journal the existing rejection vocabulary
@@ -1330,6 +1647,32 @@ fn next_message_nanos(now: u64, last: &AtomicU64) -> u64 {
     }
 }
 
+/// Story 19.18c `A21` — one outbound message id, `rustain-{nanos}-{r}` with
+/// `r` 64 random bits as 16 lowercase hex. The nanos cell is process-local,
+/// but the TUI and the daemon share the item-capability key (`A3`) and a
+/// clock can step back across a restart: without `r` two recipients could
+/// receive items with the SAME capability. Pure over its cell and RNG so a
+/// unit can feed two independent cells one clock reading.
+fn mint_message_id(now: u64, last: &AtomicU64, rng: &mut impl rand_core::RngCore) -> String {
+    let nanos = next_message_nanos(now, last);
+    format!("rustain-{nanos}-{:016x}", rng.next_u64())
+}
+
+/// The carriers [`build_message`] writes from **Rust parameters only** —
+/// ⛔ never from `input`, which carries model-controlled tool arguments.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MessageCarriers<'a> {
+    /// Story 19.18 `AC7(b)` — the id a follow-up answers
+    /// ([`super::REPLY_TO_METADATA_KEY`]); the model rail passes `None`.
+    pub reply_to: Option<&'a str>,
+    /// Story 19.18c `A2` — this host's key: the message carries
+    /// `derive(key, messageId)` ([`super::ITEM_CAPABILITY_METADATA_KEY`]).
+    pub item_key: Option<&'a ItemCapabilityKey>,
+    /// Story 19.18c `A10` — the capability of the reference's nearest item
+    /// ([`super::REPLY_CAPABILITY_METADATA_KEY`]).
+    pub reply_capability: Option<&'a ItemCapability>,
+}
+
 /// Build an A2A `message/send` params object from the tool input. The JSON-RPC
 /// binding uses `kind`-tagged parts.
 ///
@@ -1338,11 +1681,14 @@ fn next_message_nanos(now: u64, last: &AtomicU64) -> u64 {
 /// carrier key entirely (the receiver resolves absence to Unknown); any other
 /// token is dropped with a warning — never forwarded raw.
 ///
-/// Story 19.18 `AC7(b)`: `reply_to` is a SEPARATE Rust parameter written
-/// under [`super::REPLY_TO_METADATA_KEY`]. ⛔ It is never read from `input`,
-/// which carries model-controlled tool arguments: the model rail passes
-/// `None` and its wire is byte-identical to 19.17's.
-pub fn build_message(input: &serde_json::Value, reply_to: Option<&str>) -> serde_json::Value {
+/// Story 19.18 `AC7(b)` / 19.18c `A18`: every `x-rustain-*` carrier comes
+/// from [`MessageCarriers`], never from `input`. With a key the message is
+/// capability-bearing and the returned [`OwnTask`] binds the transport that
+/// sends it (`A9`); without one the wire is 19.18's.
+pub fn build_message(
+    input: &serde_json::Value,
+    carriers: MessageCarriers<'_>,
+) -> (serde_json::Value, Option<OwnTask>) {
     let text = input
         .get("message")
         .and_then(serde_json::Value::as_str)
@@ -1363,7 +1709,7 @@ pub fn build_message(input: &serde_json::Value, reply_to: Option<&str>) -> serde
         .duration_since(UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_nanos()).expect("epoch nanoseconds fit message id"))
         .unwrap_or(0);
-    let nanos = next_message_nanos(nanos, &LAST_MESSAGE_NANOS);
+    let message_id = mint_message_id(nanos, &LAST_MESSAGE_NANOS, &mut rand_core::OsRng);
     let mut metadata = serde_json::Map::new();
     if let Some(token) = message_type {
         metadata.insert(
@@ -1371,21 +1717,41 @@ pub fn build_message(input: &serde_json::Value, reply_to: Option<&str>) -> serde
             serde_json::Value::String(token.to_owned()),
         );
     }
-    if let Some(reply_to) = reply_to {
+    if let Some(reply_to) = carriers.reply_to {
         metadata.insert(
             super::REPLY_TO_METADATA_KEY.to_owned(),
             serde_json::Value::String(reply_to.to_owned()),
         );
     }
-    serde_json::json!({
-        "message": {
-            "kind": "message",
-            "messageId": format!("rustain-{nanos}"),
-            "role": "user",
-            "parts": [{ "kind": "text", "text": text }],
-            "metadata": metadata,
+    if let Some(reply_capability) = carriers.reply_capability {
+        metadata.insert(
+            super::REPLY_CAPABILITY_METADATA_KEY.to_owned(),
+            serde_json::Value::String(reply_capability.as_wire_str().to_owned()),
+        );
+    }
+    let own_task = carriers.item_key.map(|key| {
+        let capability = derive_item_capability(key, &message_id);
+        metadata.insert(
+            super::ITEM_CAPABILITY_METADATA_KEY.to_owned(),
+            serde_json::Value::String(capability.as_wire_str().to_owned()),
+        );
+        OwnTask {
+            message_id: message_id.clone(),
+            capability,
         }
-    })
+    });
+    (
+        serde_json::json!({
+            "message": {
+                "kind": "message",
+                "messageId": message_id,
+                "role": "user",
+                "parts": [{ "kind": "text", "text": text }],
+                "metadata": metadata,
+            }
+        }),
+        own_task,
+    )
 }
 
 #[cfg(test)]
@@ -1410,21 +1776,54 @@ mod tests {
         assert_eq!(next_message_nanos(90, &last), 90);
     }
 
+    /// Story 19.18c `K14` (id half, `A21`) — two INDEPENDENT nanos cells (the
+    /// TUI and the daemon share the key but not the cell) fed one clock
+    /// reading still mint different ids. `M27` → RED: drop the suffix.
+    #[test]
+    fn k14_two_processes_at_one_clock_reading_mint_distinct_ids() {
+        let (first, second) = (AtomicU64::new(0), AtomicU64::new(0));
+        let a = mint_message_id(1_000, &first, &mut rand_core::OsRng);
+        let b = mint_message_id(1_000, &second, &mut rand_core::OsRng);
+        assert_ne!(a, b);
+        for id in [&a, &b] {
+            assert!(is_minted_message_id(id), "{id}");
+        }
+    }
+
+    /// `^rustain-\d+-[0-9a-f]{16}$`, without a regex dependency in the lib.
+    fn is_minted_message_id(id: &str) -> bool {
+        let Some((nanos, suffix)) = id
+            .strip_prefix("rustain-")
+            .and_then(|rest| rest.split_once('-'))
+        else {
+            return false;
+        };
+        !nanos.is_empty()
+            && nanos.bytes().all(|byte| byte.is_ascii_digit())
+            && suffix.len() == 16
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
     #[test]
     fn build_message_emits_the_exact_semantic_type_metadata_key() {
-        let typed = build_message(
+        let (typed, _) = build_message(
             &serde_json::json!({
                 "message": "review this",
                 "message_type": "consultation"
             }),
-            None,
+            MessageCarriers::default(),
         );
         assert_eq!(
             typed.pointer("/message/metadata/x-rustain-message-type"),
             Some(&serde_json::Value::String("consultation".to_owned()))
         );
 
-        let untyped = build_message(&serde_json::json!({ "message": "review this" }), None);
+        let (untyped, _) = build_message(
+            &serde_json::json!({ "message": "review this" }),
+            MessageCarriers::default(),
+        );
         assert_eq!(
             untyped.pointer("/message/metadata/x-rustain-message-type"),
             None,
@@ -1432,33 +1831,85 @@ mod tests {
         );
     }
 
-    /// Story 19.18 `AC7(b)` — the reply-to carrier comes ONLY from the
-    /// separate Rust parameter. Model-controlled `input` naming the carrier —
-    /// under its wire key or a camelCase spelling — never produces it, and the
-    /// model rail (`None`) is byte-identical on the wire.
+    /// Story 19.18 `AC7(b)`, amended by Story 19.18c `A18` (19.17 `AC3(e)`'s
+    /// byte-identity pin) — every carrier comes ONLY from `MessageCarriers`.
+    /// Model-controlled `input` naming any of the three carriers never
+    /// produces one; without a key the model rail's metadata is `{}`; with a
+    /// key it is exactly the item capability of the message it minted.
     #[test]
-    fn the_reply_to_carrier_is_written_only_from_its_parameter() {
+    fn every_carrier_is_written_only_from_its_rust_parameter() {
+        let key = ItemCapabilityKey::from_file_bytes(&[5u8; 32]);
         let hostile = serde_json::json!({
             "message": "review this",
             "x-rustain-in-reply-to": "rr_forged",
             "inReplyTo": "rr_forged",
+            "x-rustain-item-capability": "forged",
+            "x-rustain-reply-capability": "forged",
         });
-        let model = build_message(&hostile, None);
-        assert_eq!(
-            model.pointer("/message/metadata/x-rustain-in-reply-to"),
-            None
-        );
+        let (model, own) = build_message(&hostile, MessageCarriers::default());
+        assert!(own.is_none());
         assert_eq!(
             model.pointer("/message/metadata"),
             Some(&serde_json::json!({}))
         );
-        let follow_up = build_message(
+        let (keyed, own) = build_message(
+            &hostile,
+            MessageCarriers {
+                item_key: Some(&key),
+                ..MessageCarriers::default()
+            },
+        );
+        let message_id = keyed["message"]["messageId"].as_str().expect("id");
+        assert_eq!(
+            keyed.pointer("/message/metadata"),
+            Some(&serde_json::json!({
+                "x-rustain-item-capability": derive_item_capability(&key, message_id).as_wire_str(),
+            })),
+            "with a key, exactly the derived carrier — nothing from `input`"
+        );
+        assert_eq!(own.expect("bound").message_id(), message_id);
+        let reply = derive_item_capability(&key, "rustain-0-0000000000000000");
+        let (follow_up, _) = build_message(
             &serde_json::json!({ "message": "and retries?" }),
-            Some("rr_1"),
+            MessageCarriers {
+                reply_to: Some("rr_1"),
+                reply_capability: Some(&reply),
+                ..MessageCarriers::default()
+            },
         );
         assert_eq!(
-            follow_up.pointer("/message/metadata/x-rustain-in-reply-to"),
-            Some(&serde_json::Value::String("rr_1".to_owned()))
+            follow_up.pointer("/message/metadata"),
+            Some(&serde_json::json!({
+                "x-rustain-in-reply-to": "rr_1",
+                "x-rustain-reply-capability": reply.as_wire_str(),
+            }))
+        );
+    }
+
+    /// Story 19.18c `K02` (message half, `P13`) — the carrier equals
+    /// `derive(key, messageId)` for the id `build_message` minted, and that
+    /// WIRE id has the `A21` shape (a suffix helper the builder never called
+    /// would pass `K14`). `M03` → RED: read the carrier from `input`.
+    #[test]
+    fn k02_the_wire_message_id_is_suffixed_and_carries_its_capability() {
+        let key = ItemCapabilityKey::from_file_bytes(&[6u8; 32]);
+        let (message, own) = build_message(
+            &serde_json::json!({ "message": "q" }),
+            MessageCarriers {
+                item_key: Some(&key),
+                ..MessageCarriers::default()
+            },
+        );
+        let id = message["message"]["messageId"].as_str().expect("id");
+        assert!(is_minted_message_id(id), "{id}");
+        assert_eq!(
+            message["message"]["metadata"]["x-rustain-item-capability"],
+            derive_item_capability(&key, id).as_wire_str()
+        );
+        let own = own.expect("bound");
+        assert_eq!(
+            own.capability.as_wire_str(),
+            derive_item_capability(&key, id).as_wire_str()
         );
     }
 
@@ -1468,12 +1919,12 @@ mod tests {
         // D3: the closed domain holds on emit too — an unrecognized token is
         // never forwarded raw; the carrier key is omitted so the receiver
         // resolves Unknown, and the drop warns once, naming the token.
-        let dropped = build_message(
+        let (dropped, _) = build_message(
             &serde_json::json!({
                 "message": "review this",
                 "message_type": "urgent_escalation"
             }),
-            None,
+            MessageCarriers::default(),
         );
         assert_eq!(
             dropped.pointer("/message/metadata/x-rustain-message-type"),
@@ -1485,17 +1936,81 @@ mod tests {
             "the warn must name the dropped token"
         );
 
-        let empty = build_message(
+        let (empty, _) = build_message(
             &serde_json::json!({
                 "message": "review this",
                 "message_type": ""
             }),
-            None,
+            MessageCarriers::default(),
         );
         assert_eq!(
             empty.pointer("/message/metadata/x-rustain-message-type"),
             None,
             "an empty token is absence, not a type"
+        );
+    }
+
+    /// Story 19.18c `K06e` (`PQ2` = B widened) — the own-row predicate, pure.
+    /// Production caller: the capability resolver (`own_task_capability`).
+    /// `M33` (endpoint arm), `M34` (pseudonym arm) and `M35` (a row without
+    /// `endpoint` matching the current origin) each turn a row here RED.
+    #[test]
+    fn k06e_a_dispatch_row_is_own_by_pin_pseudonym_or_origin() {
+        use crate::domain::models::{A2aPeerSource, PinnedKey, PinnedKeyAlgorithm};
+        let pinned = |alias: &str, byte: u8| {
+            A2aPeerSpec::new(
+                alias,
+                RedactedUrl::new("https://peer.example/a2a".to_owned()),
+                A2aPeerSource::Workspace,
+            )
+            .with_pinned_key(Some(PinnedKey::new(
+                PinnedKeyAlgorithm::EdDsa,
+                URL_SAFE_NO_PAD.encode([byte; 32]),
+                None,
+            )))
+        };
+        let unpinned = |alias: &str| {
+            A2aPeerSpec::new(
+                alias,
+                RedactedUrl::new("https://peer.example/a2a".to_owned()),
+                A2aPeerSource::Workspace,
+            )
+        };
+        let pin_b = pinned("b", 7).resolved_identity().to_string();
+        let pseudonym_b = unpinned("b").resolved_identity().to_string();
+        // Unpinned rows (they carry the origin digest).
+        assert!(
+            dispatch_row_is_own(&pseudonym_b, Some("o1"), &unpinned("b"), Some("o2")),
+            "a move keeps the alias pseudonym"
+        );
+        assert!(
+            dispatch_row_is_own(&pseudonym_b, Some("o1"), &pinned("b", 7), Some("o1")),
+            "a pin-add admits the unpinned row by pseudonym"
+        );
+        assert!(
+            dispatch_row_is_own(&pseudonym_b, Some("o1"), &unpinned("b2"), Some("o1")),
+            "a rename at the same origin keeps the endpoint"
+        );
+        assert!(
+            !dispatch_row_is_own(&pseudonym_b, Some("o1"), &unpinned("b2"), Some("o2")),
+            "a rename AND a move orphan the row"
+        );
+        // Pinned rows (no endpoint).
+        assert!(
+            dispatch_row_is_own(&pin_b, None, &pinned("b2", 7), Some("o9")),
+            "a pinned row survives a rename and a move under the same pin"
+        );
+        assert!(
+            !dispatch_row_is_own(&pin_b, None, &pinned("b", 8), Some("o1")),
+            "a replaced pin at the same origin cuts it — never matched by endpoint"
+        );
+        assert!(
+            !dispatch_row_is_own(&pin_b, None, &unpinned("b"), Some("o1")),
+            "a removed pin cuts it"
+        );
+        assert!(
+            !dispatch_row_is_own(&pseudonym_b, None, &unpinned("b"), Some("o1")),
+            "a row without endpoint (pre-19.18c) never grants by pseudonym or origin"
         );
     }
 

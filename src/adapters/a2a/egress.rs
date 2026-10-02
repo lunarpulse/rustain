@@ -13,6 +13,7 @@ use crate::infrastructure::subagent::NodeTree;
 
 use super::client::A2aClientAdapter;
 use super::driver::A2aDelegationRuntime;
+use super::item_capability::ItemCapabilityKeyState;
 use super::provider::A2aProvider;
 
 /// The one outbound A2A runtime shared by a composition root's provider and
@@ -25,12 +26,18 @@ pub struct A2aEgress {
 }
 
 impl A2aEgress {
+    /// Compose the outbound runtime. Story 19.18c `A3`/`PQ1`: the root loads
+    /// `item_capability` (the one loader helper,
+    /// [`super::item_capability::load_item_capability_key`]) and hands it in;
+    /// ⛔ compose never touches the filesystem for it, and an unusable key is
+    /// never a compose error.
     pub fn compose(
         peers: Vec<A2aPeerSpec>,
         node_tree: NodeTree,
         journal: Arc<dyn RoomJournal>,
         journal_reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
         event_tx: UnboundedSender<AppEvent>,
+        item_capability: ItemCapabilityKeyState,
     ) -> Result<Self> {
         let mut bindings = Vec::with_capacity(peers.len());
         for spec in peers {
@@ -44,7 +51,8 @@ impl A2aEgress {
         let runtime = Arc::new(
             A2aDelegationRuntime::new(node_tree, journal, event_tx.clone())
                 .with_peer_bindings(provider.peer_bindings())
-                .with_journal_reader(journal_reader),
+                .with_journal_reader(journal_reader)
+                .with_item_capability(item_capability),
         );
         provider.set_delegation_runtime(runtime.clone());
 
@@ -166,12 +174,18 @@ mod trust_anchor_tests {
     /// timeout turns a hang into a failure instead of a hang.
     async fn composed(peers: Vec<A2aPeerSpec>) -> A2aEgress {
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Story 19.18c: a production-shaped `Ready` key from a throwaway
+        // store — these keystones are about trust anchors, not capabilities.
+        let keys = tempfile::tempdir().expect("item capability key dir");
         let egress = A2aEgress::compose(
             peers,
             NodeTree::new(),
             Arc::new(AcceptingJournal),
             Arc::new(AcceptingJournal),
             event_tx,
+            crate::adapters::a2a::item_capability::load_item_capability_key(Ok(keys
+                .path()
+                .to_path_buf())),
         )
         .expect("compose must not fail for an unloadable anchor or an unset variable");
         for (_, client) in egress.provider().peer_bindings().iter() {
@@ -532,6 +546,260 @@ mod trust_anchor_tests {
             refusal(&egress, "rotated").await,
             "rotated's certificate does not match the pinned anchor",
             "the RPC's own handshake must be classified, not just the boot GET"
+        );
+    }
+}
+
+/// Story 19.18c in-crate units through `A2aEgress::compose`: the compose half
+/// of `K15`, and the `K03`/`K06b` wire-shape units on the extended
+/// `PeerFixture` (`P11`). ⛔ Wire shape only — the recorded request body —
+/// never an end-to-end claim; those live in
+/// `tests/conformance_19_18c_a2a_item_capability.rs`.
+#[cfg(test)]
+mod item_capability_tests {
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+
+    use crate::adapters::a2a::item_capability::{
+        ItemCapabilityKeyState, ItemCapabilityKeyStore, derive_item_capability,
+        load_item_capability_key,
+    };
+    use crate::adapters::a2a::lifecycle::A2aTaskTransport;
+    use crate::adapters::a2a::test_fixtures::PeerFixture;
+    use crate::domain::models::{
+        A2aPeerSource, A2aPeerSpec, DispatchAct, JournalEntry, JournalRecord, RedactedUrl,
+        RoomEvent, alias_pseudonym,
+    };
+    use crate::domain::ports::{RoomJournal, RoomJournalError, RoomJournalReader};
+
+    use super::*;
+
+    const SETTLE: Duration = Duration::from_secs(20);
+
+    /// A sender journal holding seeded rows; appends are kept too.
+    #[derive(Default)]
+    struct SeededJournal(tokio::sync::Mutex<Vec<JournalEntry>>);
+
+    #[async_trait]
+    impl RoomJournal for SeededJournal {
+        async fn record_event(&self, event: RoomEvent) -> Result<(), RoomJournalError> {
+            let mut rows = self.0.lock().await;
+            let seq = rows.len() as u64 + 1;
+            rows.push(JournalEntry::new(seq, JournalRecord::Room(event), 0));
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl RoomJournalReader for SeededJournal {
+        async fn load_entries(&self) -> Result<Vec<JournalEntry>, RoomJournalError> {
+            Ok(self.0.lock().await.clone())
+        }
+
+        async fn latest_seq(&self) -> Result<u64, RoomJournalError> {
+            Ok(self.0.lock().await.len() as u64)
+        }
+    }
+
+    fn peer(alias: &str, origin: &str) -> A2aPeerSpec {
+        A2aPeerSpec::new(alias, RedactedUrl::from(origin), A2aPeerSource::Workspace)
+    }
+
+    async fn compose(
+        peers: Vec<A2aPeerSpec>,
+        journal: Arc<SeededJournal>,
+        state: ItemCapabilityKeyState,
+    ) -> A2aEgress {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let egress = A2aEgress::compose(
+            peers,
+            NodeTree::new(),
+            journal.clone(),
+            journal,
+            event_tx,
+            state,
+        )
+        .expect("an unusable key is never a compose error");
+        tokio::time::timeout(SETTLE, egress.await_cards_settled())
+            .await
+            .expect("boot card fetch settled");
+        egress
+    }
+
+    fn dispatched(peer: &str, task: &str, endpoint: Option<&str>) -> RoomEvent {
+        RoomEvent::RemoteEnvelopeDispatched {
+            peer: alias_pseudonym(peer),
+            task: Some(task.to_owned()),
+            bytes: 1,
+            act: DispatchAct::Task,
+            content_hash: None,
+            endpoint: endpoint.map(str::to_owned),
+        }
+    }
+
+    /// `K15` (compose half, `P6`/`P19`) — an unusable key composes `Ok`; the
+    /// refusal is per send, credentialed peers only (`PQ1`).
+    #[tokio::test]
+    async fn k15_an_unusable_key_composes_and_refuses_only_credentialed_peers() {
+        let fixture = PeerFixture::plaintext().await;
+        let credentialed = peer("b", &fixture.origin).with_auth(Some("UNSET_19_18C".to_owned()));
+        let open = peer("l", &fixture.origin);
+        let egress = compose(
+            vec![credentialed.clone(), open.clone()],
+            Arc::new(SeededJournal::default()),
+            ItemCapabilityKeyState::Unusable {
+                path: "/keys/item-capability.key".to_owned(),
+                cause: "item capability key file must be exactly 32 bytes, found 31".to_owned(),
+            },
+        )
+        .await;
+        let refusal = egress
+            .runtime()
+            .outbound_item_key(&credentialed)
+            .expect_err("a credentialed peer is refused");
+        assert_eq!(
+            refusal.to_string(),
+            "this host's item key can't be read (/keys/item-capability.key: item capability key \
+             file must be exactly 32 bytes, found 31). Fix its permissions (chmod 600) or restore \
+             it; don't delete it."
+        );
+        assert!(
+            egress
+                .runtime()
+                .outbound_item_key(&open)
+                .expect("an uncredentialed peer sends legacy")
+                .is_none()
+        );
+    }
+
+    /// `K03` (`A9`, `P8`) — a transport bound to its own `(messageId, c)`
+    /// presents `c` in `params.metadata` for THAT id only, on `tasks/get` and
+    /// `tasks/cancel`; a peer-chosen id gets nothing. `M04` → RED: derive and
+    /// attach for any polled id. `M20b` → RED: bind `tasks_get` only.
+    #[tokio::test]
+    async fn k03_a_bound_transport_presents_its_capability_for_its_own_id_only() {
+        let fixture = PeerFixture::plaintext().await;
+        let keys = tempfile::tempdir().expect("keys");
+        let key = ItemCapabilityKeyStore::new(keys.path())
+            .load_or_generate()
+            .expect("key");
+        let (message, own) = super::super::driver::build_message(
+            &serde_json::json!({ "message": "q" }),
+            super::super::driver::MessageCarriers {
+                item_key: Some(&key),
+                ..Default::default()
+            },
+        );
+        let own_id = message["message"]["messageId"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        let client =
+            Arc::new(A2aClientAdapter::new(&peer("b", &fixture.origin), None).expect("client"));
+        let transport =
+            super::super::driver::TaskClient::new(client, format!("{}/", fixture.origin))
+                .with_own_task(own.expect("bound"));
+        transport.tasks_get(&own_id).await.expect("get");
+        transport.tasks_get("rustain-2").await.expect("get");
+        transport.tasks_cancel(&own_id).await.expect("cancel");
+        transport.tasks_cancel("peer-chosen").await.expect("cancel");
+        let expected = derive_item_capability(&key, &own_id);
+        let gets = fixture.calls("tasks/get").await;
+        let cancels = fixture.calls("tasks/cancel").await;
+        assert_eq!(
+            gets[0]["params"],
+            serde_json::json!({
+                "id": own_id,
+                "metadata": { "x-rustain-item-capability": expected.as_wire_str() },
+            })
+        );
+        assert_eq!(gets[1]["params"], serde_json::json!({ "id": "rustain-2" }));
+        assert_eq!(
+            cancels[0]["params"]["metadata"]["x-rustain-item-capability"],
+            expected.as_wire_str()
+        );
+        assert_eq!(
+            cancels[1]["params"],
+            serde_json::json!({ "id": "peer-chosen" })
+        );
+    }
+
+    /// `K06b` (`A9`/`A10`, `P13` positive control) — the resolver derives
+    /// only for a task this host dispatched to THIS peer: a served task not
+    /// in the ledger and a task dispatched to another peer yield no
+    /// capability; an `rr_` id with no observed row yields none WITHOUT a
+    /// list call; an own task yields `derive(K, task)` and the recorded
+    /// thread request carries it. `M12` (front-door kill is `K06c`).
+    #[tokio::test]
+    async fn k06b_the_resolver_derives_only_for_an_own_task_of_this_peer() {
+        let fixture = PeerFixture::plaintext().await;
+        fixture
+            .answer_method(
+                crate::adapters::a2a::ITEMS_LIST_METHOD,
+                serde_json::json!({ "items": [
+                    { "itemId": "ri_own", "task": "t-own" },
+                    { "itemId": "ri_foreign", "task": "t-foreign" },
+                    { "itemId": "ri_other", "task": "t-other" },
+                ]}),
+            )
+            .await;
+        let journal = Arc::new(SeededJournal::default());
+        journal
+            .record_event(dispatched("b", "t-own", Some("any-origin")))
+            .await
+            .expect("seed");
+        journal
+            .record_event(dispatched("c", "t-other", Some("another-origin")))
+            .await
+            .expect("seed");
+        let keys = tempfile::tempdir().expect("keys");
+        let egress = compose(
+            vec![peer("b", &fixture.origin)],
+            journal,
+            load_item_capability_key(Ok(keys.path().to_path_buf())),
+        )
+        .await;
+        let key = ItemCapabilityKeyStore::new(keys.path())
+            .load()
+            .expect("key");
+        let thread_params = || async {
+            fixture
+                .calls(crate::adapters::a2a::ITEMS_THREAD_METHOD)
+                .await
+                .last()
+                .expect("a thread request")["params"]
+                .clone()
+        };
+
+        let _ = super::super::send::read_thread(egress.runtime(), "b", "rr_unobserved").await;
+        assert!(
+            fixture
+                .calls(crate::adapters::a2a::ITEMS_LIST_METHOD)
+                .await
+                .is_empty(),
+            "an unobserved reply turn resolves nothing and reads no list"
+        );
+        assert_eq!(
+            thread_params().await,
+            serde_json::json!({ "itemId": "rr_unobserved" })
+        );
+        for foreign in ["ri_foreign", "ri_other"] {
+            let _ = super::super::send::read_thread(egress.runtime(), "b", foreign).await;
+            assert_eq!(
+                thread_params().await,
+                serde_json::json!({ "itemId": foreign }),
+                "{foreign}: not this host's dispatch to THIS peer"
+            );
+        }
+        let _ = super::super::send::read_thread(egress.runtime(), "b", "ri_own").await;
+        assert_eq!(
+            thread_params().await,
+            serde_json::json!({
+                "itemId": "ri_own",
+                "capability": derive_item_capability(&key, "t-own").as_wire_str(),
+            }),
+            "positive control: an own task for this peer"
         );
     }
 }

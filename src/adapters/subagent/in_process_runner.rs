@@ -8062,6 +8062,7 @@ mod tests {
                     answers,
                     content,
                     content_hash,
+                    ..
                 } => {
                     lines.push(format!(
                         "journal PeerReplyObserved peer={peer:?} turn={turn:?} \

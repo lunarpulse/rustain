@@ -1407,6 +1407,7 @@ mod tests {
                 bytes: "Καλημέρα 🌕".len(),
                 act: crate::domain::models::DispatchAct::Task,
                 content_hash: None,
+                endpoint: None,
             },
         );
         let row = transparency_row(&entry).expect("dispatch projects");

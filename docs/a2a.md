@@ -250,10 +250,55 @@ it names only the configured peer alias, never a person.
 `"credential-scoped"` to opt in. An unknown value is treated as off and produces
 a startup warning. The opt-in asserts that each peer has its own key; the host
 cannot discover whether key holders share one. With the default, an API-key
-caller is refused before a thread lookup or follow-up mutation. Loopback is
-always served, and the thread block discloses its collapsed principal. Story
-19.18c's per-item capability nonce and Story 19.18d's per-peer credential
-binding are the follow-up hardening rows.
+caller that presents no item capability is refused before a thread lookup or
+follow-up mutation. Loopback is always served, and the thread block discloses
+its collapsed principal. Story
+19.18c's per-item capability nonce (below) shipped the first follow-up
+hardening row; Story 19.18d's per-peer credential binding is the next.
+
+## Per-item capabilities (Story 19.18c, 2026-09-30)
+
+A capability is a keyed value derived from a sent message id. Only the sender's
+host can re-derive it; the recipient keeps only its hash. The sender key is
+`item-capability.key` in the per-user data directory (`~/.rustain/` or
+`RUSTAIN_DATA_DIR`): exactly 32 raw bytes and mode 0600 on Unix. Back it up with
+your home directory; losing it makes your earlier items unreachable to API-key
+callers. Windows has no permission check.
+
+For API-key callers, a capability-bearing item's thread read, follow-up
+reference, retract, `tasks/get`, and `tasks/cancel` require that item's
+capability. Loopback is unchanged. Items from older or non-rustain senders are
+legacy: thread and follow-up access still follow `server.threadReads`; retract
+and `tasks/*` remain credential-scoped. The list remains credential-scoped and
+can still show co-holders item ids, states, and task ids; per-peer binding is
+Story 19.18d.
+
+If this host's key cannot be read, sends to a credentialed peer are refused
+before dispatch and show `⚠ <alias>  unreachable` followed by
+`    this host's item key can't be read (<path>: <cause>). Fix its permissions (chmod 600) or restore it; don't delete it.`
+Uncredentialed peers send legacy. Repair or restore an existing key file; never
+delete it.
+
+For sender-side thread and follow-up resolution, rustain makes one
+`x-rustain-items/list` read. Its JSON-RPC body is capped at 1 MiB, so after a
+few thousand items `/team thread` and `/team followup` stop resolving. Read a
+thread before following up on a reply: an unobserved `rr_` has no reply
+capability. A 19.18c follow-up on a pre-19.18c item starts its own thread.
+
+The reply observation records the peer binding so a previously read `rr_`
+remains resolvable after a supported rename or pin-add; another local process
+can observe it through the shared journal.
+
+Dispatch history follows the 19.18c `PQ2` rule. A pinned peer survives a rename
+and a move. An unpinned peer survives either a rename or a move, but not both.
+An unpinned alias re-pointed at another host, or an alias reused for a different
+peer, receives this host's capabilities for the old host's items; pin the peer
+to remove both cases.
+
+An older build treats capability-bearing items as legacy and can rewrite
+`a2a-pending.json` without the capability hash. There is no capability
+revocation (`D3`, `DF-19-18C-CAPABILITY-NO-REVOCATION`) and no key rotation
+(`DF-19-18C-CAPABILITY-KEY-ROTATION`).
 
 ## The `log: N` reminder
 
@@ -354,6 +399,7 @@ The `server` block of `.rustain/a2a.json`:
 | `admission` | `deny` (default), `ask`, `allow` | What to do with a task from a remote agent |
 | `apiKeyEnv` / `api_key_env` | env var **name** | Legacy primary API-key variable. It remains honored. The key itself never lives in the file |
 | `apiKeys` / `api_keys` | array of env var **names** | Additional API keys. The effective set is the union with `apiKeyEnv`; each configured key is a distinct submitting principal |
+| `threadReads` / `thread_reads` | `off` (default), `credential-scoped` | Thread and follow-up access for legacy items from API-key callers |
 | `advertisedHost` / `advertised_host` | public `host[:port]` authority | Authority published in the AgentCard. Required for `0.0.0.0` or `::` binds |
 | `tls.cert` / `tls.key` | workspace-relative PEM paths | Certificate chain and private key |
 
@@ -406,9 +452,11 @@ exactly what a task that does not exist returns. That is deliberate: telling
 "not yours" apart from "not found" would let a peer enumerate task ids and map
 the host's federation for free.
 
-If the host restarts mid-task, the task resolves to `failed` with a restart
-reason — never a zombie `working`. Durable resumption is not implemented
-(`DF-18-1-HOSTRECONCILE`).
+If the host restarts mid-task, a task whose capability class can be recovered
+resolves to `failed` with a restart reason — never a zombie `working`. If the
+pending record is missing and no item holds its class, the orphan is not
+restored as a legacy task: `tasks/get` reports not found. Durable resumption
+is not implemented (`DF-18-1-HOSTRECONCILE`).
 
 ### JSON-RPC profile (narrow, and stated)
 

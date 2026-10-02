@@ -147,6 +147,116 @@ async fn daemon_composition_starts_a2a_agent_card_discovery_for_configured_peers
     );
 }
 
+/// Story 19.18c `K15` (`P6`, `PQ1`) — the daemon root loads the item
+/// capability key through the one loader helper, from `RUSTAIN_DATA_DIR`.
+/// (i) A fresh data dir gains `item-capability.key`: 32 bytes, mode 0600.
+/// (ii) A planted 31-byte key, then a 0644 key: the daemon still boots
+/// through card discovery, logs the warning EXACTLY once, and never touches
+/// the file. `M22` → RED: propagate the load error (the daemon exits).
+/// `M36` → RED: regenerate the file when the load fails (its bytes change).
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn daemon_root_loads_the_item_capability_key_and_never_rewrites_a_bad_one() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const WARNING: &str = "A2A item capability key unusable";
+    let boot = |planted: Option<(Vec<u8>, u32)>| async move {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/agent-card.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"name":"Key Peer","skills":[{"id":"inspect","name":"Inspect"}]}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        let d = dirs();
+        let workspace_config = d.ws.path().join(".rustain");
+        std::fs::create_dir_all(&workspace_config).unwrap();
+        std::fs::write(
+            workspace_config.join("a2a.json"),
+            format!(
+                r#"{{"agents":{{"key-peer":{{"url":"{}"}}}}}}"#,
+                server.uri()
+            ),
+        )
+        .unwrap();
+        let key_path = d.data.path().join("item-capability.key");
+        if let Some((bytes, mode)) = &planted {
+            std::fs::write(&key_path, bytes).unwrap();
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(*mode)).unwrap();
+        }
+        let before = planted.as_ref().map(|_| {
+            (
+                std::fs::read(&key_path).unwrap(),
+                std::fs::metadata(&key_path).unwrap().modified().unwrap(),
+            )
+        });
+        let log_dir = d.data.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("rustain"))
+            .current_dir(d.ws.path())
+            .env("RUSTAIN_DATA_DIR", d.data.path())
+            .env("RUSTAIN_CONFIG_DIR", d.cfg.path())
+            .env("RUSTAIN_LOG_PATH", log_dir.join("rustain.log"))
+            .args(["daemon", "start", "--foreground"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while server
+            .received_requests()
+            .await
+            .map(|requests| requests.is_empty())
+            .unwrap_or(true)
+            || (planted.is_some() && read_log_mentions(&log_dir, WARNING) == 0)
+        {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "the daemon boots whatever the key's state"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "the daemon never reached discovery"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(child.try_wait().unwrap().is_none(), "still running");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let after = std::fs::read(&key_path).ok().map(|bytes| {
+            (
+                bytes,
+                std::fs::metadata(&key_path).unwrap().modified().unwrap(),
+            )
+        });
+        (
+            read_log_mentions(&log_dir, WARNING),
+            before,
+            after,
+            std::fs::metadata(&key_path).ok(),
+        )
+    };
+
+    // (i) generated on first use, in the data dir the root resolved.
+    let (warnings, _, after, metadata) = boot(None).await;
+    assert_eq!(warnings, 0, "a missing file is generated, not a failure");
+    let (bytes, _) = after.expect("the root generated item-capability.key");
+    assert_eq!(bytes.len(), 32);
+    assert_eq!(metadata.unwrap().permissions().mode() & 0o777, 0o600);
+
+    // (ii) an existing but unusable file: boot, warn once, never touch it.
+    for planted in [(vec![7u8; 31], 0o600), (vec![7u8; 32], 0o644)] {
+        let (warnings, before, after, _) = boot(Some(planted)).await;
+        assert_eq!(warnings, 1, "one warning naming the path and cause");
+        assert_eq!(
+            after, before,
+            "the key file's bytes and mtime are unchanged"
+        );
+    }
+}
+
 /// 18.9b-a D1 (party-mode ruling 2026-09-06, owner-approved Shape A): `base`
 /// resolves builtin-only tools, which cannot host the a2a provider install —
 /// before the upgrade such a daemon booted and even fetched the peer's

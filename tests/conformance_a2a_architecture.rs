@@ -209,6 +209,10 @@ fn every_public_a2a_enum_is_non_exhaustive() {
             "AnchorFailure".to_owned(),
             "AuthOutcome".to_owned(),
             "BindDecision".to_owned(),
+            // Story 19.18c `A7`/`P7`: the capability gate's verb classes and
+            // verdicts; a new verb or verdict must be decided, not defaulted.
+            "CapabilityGatedVerb".to_owned(),
+            "CapabilityVerdict".to_owned(),
             "Disclosure".to_owned(),
             "InboundOutcome".to_owned(),
             "PendingAuth".to_owned(),

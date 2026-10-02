@@ -91,6 +91,14 @@ impl ThreadTurn {
     }
 }
 
+/// Story 19.18c `A8` — what the served checks need of an id's nearest item:
+/// its capability class. ⛔ No content, so a lookup never clones a body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NearestItem {
+    /// `sha256` hex of the item's capability, or `None` for a legacy item.
+    pub capability_hash: Option<String>,
+}
+
 #[derive(Clone, Copy)]
 enum ThreadMemberRef<'a> {
     Item(&'a RecipientItemView),
@@ -413,20 +421,56 @@ impl JournalRecipientItemProjection {
             .any(|address| address.turn().as_str() == id)
     }
 
-    /// Whether `id` names an item or a reply turn **of this principal** —
-    /// the follow-up reference check (`AC5(b)`). ⛔ Another principal's id is
-    /// `false`, byte-identical to one that never existed (R21).
+    /// Story 19.18c `A8` — the capability class of `id`'s **nearest item**
+    /// inside `principal`: the item itself for an item id, the item a reply
+    /// turn answers for a turn id. `None` when `id` names nothing of this
+    /// principal — byte-identical, for a caller, to one that never existed
+    /// (R21). Replaces 19.18's boolean `resolves_in_principal`: the follow-up
+    /// reference check needs the class too.
     #[must_use]
-    pub fn resolves_in_principal(&self, principal: &ItemPrincipal, id: &str) -> bool {
+    pub fn nearest_item(&self, principal: &ItemPrincipal, id: &str) -> Option<NearestItem> {
         let snapshot = self.snapshot.load();
-        snapshot
-            .items
-            .keys()
-            .any(|address| address.principal() == principal && address.item().as_str() == id)
-            || snapshot
+        let item_of = |item_id: &str| {
+            snapshot.items.values().find(|item| {
+                item.address.principal() == principal && item.address.item().as_str() == item_id
+            })
+        };
+        let item = item_of(id).or_else(|| {
+            snapshot
                 .replies
-                .keys()
-                .any(|address| address.principal() == principal && address.turn().as_str() == id)
+                .values()
+                .find(|turn| {
+                    turn.address.principal() == principal && turn.address.turn().as_str() == id
+                })
+                .and_then(|turn| item_of(turn.answers.as_str()))
+        })?;
+        Some(NearestItem {
+            capability_hash: item.capability_hash.clone(),
+        })
+    }
+
+    /// Story 19.18c `A22`/`P16` — the capability class of every item sharing
+    /// `(principal, task)`, **Removed included**, in fold order (`None` is
+    /// the legacy class). Unlike [`Self::find_by_task`] a tombstone counts:
+    /// the class of a task id is fixed by its first item, whatever became of
+    /// it.
+    #[must_use]
+    pub fn task_capability_classes(
+        &self,
+        principal: &ItemPrincipal,
+        task: &str,
+    ) -> Vec<Option<String>> {
+        let snapshot = self.snapshot.load();
+        let mut items = snapshot
+            .items
+            .values()
+            .filter(|item| item.address.principal() == principal && item.task == task)
+            .collect::<Vec<_>>();
+        items.sort_by_key(|item| item.journal_order);
+        items
+            .into_iter()
+            .map(|item| item.capability_hash.clone())
+            .collect()
     }
 
     /// Story 19.18 `AC4(b)` — one principal's thread containing `id`, in the
@@ -441,19 +485,51 @@ impl JournalRecipientItemProjection {
     /// `answers` (turns) upward. The walk is bounded by the index size and
     /// cycle-safe; a missing parent ends it. Roots are memoized over the
     /// borrowed index, then only returned turns are cloned from the snapshot.
+    ///
+    /// Story 19.18c `A15` — an item's `in_reply_to` edge counts only within
+    /// one capability class: legacy under legacy, or capability-bearing
+    /// under capability-bearing **and** matched at ingress. Every other edge
+    /// is cut and the child is its own root, so a legacy root never serves a
+    /// capability-bearing descendant to a caller without its capability, and
+    /// an unmatched link never joins a capability-bearing thread. Reply-turn
+    /// edges (minted by this host's operator) always count.
     #[must_use]
     pub fn thread(&self, principal: &ItemPrincipal, id: &str) -> Option<(String, Vec<ThreadTurn>)> {
         let snapshot = self.snapshot.load();
-        let mut index = HashMap::new();
-        for item in snapshot
+        let items: HashMap<&str, &RecipientItemView> = snapshot
             .items
             .values()
             .filter(|item| item.address.principal() == principal)
-        {
+            .map(|item| (item.address.item().as_str(), item))
+            .collect();
+        let answered: HashMap<&str, &str> = snapshot
+            .replies
+            .values()
+            .filter(|turn| turn.address.principal() == principal)
+            .map(|turn| (turn.address.turn().as_str(), turn.answers.as_str()))
+            .collect();
+        // The capability class of a reference's nearest item (`A8`).
+        let nearest_class = |reference: &str| {
+            items
+                .get(reference)
+                .or_else(|| answered.get(reference).and_then(|item| items.get(item)))
+                .map(|item| item.capability_hash.is_some())
+        };
+        let mut index = HashMap::new();
+        for (&item_id, &item) in &items {
+            let parent = item.in_reply_to.as_deref().filter(|reference| {
+                match (item.capability_hash.is_some(), nearest_class(reference)) {
+                    // An unresolvable reference ends the walk either way.
+                    (_, None) => true,
+                    (false, Some(false)) => true,
+                    (true, Some(true)) => item.reply_capability_matched,
+                    (false, Some(true)) | (true, Some(false)) => false,
+                }
+            });
             index.insert(
-                item.address.item().as_str(),
+                item_id,
                 ThreadIndexNode {
-                    parent: item.in_reply_to.as_deref(),
+                    parent,
                     member: ThreadMemberRef::Item(item),
                 },
             );
@@ -599,6 +675,8 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
             alias,
             content,
             in_reply_to,
+            capability_hash,
+            reply_capability_matched,
         } => {
             items
                 .entry(address.clone())
@@ -612,6 +690,10 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
                     journal_order: order,
                     retracted_at_ms: None,
                     in_reply_to: in_reply_to.clone(),
+                    // Story 19.18c `A14` — the first Received wins, so the
+                    // hash is immutable per item.
+                    capability_hash: capability_hash.clone(),
+                    reply_capability_matched: *reply_capability_matched,
                 });
         }
         // The legality verdict gates the WHOLE arm, never just the state
@@ -725,6 +807,8 @@ mod tests {
             alias: None,
             content: "content".to_owned(),
             in_reply_to: None,
+            capability_hash: None,
+            reply_capability_matched: false,
         });
         reset_recipient_item_transition_count();
         projection.apply(&RoomEvent::RecipientItemAcknowledged {
@@ -764,6 +848,8 @@ mod tests {
                     alias: Some("arrival-alias".to_owned()),
                     content: "peer content".to_owned(),
                     in_reply_to: None,
+                    capability_hash: None,
+                    reply_capability_matched: false,
                 },
             ),
             entry(
@@ -824,6 +910,8 @@ mod tests {
             alias: None,
             content: "peer content".to_owned(),
             in_reply_to: None,
+            capability_hash: None,
+            reply_capability_matched: false,
         };
         let entries = vec![
             entry(1, received(&acked)),
@@ -859,6 +947,8 @@ mod tests {
                 alias: None,
                 content: format!("content {id}"),
                 in_reply_to: reply_to.map(str::to_owned),
+                capability_hash: None,
+                reply_capability_matched: false,
             };
         let reply = |answered: &str, turn: &str| RoomEvent::RecipientItemReplied {
             address: TurnAddress::answering(
@@ -982,8 +1072,15 @@ mod tests {
             )),
             2
         );
-        assert!(projection.resolves_in_principal(&principal, "rr_3"));
-        assert!(!projection.resolves_in_principal(&principal, "ri_x"));
+        // Story 19.18c `A8` — a reply turn's nearest item is the item it
+        // answers; another principal's id resolves to nothing.
+        assert_eq!(
+            projection.nearest_item(&principal, "rr_3"),
+            Some(NearestItem {
+                capability_hash: None
+            })
+        );
+        assert_eq!(projection.nearest_item(&principal, "ri_x"), None);
     }
 
     /// Story 19.18 `AC4(b)` — the chain walk is bounded and cycle-safe: two
@@ -997,6 +1094,8 @@ mod tests {
             alias: None,
             content: id.to_owned(),
             in_reply_to: Some(reply_to.to_owned()),
+            capability_hash: None,
+            reply_capability_matched: false,
         };
         let projection = JournalRecipientItemProjection::from_entries(&[
             entry(1, item("ri_a", "ri_b")),

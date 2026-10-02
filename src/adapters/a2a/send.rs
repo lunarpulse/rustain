@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 
 use super::client::CardSlot;
-use super::driver::{A2aDelegationRuntime, TaskClient, build_message};
+use super::driver::{A2aDelegationRuntime, MessageCarriers, OwnTask, TaskClient, build_message};
 use super::endpoint::resolve_jsonrpc_endpoint;
 use super::error::{A2aError, anchor_error};
+use super::item_capability::ItemCapability;
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -50,8 +51,69 @@ impl std::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-fn outbound_message(text: &str, reply_to: Option<&str>) -> serde_json::Value {
-    build_message(&serde_json::json!({ "message": text }), reply_to)
+fn outbound_message(
+    text: &str,
+    carriers: MessageCarriers<'_>,
+) -> (serde_json::Value, Option<OwnTask>) {
+    build_message(&serde_json::json!({ "message": text }), carriers)
+}
+
+/// Story 19.18c `A10` — the capability this host presents for `id` on
+/// `spec`'s host, or `None`:
+///
+/// 1. a reply-turn id maps to the item it answers through this host's
+///    `PeerReplyObserved` rows; no row ⇒ `None`, and ⛔ no list call;
+/// 2. `x-rustain-items/list` names the item's `task`; no row ⇒ `None`;
+/// 3. the task must be one this host dispatched to this peer (`A9`, the
+///    `PQ2` own-row rule) ⇒ derive; else `None` — ⛔ never a derivation for
+///    a task a peer merely served, which would make this host a MAC oracle.
+///
+/// "No capability" is not an error: the verb goes out without one and the
+/// recipient answers per `A7`. Under an unusable or disabled key nothing is
+/// read. Callers: the `/team thread` spawn ([`read_thread`]) and a follow-up
+/// in [`deliver_text`]; the retract dispatch applies step 3 to its carried
+/// task. Cost: one list round trip per call, bounded by the 1 MiB body cap
+/// (`DF-19-16B-ACK-READ-REFOLDS-THE-WHOLE-JOURNAL`).
+///
+/// # Errors
+///
+/// The list read's transport or JSON-RPC failure; the caller sends nothing.
+pub(crate) async fn capability_for(
+    runtime: &A2aDelegationRuntime,
+    spec: &crate::domain::models::A2aPeerSpec,
+    transport: &TaskClient,
+    id: &str,
+) -> Result<Option<ItemCapability>, A2aError> {
+    if !runtime.resolves_capabilities() {
+        return Ok(None);
+    }
+    let answered;
+    let item = if id.starts_with(crate::domain::models::REPLY_TURN_ID_PREFIX) {
+        match runtime.answered_item(spec, id).await {
+            Some(item) => {
+                answered = item;
+                answered.as_str()
+            }
+            None => return Ok(None),
+        }
+    } else {
+        id
+    };
+    let listed = transport.list_items().await?;
+    let task = listed
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|row| row.get("itemId").and_then(serde_json::Value::as_str) == Some(item))
+        })
+        .and_then(|row| row.get("task"))
+        .and_then(serde_json::Value::as_str);
+    Ok(match task {
+        Some(task) => runtime.own_task_capability(spec, task).await,
+        None => None,
+    })
 }
 
 /// Drive N independent sends and report each row as it settles. The callback
@@ -124,6 +186,12 @@ pub enum RecipientOutcome {
 /// Deliver one independently addressed message. Resolve the roster binding
 /// before calling this function; only the rail-three action validates the
 /// complete set before starting any recipient I/O.
+///
+/// Story 19.18c: the message carries this host's item capability; a
+/// follow-up also resolves its reference's capability (`A10`, `P17`) before
+/// the message is built. While the key is unusable, a credentialed peer is
+/// refused with the key's repair sentence before any dispatch row or POST
+/// (`PQ1`).
 pub async fn deliver_text(
     runtime: &A2aDelegationRuntime,
     peer_id: &str,
@@ -134,6 +202,16 @@ pub async fn deliver_text(
 
     let Some((spec, client)) = runtime.peer_binding(peer_id) else {
         return RecipientOutcome::NotSent;
+    };
+    let item_key = match runtime.outbound_item_key(&spec) {
+        Ok(item_key) => item_key,
+        Err(error) => {
+            let cause = send_preflight_cause(peer_id, &error);
+            let _ = runtime
+                .journal_send_preflight_refusal(&spec, cause.as_str())
+                .await;
+            return RecipientOutcome::Unreachable { cause: Some(cause) };
+        }
     };
     let card = match client.card_slot().await {
         CardSlot::Ready(card, _) => card,
@@ -170,12 +248,40 @@ pub async fn deliver_text(
             };
         }
     };
-    let message = outbound_message(text, reply_to);
+    let transport = TaskClient::new(client, endpoint.url().to_owned());
+    // Story 19.18c `P17` — a follow-up's reply capability goes INSIDE the
+    // message, so it is resolved first; a failed list read is a preflight
+    // refusal (one row, no dispatch, nothing sent).
+    let reply_capability = match reply_to {
+        Some(reference) => match capability_for(runtime, &spec, &transport, reference).await {
+            Ok(capability) => capability,
+            Err(error) => {
+                let cause = send_preflight_cause(peer_id, &error);
+                let _ = runtime
+                    .journal_send_preflight_refusal(&spec, cause.as_str())
+                    .await;
+                return RecipientOutcome::Unreachable { cause: Some(cause) };
+            }
+        },
+        None => None,
+    };
+    let (message, own_task) = outbound_message(
+        text,
+        MessageCarriers {
+            reply_to,
+            item_key: item_key.as_deref(),
+            reply_capability: reply_capability.as_ref(),
+        },
+    );
     let task_id = message["message"]["messageId"]
         .as_str()
         .expect("build_message creates messageId")
         .to_owned();
-    let transport = TaskClient::new(client, endpoint.url().to_owned());
+    // `A9`: the cancel below presents the capability only for this id.
+    let transport = match own_task {
+        Some(own_task) => transport.with_own_task(own_task),
+        None => transport,
+    };
     let dispatched = AtomicBool::new(false);
     let result = transport
         .send_after(message, || async {
@@ -346,7 +452,10 @@ fn send_error_class(error: &A2aError) -> SendErrorClass {
         | A2aError::CredentialMissing { .. }
         | A2aError::CredentialOutOfScope { .. }
         | A2aError::AnchorValidationFailed { .. }
-        | A2aError::CaCertUnloadable { .. } => SendErrorClass::Trust,
+        | A2aError::CaCertUnloadable { .. }
+        // Story 19.18c `PQ1`: a local, ratified repair sentence — ⛔ never the
+        // `_ =>` arm, which would render it as a peer-influenced endpoint cause.
+        | A2aError::ItemCapabilityKeyUnusable { .. } => SendErrorClass::Trust,
         A2aError::Request(_)
         | A2aError::HttpStatus { .. }
         | A2aError::JsonRpc { .. }
@@ -609,6 +718,11 @@ pub async fn preview_item_retract(
 /// **before** the POST; `M20`) → POST → classify on the variant → journal a
 /// rejection row **only** when the answer proves nothing was marked. A
 /// resolution failure sent nothing and journals nothing.
+///
+/// Story 19.18c `D2`/`A10` — the carried confirm-time `task` is checked
+/// against this host's own dispatches (step 3) and, when own, its
+/// capability rides the request; the journaled `bytes` count the params
+/// actually sent.
 pub async fn retract_item_on_peer(
     runtime: &A2aDelegationRuntime,
     peer_id: &str,
@@ -619,10 +733,15 @@ pub async fn retract_item_on_peer(
         Ok(resolved) => resolved,
         Err(not_sent) => return RetractOutcome::NotSent(not_sent),
     };
-    let bytes = serde_json::json!({ "itemId": item_id }).to_string().len();
+    let capability = match task.as_deref() {
+        Some(task) => runtime.own_task_capability(&spec, task).await,
+        None => None,
+    };
+    let params = super::driver::item_verb_params(item_id, capability.as_ref());
+    let bytes = params.to_string().len();
     let request_started = AtomicBool::new(false);
     let outcome = match transport
-        .retract_item(item_id, || async {
+        .retract_item(params, || async {
             runtime
                 .journal_item_retract_dispatch(&spec, task.as_deref(), item_id, bytes)
                 .await;
@@ -779,7 +898,13 @@ pub async fn read_thread(
         }
     };
     let transport = TaskClient::new(client, endpoint.url().to_owned());
-    let result = match transport.read_thread(item_id).await {
+    // Story 19.18c `A10` — resolve this host's capability for the item first;
+    // a failed list read renders like a failed thread read and sends nothing.
+    let capability = match capability_for(runtime, &spec, &transport, item_id).await {
+        Ok(capability) => capability,
+        Err(error) => return ThreadRead::Failed(transport_failure(&error)),
+    };
+    let result = match transport.read_thread(item_id, capability.as_ref()).await {
         Ok(result) => result,
         Err(A2aError::JsonRpc { code, .. }) => {
             return match JsonRpcErrorKind::classify(code) {
@@ -788,15 +913,7 @@ pub async fn read_thread(
                 _ => ThreadRead::Failed(RecipientOutcome::NoUsableAnswer),
             };
         }
-        Err(error) => {
-            return ThreadRead::Failed(match send_error_class(&error) {
-                SendErrorClass::Connect => RecipientOutcome::Unreachable { cause: None },
-                SendErrorClass::Trust => RecipientOutcome::Unreachable {
-                    cause: Some(SendCause::Ratified(error.to_string())),
-                },
-                SendErrorClass::Unproven => RecipientOutcome::NoUsableAnswer,
-            });
-        }
+        Err(error) => return ThreadRead::Failed(transport_failure(&error)),
     };
     let Some(thread) = parse_thread(&result) else {
         return ThreadRead::Failed(RecipientOutcome::NoUsableAnswer);
@@ -822,6 +939,18 @@ pub async fn read_thread(
         .collect();
     let mine = runtime.settle_thread(&spec, &observed).await;
     ThreadRead::Read { thread, mine }
+}
+
+/// A failed read in 19.17's outcome vocabulary — ⛔ no new cause words:
+/// `unreachable` (with its cause line) or `no usable answer`.
+fn transport_failure(error: &A2aError) -> RecipientOutcome {
+    match send_error_class(error) {
+        SendErrorClass::Connect => RecipientOutcome::Unreachable { cause: None },
+        SendErrorClass::Trust => RecipientOutcome::Unreachable {
+            cause: Some(SendCause::Ratified(error.to_string())),
+        },
+        SendErrorClass::Unproven => RecipientOutcome::NoUsableAnswer,
+    }
 }
 
 /// Parse and bound one served thread (`P12`). `None` when the answer is not a
@@ -1024,7 +1153,7 @@ mod tests {
     #[test]
     fn outbound_message_preserves_exact_unicode_text_in_one_text_part() {
         let text = "  Καλημέρα 🌕\nsecond line  ";
-        let message = outbound_message(text, None);
+        let (message, _) = outbound_message(text, super::MessageCarriers::default());
         let parts = message["message"]["parts"]
             .as_array()
             .expect("message parts");

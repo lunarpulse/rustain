@@ -148,11 +148,27 @@ impl CapabilityProvider for A2aProvider {
             CapabilityError::InvocationFailed(capability_id.to_string(), error.to_string())
         })?;
 
-        let transport = Arc::new(super::driver::TaskClient::new(
-            client.clone(),
-            endpoint.url().to_owned(),
-        ));
-        let message = super::driver::build_message(&input, None);
+        // Story 19.18c `PQ1` — while the key is unusable a credentialed peer
+        // is refused before `delegate`: no dispatch row, no POST.
+        let item_key = runtime.outbound_item_key(spec).map_err(|error| {
+            CapabilityError::InvocationFailed(capability_id.to_string(), error.to_string())
+        })?;
+        // Story 19.18c `A9` — build the message FIRST, then bind the transport
+        // to its one `(messageId, capability)`, then share it: the lifecycle's
+        // polls and cancels present the capability only for that id, never for
+        // an id the peer answered with. ⛔ No interior mutability.
+        let (message, own_task) = super::driver::build_message(
+            &input,
+            super::driver::MessageCarriers {
+                item_key: item_key.as_deref(),
+                ..super::driver::MessageCarriers::default()
+            },
+        );
+        let transport = super::driver::TaskClient::new(client.clone(), endpoint.url().to_owned());
+        let transport = Arc::new(match own_task {
+            Some(own_task) => transport.with_own_task(own_task),
+            None => transport,
+        });
         match runtime
             .delegate(spec, trust, &capability_id.tool, transport, message, cancel)
             .await

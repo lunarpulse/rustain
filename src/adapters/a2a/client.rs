@@ -261,6 +261,16 @@ impl A2aClientAdapter {
         })
     }
 
+    /// Story 19.18c `PQ2` — lowercase sha256 hex of the roster-configured
+    /// origin (the 19.14 credential-binding origin, `A29`): the dispatch
+    /// row's `endpoint` for an unpinned send. ⛔ Never the raw URL.
+    pub(crate) fn origin_digest(&self) -> String {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(
+            self.credential_origin.ascii_serialization().as_bytes(),
+        ))
+    }
+
     pub async fn refresh_agent_card(&self, spec: &A2aPeerSpec) -> Result<(), A2aError> {
         // `A28` item 1: with no client there is nothing to fetch — and nothing to
         // overwrite. ⛔ A refresh never replaces `AnchorRefused(Unloadable)` with a

@@ -17,6 +17,8 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
             alias: None,
             content: "review the patch".to_owned(),
             in_reply_to: None,
+            capability_hash: None,
+            reply_capability_matched: false,
         },
         RoomEvent::RecipientItemAcknowledged {
             address: address.clone(),
@@ -67,6 +69,8 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         alias: Some("peer eighteen".to_owned()),
         content: "follow-up question".to_owned(),
         in_reply_to: Some("rr_previous".to_owned()),
+        capability_hash: None,
+        reply_capability_matched: false,
     };
     let mut legacy_received = serde_json::to_value(&received).expect("serialize received item");
     assert_eq!(legacy_received["in_reply_to"], "rr_previous");
@@ -97,13 +101,14 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         task: Some("outbound-task".to_owned()),
         bytes: 17,
         act: DispatchAct::Task,
-        content_hash: Some(content_hash.clone()),
+        content_hash: Some(content_hash),
+        endpoint: None,
     };
     let mut legacy_dispatched =
         serde_json::to_value(&dispatched).expect("serialize outbound dispatch");
     assert_eq!(
         legacy_dispatched["content_hash"],
-        serde_json::to_value(&content_hash).expect("serialize content hash")
+        serde_json::to_value(content_hash).expect("serialize content hash")
     );
     legacy_dispatched
         .as_object_mut()
@@ -163,15 +168,16 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
 
     let observed = RoomEvent::PeerReplyObserved {
         peer: peer(20),
+        endpoint: None,
         turn: "rr_remote".to_owned(),
         answers: Some("ri_question".to_owned()),
         content: Some("peer answer".to_owned()),
-        content_hash: Some(content_hash.clone()),
+        content_hash: Some(content_hash),
     };
     let mut legacy_observed = serde_json::to_value(&observed).expect("serialize observed reply");
     assert_eq!(
         legacy_observed["content_hash"],
-        serde_json::to_value(&content_hash).expect("serialize content hash")
+        serde_json::to_value(content_hash).expect("serialize content hash")
     );
     for field in ["answers", "content", "content_hash"] {
         legacy_observed
@@ -205,6 +211,104 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
             && content == "peer answer"
             && persisted_hash == content_hash
     ));
+}
+
+/// Story 19.18c `AC3(c)` — the capability fields round-trip, and their
+/// absence (`None`/`false`) serializes to exactly a 19.18 row: the key set
+/// is unchanged and every existing key keeps its value, so the pinned
+/// transparency fixtures and every older journal line stay byte-identical.
+#[test]
+fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
+    let address = ItemAddress::from_a2a_ingress(peer(21), ItemId::from_replay("ri_capable"));
+    let hash = "ab".repeat(32);
+    let received = RoomEvent::RecipientItemReceived {
+        address: address.clone(),
+        task: "rustain-1-00000000000000aa".to_owned(),
+        alias: None,
+        content: "question".to_owned(),
+        in_reply_to: Some("ri_root".to_owned()),
+        capability_hash: Some(hash.clone()),
+        reply_capability_matched: true,
+    };
+    let encoded = serde_json::to_value(&received).expect("serialize");
+    assert_eq!(encoded["capability_hash"], hash.as_str());
+    assert_eq!(encoded["reply_capability_matched"], true);
+    assert_eq!(
+        serde_json::from_value::<RoomEvent>(encoded).expect("replays"),
+        received
+    );
+
+    let legacy = RoomEvent::RecipientItemReceived {
+        address: address.clone(),
+        task: "sender-task".to_owned(),
+        alias: None,
+        content: "question".to_owned(),
+        in_reply_to: None,
+        capability_hash: None,
+        reply_capability_matched: false,
+    };
+    let row = serde_json::to_string(&legacy).expect("serialize legacy");
+    let value: serde_json::Value = serde_json::from_str(&row).expect("json");
+    let keys: Vec<&str> = value
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["address", "alias", "content", "event", "task"],
+        "a 19.18 row's key set: {row}"
+    );
+    assert!(!row.contains("capability"), "{row}");
+    let mut older = value.clone();
+    older.as_object_mut().expect("object").remove("alias");
+    assert_eq!(
+        serde_json::from_value::<RoomEvent>(value).expect("19.18 row replays"),
+        legacy,
+        "a row without the fields replays as legacy"
+    );
+    assert!(matches!(
+        serde_json::from_value::<RoomEvent>(older).expect("older row replays"),
+        RoomEvent::RecipientItemReceived {
+            capability_hash: None,
+            reply_capability_matched: false,
+            ..
+        }
+    ));
+
+    let unpinned = RoomEvent::RemoteEnvelopeDispatched {
+        peer: peer(22),
+        task: Some("rustain-1-00000000000000aa".to_owned()),
+        bytes: 8,
+        act: DispatchAct::Task,
+        content_hash: None,
+        endpoint: Some("cd".repeat(32)),
+    };
+    let encoded = serde_json::to_value(&unpinned).expect("serialize dispatch");
+    assert_eq!(encoded["endpoint"], "cd".repeat(32));
+    assert_eq!(
+        serde_json::from_value::<RoomEvent>(encoded).expect("replays"),
+        unpinned
+    );
+    let pinned = RoomEvent::RemoteEnvelopeDispatched {
+        peer: peer(22),
+        task: Some("t".to_owned()),
+        bytes: 8,
+        act: DispatchAct::Task,
+        content_hash: None,
+        endpoint: None,
+    };
+    let row = serde_json::to_value(&pinned).expect("serialize dispatch");
+    assert_eq!(
+        row.as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["bytes", "event", "peer", "task"],
+        "a pinned send's row is a 19.18 row"
+    );
 }
 
 #[test]
@@ -266,6 +370,8 @@ fn recipient_item_fold_replays_acknowledgement_and_is_idempotent() {
         alias: None,
         content: "durable content".to_owned(),
         in_reply_to: None,
+        capability_hash: None,
+        reply_capability_matched: false,
     };
     let acknowledged = RoomEvent::RecipientItemAcknowledged {
         address: address.clone(),
@@ -317,6 +423,8 @@ fn replacing_from_the_journal_discards_an_in_memory_divergence() {
         alias: None,
         content: "durable content".to_owned(),
         in_reply_to: None,
+        capability_hash: None,
+        reply_capability_matched: false,
     };
     let entries = vec![entry(1, received.clone())];
     let projection = JournalRecipientItemProjection::from_entries(&entries);
@@ -355,6 +463,8 @@ fn find_by_task_binds_the_newest_item_when_a_message_id_is_resent() {
         alias: None,
         content: "durable content".to_owned(),
         in_reply_to: None,
+        capability_hash: None,
+        reply_capability_matched: false,
     };
     let entries = vec![
         entry(1, received(first)),

@@ -522,12 +522,17 @@ async fn new_sender(peers: Vec<A2aPeerSpec>) -> Sender {
 /// (new egress, new `AppState`) over the same workspace.
 async fn sender_over(peers: Vec<A2aPeerSpec>, journal: Journal) -> Sender {
     let (egress_tx, _egress_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    // Story 19.18c `A15`: `Disabled` — this file proves the PRE-19.18c
+    // behaviour (legacy on both sides, every legacy→legacy edge counts; `K07`
+    // follows up on an `rr_` it never observed). The keyed twin is 19.18c's
+    // `K09` in `conformance_19_18c_a2a_item_capability.rs`.
     let egress = A2aEgress::compose(
         peers,
         NodeTree::new(),
         journal.room.clone(),
         journal.node.clone(),
         egress_tx,
+        rustain::adapters::a2a::item_capability::ItemCapabilityKeyState::Disabled,
     )
     .expect("compose production sender egress");
     tokio::time::timeout(SETTLE, egress.await_cards_settled())
@@ -1503,6 +1508,8 @@ async fn not_yours_is_byte_identical_to_never_existed() {
             alias: None,
             content: "someone else's words".to_owned(),
             in_reply_to: Some(ri_q.clone()),
+            capability_hash: None,
+            reply_capability_matched: false,
         })
         .await
         .expect("seed another principal's earlier ingress");

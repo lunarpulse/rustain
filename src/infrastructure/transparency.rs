@@ -158,6 +158,63 @@ pub(crate) fn write_private_atomic(
     Ok(())
 }
 
+/// What [`create_private_noclobber`] did.
+#[cfg(feature = "a2a")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrivateCreate {
+    /// `path` did not exist and now holds `body`, durably.
+    Created,
+    /// `path` already existed; it was not touched.
+    AlreadyExists,
+}
+
+/// Create `path` holding `body` durably and privately, ⛔ never replacing an
+/// existing file: a `0600` temporary in the same directory, fully written and
+/// `fsync`ed, linked into place only if `path` is absent, then a
+/// parent-directory sync so a crash cannot leave the file absent after the
+/// caller acted on it (Story 19.18c `P3`). Shares [`write_private_atomic`]'s
+/// recipe except the final step. Sole caller: the item-capability key store.
+#[cfg(feature = "a2a")]
+pub(crate) fn create_private_noclobber(
+    path: &Path,
+    body: &[u8],
+    prefix: &str,
+) -> Result<PrivateCreate, std::io::Error> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "private create path has no parent directory",
+        )
+    })?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix).suffix(".tmp").rand_bytes(16);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    let mut temporary = builder.tempfile_in(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.write_all(body)?;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Ok(PrivateCreate::AlreadyExists);
+        }
+        Err(error) => return Err(error.error),
+    }
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(PrivateCreate::Created)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -211,6 +211,16 @@ pub enum A2aError {
     /// and the fault).
     #[error("{}", unloadable_refusal(.alias, .reason))]
     CaCertUnloadable { alias: String, reason: String },
+    /// Story 19.18c `PQ1` — this host's item-capability key file exists but
+    /// cannot be used (or the data directory could not be resolved), so a
+    /// send to a credentialed peer is refused before any dispatch row or
+    /// POST. `path` is the operator's own local file; `cause` is the store's
+    /// error, never key bytes. The one new sentence (`A20`'s exception).
+    #[error(
+        "this host's item key can't be read ({path}: {cause}). Fix its permissions (chmod 600) \
+         or restore it; don't delete it."
+    )]
+    ItemCapabilityKeyUnusable { path: String, cause: String },
 }
 
 /// Find the `rustls::Error` a `reqwest` transport failure is really carrying.

@@ -170,6 +170,92 @@ pub fn admit_thread_access(
     }
 }
 
+/// Story 19.18c `A7` — the served verbs a per-item capability gates, grouped
+/// by the rule their **legacy** items keep.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityGatedVerb {
+    /// `x-rustain-items/thread` and a follow-up's reference: a legacy item
+    /// keeps 19.18's `threadReads` gate.
+    ThreadOrFollowUp,
+    /// `x-rustain-items/retract`, `tasks/get`, `tasks/cancel`: a legacy item
+    /// keeps today's credential-scoped behaviour.
+    RetractOrTask,
+}
+
+/// Story 19.18c `A7` step 5 — what the served verb does after the lookup.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityVerdict {
+    Serve,
+    /// Byte-identical to an id that does not exist.
+    NotFound,
+    /// [`THREAD_ACCESS_OFF`]: a legacy item under `threadReads = off`.
+    AccessOff,
+}
+
+/// Story 19.18c `A7` step 2 — the one refusal decided **before** any lookup:
+/// an API-key caller that presents **no** capability on a thread read or a
+/// follow-up reference meets 19.18's gate unchanged, so the refusal still
+/// reveals nothing about the id (19.18 `M44`). A caller that presents one is
+/// classified after the lookup, by [`post_lookup`]. Pure; exhaustive over
+/// [`SubmitterTrust`] with no wildcard, so a new trust class must decide.
+///
+/// # Errors
+///
+/// [`THREAD_ACCESS_OFF`] for a capability-less API-key thread read or
+/// follow-up reference under `off` or an unrecognised setting.
+pub fn pre_lookup(
+    trust: SubmitterTrust,
+    verb: CapabilityGatedVerb,
+    presented: bool,
+    setting: ThreadReads,
+) -> Result<(), &'static str> {
+    match trust {
+        SubmitterTrust::Loopback => Ok(()),
+        SubmitterTrust::ApiKey => match verb {
+            CapabilityGatedVerb::ThreadOrFollowUp if !presented => {
+                admit_thread_access(trust, setting)
+            }
+            CapabilityGatedVerb::ThreadOrFollowUp | CapabilityGatedVerb::RetractOrTask => Ok(()),
+        },
+    }
+}
+
+/// Story 19.18c `A7` steps 4–5 — decide a served verb on its nearest item
+/// (`A8`), after the principal-scoped lookup found it. `matched` is the one
+/// compare's result, computed independently of trust (`P7`).
+///
+/// - Loopback → serve (no principal separation exists there, 19.16b `A13`).
+/// - API key, capability-bearing item → serve iff `matched`, else not-found.
+/// - API key, legacy item → thread/follow-up keep the `threadReads` gate;
+///   retract and `tasks/*` stay credential-scoped (disclosed).
+///
+/// Pure; exhaustive over [`SubmitterTrust`] with no wildcard.
+#[must_use]
+pub fn post_lookup(
+    trust: SubmitterTrust,
+    verb: CapabilityGatedVerb,
+    item_hash: Option<&str>,
+    matched: bool,
+    setting: ThreadReads,
+) -> CapabilityVerdict {
+    match trust {
+        SubmitterTrust::Loopback => CapabilityVerdict::Serve,
+        SubmitterTrust::ApiKey => match (item_hash, verb) {
+            (Some(_), _) if matched => CapabilityVerdict::Serve,
+            (Some(_), _) => CapabilityVerdict::NotFound,
+            (None, CapabilityGatedVerb::ThreadOrFollowUp) => {
+                match admit_thread_access(trust, setting) {
+                    Ok(()) => CapabilityVerdict::Serve,
+                    Err(_) => CapabilityVerdict::AccessOff,
+                }
+            }
+            (None, CapabilityGatedVerb::RetractOrTask) => CapabilityVerdict::Serve,
+        },
+    }
+}
+
 fn credential_label(trust: SubmitterTrust) -> &'static str {
     match trust {
         SubmitterTrust::Loopback => "loopback",
@@ -304,5 +390,98 @@ mod tests {
                 expected
             );
         }
+    }
+
+    /// Story 19.18c `A7` (pure half of `K05`/`K08`, served decision table):
+    /// every `(trust, verb, class, presented/matched, setting)` cell.
+    #[test]
+    fn the_capability_gate_follows_the_served_decision_table() {
+        use CapabilityGatedVerb::{RetractOrTask, ThreadOrFollowUp};
+        use CapabilityVerdict::{AccessOff, NotFound, Serve};
+        let hash = Some("00");
+        for setting in [
+            ThreadReads::Off,
+            ThreadReads::CredentialScoped,
+            ThreadReads::Unknown,
+        ] {
+            for verb in [ThreadOrFollowUp, RetractOrTask] {
+                for presented in [false, true] {
+                    assert_eq!(
+                        pre_lookup(SubmitterTrust::Loopback, verb, presented, setting),
+                        Ok(())
+                    );
+                }
+                for (item, matched) in [(hash, true), (hash, false), (None, false)] {
+                    assert_eq!(
+                        post_lookup(SubmitterTrust::Loopback, verb, item, matched, setting),
+                        Serve,
+                        "loopback is served ({verb:?}, {item:?}, {matched})"
+                    );
+                }
+                assert_eq!(
+                    post_lookup(SubmitterTrust::ApiKey, verb, hash, true, setting),
+                    Serve
+                );
+                assert_eq!(
+                    post_lookup(SubmitterTrust::ApiKey, verb, hash, false, setting),
+                    NotFound,
+                    "a capability-bearing item without its capability is not-found"
+                );
+            }
+            assert_eq!(
+                pre_lookup(SubmitterTrust::ApiKey, RetractOrTask, false, setting),
+                Ok(())
+            );
+            assert_eq!(
+                pre_lookup(SubmitterTrust::ApiKey, ThreadOrFollowUp, true, setting),
+                Ok(()),
+                "a presented capability is classified after the lookup (`M09`)"
+            );
+            assert_eq!(
+                post_lookup(SubmitterTrust::ApiKey, RetractOrTask, None, false, setting),
+                Serve,
+                "a legacy retract / tasks/* stays credential-scoped"
+            );
+        }
+        assert_eq!(
+            pre_lookup(
+                SubmitterTrust::ApiKey,
+                ThreadOrFollowUp,
+                false,
+                ThreadReads::Off
+            ),
+            Err(THREAD_ACCESS_OFF),
+            "19.18's pre-lookup gate binds capability-less API-key reads"
+        );
+        assert_eq!(
+            pre_lookup(
+                SubmitterTrust::ApiKey,
+                ThreadOrFollowUp,
+                false,
+                ThreadReads::CredentialScoped
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            post_lookup(
+                SubmitterTrust::ApiKey,
+                ThreadOrFollowUp,
+                None,
+                true,
+                ThreadReads::Off
+            ),
+            AccessOff,
+            "a legacy item under off is refused even when a capability was presented (`M14`)"
+        );
+        assert_eq!(
+            post_lookup(
+                SubmitterTrust::ApiKey,
+                ThreadOrFollowUp,
+                None,
+                false,
+                ThreadReads::CredentialScoped
+            ),
+            Serve
+        );
     }
 }

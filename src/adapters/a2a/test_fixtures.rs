@@ -179,6 +179,9 @@ struct FixtureState {
     tls: Mutex<Option<Arc<rustls::ServerConfig>>>,
     card_endpoint: Mutex<String>,
     answer: Mutex<RpcAnswer>,
+    /// Story 19.18c `P11` — a scripted JSON-RPC `result` per method, which
+    /// wins over `answer` (e.g. a served `x-rustain-items/list`).
+    scripted: Mutex<HashMap<String, serde_json::Value>>,
     cancel: CancellationToken,
 }
 
@@ -232,6 +235,7 @@ impl PeerFixture {
             tls: Mutex::new(tls),
             card_endpoint: Mutex::new(format!("{origin}/")),
             answer: Mutex::new(RpcAnswer::Completed),
+            scripted: Mutex::new(HashMap::new()),
             cancel: CancellationToken::new(),
         });
         tokio::spawn(accept_loop(listener, state.clone()));
@@ -250,6 +254,27 @@ impl PeerFixture {
 
     pub(crate) async fn answer_with(&self, answer: RpcAnswer) {
         *self.state.answer.lock().await = answer;
+    }
+
+    /// Story 19.18c `P11` — answer every `method` call with this correlated
+    /// JSON-RPC `result`. For wire-shape units only (`K03`, `K06b`): ⛔ never
+    /// an end-to-end claim.
+    pub(crate) async fn answer_method(&self, method: &str, result: serde_json::Value) {
+        self.state
+            .scripted
+            .lock()
+            .await
+            .insert(method.to_owned(), result);
+    }
+
+    /// The JSON-RPC bodies this fixture received for `method`, in order.
+    pub(crate) async fn calls(&self, method: &str) -> Vec<serde_json::Value> {
+        self.posts()
+            .await
+            .into_iter()
+            .filter_map(|request| serde_json::from_str::<serde_json::Value>(&request.body).ok())
+            .filter(|body| body["method"] == method)
+            .collect()
     }
 
     /// Swap in a **fresh** `ServerConfig` for `leaf`.
@@ -394,6 +419,14 @@ where
         body: body.clone(),
     });
 
+    let called = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|request| request["method"].as_str().map(str::to_owned));
+    let scripted = match called {
+        Some(called) if method == "POST" => state.scripted.lock().await.get(&called).cloned(),
+        _ => None,
+    };
+
     let response = if method == "GET" && path == "/.well-known/agent-card.json" {
         let card = serde_json::json!({
             "name": "Fixture Peer",
@@ -402,6 +435,13 @@ where
             "skills": [{ "id": "scan", "name": "Scan" }],
         });
         http_response(200, "application/json", &card.to_string())
+    } else if let Some(result) = scripted {
+        http_response(
+            200,
+            "application/json",
+            &serde_json::json!({ "jsonrpc": "2.0", "id": request_id(&body), "result": result })
+                .to_string(),
+        )
     } else if method == "POST" {
         match *state.answer.lock().await {
             RpcAnswer::Completed => {

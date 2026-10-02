@@ -1886,6 +1886,7 @@ async fn a_non_owner_gets_byte_identical_responses_to_a_fabricated_task_id() {
             mint_inbound_node_id(&owner, "real-task"),
             owner.clone(),
             rustain::domain::models::RapTaskState::Submitted,
+            None,
         )
         .await
         .expect("insert");
@@ -2635,6 +2636,8 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
             alias: None,
             content: "survive the restart".to_owned(),
             in_reply_to: None,
+            capability_hash: None,
+            reply_capability_matched: false,
         },
     )
     .await
@@ -3493,6 +3496,8 @@ async fn ac4_a_restart_never_rebinds_an_orphaned_task_to_a_removed_item() {
             alias: None,
             content: "content the recipient later disposed of".to_owned(),
             in_reply_to: None,
+            capability_hash: None,
+            reply_capability_matched: false,
         },
     )
     .await

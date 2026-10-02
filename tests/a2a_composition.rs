@@ -216,7 +216,19 @@ async fn egress_composition_exposes_a_cached_peer_and_its_same_delegation_runtim
         journal.clone(),
         Some(event_tx.clone()),
     ));
-    let egress = A2aEgress::compose(vec![peer], NodeTree::new(), room, journal, event_tx).unwrap();
+    // Story 19.18c: a production-shaped `Ready` key; composition is the subject.
+    let keys = tempfile::tempdir().unwrap();
+    let egress = A2aEgress::compose(
+        vec![peer],
+        NodeTree::new(),
+        room,
+        journal,
+        event_tx,
+        rustain::adapters::a2a::item_capability::load_item_capability_key(Ok(keys
+            .path()
+            .to_path_buf())),
+    )
+    .unwrap();
     let composite = composite();
     egress.install(&composite);
 
@@ -255,7 +267,18 @@ async fn egress_composition_with_no_peers_exposes_no_a2a_capabilities() {
         journal.clone(),
         Some(event_tx.clone()),
     ));
-    let egress = A2aEgress::compose(Vec::new(), NodeTree::new(), room, journal, event_tx).unwrap();
+    let keys = tempfile::tempdir().unwrap();
+    let egress = A2aEgress::compose(
+        Vec::new(),
+        NodeTree::new(),
+        room,
+        journal,
+        event_tx,
+        rustain::adapters::a2a::item_capability::load_item_capability_key(Ok(keys
+            .path()
+            .to_path_buf())),
+    )
+    .unwrap();
     let composite = composite();
     egress.install(&composite);
     composite.populate_registry().await.unwrap();

@@ -134,6 +134,11 @@ pub struct InboundTask {
     pub submitter: SubmitterKey,
     /// The token `drive_preloaded_turn` selects on. `tasks/cancel` cancels it.
     pub cancel: CancellationToken,
+    /// Story 19.18c `A6` — `sha256` hex of the item capability presented
+    /// with this task's `message/send` (⛔ never the value), or `None` for a
+    /// legacy task. Held here, not only on the item, because a task parked
+    /// on approval has no item yet. Fixed at insert.
+    pub capability_hash: Option<String>,
     /// State of the first `tasks/get` journal record. Lives on the existing
     /// submitter-scoped record — which is already evicted on terminal — rather
     /// than in a new `(peer, task)` map that would need an eviction path.
@@ -179,12 +184,19 @@ impl InboundTask {
     const DISCLOSURE_RECORDING: u8 = 1;
     const DISCLOSURE_RECORDED: u8 = 2;
 
-    fn new(id: String, node_id: AgentId, submitter: SubmitterKey, initial: RapTaskState) -> Self {
+    fn new(
+        id: String,
+        node_id: AgentId,
+        submitter: SubmitterKey,
+        initial: RapTaskState,
+        capability_hash: Option<String>,
+    ) -> Self {
         Self {
             id,
             node_id,
             submitter,
             cancel: CancellationToken::new(),
+            capability_hash,
             query_state: AtomicU8::new(Self::QUERY_UNSEEN),
             disclosure_state: AtomicU8::new(Self::DISCLOSURE_UNSEEN),
             disclosure_settled: Notify::new(),
@@ -413,12 +425,18 @@ impl InboundTaskStore {
     /// `messageId` is submitter-chosen, so a replayed id must not silently
     /// rebind that principal's existing task. Another principal may use the
     /// same id without learning whether this one has.
+    ///
+    /// Story 19.18c `A6` — every caller supplies the task's capability hash:
+    /// the live ingress from the presented carrier, the two restart
+    /// reconciliations from the durable item or the pending record. ⛔ A
+    /// reseeded task never becomes legacy because a site passed `None`.
     pub async fn insert(
         &self,
         id: String,
         node_id: AgentId,
         submitter: SubmitterKey,
         initial: RapTaskState,
+        capability_hash: Option<String>,
     ) -> Option<Arc<InboundTask>> {
         let mut tasks = self.tasks.write().await;
         let key = (submitter.clone(), id.clone());
@@ -449,7 +467,13 @@ impl InboundTaskStore {
                 tasks.remove(key);
             }
         }
-        let task = Arc::new(InboundTask::new(id, node_id, submitter, initial));
+        let task = Arc::new(InboundTask::new(
+            id,
+            node_id,
+            submitter,
+            initial,
+            capability_hash,
+        ));
         tasks.insert(key, task.clone());
         Some(task)
     }
@@ -704,6 +728,7 @@ mod tests {
                 mint_inbound_node_id(&owner, "t1"),
                 owner.clone(),
                 RapTaskState::Submitted,
+                None,
             )
             .await
             .expect("insert");
@@ -730,6 +755,7 @@ mod tests {
                 mint_inbound_node_id(&owner, "t1"),
                 owner.clone(),
                 RapTaskState::Submitted,
+                None,
             )
             .await
             .expect("first insert");
@@ -740,6 +766,7 @@ mod tests {
                     mint_inbound_node_id(&owner, "other"),
                     owner.clone(),
                     RapTaskState::Submitted,
+                    None,
                 )
                 .await
                 .is_none()
@@ -765,6 +792,7 @@ mod tests {
                 mint_inbound_node_id(&first, "same-id"),
                 first.clone(),
                 RapTaskState::Submitted,
+                None,
             )
             .await
             .expect("first principal insert");
@@ -774,6 +802,7 @@ mod tests {
                 mint_inbound_node_id(&second, "same-id"),
                 second.clone(),
                 RapTaskState::Submitted,
+                None,
             )
             .await
             .expect("second principal must not collide");
@@ -808,6 +837,7 @@ mod tests {
                 mint_inbound_node_id(&owner, "live"),
                 owner.clone(),
                 RapTaskState::Submitted,
+                None,
             )
             .await
             .expect("live");
@@ -817,6 +847,7 @@ mod tests {
                 mint_inbound_node_id(&owner, "done"),
                 owner.clone(),
                 RapTaskState::Submitted,
+                None,
             )
             .await
             .expect("done");
@@ -829,6 +860,7 @@ mod tests {
                     mint_inbound_node_id(&owner, "new"),
                     owner.clone(),
                     RapTaskState::Submitted,
+                    None,
                 )
                 .await
                 .is_some()
@@ -851,6 +883,7 @@ mod tests {
             mint_inbound_node_id(&SubmitterKey::loopback(), "t"),
             SubmitterKey::loopback(),
             RapTaskState::Submitted,
+            None,
         );
         // Submitted -> Working -> AuthRequired -> Working -> Completed is the
         // R10 arc, and every hop is legal in the shipped FSM.
@@ -871,6 +904,7 @@ mod tests {
             mint_inbound_node_id(&SubmitterKey::loopback(), "t"),
             SubmitterKey::loopback(),
             RapTaskState::Working,
+            None,
         ));
         let waiting = task.clone();
         let waiter = tokio::spawn(async move {

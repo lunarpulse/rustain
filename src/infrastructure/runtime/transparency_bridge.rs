@@ -2010,12 +2010,18 @@ mod credential_tests {
         async fn compose(peers: Vec<A2aPeerSpec>) -> Self {
             let journal = Arc::new(RecordingJournal::default());
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            // Story 19.18c: a production-shaped `Ready` key from a throwaway
+            // store — these keystones are about credentials, not capabilities.
+            let keys = tempfile::tempdir().expect("item capability key dir");
             let egress = A2aEgress::compose(
                 peers,
                 NodeTree::new(),
                 journal.clone() as Arc<dyn RoomJournal>,
                 journal.clone(),
                 event_tx,
+                crate::adapters::a2a::item_capability::load_item_capability_key(Ok(keys
+                    .path()
+                    .to_path_buf())),
             )
             .expect("compose must survive an unset variable and an unloadable anchor");
             for (_, client) in egress.provider().peer_bindings().iter() {

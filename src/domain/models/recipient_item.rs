@@ -193,6 +193,13 @@ pub struct RecipientItemView {
     /// creation-time attribute of THIS item, ⛔ never a transition on the
     /// item it names (`AD-1827`).
     pub in_reply_to: Option<String>,
+    /// Story 19.18c `A14` — `sha256` hex of the item capability presented at
+    /// ingress, or `None` for a legacy item. Immutable: the first Received
+    /// record wins. ⛔ Never the capability itself.
+    pub capability_hash: Option<String>,
+    /// Story 19.18c `A15` — whether this follow-up's presented reply
+    /// capability matched its reference's nearest item at ingress.
+    pub reply_capability_matched: bool,
 }
 
 /// What the retract predicate says about one item. The retract is its own
@@ -410,12 +417,17 @@ pub struct ReplyTurnView {
 /// root. The asker enforces it again on read (`P12`).
 pub const MAX_REPLY_BYTES: usize = 64 * 1024;
 
+/// The prefix every reply-turn id carries (Story 19.18 `AC2(d)`). One
+/// spelling: the minting below and Story 19.18c's sender-side resolver, which
+/// maps a reply-turn id to the item it answers, both read it.
+pub const REPLY_TURN_ID_PREFIX: &str = "rr_";
+
 /// A fresh reply-turn candidate: a distinct `rr_` prefix, so it can never
 /// equal an `ri_` item id by construction, and 32 nanoid characters so it is
 /// unguessable and independent of every sender-supplied value (19.16 `A5`).
 #[must_use]
 pub fn fresh_reply_turn_candidate() -> String {
-    format!("rr_{}", nanoid::nanoid!(32))
+    format!("{REPLY_TURN_ID_PREFIX}{}", nanoid::nanoid!(32))
 }
 
 /// Claim a reply-turn id. A candidate already present in durable history is

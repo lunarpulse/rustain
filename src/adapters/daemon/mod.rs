@@ -425,6 +425,12 @@ async fn run_daemon_foreground(
             ),
             node_journal.clone(),
             domain_tx.clone(),
+            // Story 19.18c `A3`/`P5`/`PQ1` — the one loader helper over the
+            // per-user data dir. An unusable key is one warning and a refusal
+            // toward credentialed peers at send time, ⛔ never a boot failure.
+            crate::adapters::a2a::item_capability::load_item_capability_key(
+                crate::infrastructure::paths::data_dir(),
+            ),
         )
         .map_err(|error| anyhow::anyhow!("composing daemon A2A egress: {error}"))?,
     );

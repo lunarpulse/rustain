@@ -1896,6 +1896,12 @@ pub async fn run() -> Result<()> {
                     ),
                     node_journal.clone(),
                     domain_tx.clone(),
+                    // Story 19.18c `A3`/`P5` — the one loader helper, over the
+                    // SAME per-user data dir the daemon root reads, so both
+                    // processes derive identical capabilities.
+                    crate::adapters::a2a::item_capability::load_item_capability_key(
+                        crate::infrastructure::paths::data_dir(),
+                    ),
                 )?);
                 egress.install(composite);
                 a2a_send_runtime = Some(egress.runtime().clone());

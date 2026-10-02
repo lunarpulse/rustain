@@ -1330,6 +1330,8 @@ async fn seed_item(
         alias: None,
         content: format!("content for {item_id}"),
         in_reply_to: None,
+        capability_hash: None,
+        reply_capability_matched: false,
     })
     .await
     .expect("seed the recipient item");
@@ -1449,6 +1451,8 @@ async fn ac1_the_read_verb_serves_only_the_callers_own_set_through_the_real_fron
             alias: None,
             content: "content".to_owned(),
             in_reply_to: None,
+            capability_hash: None,
+            reply_capability_matched: false,
         })
         .await
         .expect("seed received");
@@ -1923,12 +1927,17 @@ async fn board_egress(
 ) -> rustain::adapters::a2a::egress::A2aEgress {
     let (event_tx, _event_rx) =
         tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    // Story 19.18c: a production-shaped `Ready` key; the board is the subject.
+    let keys = tempfile::tempdir().expect("item capability key dir");
     let egress = rustain::adapters::a2a::egress::A2aEgress::compose(
         peers,
         NodeTree::new(),
         room,
         journal,
         event_tx,
+        rustain::adapters::a2a::item_capability::load_item_capability_key(Ok(keys
+            .path()
+            .to_path_buf())),
     )
     .expect("compose the sender egress");
     tokio::time::timeout(Duration::from_secs(10), egress.await_cards_settled())
@@ -1984,6 +1993,7 @@ async fn ac3b2_an_unreachable_roster_peer_renders_warned_never_declined() {
             bytes: 8,
             act: rustain::domain::models::DispatchAct::Task,
             content_hash: None,
+            endpoint: None,
         },
     )
     .await
@@ -2133,6 +2143,7 @@ async fn ac3_the_board_is_assembled_from_remote_reads_not_the_local_projection()
             bytes: 8,
             act: rustain::domain::models::DispatchAct::Task,
             content_hash: None,
+            endpoint: None,
         },
     )
     .await
@@ -2254,6 +2265,7 @@ async fn ac3g_the_board_row_answers_for_the_dispatched_task_not_the_newest_bag()
             bytes: 8,
             act: rustain::domain::models::DispatchAct::Task,
             content_hash: None,
+            endpoint: None,
         },
     )
     .await
@@ -2353,6 +2365,7 @@ async fn ac2c_the_board_carries_the_collapse_disclosure_from_a_loopback_peer() {
             bytes: 8,
             act: rustain::domain::models::DispatchAct::Task,
             content_hash: None,
+            endpoint: None,
         },
     )
     .await

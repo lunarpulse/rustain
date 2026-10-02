@@ -66,8 +66,9 @@ use crate::domain::models::{
 use crate::domain::ports::{InboundApprovalTicket, InboundPeerRuntime, InboundPeerTask};
 
 use super::admission::{
-    A2aAdmissionPolicy, AdmissionRequest, AdmissionVerdict, SubmitterTrust, ThreadReads, admit,
-    admit_item_retract, admit_thread_access,
+    A2aAdmissionPolicy, AdmissionRequest, AdmissionVerdict, CapabilityGatedVerb, CapabilityVerdict,
+    SubmitterTrust, THREAD_ACCESS_OFF, ThreadReads, admit, admit_item_retract, post_lookup,
+    pre_lookup,
 };
 use super::auth::{
     A2aServerAuth, A2aServerSecurity, API_KEY_HEADER, AuthOutcome, BindDecision, BindEvidence,
@@ -79,6 +80,9 @@ use super::exec::{
     CANCEL_DETAIL, FAILURE_DETAIL, INBOUND_SUBAGENT_TYPE, InboundTaskStore, PendingAuth,
     RESTART_DETAIL, START_FAILURE_DETAIL, SubmitterKey, UNRECORDED_ACCEPT_DETAIL,
     mint_inbound_node_id, parse_inbound_node_id, project_node_to_rap,
+};
+use super::item_capability::{
+    PresentedCapability, capability_matches, parse_presented_capability, presented_matches,
 };
 use super::jsonrpc::{
     CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_ITEM_REMOVED,
@@ -313,8 +317,14 @@ pub async fn serve(
     // AC5b — a task the previous process was running must not read as a zombie
     // `working`. Reconcile BEFORE the router accepts anything, so the very first
     // `tasks/get` after a restart already tells the truth.
-    reconcile_after_restart(&state).await;
-    reconcile_pending_after_restart(&state).await;
+    //
+    // Story 19.18c `P16` — the pending file is read ONCE, before the orphan
+    // pass: under consent a pending task already has a durable node, so the
+    // orphan pass inserts it first and must take its capability hash from
+    // the pending record, or the reseeded task would turn legacy.
+    let pending = read_pending_records(&state).await;
+    reconcile_after_restart(&state, pending.as_deref().unwrap_or_default()).await;
+    reconcile_pending_after_restart(&state, pending).await;
 
     let tls = state.security.tls.clone();
     let router = build_router(state);
@@ -340,7 +350,13 @@ pub async fn serve(
 ///
 /// Durable host-side *resumption* is deferred (`DF-18-1-HOSTRECONCILE`); the
 /// defer must not become a place tasks disappear.
-async fn reconcile_after_restart(state: &ServerState) {
+///
+/// Story 19.18c `A6`/`P16` — the reseeded task keeps its capability hash: from
+/// the durable item sharing `(principal, task)` (Removed included; the class
+/// of a task id is fixed, `A22`), else from the pending record keyed by
+/// `(submitter, task)` — ⛔ never by task alone, which would lend one
+/// principal's hash to another principal's orphan with the same id.
+async fn reconcile_after_restart(state: &ServerState, pending: &[PendingTaskRecord]) {
     let Some(runtime) = state.runtime.as_ref() else {
         return;
     };
@@ -352,6 +368,26 @@ async fn reconcile_after_restart(state: &ServerState) {
             continue;
         };
         let peer_id = submitter.pseudonymous_peer_id();
+        let principal = crate::domain::models::ItemPrincipal::A2aPseudonym(peer_id.clone());
+        let capability_class = state
+            .recipient_items
+            .task_capability_classes(&principal, &task_id)
+            .pop()
+            .or_else(|| {
+                pending
+                    .iter()
+                    .find(|record| {
+                        record.task_id == task_id && record.submitter == submitter.as_str()
+                    })
+                    .map(|record| record.capability_hash.clone())
+            });
+        let Some(capability_hash) = capability_class else {
+            // No received item and no pending record: absence is not proof of
+            // a legacy task. A failed pending-file write must not turn a
+            // capability-bearing orphan into a co-holder-readable task.
+            tracing::warn!(task = %task_id, node = %node_id, "A2A orphan task capability class unknown; not restoring task");
+            continue;
+        };
         let Some(task) = state
             .tasks
             .insert(
@@ -359,6 +395,7 @@ async fn reconcile_after_restart(state: &ServerState) {
                 node_id.clone(),
                 submitter,
                 RapTaskState::Submitted,
+                capability_hash,
             )
             .await
         else {
@@ -371,7 +408,6 @@ async fn reconcile_after_restart(state: &ServerState) {
         {
             task.restore_status_query();
         }
-        let principal = crate::domain::models::ItemPrincipal::A2aPseudonym(peer_id.clone());
         if let Some(item) = state.recipient_items.find_by_task(&principal, &task_id) {
             task.set_item_address(item.address).await;
         }
@@ -386,6 +422,11 @@ async fn reconcile_after_restart(state: &ServerState) {
 struct PendingTaskRecord {
     task_id: String,
     submitter: String,
+    /// Story 19.18c `A6` — the task's capability **hash** (⛔ never the
+    /// value), so a restart reseeds the pending task as capability-bearing.
+    /// Absent on a pre-19.18c record, which stays legacy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capability_hash: Option<String>,
 }
 
 fn pending_tasks_path(state: &ServerState) -> PathBuf {
@@ -477,27 +518,41 @@ async fn remove_pending_task(state: &ServerState, record: &PendingTaskRecord) {
     }
 }
 
-/// Rehydrate approval-pending tasks after their owning process disappeared.
-async fn reconcile_pending_after_restart(state: &ServerState) {
+/// Read `a2a-pending.json` once at startup (Story 19.18c `P16`). `None` when
+/// it is missing, corrupt or unreadable — each warned, and then nothing is
+/// restored or truncated, exactly as before the read was split out.
+async fn read_pending_records(state: &ServerState) -> Option<Vec<PendingTaskRecord>> {
     let path = pending_tasks_path(state);
-    let records = match tokio::fs::read(&path).await {
+    match tokio::fs::read(&path).await {
         Ok(raw) => match serde_json::from_slice::<Vec<PendingTaskRecord>>(&raw) {
-            Ok(records) => records,
+            Ok(records) => Some(records),
             Err(error) => {
                 tracing::warn!(%error, path = %path.display(), "skipping corrupt A2A pending task file");
-                return;
+                None
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             tracing::warn!(path = %path.display(), "A2A pending task file is missing; no approval-pending tasks restored");
-            return;
+            None
         }
         Err(error) => {
             tracing::warn!(%error, path = %path.display(), "skipping unreadable A2A pending task file");
-            return;
+            None
         }
-    };
+    }
+}
 
+/// Rehydrate approval-pending tasks after their owning process disappeared.
+/// A record whose task the orphan pass already reseeded is skipped here; that
+/// pass took the record's capability hash (`P16`).
+async fn reconcile_pending_after_restart(
+    state: &ServerState,
+    records: Option<Vec<PendingTaskRecord>>,
+) {
+    let Some(records) = records else {
+        return;
+    };
+    let path = pending_tasks_path(state);
     for record in &records {
         if record.task_id.is_empty()
             || record.task_id.len() > MAX_TASK_ID_BYTES
@@ -515,6 +570,7 @@ async fn reconcile_pending_after_restart(state: &ServerState) {
                 mint_inbound_node_id(&submitter, &record.task_id),
                 submitter,
                 RapTaskState::Submitted,
+                record.capability_hash.clone(),
             )
             .await
         else {
@@ -890,8 +946,43 @@ async fn message_send(
             "Invalid params",
         ));
     }
+    // Story 19.18c `A7` step 1 / `P7` — both capability carriers parse HERE,
+    // for every caller trust, before anything reads or writes: a malformed
+    // value is `-32602` with zero rows, and `null` is absent. The raw value
+    // is reduced to its digest at once and dropped (`A13`); ⛔ never logged.
+    let carrier = |key: &str| params.pointer(&format!("/message/metadata/{key}"));
+    let (Ok(item_capability), Ok(reply_capability)) = (
+        parse_presented_capability(carrier(super::ITEM_CAPABILITY_METADATA_KEY)),
+        parse_presented_capability(carrier(super::REPLY_CAPABILITY_METADATA_KEY)),
+    ) else {
+        return Err(JsonRpcErrorResponse::new(
+            echo,
+            CODE_INVALID_PARAMS,
+            "Invalid params",
+        ));
+    };
     let peer_id = caller.key.pseudonymous_peer_id();
-    let in_reply_to = follow_up_reference(state, caller, params, &echo).await?;
+    let reference =
+        follow_up_reference(state, caller, params, &echo, reply_capability.as_ref()).await?;
+    // Story 19.18c `A22` — one capability class per `(principal, task)`,
+    // checked for every admission verdict before `admit`, so a refusal
+    // writes zero rows. A co-holder that resubmits another sender's task id
+    // after a restart or an eviction gets today's in-memory duplicate answer,
+    // byte for byte, instead of an item the operator's answer would land on.
+    if !task_class_admits(state, &peer_id, &task_id, item_capability.as_ref()).await {
+        return Err(JsonRpcErrorResponse::new(
+            echo,
+            CODE_INTERNAL_ERROR,
+            format!("task id {task_id} is already in flight"),
+        ));
+    }
+    let facts = IngressFacts {
+        in_reply_to: reference.as_ref().map(|reference| reference.id.clone()),
+        capability_hash: item_capability
+            .as_ref()
+            .map(PresentedCapability::stored_hash),
+        reply_capability_matched: reference.is_some_and(|reference| reference.matched),
+    };
 
     // ── Decision core. Effect-free: no lock, no node, no journal write. ──
     let verdict = admit(
@@ -922,29 +1013,69 @@ async fn message_send(
                 .await;
             Ok(rejected_task_json(&task_id, &reason, &state.signer))
         }
-        AdmissionVerdict::Accept => start_task(
-            state,
-            caller,
-            task_id,
-            message,
-            message_type,
-            in_reply_to,
-            false,
-        )
-        .await
-        .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason)),
-        AdmissionVerdict::AcceptPendingApproval => start_task(
-            state,
-            caller,
-            task_id,
-            message,
-            message_type,
-            in_reply_to,
-            true,
-        )
-        .await
-        .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason)),
+        AdmissionVerdict::Accept => {
+            start_task(state, caller, task_id, message, message_type, facts, false)
+                .await
+                .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason))
+        }
+        AdmissionVerdict::AcceptPendingApproval => {
+            start_task(state, caller, task_id, message, message_type, facts, true)
+                .await
+                .map_err(|reason| JsonRpcErrorResponse::new(echo, CODE_INTERNAL_ERROR, &reason))
+        }
     }
+}
+
+/// Story 19.18c — what `message_send` validated before admission, carried to
+/// `launch` as one value so the four signatures grow by one parameter.
+#[derive(Clone, Debug, Default)]
+struct IngressFacts {
+    /// Story 19.18 `AC5(c)` — the resolved follow-up reference, stored raw.
+    in_reply_to: Option<String>,
+    /// `sha256` hex of the presented item capability; `None` is legacy.
+    capability_hash: Option<String>,
+    /// `A15` — the reply capability matched the reference's nearest item.
+    reply_capability_matched: bool,
+}
+
+/// A follow-up reference that resolved inside the caller's principal.
+struct FollowUpReference {
+    id: String,
+    /// The presented reply capability matched the reference's nearest item.
+    matched: bool,
+}
+
+/// Story 19.18c `A22` — whether a `message/send` for `task_id` keeps one
+/// capability class per `(principal, task)`: every existing item sharing it,
+/// Removed included, must carry the presented class and hash (`None` is a
+/// class). Lookup first, refresh on a miss; a refresh that fails refuses
+/// rather than decide on a stale fold. Cost: one O(items) scan per send
+/// (`DF-19-16B-ACK-READ-REFOLDS-THE-WHOLE-JOURNAL`).
+async fn task_class_admits(
+    state: &ServerState,
+    peer_id: &PeerId,
+    task_id: &str,
+    presented: Option<&PresentedCapability>,
+) -> bool {
+    let principal = crate::domain::models::ItemPrincipal::A2aPseudonym(peer_id.clone());
+    let mut classes = state
+        .recipient_items
+        .task_capability_classes(&principal, task_id);
+    if classes.is_empty() {
+        if !refresh_recipient_items(state).await {
+            return false;
+        }
+        classes = state
+            .recipient_items
+            .task_capability_classes(&principal, task_id);
+    }
+    classes
+        .iter()
+        .all(|class| match (class.as_deref(), presented) {
+            (None, None) => true,
+            (Some(stored), Some(presented)) => capability_matches(stored, presented),
+            (None, Some(_)) | (Some(_), None) => false,
+        })
 }
 
 /// Story 19.18 `AC5(a)(b)` — read and validate the follow-up carrier
@@ -953,18 +1084,26 @@ async fn message_send(
 /// - Absent (or `null`) ⇒ `None`: an ordinary root item, unchanged.
 /// - Not a non-empty string within `MAX_PEER_ID_BYTES` ⇒ `-32602`, nothing
 ///   written (the invalid-params precedent).
-/// - Present ⇒ the thread-access gate first (`AC12`: an API-key caller with
-///   thread access off gets `-32040` and nothing is written), then the
-///   reference must resolve inside the CALLER's principal to an item or a
-///   reply turn on this host. Lookup first, refresh only on a miss. A miss is
-///   ONE error — `CODE_TASK_NOT_FOUND` with `ITEM_NOT_FOUND` — for not-yours
-///   and never-existed alike (R21), and ⛔ mints nothing.
+/// - Present ⇒ Story 19.18c's `A7` order: an API-key caller that presents
+///   **no** reply capability meets 19.18's pre-lookup gate unchanged
+///   (`-32040` under `off`); otherwise the reference must resolve inside the
+///   CALLER's principal (lookup first, refresh only on a miss), and its
+///   nearest item decides (`post_lookup`): a capability-bearing item needs
+///   the matching reply capability, a legacy one keeps the `threadReads`
+///   gate. A miss is ONE error — `CODE_TASK_NOT_FOUND` with `ITEM_NOT_FOUND`
+///   — for not-yours, never-existed and wrong-capability alike (R21), and ⛔
+///   mints nothing.
+///
+/// `reply_capability` was parsed by `message_send` (`P7`): this function
+/// returns before reading anything when there is no reference, so a
+/// malformed carrier parsed here would be silently ignored.
 async fn follow_up_reference(
     state: &ServerState,
     caller: &Caller,
     params: &serde_json::Value,
     echo: &serde_json::Value,
-) -> Result<Option<String>, JsonRpcErrorResponse> {
+    reply_capability: Option<&PresentedCapability>,
+) -> Result<Option<FollowUpReference>, JsonRpcErrorResponse> {
     let reference = match params.pointer(&format!(
         "/message/metadata/{}",
         super::REPLY_TO_METADATA_KEY
@@ -980,26 +1119,42 @@ async fn follow_up_reference(
                 JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params")
             })?,
     };
-    admit_thread_access(caller.trust, state.security.thread_reads).map_err(|reason| {
-        JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason)
-    })?;
+    let setting = state.security.thread_reads;
+    let refused =
+        |reason: &str| JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason);
+    pre_lookup(
+        caller.trust,
+        CapabilityGatedVerb::ThreadOrFollowUp,
+        reply_capability.is_some(),
+        setting,
+    )
+    .map_err(refused)?;
     let principal =
         crate::domain::models::ItemPrincipal::A2aPseudonym(caller.key.pseudonymous_peer_id());
-    if !state
-        .recipient_items
-        .resolves_in_principal(&principal, reference)
-        && (!refresh_recipient_items(state).await
-            || !state
-                .recipient_items
-                .resolves_in_principal(&principal, reference))
-    {
-        return Err(JsonRpcErrorResponse::new(
-            echo.clone(),
-            CODE_TASK_NOT_FOUND,
-            ITEM_NOT_FOUND,
-        ));
+    let not_found = || JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, ITEM_NOT_FOUND);
+    let nearest = match state.recipient_items.nearest_item(&principal, reference) {
+        Some(nearest) => nearest,
+        None if refresh_recipient_items(state).await => state
+            .recipient_items
+            .nearest_item(&principal, reference)
+            .ok_or_else(not_found)?,
+        None => return Err(not_found()),
+    };
+    let matched = presented_matches(nearest.capability_hash.as_deref(), reply_capability);
+    match post_lookup(
+        caller.trust,
+        CapabilityGatedVerb::ThreadOrFollowUp,
+        nearest.capability_hash.as_deref(),
+        matched,
+        setting,
+    ) {
+        CapabilityVerdict::Serve => Ok(Some(FollowUpReference {
+            id: reference.to_owned(),
+            matched,
+        })),
+        CapabilityVerdict::NotFound => Err(not_found()),
+        CapabilityVerdict::AccessOff => Err(refused(THREAD_ACCESS_OFF)),
     }
-    Ok(Some(reference.to_owned()))
 }
 
 /// Admit a task: register the store entry, then either run it or park it on a
@@ -1017,7 +1172,7 @@ async fn start_task(
     task_id: String,
     text: String,
     message_type: SemanticMessageType,
-    in_reply_to: Option<String>,
+    facts: IngressFacts,
     needs_approval: bool,
 ) -> Result<serde_json::Value, String> {
     let runtime = state
@@ -1034,6 +1189,7 @@ async fn start_task(
             node_id,
             caller.key.clone(),
             RapTaskState::Submitted,
+            facts.capability_hash.clone(),
         )
         .await
         .ok_or_else(|| format!("task id {task_id} is already in flight"))?;
@@ -1052,7 +1208,7 @@ async fn start_task(
             text,
             peer_id,
             message_type,
-            in_reply_to,
+            facts,
             needs_approval,
         )
         .await;
@@ -1076,7 +1232,7 @@ async fn setup_task(
     text: String,
     peer_id: PeerId,
     message_type: SemanticMessageType,
-    in_reply_to: Option<String>,
+    facts: IngressFacts,
     needs_approval: bool,
 ) -> Result<serde_json::Value, String> {
     if needs_approval || runtime.enforces_sender_consent() {
@@ -1106,6 +1262,9 @@ async fn setup_task(
             let pending = PendingTaskRecord {
                 task_id: task_id.clone(),
                 submitter: task.submitter.as_str().to_owned(),
+                // Story 19.18c `A6` — the hash only, so a restart reseeds
+                // this pending task as capability-bearing.
+                capability_hash: facts.capability_hash.clone(),
             };
             // Persist the admission outcome before exposing AuthRequired.
             let _ = state
@@ -1129,7 +1288,7 @@ async fn setup_task(
                 text,
                 peer_id,
                 message_type,
-                in_reply_to,
+                facts,
                 pending,
                 ticket,
             ));
@@ -1185,7 +1344,7 @@ async fn setup_task(
         text,
         peer_id.clone(),
         message_type,
-        in_reply_to,
+        facts,
         None,
     )
     .await?;
@@ -1285,7 +1444,7 @@ async fn watch_pending_approval(
     text: String,
     peer_id: PeerId,
     message_type: SemanticMessageType,
-    in_reply_to: Option<String>,
+    facts: IngressFacts,
     pending: PendingTaskRecord,
     ticket: InboundApprovalTicket,
 ) {
@@ -1332,7 +1491,7 @@ async fn watch_pending_approval(
         text,
         peer_id,
         message_type,
-        in_reply_to,
+        facts,
         Some(pending),
     )
     .await;
@@ -1347,7 +1506,7 @@ async fn launch(
     text: String,
     peer_id: PeerId,
     message_type: SemanticMessageType,
-    in_reply_to: Option<String>,
+    facts: IngressFacts,
     pending: Option<PendingTaskRecord>,
 ) -> Result<(), String> {
     let address = match state
@@ -1372,7 +1531,11 @@ async fn launch(
         content: text.clone(),
         // Story 19.18 `AC5(c)` — the reference `message_send` already
         // resolved inside this caller's principal, stored raw.
-        in_reply_to,
+        in_reply_to: facts.in_reply_to,
+        // Story 19.18c `A13`/`A14` — the digest only, for every caller trust:
+        // the capability is a property of the item.
+        capability_hash: facts.capability_hash,
+        reply_capability_matched: facts.reply_capability_matched,
     };
     // The fold lock (19.16b review): the durable append and the in-place
     // `apply` must be atomic against the read-side refresh's load +
@@ -1532,24 +1695,50 @@ async fn launch(
 /// A task that exists but belongs to another credential produces the byte-identical
 /// response of a task that does not exist. See `exec::InboundTaskStore::get_scoped`
 /// and the ADR for why the imprecision is deliberate.
+///
+/// Story 19.18c `A6`/`P8` — for an API-key caller a capability-bearing task is
+/// served only with its capability, presented in the A2A extension slot
+/// `params.metadata["x-rustain-item-capability"]`; a miss is the same
+/// `TASK_NOT_FOUND`, so `tasks/get` journals no `StatusQueried` and
+/// `tasks/cancel` fires no token. A `metadata` that is not an object, or a
+/// malformed carrier, is `-32602` for every caller; `null` is absent.
 async fn scoped_task(
     state: &ServerState,
     caller: &Caller,
     params: &serde_json::Value,
     echo: &serde_json::Value,
 ) -> Result<Arc<super::exec::InboundTask>, JsonRpcErrorResponse> {
+    let invalid = || JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params");
     let id = params
         .get("id")
         .and_then(serde_json::Value::as_str)
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| {
-            JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params")
-        })?;
-    state
+        .ok_or_else(invalid)?;
+    let presented = match params.get("metadata") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Object(metadata)) => {
+            parse_presented_capability(metadata.get(super::ITEM_CAPABILITY_METADATA_KEY))
+                .map_err(|_| invalid())?
+        }
+        Some(_) => return Err(invalid()),
+    };
+    let not_found = || JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, TASK_NOT_FOUND);
+    let task = state
         .tasks
         .get_scoped(id, &caller.key)
         .await
-        .ok_or_else(|| JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, TASK_NOT_FOUND))
+        .ok_or_else(not_found)?;
+    let hash = task.capability_hash.as_deref();
+    match post_lookup(
+        caller.trust,
+        CapabilityGatedVerb::RetractOrTask,
+        hash,
+        presented_matches(hash, presented.as_ref()),
+        state.security.thread_reads,
+    ) {
+        CapabilityVerdict::Serve => Ok(task),
+        CapabilityVerdict::NotFound | CapabilityVerdict::AccessOff => Err(not_found()),
+    }
 }
 
 async fn tasks_get(
@@ -1712,11 +1901,14 @@ fn principal_collapsed(trust: SubmitterTrust) -> bool {
 ///
 /// # What it guarantees, in order
 ///
-/// 1. **`itemId` is the only parameter**, hand-read — unknown fields are
-///    ignored (`AD-1826`); empty or oversized ⇒ `-32602`.
-/// 2. **The thread-access gate first** (`AC12`): an API-key caller with
-///    thread access off is refused `-32040` before any fold or lookup, so
-///    the refusal leaks nothing about the id (`M44`).
+/// 1. **`itemId` and an optional `capability` are the only parameters**,
+///    hand-read — unknown fields are ignored (`AD-1826`); an empty or
+///    oversized id, or a malformed capability, ⇒ `-32602` for every caller.
+/// 2. **The thread-access gate first for a capability-less API-key caller**
+///    (`AC12`, Story 19.18c `A7` step 2): refused `-32040` under `off`
+///    before any fold or lookup, so the refusal leaks nothing about the id
+///    (`M44`). A caller presenting a capability is classified after the
+///    lookup.
 /// 3. **The fold is refreshed unconditionally**, as `items_list` does: reply
 ///    turns are written on the DAEMON rail, which never applies this
 ///    projection in place, so a lookup-first read would serve a thread
@@ -1724,12 +1916,16 @@ fn principal_collapsed(trust: SubmitterTrust) -> bool {
 /// 4. **Principal first** (`A6`, R21): the join indexes only this caller's
 ///    items and turns; not-yours and never-existed leave through ONE site
 ///    with ONE message. A removed root is a tombstone turn, not not-found.
-/// 5. **Side-effect free** (`AC4(e)`): ⛔ nothing here writes.
-/// 6. **Bounded by count and bytes, newest wins** (`P9`, `Q8`): the root is
+/// 5. **The nearest item's capability** (Story 19.18c `A7` step 5, `A8`):
+///    an API-key caller reads a capability-bearing item's thread only with
+///    its capability — a miss leaves through the same not-found site, byte
+///    for byte; a legacy item keeps the `threadReads` gate.
+/// 6. **Side-effect free** (`AC4(e)`): ⛔ nothing here writes.
+/// 7. **Bounded by count and bytes, newest wins** (`P9`, `Q8`): the root is
 ///    always served (withheld if it alone is over the per-turn bound), then
 ///    the newest turns that fit; `omittedBefore` counts the non-root turns
 ///    not served.
-/// 7. **Reply content passes the disclosure scrub** every served task payload
+/// 8. **Reply content passes the disclosure scrub** every served task payload
 ///    passes; a body that fails it is served `contentWithheld`, no content.
 ///
 /// ⛔ Private, reachable only through `dispatch` (Rule 2).
@@ -1739,27 +1935,47 @@ async fn items_thread(
     params: &serde_json::Value,
     echo: serde_json::Value,
 ) -> Result<serde_json::Value, JsonRpcErrorResponse> {
+    let invalid = || JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params");
     let item_id = params
         .get("itemId")
         .and_then(serde_json::Value::as_str)
         .filter(|id| {
             !id.is_empty() && id.len() <= crate::domain::services::transparency::MAX_PEER_ID_BYTES
         })
-        .ok_or_else(|| {
-            JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params")
-        })?;
-    admit_thread_access(caller.trust, state.security.thread_reads).map_err(|reason| {
-        JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason)
-    })?;
+        .ok_or_else(invalid)?;
+    let presented = parse_presented_capability(params.get("capability")).map_err(|_| invalid())?;
+    let setting = state.security.thread_reads;
+    let refused =
+        |reason: &str| JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason);
+    pre_lookup(
+        caller.trust,
+        CapabilityGatedVerb::ThreadOrFollowUp,
+        presented.is_some(),
+        setting,
+    )
+    .map_err(refused)?;
     refresh_recipient_items(state).await;
     let principal =
         crate::domain::models::ItemPrincipal::A2aPseudonym(caller.key.pseudonymous_peer_id());
+    let not_found = || JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, ITEM_NOT_FOUND);
+    let nearest = state
+        .recipient_items
+        .nearest_item(&principal, item_id)
+        .ok_or_else(not_found)?;
+    let hash = nearest.capability_hash.as_deref();
+    match post_lookup(
+        caller.trust,
+        CapabilityGatedVerb::ThreadOrFollowUp,
+        hash,
+        presented_matches(hash, presented.as_ref()),
+        setting,
+    ) {
+        CapabilityVerdict::Serve => {}
+        CapabilityVerdict::NotFound => return Err(not_found()),
+        CapabilityVerdict::AccessOff => return Err(refused(THREAD_ACCESS_OFF)),
+    }
     let Some((root, turns)) = state.recipient_items.thread(&principal, item_id) else {
-        return Err(JsonRpcErrorResponse::new(
-            echo,
-            CODE_TASK_NOT_FOUND,
-            ITEM_NOT_FOUND,
-        ));
+        return Err(not_found());
     };
     let (served, omitted_before) = bounded_thread(state, &root, &turns);
     Ok(serde_json::json!({
@@ -1943,6 +2159,10 @@ async fn items_retract(
         .ok_or_else(|| {
             JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params")
         })?;
+    // Story 19.18c `A7` step 1 — one parse point, every caller trust.
+    let presented = parse_presented_capability(params.get("capability")).map_err(|_| {
+        JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params")
+    })?;
     admit_item_retract(state.policy, trust).map_err(|reason| {
         JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason)
     })?;
@@ -1952,13 +2172,31 @@ async fn items_retract(
     let internal_error =
         || JsonRpcErrorResponse::new(echo.clone(), CODE_INTERNAL_ERROR, "Internal error");
 
-    if state.recipient_items.get(&address).is_none() {
-        if !refresh_recipient_items(state).await {
-            return Err(internal_error());
+    let item = match state.recipient_items.get(&address) {
+        Some(item) => item,
+        None => {
+            if !refresh_recipient_items(state).await {
+                return Err(internal_error());
+            }
+            state.recipient_items.get(&address).ok_or_else(not_found)?
         }
-        if state.recipient_items.get(&address).is_none() {
-            return Err(not_found());
-        }
+    };
+    // Story 19.18c `D2`/`AC4(c)` — the capability check runs HERE, at the
+    // pre-lock lookup: before the fold lock and before `retract_outcome`, so
+    // a miss never reaches the tombstone (`-32041`) or `alreadyRetracted`
+    // answers — either would tell a co-holder about another sender's item.
+    // The hash is immutable per item (the first Received wins), so this one
+    // check holds for the whole critical section below.
+    let hash = item.capability_hash.as_deref();
+    if post_lookup(
+        trust,
+        CapabilityGatedVerb::RetractOrTask,
+        hash,
+        presented_matches(hash, presented.as_ref()),
+        state.security.thread_reads,
+    ) != CapabilityVerdict::Serve
+    {
+        return Err(not_found());
     }
 
     let fold_guard = state.recipient_items_fold.lock().await;
@@ -2289,12 +2527,15 @@ pub async fn run(
 /// principal equality, and off loopback the principal is a digest of the
 /// **presented key**: nothing binds a key to a peer, and `verify` cannot say
 /// which configured key matched. ⛔ A legibility statement, never a security
-/// claim; the real control is `server.admission` (`AC1(g)`).
+/// claim; the real control is `server.admission` (`AC1(g)`). Story 19.18c
+/// `AC9(a)`: an item carrying a per-item capability needs it; legacy items
+/// keep the credential-scoped rule.
 const CREDENTIAL_SCOPED_RETRACT_DISCLOSURE: &str = "A2A item retraction: ownership is \
-     credential-scoped, not peer-scoped — every caller presenting a configured API key is one \
-     principal, so where peers share a key any of them can retract items another sent. A \
-     shared-key deployment is unsafe for this write; keep `server.admission` at \"deny\" (the \
-     default) there.";
+     credential-scoped, not peer-scoped — every caller presenting the same API key is one \
+     principal. An item a rustain sender tagged with its per-item capability can be retracted \
+     only with that capability; for items without one, where peers share a key any of them can \
+     retract items another sent. Keep `server.admission` at \"deny\" (the default) on a \
+     shared-key deployment.";
 
 /// Story 19.16d `P7` (owner answer 5 = A: accept, state, file, WARN — ⛔ never
 /// refuse). The same design seen from the other side: rotation to a distinct
@@ -2326,17 +2567,17 @@ fn retract_ownership_disclosures(auth: Option<&A2aServerAuth>) -> Vec<&'static s
 /// Story 19.18 `AC12(c)` (`P11(iii)`) — the thread posture, stated at
 /// startup whenever API keys are configured: off by default, or on with the
 /// same co-holder caveat the retract disclosure carries. ⛔ A legibility
-/// statement, never a security claim.
-const THREAD_ACCESS_OFF_DISCLOSURE: &str = "A2A threads: thread reads and follow-up references \
-     are refused for API-key callers on this host (server.threadReads is off, the default) — an \
-     API-key principal cannot exclude another holder of the same key. Loopback callers are \
-     served.";
+/// statement, never a security claim. Story 19.18c `AC9(a)`: an item's
+/// capability, not the setting, decides for items that carry one.
+const THREAD_ACCESS_OFF_DISCLOSURE: &str = "A2A threads: an API-key caller is served a thread \
+     read or follow-up reference only with the item's capability, which only its sender can \
+     derive; items without one (from an older or non-rustain sender) are refused to API-key \
+     callers (server.threadReads is off, the default). Loopback callers are served.";
 
-const THREAD_ACCESS_CREDENTIAL_SCOPED_DISCLOSURE: &str = "A2A threads: thread reads and \
-     follow-up references are served to API-key callers (server.threadReads = \
-     \"credential-scoped\"): every caller presenting a configured key is one principal, so where \
-     peers share a key any of them can read and add to a thread another began. This setting \
-     asserts each peer has its own key.";
+const THREAD_ACCESS_CREDENTIAL_SCOPED_DISCLOSURE: &str = "A2A threads: items that carry a \
+     capability still require it; items without one are served to every API-key caller \
+     (server.threadReads = \"credential-scoped\"), so where peers share a key any of them can \
+     read and add to such a thread. This setting asserts each peer has its own key.";
 
 /// Story 19.18 `AC12(a)` — an unrecognised `threadReads` value fails closed.
 const THREAD_ACCESS_UNKNOWN_WARNING: &str = "A2A threads: server.threadReads names a value this \
@@ -2694,6 +2935,27 @@ mod tests {
     fn the_collapse_disclosure_is_present_on_loopback_and_absent_behind_a_key() {
         assert!(principal_collapsed(SubmitterTrust::Loopback));
         assert!(!principal_collapsed(SubmitterTrust::ApiKey));
+    }
+
+    /// Story 19.18c `AC3(c)`/`A6` — the pending record carries the capability
+    /// HASH only; a record without it (pre-19.18c) replays as legacy and a
+    /// legacy record serializes exactly as before.
+    #[test]
+    fn a_pending_record_keeps_the_capability_hash_and_stays_backward_compatible() {
+        let legacy: PendingTaskRecord =
+            serde_json::from_str(r#"{"task_id":"t","submitter":"apikey:x"}"#).expect("legacy");
+        assert_eq!(legacy.capability_hash, None);
+        assert_eq!(
+            serde_json::to_string(&legacy).expect("serialize"),
+            r#"{"task_id":"t","submitter":"apikey:x"}"#
+        );
+        let hashed = PendingTaskRecord {
+            capability_hash: Some("ab".repeat(32)),
+            ..legacy
+        };
+        let encoded = serde_json::to_string(&hashed).expect("serialize");
+        let replayed: PendingTaskRecord = serde_json::from_str(&encoded).expect("replay");
+        assert_eq!(replayed.capability_hash, hashed.capability_hash);
     }
 
     /// Story 19.18 `AC12(c)`/`K21(4)` — the thread posture lines: an unknown

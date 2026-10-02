@@ -491,6 +491,14 @@ pub enum RoomEvent {
         /// sender`) and on a retract row, which sends no text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_hash: Option<ContentHash>,
+        /// Story 19.18c `PQ2` — for a send to an **unpinned** peer, the
+        /// lowercase sha256 hex of the roster-configured origin it went to
+        /// (never the raw URL), so a later alias rename at the same URL still
+        /// recognises the row as this host's own send. `None` on a pinned
+        /// send, a retract row and every row written before 19.18c — each
+        /// serializes byte-identically to a 19.18 row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
     },
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.
@@ -906,6 +914,20 @@ pub enum RoomEvent {
         /// line, so the pinned fixtures do not move.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         in_reply_to: Option<String>,
+        /// Story 19.18c `A13`/`A14` — `sha256` (lowercase hex) of the item
+        /// capability the sender presented at ingress; ⛔ never the value
+        /// itself. `None` is a legacy item (no carrier: an older or
+        /// non-rustain sender) and serializes byte-identically to a 19.18
+        /// line. A value that does not decode to 32 bytes is capability-
+        /// bearing and never matches (fail closed), ⛔ never legacy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capability_hash: Option<String>,
+        /// Story 19.18c `A15` — `true` only for a follow-up whose presented
+        /// reply capability matched its reference's nearest item. The
+        /// thread walk counts a capability-bearing edge only when this is
+        /// set. `false` serializes byte-identically to a 19.18 line.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reply_capability_matched: bool,
     },
     /// A local human deliberately acknowledged a recipient-owned item.
     RecipientItemAcknowledged {
@@ -999,6 +1021,10 @@ pub enum RoomEvent {
     PeerReplyObserved {
         /// The roster peer's resolved identity the thread was read from.
         peer: PeerId,
+        /// Origin digest for an unpinned roster peer. Lets an observed reply
+        /// survive an alias rename under the same binding as its dispatch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
         /// The peer-minted reply-turn id (bounded on read).
         turn: String,
         /// The item id the turn answers, as the peer served it.

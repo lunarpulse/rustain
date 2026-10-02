@@ -30,6 +30,17 @@ pub const ITEMS_RETRACT_METHOD: &str = "x-rustain-items/retract";
 /// for both sides, so a one-side respelling cannot compile silently.
 #[cfg(feature = "a2a")]
 pub const REPLY_TO_METADATA_KEY: &str = "x-rustain-in-reply-to";
+/// Story 19.18c `A12`/`P2` — the per-item capability carrier on every
+/// outbound `message/send` when this host's key is usable, and the
+/// `tasks/get`/`tasks/cancel` carrier under `params.metadata` (`P8`). Frozen
+/// at the v1 43-character shape: a new format ships under a new name.
+#[cfg(feature = "a2a")]
+pub const ITEM_CAPABILITY_METADATA_KEY: &str = "x-rustain-item-capability";
+/// Story 19.18c `A12` — on a follow-up, the capability of the reference's
+/// nearest item. ⛔ Only this carrier counts as presenting a capability for
+/// the reference (`A7` step 1).
+#[cfg(feature = "a2a")]
+pub const REPLY_CAPABILITY_METADATA_KEY: &str = "x-rustain-reply-capability";
 /// Story 19.18 `AC4(a)` — the per-item thread read, served by the
 /// ANSWERING host. Namespaced for the same reason as [`ITEMS_LIST_METHOD`].
 /// Side-effect free; one operator act on one item, ⛔ never a poll.
@@ -66,6 +77,8 @@ pub mod endpoint;
 pub mod error;
 #[cfg(feature = "a2a")]
 pub mod exec;
+#[cfg(feature = "a2a")]
+pub mod item_capability;
 #[cfg(feature = "a2a")]
 pub mod jsonrpc;
 #[cfg(feature = "a2a")]

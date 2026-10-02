@@ -5211,6 +5211,8 @@ mod tests {
                 alias: None,
                 content: "review".to_owned(),
                 in_reply_to: None,
+                capability_hash: None,
+                reply_capability_matched: false,
             })
             .await
             .unwrap();
@@ -5294,6 +5296,8 @@ mod tests {
                     alias: alias.map(ToOwned::to_owned),
                     content: (*content).to_owned(),
                     in_reply_to: None,
+                    capability_hash: None,
+                    reply_capability_matched: false,
                 })
                 .await
                 .unwrap();
@@ -6616,6 +6620,8 @@ mod tests {
                 alias: None,
                 content: "question".to_owned(),
                 in_reply_to: None,
+                capability_hash: None,
+                reply_capability_matched: false,
             })
             .await
             .unwrap();

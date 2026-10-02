@@ -332,8 +332,19 @@ async fn sender_with_journal(
 ) -> Sender {
     let (egress_tx, _egress_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let tree = NodeTree::new();
-    let egress = A2aEgress::compose(peers, tree.clone(), sink, journal.node.clone(), egress_tx)
-        .expect("compose production sender egress");
+    // Story 19.18c: a production-shaped `Ready` key; fan-out is the subject.
+    let keys = tempfile::tempdir().expect("item capability key dir");
+    let egress = A2aEgress::compose(
+        peers,
+        tree.clone(),
+        sink,
+        journal.node.clone(),
+        egress_tx,
+        rustain::adapters::a2a::item_capability::load_item_capability_key(Ok(keys
+            .path()
+            .to_path_buf())),
+    )
+    .expect("compose production sender egress");
     tokio::time::timeout(SETTLE, egress.await_cards_settled())
         .await
         .expect("sender card fetches settle");

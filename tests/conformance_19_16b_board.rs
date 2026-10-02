@@ -33,6 +33,8 @@ fn received(address: &ItemAddress, task: &str) -> RoomEvent {
         alias: None,
         content: "durable content".to_owned(),
         in_reply_to: None,
+        capability_hash: None,
+        reply_capability_matched: false,
     }
 }
 
