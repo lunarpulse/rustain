@@ -334,6 +334,7 @@ mod tests {
             coordinator: AgentId::root(),
             spoke: peer().as_str().to_owned(),
             gate: "a2a-status-query:t-1".to_owned(),
+            principal: None,
         };
         assert!(!apply_domain_event(
             &mut state,

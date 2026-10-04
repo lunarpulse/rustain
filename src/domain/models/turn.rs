@@ -45,6 +45,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::PolicyPrincipal;
 use super::conversation::ChatMessage;
 use super::message::MessageRole;
 use super::tools::ToolCallInfo;
@@ -57,12 +58,8 @@ use super::tools::ToolCallInfo;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnOrigin {
     Interactive,
-    Acp {
-        session_id: String,
-    },
-    RemotePeer {
-        peer_id: super::peer_identity::PeerId,
-    },
+    Acp { session_id: String },
+    RemotePeer { principal: PolicyPrincipal },
     Subagent,
     Cron,
     Channel,
@@ -96,10 +93,9 @@ impl TurnOrigin {
                 session_id: session_id.clone(),
                 conversation_id: conversation_id.to_owned(),
             },
-            Self::RemotePeer { peer_id } => super::tool_call::ApprovalSource::RemotePeer {
-                conversation_id: conversation_id.to_owned(),
-                peer_id: peer_id.clone(),
-            },
+            Self::RemotePeer { principal } => {
+                super::tool_call::ApprovalSource::remote_peer(conversation_id.to_owned(), principal)
+            }
         }
     }
 
@@ -412,7 +408,10 @@ mod tests {
         let peer = crate::domain::models::PeerId::from_public_key(&[7u8; 32]).unwrap();
         // R-D: only the remote-peer route taints its tool dispatches.
         assert_eq!(
-            TurnOrigin::RemotePeer { peer_id: peer }.provenance(),
+            TurnOrigin::RemotePeer {
+                principal: PolicyPrincipal::rap(peer)
+            }
+            .provenance(),
             ProvenanceTag::SelfOriginated
         );
         for origin in [

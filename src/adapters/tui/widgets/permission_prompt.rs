@@ -261,10 +261,10 @@ mod tests {
         let theme = crate::adapters::tui::theme::Theme::dark();
         let peer = crate::domain::models::PeerId::from_public_key(&[7_u8; 32]).unwrap();
         let lines = render_permission_lines(
-            &ApprovalSource::RemotePeer {
-                conversation_id: "conv".to_owned(),
-                peer_id: peer,
-            },
+            &ApprovalSource::remote_peer(
+                "conv".to_owned(),
+                &crate::domain::models::PolicyPrincipal::rap(peer),
+            ),
             "a2a/\nmessage",
             "review\x1b[2J\r\n[urgent]",
             &theme,

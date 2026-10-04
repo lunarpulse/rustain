@@ -471,3 +471,42 @@ Served payloads carry capability-scoped projections only: no filesystem path, no
 workspace root, no system prompt, no internal node/room/journal state. This is
 enforced by the *type* of the projection, not by a redaction pass, so it holds
 even against a modified requesting client.
+
+## Sender consent and typed grants (Story 19.18d0)
+
+Sender-consent grants saved by the approval card's **Always** action now carry a
+`principal` kind:
+
+- `pinned`: a RAP sender whose identity was authenticated by the transport.
+- `pseudonymous`: an A2A submitter identified by the loopback or API-key handle.
+
+These are separate consent slots even when their `PeerId` hex labels are
+identical. Trusting the A2A pseudonym does not trust the colliding RAP principal,
+and trusting the RAP principal does not trust the A2A pseudonym. Per-sender
+policy overrides, including their implied consent, apply only to pinned
+principals; an A2A pseudonym cannot inherit one by matching its label. Global
+and message-type policy still apply.
+
+Existing grants without `principal` remain **legacy grants**. They still admit
+RAP and A2A callers exactly as before, unless that caller has an explicit
+typed-slot decision. Loading or using a legacy grant does not rewrite it
+as a typed grant. Newly saved sender-consent grants are typed; this is not a
+migration of old journal rows.
+
+`/team untrust <alias-or-peer-id>` revokes every stored kind for that peer:
+pinned, pseudonymous and legacy. A later typed grant re-trusts only its own
+kind. `/team trust` is a listing command, not a way to create a grant.
+
+`/team status` keeps one row per roster alias, including aliases sharing a pin,
+plus one row per distinct journal-only peer. Multiple consent slots do not
+create duplicate peer rows. The display aggregates them as trusted if any
+slot is trusted, otherwise revoked if any is revoked, otherwise no grant;
+that display aggregate is not the admission decision.
+
+Approval-source provenance is carried in memory. Its serialized `RemotePeer`
+shape remains unchanged, and decoding it does not reconstruct trusted
+provenance from `peer_id`.
+
+**Downgrade caveat:** an older build ignores `principal` and folds a typed grant
+as a bare grant. Its reach then equals pre-19.18d0 behavior; typed separation
+does not survive that downgrade.

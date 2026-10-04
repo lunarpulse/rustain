@@ -71,7 +71,7 @@ impl rustain::domain::ports::DeliveryPolicy for ModePolicy {
 
     fn response_policy_for_peer(
         &self,
-        _peer_id: &rustain::domain::models::PeerId,
+        _principal: &rustain::domain::models::PolicyPrincipal,
         _message_type: rustain::domain::models::SemanticMessageType,
     ) -> rustain::domain::ports::PeerResponsePolicy {
         rustain::domain::ports::PeerResponsePolicy {
@@ -212,7 +212,7 @@ struct ScrubRuntime {
 impl InboundPeerRuntime for ScrubRuntime {
     fn response_policy(
         &self,
-        _peer_id: &rustain::domain::models::PeerId,
+        _principal: &rustain::domain::models::PolicyPrincipal,
         _message_type: rustain::domain::models::SemanticMessageType,
     ) -> rustain::domain::ports::PeerResponsePolicy {
         rustain::domain::ports::PeerResponsePolicy {
@@ -233,7 +233,7 @@ impl InboundPeerRuntime for ScrubRuntime {
 
     async fn request_admission_approval(
         &self,
-        _peer_id: &rustain::domain::models::PeerId,
+        _principal: &rustain::domain::models::PolicyPrincipal,
         _summary: &str,
     ) -> Result<InboundApprovalTicket, InboundPeerError> {
         Err(InboundPeerError::unavailable(
@@ -277,7 +277,7 @@ impl InboundPeerRuntime for FailingStartRuntime {
 
     async fn request_admission_approval(
         &self,
-        _peer_id: &rustain::domain::models::PeerId,
+        _principal: &rustain::domain::models::PolicyPrincipal,
         _summary: &str,
     ) -> Result<InboundApprovalTicket, InboundPeerError> {
         Err(InboundPeerError::unavailable("not reached"))
@@ -3256,9 +3256,11 @@ async fn ac2_inbound_peer_delivery_is_refused_with_a_receipt_never_dropped() {
         .start(
             InboundPeerTask {
                 node_id: node_id.clone(),
-                peer_id: rustain::domain::models::PeerIdentity::from_public_key(vec![9; 32])
-                    .expect("peer identity")
-                    .peer_id,
+                principal: rustain::domain::models::PolicyPrincipal::Pseudonymous(
+                    rustain::domain::models::PeerIdentity::from_public_key(vec![9; 32])
+                        .expect("peer identity")
+                        .peer_id,
+                ),
                 text: "do the thing".to_owned(),
                 subagent_type: "a2a-inbound".to_owned(),
                 response_policy: rustain::domain::ports::PeerResponsePolicy::default(),
@@ -3362,9 +3364,11 @@ async fn ac3_one_bus_slot_and_the_peer_path_honours_the_installed_policy() {
         .start(
             InboundPeerTask {
                 node_id: node_id.clone(),
-                peer_id: rustain::domain::models::PeerIdentity::from_public_key(vec![4; 32])
-                    .expect("peer identity")
-                    .peer_id,
+                principal: rustain::domain::models::PolicyPrincipal::Pseudonymous(
+                    rustain::domain::models::PeerIdentity::from_public_key(vec![4; 32])
+                        .expect("peer identity")
+                        .peer_id,
+                ),
                 text: "do the thing".to_owned(),
                 subagent_type: "a2a-inbound".to_owned(),
                 response_policy: rustain::domain::ports::PeerResponsePolicy::default(),

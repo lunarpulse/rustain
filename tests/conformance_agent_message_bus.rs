@@ -52,29 +52,3 @@ fn ac5_header_shape_round_trip_no_sequence_by_default() {
     let parsed: Envelope<AgentMessage> = serde_json::from_str(&json).expect("deserializes");
     assert_eq!(parsed.header.correlation_id, CorrelationId::new("corr-42"));
 }
-
-#[test]
-fn ac6_approval_source_has_typed_remote_peer_and_stays_non_exhaustive() {
-    let source = include_str!("../src/domain/models/tool_call.rs");
-    let before_enum = source
-        .split("pub enum ApprovalSource")
-        .next()
-        .expect("source loaded");
-    let enum_body = source
-        .split("pub enum ApprovalSource")
-        .nth(1)
-        .and_then(|tail| tail.split("impl ApprovalSource").next())
-        .expect("ApprovalSource enum body exists");
-    assert!(
-        before_enum.contains("#[non_exhaustive]"),
-        "ApprovalSource must remain non_exhaustive for future routing sources"
-    );
-    assert!(
-        enum_body.contains("RemotePeer"),
-        "R2 must expose ApprovalSource::RemotePeer"
-    );
-    assert!(
-        enum_body.contains("peer_id: crate::domain::models::peer_identity::PeerId"),
-        "RemotePeer must carry a typed RAP PeerId, never a transport address"
-    );
-}

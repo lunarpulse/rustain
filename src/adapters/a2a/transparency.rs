@@ -43,7 +43,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
 use crate::domain::events::{AppEvent, DomainEventPayload};
-use crate::domain::models::{AgentId, Direction, JournalRecord, PeerId, RejectReason, RoomEvent};
+use crate::domain::models::{
+    AgentId, Direction, JournalRecord, PeerId, PolicyPrincipal, PrincipalKind, RejectReason,
+    RoomEvent,
+};
 use crate::domain::ports::{
     EventEmitter, PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder, RoomJournal,
     RoomJournalError, RoomJournalReader, TransportRefusalRecord,
@@ -74,7 +77,10 @@ pub enum InboundOutcome {
         reason: String,
     },
     /// Accepted but parked on a human decision (R10).
-    AwaitingApproval { peer: PeerId, task_id: String },
+    AwaitingApproval {
+        principal: PolicyPrincipal,
+        task_id: String,
+    },
     /// The **first** `tasks/get` observed for a task.
     ///
     /// FR92 names "every incoming A2A message, request, *or status query*".
@@ -83,7 +89,10 @@ pub enum InboundOutcome {
     /// peer reconnaissance, which is precisely what an audit log exists to
     /// catch. First-observation-only is bounded by task count rather than by
     /// time, and closes FR92 instead of descoping it.
-    StatusQueried { peer: PeerId, task_id: String },
+    StatusQueried {
+        principal: PolicyPrincipal,
+        task_id: String,
+    },
     /// Result content was handed back to the remote peer.
     Disclosed {
         peer: PeerId,
@@ -209,26 +218,39 @@ impl TransparencySink {
     /// `tasks/get`. This is called only during startup rehydration; it scans
     /// the canonical stream rather than maintaining another durable or
     /// unbounded task-id index.
-    pub async fn has_recorded_status_query(&self, peer: &PeerId, task_id: &str) -> bool {
+    pub async fn has_recorded_status_query(
+        &self,
+        principal: &PolicyPrincipal,
+        task_id: &str,
+    ) -> bool {
         let Some(reader) = &self.reader else {
             return false;
         };
         let gate = format!("{STATUS_QUERY_GATE_PREFIX}{}", disclosable_task_id(task_id));
         match reader.load_entries().await {
-            Ok(entries) => entries.into_iter().any(|entry| {
-                matches!(
-                    entry.record,
-                    JournalRecord::Room(RoomEvent::AdmissionDeferred {
-                        spoke,
-                        gate: recorded_gate,
-                        ..
-                    }) if spoke == peer.as_str() && recorded_gate == gate
-                )
+            Ok(entries) => entries.into_iter().any(|entry| match entry.record {
+                JournalRecord::Room(RoomEvent::AdmissionDeferred {
+                    spoke,
+                    gate: recorded_gate,
+                    principal: recorded_kind,
+                    ..
+                }) => {
+                    spoke == principal.peer().as_str()
+                        && recorded_gate == gate
+                        && matches!(
+                            (principal.kind(), recorded_kind),
+                            (
+                                PrincipalKind::Pseudonymous,
+                                None | Some(PrincipalKind::Pseudonymous),
+                            ) | (PrincipalKind::Pinned, Some(PrincipalKind::Pinned))
+                        )
+                }
+                _ => false,
             }),
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    peer = %peer,
+                    peer = %principal.peer(),
                     "cannot recover A2A first-status-query observation from the canonical journal"
                 );
                 false
@@ -292,18 +314,22 @@ impl TransparencySink {
             // for, so it is journaled, not merely logged. The status-query
             // record reuses the same shape under its own gate prefix rather
             // than minting a variant for a record that carries no new fields.
-            InboundOutcome::AwaitingApproval { peer, task_id } => RoomEvent::AdmissionDeferred {
+            InboundOutcome::AwaitingApproval { principal, task_id } => {
+                RoomEvent::AdmissionDeferred {
+                    coordinator: AgentId::root(),
+                    spoke: principal.peer().as_str().to_owned(),
+                    gate: format!("{APPROVAL_GATE_PREFIX}{}", disclosable_task_id(&task_id)),
+                    principal: Some(principal.kind()),
+                }
+            }
+            InboundOutcome::StatusQueried { principal, task_id } => RoomEvent::AdmissionDeferred {
                 coordinator: AgentId::root(),
-                spoke: peer.as_str().to_owned(),
-                gate: format!("{APPROVAL_GATE_PREFIX}{}", disclosable_task_id(&task_id)),
-            },
-            InboundOutcome::StatusQueried { peer, task_id } => RoomEvent::AdmissionDeferred {
-                coordinator: AgentId::root(),
-                spoke: peer.as_str().to_owned(),
+                spoke: principal.peer().as_str().to_owned(),
                 gate: format!(
                     "{STATUS_QUERY_GATE_PREFIX}{}",
                     disclosable_task_id(&task_id)
                 ),
+                principal: Some(principal.kind()),
             },
             InboundOutcome::Disclosed {
                 peer,
@@ -501,7 +527,7 @@ mod tests {
         );
         assert!(
             !InboundOutcome::StatusQueried {
-                peer: peer(),
+                principal: PolicyPrincipal::Pseudonymous(peer()),
                 task_id: String::new()
             }
             .is_fail_closed()
@@ -554,5 +580,108 @@ mod tests {
             .is_ok()
         );
         assert_eq!(sink.journal_failures(), 0);
+    }
+
+    #[tokio::test]
+    async fn k07_status_query_history_matches_kind_peer_and_gate() {
+        use crate::infrastructure::subagent::node_journal::{
+            NodeJournal, NodeRoomJournal, WorkspaceJournalReader,
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(workspace.path()).await.unwrap());
+        let reader = Arc::new(WorkspaceJournalReader::open_workspace(workspace.path()));
+        let sink = TransparencySink::new(Arc::new(NodeRoomJournal::new(journal.clone(), None)))
+            .with_reader(reader.clone());
+        let peer = peer();
+        let pinned = PolicyPrincipal::rap(peer.clone());
+        let pseudonymous = PolicyPrincipal::Pseudonymous(peer.clone());
+        let different = PolicyPrincipal::Pseudonymous(PeerId::from_public_key(&[4; 32]).unwrap());
+        for (task, kind, pin_matches, pseudo_matches) in [
+            ("legacy", None, false, true),
+            ("pinned", Some(PrincipalKind::Pinned), true, false),
+            (
+                "pseudonymous",
+                Some(PrincipalKind::Pseudonymous),
+                false,
+                true,
+            ),
+            ("unknown", Some(PrincipalKind::Unknown), false, false),
+        ] {
+            journal
+                .append_room(RoomEvent::AdmissionDeferred {
+                    coordinator: AgentId::root(),
+                    spoke: peer.as_str().to_owned(),
+                    gate: format!("{STATUS_QUERY_GATE_PREFIX}{task}"),
+                    principal: kind,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                sink.has_recorded_status_query(&pinned, task).await,
+                pin_matches,
+                "{task}"
+            );
+            assert_eq!(
+                sink.has_recorded_status_query(&pseudonymous, task).await,
+                pseudo_matches,
+                "{task}"
+            );
+            assert!(
+                !sink.has_recorded_status_query(&different, task).await,
+                "{task}: different peer"
+            );
+            assert!(
+                !sink
+                    .has_recorded_status_query(&pseudonymous, &format!("{task}-other"))
+                    .await
+            );
+        }
+        for gate in ["a2a-inbound-approval:wrong-gate", "other:wrong-gate"] {
+            journal
+                .append_room(RoomEvent::AdmissionDeferred {
+                    coordinator: AgentId::root(),
+                    spoke: peer.as_str().to_owned(),
+                    gate: gate.to_owned(),
+                    principal: Some(PrincipalKind::Pseudonymous),
+                })
+                .await
+                .unwrap();
+        }
+        assert!(
+            !sink
+                .has_recorded_status_query(&pseudonymous, "wrong-gate")
+                .await
+        );
+        for (principal, task) in [(pinned, "written-pin"), (pseudonymous, "written-pseudo")] {
+            sink.record(InboundOutcome::StatusQueried {
+                principal: principal.clone(),
+                task_id: task.to_owned(),
+            })
+            .await
+            .unwrap();
+            sink.record(InboundOutcome::AwaitingApproval {
+                principal: principal.clone(),
+                task_id: task.to_owned(),
+            })
+            .await
+            .unwrap();
+            assert!(sink.has_recorded_status_query(&principal, task).await);
+            let entries = reader.load_entries().await.unwrap();
+            let tail = &entries[entries.len() - 2..];
+            for (entry, prefix) in tail
+                .iter()
+                .zip([STATUS_QUERY_GATE_PREFIX, APPROVAL_GATE_PREFIX])
+            {
+                assert!(matches!(
+                    &entry.record,
+                    JournalRecord::Room(RoomEvent::AdmissionDeferred {
+                        coordinator, spoke, gate, principal: Some(kind),
+                    }) if coordinator == &AgentId::root()
+                        && spoke == peer.as_str()
+                        && gate == &format!("{prefix}{task}")
+                        && *kind == principal.kind()
+                ));
+            }
+        }
     }
 }

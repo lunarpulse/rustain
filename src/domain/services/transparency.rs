@@ -1602,6 +1602,7 @@ mod tests {
                     coordinator: AgentId::root(),
                     spoke: "peer".to_owned(),
                     gate: gate.to_owned(),
+                    principal: None,
                 },
             )
         };

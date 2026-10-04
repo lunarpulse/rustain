@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::domain::models::{
     AgentId, DeliveryDisposition, DeliveryOutcome, EffectivePolicy, MessageHeader, OwnershipKind,
-    PeerId, RefuseReason, ResponseMode, SemanticMessageType, relationship_disposition,
+    PolicyPrincipal, RefuseReason, ResponseMode, SemanticMessageType, relationship_disposition,
 };
 use crate::domain::services::team_policy::{resolve_message_type_policy, sender_policy_for};
 
@@ -62,16 +62,19 @@ pub trait DeliveryPolicy: Send + Sync {
             .verified_peer_id
             .as_ref()
             .map_or_else(PeerResponsePolicy::default, |peer_id| {
-                self.response_policy_for_peer(peer_id, header.message_type)
+                self.response_policy_for_peer(
+                    &PolicyPrincipal::rap(peer_id.clone()),
+                    header.message_type,
+                )
             })
     }
 
     fn response_policy_for_peer(
         &self,
-        peer_id: &PeerId,
+        principal: &PolicyPrincipal,
         message_type: SemanticMessageType,
     ) -> PeerResponsePolicy {
-        let _ = (peer_id, message_type);
+        let _ = (principal, message_type);
         PeerResponsePolicy::default()
     }
 }
@@ -116,10 +119,10 @@ impl DeliveryPolicy for EffectiveDeliveryPolicy {
 
     fn response_policy_for_peer(
         &self,
-        peer_id: &PeerId,
+        principal: &PolicyPrincipal,
         message_type: SemanticMessageType,
     ) -> PeerResponsePolicy {
-        let sender = sender_policy_for(&self.policy, peer_id, message_type);
+        let sender = sender_policy_for(&self.policy, principal, message_type);
         let (response, notification) =
             resolve_message_type_policy(&self.policy, sender, message_type);
         PeerResponsePolicy {
@@ -144,7 +147,7 @@ impl DeliveryPolicy for EffectiveDeliveryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{CorrelationId, MessageKind};
+    use crate::domain::models::{CorrelationId, MessageKind, PeerId};
 
     fn header() -> MessageHeader {
         MessageHeader {
@@ -331,9 +334,14 @@ mod tests {
         };
         let policy = EffectiveDeliveryPolicy::new(Arc::new(effective));
 
-        let consultation =
-            policy.response_policy_for_peer(&sender, SemanticMessageType::Consultation);
-        let bug = policy.response_policy_for_peer(&sender, SemanticMessageType::BugReport);
+        let consultation = policy.response_policy_for_peer(
+            &PolicyPrincipal::rap(sender.clone()),
+            SemanticMessageType::Consultation,
+        );
+        let bug = policy.response_policy_for_peer(
+            &PolicyPrincipal::rap(sender),
+            SemanticMessageType::BugReport,
+        );
         assert_eq!(consultation.mode, ResponseMode::NotifyAndWait);
         assert_eq!(consultation.notification, NotificationUrgency::Immediate);
         assert_eq!(
@@ -345,10 +353,14 @@ mod tests {
         assert_eq!(bug.auto_response.as_deref(), Some("bug reply"));
 
         let a2a_submitter = PeerId::from_public_key(&[10_u8; 32]).expect("valid peer id");
-        let a2a_consultation =
-            policy.response_policy_for_peer(&a2a_submitter, SemanticMessageType::Consultation);
-        let a2a_bug =
-            policy.response_policy_for_peer(&a2a_submitter, SemanticMessageType::BugReport);
+        let a2a_consultation = policy.response_policy_for_peer(
+            &PolicyPrincipal::Pseudonymous(a2a_submitter.clone()),
+            SemanticMessageType::Consultation,
+        );
+        let a2a_bug = policy.response_policy_for_peer(
+            &PolicyPrincipal::Pseudonymous(a2a_submitter),
+            SemanticMessageType::BugReport,
+        );
         assert_eq!(a2a_consultation.mode, ResponseMode::NotifyAndDraft);
         assert_eq!(a2a_consultation.notification, NotificationUrgency::Queue);
         assert_eq!(a2a_bug.mode, ResponseMode::NotifyAndAuto);
@@ -430,7 +442,7 @@ mod tests {
 
         for token in semantic_message_type_tokens() {
             let resolved = policy.response_policy_for_peer(
-                &sender,
+                &PolicyPrincipal::rap(sender.clone()),
                 crate::domain::models::SemanticMessageType::parse(token),
             );
             assert_eq!(
@@ -489,11 +501,98 @@ mod tests {
         let policy = EffectiveDeliveryPolicy::new(Arc::new(effective));
         let submitter = PeerId::from_public_key(&[11_u8; 32]).expect("valid peer id");
 
-        let unknown = policy.response_policy_for_peer(&submitter, SemanticMessageType::Unknown);
+        let unknown = policy.response_policy_for_peer(
+            &PolicyPrincipal::Pseudonymous(submitter),
+            SemanticMessageType::Unknown,
+        );
         assert_eq!(unknown.mode, ResponseMode::NotifyAndWait);
         assert_eq!(unknown.notification, NotificationUrgency::Immediate);
         let metadata = semantic_message_type_metadata(SemanticMessageType::Unknown);
         assert_eq!(metadata.recognition, SemanticMessageRecognition::Unknown);
         assert_eq!(metadata.operator_noun, "unknown type");
+    }
+
+    /// K09c: the RAP default `response_policy` wraps a verified header as `rap`, so a
+    /// pinned override written in TOML reaches it; the same `PeerId` presented as a
+    /// `Pseudonymous` principal gets the workspace default.
+    #[test]
+    fn default_response_policy_wraps_header_peer_as_rap_and_pseudonym_gets_defaults() {
+        use sha2::Digest as _;
+
+        use crate::domain::models::{
+            A2aPeerSource, A2aPeerSpec, IndividualPolicy, NotificationUrgency, PinnedKey,
+            PinnedKeyAlgorithm, RedactedUrl,
+        };
+
+        #[derive(serde::Deserialize)]
+        struct Root {
+            interaction: IndividualPolicy,
+        }
+
+        // The override's pin equals the A2A loopback pseudonym, `sha256("loopback")`.
+        let key: [u8; 32] = sha2::Sha256::digest(b"loopback").into();
+        let pin = PeerId::from_public_key(&key).expect("valid peer id");
+        let written = format!(
+            "[interaction.overrides.loopback-pin]\n\
+             peer_id = \"{}\"\n\
+             response_mode = \"notify-and-auto\"\n\
+             notification = \"immediate\"\n\
+             auto_response = \"pinned reply\"\n",
+            pin.as_str()
+        );
+        let individual = toml::from_str::<Root>(&written)
+            .expect("written interaction policy parses")
+            .interaction;
+        let roster = [A2aPeerSpec::new(
+            "loopback-pin",
+            RedactedUrl::new("https://peer.example/a2a".to_owned()),
+            A2aPeerSource::Workspace,
+        )
+        .with_pinned_key(Some(PinnedKey::new(
+            PinnedKeyAlgorithm::EdDsa,
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, key),
+            None,
+        )))];
+        let effective = crate::domain::services::team_policy::resolve_effective_policy(
+            &individual,
+            None,
+            &roster,
+        );
+        assert_eq!(effective.sender_overrides.len(), 1);
+        let policy = EffectiveDeliveryPolicy::new(Arc::new(effective));
+
+        let mut with_peer = header();
+        with_peer.verified_peer_id = Some(pin.clone());
+        let from_header = policy.response_policy(&with_peer);
+        assert_eq!(from_header.mode, ResponseMode::NotifyAndAuto);
+        assert_eq!(from_header.notification, NotificationUrgency::Immediate);
+        assert_eq!(from_header.auto_response.as_deref(), Some("pinned reply"));
+        assert_eq!(
+            from_header.provenance.sender_label.as_deref(),
+            Some("loopback-pin")
+        );
+        assert_eq!(
+            from_header,
+            policy.response_policy_for_peer(
+                &PolicyPrincipal::rap(pin.clone()),
+                SemanticMessageType::Unknown
+            ),
+            "the header path is the rap(verified peer) path"
+        );
+
+        let pseudonymous = policy.response_policy_for_peer(
+            &PolicyPrincipal::Pseudonymous(pin),
+            SemanticMessageType::Unknown,
+        );
+        assert_eq!(pseudonymous.mode, ResponseMode::NotifyAndWait);
+        assert_eq!(pseudonymous.notification, NotificationUrgency::Queue);
+        assert_eq!(pseudonymous.auto_response, None);
+        assert_eq!(pseudonymous.provenance.sender_label, None);
+
+        assert_eq!(
+            policy.response_policy(&header()),
+            PeerResponsePolicy::default(),
+            "a header without a verified peer still gets the default"
+        );
     }
 }

@@ -24,7 +24,7 @@
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::models::{AgentId, NodeState, PeerId, SemanticMessageType};
+use crate::domain::models::{AgentId, NodeState, PolicyPrincipal, SemanticMessageType};
 use crate::domain::ports::PeerResponsePolicy;
 
 /// One admitted inbound task, ready to execute as a local peer node.
@@ -33,9 +33,8 @@ pub struct InboundPeerTask {
     /// The node id to register. Minted by the adapter so `(peer, task)` stays
     /// reversible; the runtime treats it as opaque.
     pub node_id: AgentId,
-    /// Cryptographic identity of the submitting peer, for authority scoping and
-    /// room-event observability.
-    pub peer_id: PeerId,
+    /// Submitting identity and its policy provenance, unchanged from ingress.
+    pub principal: PolicyPrincipal,
     /// The submitted instruction text.
     pub text: String,
     /// The `subagent_type` marker to stamp on the node.
@@ -121,13 +120,13 @@ impl std::error::Error for InboundPeerError {}
 /// Execute admitted inbound peer tasks on the local core.
 #[async_trait::async_trait]
 pub trait InboundPeerRuntime: Send + Sync {
-    /// Resolve response automation for a verified transport identity.
+    /// Resolve response automation for the original ingress principal.
     fn response_policy(
         &self,
-        peer_id: &PeerId,
+        principal: &PolicyPrincipal,
         message_type: SemanticMessageType,
     ) -> PeerResponsePolicy {
-        let _ = (peer_id, message_type);
+        let _ = (principal, message_type);
         PeerResponsePolicy::default()
     }
 
@@ -170,12 +169,12 @@ pub trait InboundPeerRuntime: Send + Sync {
         false
     }
 
-    /// Raise a human admission approval for `peer_id` **without awaiting it**.
+    /// Raise a human admission approval for `principal` **without awaiting it**.
     ///
     /// Implementations MUST return before any human interaction occurs.
     async fn request_admission_approval(
         &self,
-        peer_id: &PeerId,
+        principal: &PolicyPrincipal,
         summary: &str,
     ) -> Result<InboundApprovalTicket, InboundPeerError>;
 

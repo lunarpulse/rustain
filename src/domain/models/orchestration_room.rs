@@ -17,6 +17,7 @@ use crate::domain::models::invocation_fingerprint::InvocationFingerprint;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::peer_frame::FrameRefusal;
 use crate::domain::models::peer_identity::PeerId;
+use crate::domain::models::policy_principal::PrincipalKind;
 use crate::domain::models::recipient_item::{ItemAddress, ItemId, ReplyAuthorship, TurnAddress};
 use crate::domain::models::room_role::RoomRole;
 use crate::domain::models::team_policy::{InteractionPolicySnapshot, NotificationUrgency};
@@ -450,6 +451,8 @@ pub enum RoomEvent {
         coordinator: AgentId,
         spoke: String,
         gate: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        principal: Option<PrincipalKind>,
     },
     ArtifactCreated {
         artifact: ArtifactRef,
@@ -659,15 +662,16 @@ pub enum RoomEvent {
         #[serde(default)]
         count: usize,
     },
-    /// Durable operator grant allowing one authenticated sender to bypass the
-    /// pending-consent gate. Duplicate grants are replay-idempotent.
+    /// Durable operator grant for one sender and its policy provenance.
+    /// Duplicate grants are replay-idempotent; absent provenance is legacy.
     ConsentGranted {
-        /// Stable authenticated sender identity. A missing value from a
-        /// forward-written or malformed record fails closed during projection.
+        /// Stable sender label. Missing senders fail closed during projection.
         #[serde(default)]
         sender: Option<PeerId>,
         #[serde(default)]
         granted_at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        principal: Option<PrincipalKind>,
     },
     /// Durable operator revocation of a previously granted sender.
     ConsentRevoked {

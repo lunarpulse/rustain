@@ -461,13 +461,13 @@ pub fn render_team_status(
     projection: &dyn crate::domain::ports::ConsentProjectionQuery,
     peers: &[crate::domain::models::A2aPeerSpec],
 ) -> String {
-    use crate::domain::ports::ConsentState;
+    use crate::domain::ports::{ConsentState, peer_consent_state};
 
     let mut identities: Vec<(String, crate::domain::models::PeerId)> = peers
         .iter()
         .map(|peer| (peer.id.clone(), peer.resolved_identity()))
         .collect();
-    for sender in projection.known_senders() {
+    for (_, sender) in projection.known_senders() {
         if !identities.iter().any(|(_, known)| known == &sender) {
             identities.push((sender.as_str().to_owned(), sender));
         }
@@ -485,14 +485,14 @@ pub fn render_team_status(
     }
     status.push_str("\nPeers:");
     for (label, sender) in identities {
-        let consent = projection.consent_for(&sender);
+        let consent = peer_consent_state(projection, &sender);
         let source = match consent {
             ConsentState::Trusted => "trusted (journaled)".to_owned(),
             ConsentState::Revoked => "revoked".to_owned(),
             ConsentState::None => {
                 if crate::domain::services::team_policy::sender_policy_for(
                     policy,
-                    &sender,
+                    &crate::domain::models::PolicyPrincipal::rap(sender.clone()),
                     crate::domain::models::SemanticMessageType::Unknown,
                 )
                 .is_some()
@@ -1322,6 +1322,7 @@ mod tests {
                 crate::domain::models::RoomEvent::ConsentGranted {
                     sender: Some(identity),
                     granted_at: 10,
+                    principal: None,
                 },
             ),
             10,
@@ -1342,6 +1343,123 @@ mod tests {
         assert!(status.contains("alice"), "{status}");
         // D2: journaled grants are source-annotated.
         assert!(status.contains("trusted (journaled)"), "{status}");
+    }
+
+    /// K03a: `/team status` over a real folded projection and a written roster. One
+    /// row per roster alias (two aliases of one pin keep their own labels) plus one per
+    /// distinct journal-only `PeerId`; typed-only senders appear; `Trusted` wins across
+    /// slots; the stable sort is by label, not by peer string.
+    #[test]
+    fn team_status_aggregates_slots_per_peer_and_keeps_every_alias_row() {
+        use crate::domain::models::{
+            JournalEntry, JournalRecord, PeerId, PrincipalKind, RoomEvent,
+        };
+        use crate::domain::ports::{ConsentProjectionQuery, ConsentSlot};
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let (key_p, key_q, key_r, key_s, key_t) =
+            ([17u8; 32], [12u8; 32], [19u8; 32], [14u8; 32], [7u8; 32]);
+        let id = |key: &[u8; 32]| PeerId::from_public_key(key).unwrap();
+        let (p, q, r, s, t) = (id(&key_p), id(&key_q), id(&key_r), id(&key_s), id(&key_t));
+        assert!(
+            p.as_str() < q.as_str(),
+            "fixture precondition: label order must differ from peer order"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let roster_path = crate::infrastructure::paths::workspace_a2a_config_path(dir.path());
+        std::fs::create_dir_all(roster_path.parent().unwrap()).unwrap();
+        let pin = |key: &[u8; 32]| URL_SAFE_NO_PAD.encode(key);
+        let agent = |url: &str, key: &[u8; 32]| {
+            format!(
+                r#"{{"url":"https://{url}.example/a2a","pinnedKey":{{"alg":"EdDSA","x":"{}"}}}}"#,
+                pin(key)
+            )
+        };
+        std::fs::write(
+            &roster_path,
+            format!(
+                r#"{{"agents":{{"alpha":{},"mid":{},"zulu":{}}}}}"#,
+                agent("alpha", &key_q),
+                agent("mid", &key_p),
+                agent("zulu", &key_p)
+            ),
+        )
+        .unwrap();
+        let peers = crate::adapters::a2a::config::parse_workspace_a2a_config(&roster_path).unwrap();
+        assert_eq!(peers.len(), 3);
+
+        let grant = |seq: u64, sender: &PeerId, principal: Option<PrincipalKind>| {
+            JournalEntry::new(
+                seq,
+                JournalRecord::Room(RoomEvent::ConsentGranted {
+                    sender: Some(sender.clone()),
+                    granted_at: seq as i64,
+                    principal,
+                }),
+                seq as i64,
+            )
+        };
+        let revoke = |seq: u64, sender: &PeerId| {
+            JournalEntry::new(
+                seq,
+                JournalRecord::Room(RoomEvent::ConsentRevoked {
+                    sender: Some(sender.clone()),
+                    revoked_at: seq as i64,
+                }),
+                seq as i64,
+            )
+        };
+        let entries = vec![
+            grant(1, &p, None),
+            grant(2, &p, Some(PrincipalKind::Pseudonymous)),
+            revoke(3, &p),
+            grant(4, &p, Some(PrincipalKind::Pinned)),
+            grant(5, &q, None),
+            revoke(6, &q),
+            grant(7, &r, Some(PrincipalKind::Pinned)),
+            grant(8, &s, Some(PrincipalKind::Pseudonymous)),
+            grant(9, &t, None),
+        ];
+        let projection = crate::adapters::policy::JournalConsentProjection::from_entries(&entries);
+
+        let mut raw = vec![
+            (ConsentSlot::Pinned, p.clone()),
+            (ConsentSlot::Pseudonymous, p.clone()),
+            (ConsentSlot::Legacy, p.clone()),
+            (ConsentSlot::Legacy, q.clone()),
+            (ConsentSlot::Pinned, r.clone()),
+            (ConsentSlot::Pseudonymous, s.clone()),
+            (ConsentSlot::Legacy, t.clone()),
+        ];
+        raw.sort_by(|a, b| a.1.as_str().cmp(b.1.as_str()).then(a.0.cmp(&b.0)));
+        assert_eq!(projection.known_senders(), raw);
+
+        let policy = crate::domain::services::team_policy::resolve_effective_policy(
+            &crate::domain::models::IndividualPolicy::default(),
+            None,
+            &peers,
+        );
+        let status = render_team_status(&policy, &projection, &peers);
+
+        // Journal-only labels are the hex peer strings (`1220…`), which sort before the
+        // alphabetic aliases; ties keep roster-then-journal insertion order.
+        let expected = format!(
+            "Team interaction policy\nResponse mode: notify-and-wait\nNotification urgency: queue\nPeers:\n\
+             - {r} ({r}): trusted (journaled)\n\
+             - {s} ({s}): trusted (journaled)\n\
+             - {t} ({t}): trusted (journaled)\n\
+             - alpha ({q}): revoked\n\
+             - mid ({p}): trusted (journaled)\n\
+             - zulu ({p}): trusted (journaled)",
+            r = r.as_str(),
+            s = s.as_str(),
+            t = t.as_str(),
+            q = q.as_str(),
+            p = p.as_str(),
+        );
+        assert_eq!(status, expected);
     }
 
     #[test]

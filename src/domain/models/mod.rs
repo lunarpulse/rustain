@@ -55,6 +55,7 @@ pub mod peer_reach;
 pub mod peer_ticket;
 mod permission;
 pub mod plan;
+pub mod policy_principal;
 pub mod pricing;
 pub mod profile;
 pub mod project_context;
@@ -231,6 +232,7 @@ pub use plan::{
     DelegationInfo, EffortEstimate, Plan, PlanDecision, PlanStatus, PlanSubTask, PlanTask,
     PlanTaskStatus, TaskResult,
 };
+pub use policy_principal::{PinnedVia, PolicyPrincipal, PrincipalKind};
 pub use recipient_item::{
     ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, MAX_REPLY_BYTES, REPLY_TURN_ID_PREFIX,
     RecipientItemAllocator, RecipientItemState, RecipientItemView, ReplyAuthorship, ReplyTurnId,

@@ -115,7 +115,9 @@ pub use catalog_observer::{ObserverError, SubscriptionHandle, SubscriptionId};
 pub use channel::ChannelPort;
 pub use clipboard::ClipboardPort;
 pub use config_store::ConfigStorePort;
-pub use consent_projection::{ConsentProjectionQuery, ConsentState};
+pub use consent_projection::{
+    ConsentProjectionQuery, ConsentSlot, ConsentState, peer_consent_state,
+};
 pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;

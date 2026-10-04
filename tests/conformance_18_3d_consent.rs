@@ -1,6 +1,6 @@
 use rustain::adapters::policy::JournalConsentProjection;
-use rustain::domain::models::{JournalEntry, JournalRecord, PeerId, RoomEvent};
-use rustain::domain::ports::{ConsentProjectionQuery, ConsentState};
+use rustain::domain::models::{JournalEntry, JournalRecord, PeerId, PolicyPrincipal, RoomEvent};
+use rustain::domain::ports::{ConsentProjectionQuery, ConsentSlot, ConsentState};
 use rustain::domain::services::transparency::{TransparencyKind, fold_transparency};
 
 fn sender(byte: u8) -> PeerId {
@@ -18,6 +18,7 @@ fn consent_event_fixtures_round_trip_and_missing_sender_fails_closed() {
         RoomEvent::ConsentGranted {
             sender: Some(peer.clone()),
             granted_at: 10,
+            principal: None,
         },
         RoomEvent::ConsentRevoked {
             sender: Some(peer.clone()),
@@ -52,6 +53,7 @@ fn replay_projection_is_latest_act_idempotent_and_never_synthesizes_unknown_send
             RoomEvent::ConsentGranted {
                 sender: Some(alice.clone()),
                 granted_at: 10,
+                principal: None,
             },
         ),
         entry(
@@ -59,6 +61,7 @@ fn replay_projection_is_latest_act_idempotent_and_never_synthesizes_unknown_send
             RoomEvent::ConsentGranted {
                 sender: Some(alice.clone()),
                 granted_at: 11,
+                principal: None,
             },
         ),
         entry(
@@ -78,9 +81,18 @@ fn replay_projection_is_latest_act_idempotent_and_never_synthesizes_unknown_send
     ];
 
     let projection = JournalConsentProjection::from_entries(&entries);
-    assert_eq!(projection.known_senders(), vec![alice.clone()]);
-    assert_eq!(projection.consent_for(&alice), ConsentState::Revoked);
-    assert_eq!(projection.consent_for(&unknown), ConsentState::None);
+    assert_eq!(
+        projection.known_senders(),
+        vec![(ConsentSlot::Legacy, alice.clone())]
+    );
+    assert_eq!(
+        projection.consent_for(&PolicyPrincipal::rap(alice.clone())),
+        ConsentState::Revoked
+    );
+    assert_eq!(
+        projection.consent_for(&PolicyPrincipal::rap(unknown.clone())),
+        ConsentState::None
+    );
 }
 
 #[test]
@@ -92,6 +104,7 @@ fn team_log_projection_renders_grant_and_revocation_on_the_existing_spine() {
             RoomEvent::ConsentGranted {
                 sender: Some(peer.clone()),
                 granted_at: 10,
+                principal: None,
             },
         ),
         entry(
@@ -122,6 +135,7 @@ fn policy_explainer_consumes_real_trusted_and_revoked_projection_states() {
             RoomEvent::ConsentGranted {
                 sender: Some(trusted.clone()),
                 granted_at: 10,
+                principal: None,
             },
         ),
         entry(
@@ -129,6 +143,7 @@ fn policy_explainer_consumes_real_trusted_and_revoked_projection_states() {
             RoomEvent::ConsentGranted {
                 sender: Some(revoked.clone()),
                 granted_at: 11,
+                principal: None,
             },
         ),
         entry(

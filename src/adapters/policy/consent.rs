@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::domain::models::{JournalEntry, JournalRecord, PeerId, RoomEvent};
+use crate::domain::models::{JournalEntry, JournalRecord, PeerId, PrincipalKind, RoomEvent};
 use crate::domain::ports::{
-    ConsentProjectionQuery, ConsentState, RoomJournalError, RoomJournalReader,
+    ConsentProjectionQuery, ConsentSlot, ConsentState, RoomJournalError, RoomJournalReader,
 };
 
 /// The projection before any consent grant is journaled.
@@ -23,11 +23,11 @@ use crate::domain::ports::{
 pub struct EmptyConsentProjection;
 
 impl ConsentProjectionQuery for EmptyConsentProjection {
-    fn known_senders(&self) -> Vec<PeerId> {
+    fn known_senders(&self) -> Vec<(ConsentSlot, PeerId)> {
         Vec::new()
     }
 
-    fn consent_for(&self, _sender: &PeerId) -> ConsentState {
+    fn slot_state(&self, _slot: ConsentSlot, _sender: &PeerId) -> ConsentState {
         ConsentState::None
     }
 }
@@ -35,7 +35,7 @@ impl ConsentProjectionQuery for EmptyConsentProjection {
 /// Lock-free read projection over the append-only consent record family.
 #[derive(Clone)]
 pub struct JournalConsentProjection {
-    states: Arc<arc_swap::ArcSwap<HashMap<PeerId, ConsentState>>>,
+    states: Arc<arc_swap::ArcSwap<HashMap<(ConsentSlot, PeerId), ConsentState>>>,
 }
 
 impl Default for JournalConsentProjection {
@@ -99,35 +99,49 @@ impl JournalConsentProjection {
 }
 
 impl ConsentProjectionQuery for JournalConsentProjection {
-    fn known_senders(&self) -> Vec<PeerId> {
+    fn known_senders(&self) -> Vec<(ConsentSlot, PeerId)> {
         let snapshot = self.states.load();
         let mut senders: Vec<_> = snapshot.keys().cloned().collect();
-        senders.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        senders.sort_by(|(left_slot, left), (right_slot, right)| {
+            left.as_str()
+                .cmp(right.as_str())
+                .then(left_slot.cmp(right_slot))
+        });
         senders
     }
 
-    fn consent_for(&self, sender: &PeerId) -> ConsentState {
+    fn slot_state(&self, slot: ConsentSlot, sender: &PeerId) -> ConsentState {
         self.states
             .load()
-            .get(sender)
+            .get(&(slot, sender.clone()))
             .copied()
             .unwrap_or(ConsentState::None)
     }
 }
 
-fn apply_to_map(states: &mut HashMap<PeerId, ConsentState>, event: &RoomEvent) {
+fn apply_to_map(states: &mut HashMap<(ConsentSlot, PeerId), ConsentState>, event: &RoomEvent) {
     match event {
         RoomEvent::ConsentGranted {
             sender: Some(sender),
+            principal,
             ..
         } => {
-            states.insert(sender.clone(), ConsentState::Trusted);
+            let slot = match principal {
+                Some(PrincipalKind::Pinned) => ConsentSlot::Pinned,
+                Some(PrincipalKind::Pseudonymous) => ConsentSlot::Pseudonymous,
+                None | Some(PrincipalKind::Unknown) => ConsentSlot::Legacy,
+            };
+            states.insert((slot, sender.clone()), ConsentState::Trusted);
         }
         RoomEvent::ConsentRevoked {
             sender: Some(sender),
             ..
-        } if states.contains_key(sender) => {
-            states.insert(sender.clone(), ConsentState::Revoked);
+        } => {
+            for ((_, known), state) in states.iter_mut() {
+                if known == sender {
+                    *state = ConsentState::Revoked;
+                }
+            }
         }
         _ => {}
     }
@@ -136,13 +150,15 @@ fn apply_to_map(states: &mut HashMap<PeerId, ConsentState>, event: &RoomEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::PolicyPrincipal;
 
     #[test]
     fn the_stub_knows_no_senders_and_grants_nothing() {
         let projection = EmptyConsentProjection;
+        let peer = PeerId::from_public_key(&[1u8; 32]).unwrap();
         assert!(projection.known_senders().is_empty());
         assert_eq!(
-            projection.consent_for(&PeerId::from_public_key(&[1u8; 32]).unwrap()),
+            projection.consent_for(&PolicyPrincipal::rap(peer)),
             ConsentState::None
         );
     }
@@ -168,6 +184,7 @@ mod tests {
                 crate::domain::models::RoomEvent::ConsentGranted {
                     sender: Some(alice.clone()),
                     granted_at: 10,
+                    principal: None,
                 },
             ),
             entry(
@@ -175,6 +192,7 @@ mod tests {
                 crate::domain::models::RoomEvent::ConsentGranted {
                     sender: Some(alice.clone()),
                     granted_at: 11,
+                    principal: None,
                 },
             ),
             entry(
@@ -194,15 +212,28 @@ mod tests {
         ];
 
         let projection = JournalConsentProjection::from_entries(&entries);
-        assert_eq!(projection.known_senders(), vec![alice.clone()]);
-        assert_eq!(projection.consent_for(&alice), ConsentState::Revoked);
-        assert_eq!(projection.consent_for(&bob), ConsentState::None);
+        assert_eq!(
+            projection.known_senders(),
+            vec![(ConsentSlot::Legacy, alice.clone())]
+        );
+        assert_eq!(
+            projection.consent_for(&PolicyPrincipal::rap(alice.clone())),
+            ConsentState::Revoked
+        );
+        assert_eq!(
+            projection.consent_for(&PolicyPrincipal::rap(bob.clone())),
+            ConsentState::None
+        );
 
         projection.apply(&crate::domain::models::RoomEvent::ConsentGranted {
             sender: Some(bob.clone()),
             granted_at: 14,
+            principal: None,
         });
-        assert_eq!(projection.consent_for(&bob), ConsentState::Trusted);
+        assert_eq!(
+            projection.consent_for(&PolicyPrincipal::rap(bob)),
+            ConsentState::Trusted
+        );
     }
 
     #[test]

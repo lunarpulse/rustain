@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::models::PolicyPrincipal;
+
 /// A request to execute a tool.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCallRequest {
@@ -59,6 +61,9 @@ pub enum ApprovalSource {
     RemotePeer {
         conversation_id: String,
         peer_id: crate::domain::models::peer_identity::PeerId,
+        /// In-memory provenance only; a durable approval never recovers it.
+        #[serde(skip)]
+        principal: Option<PolicyPrincipal>,
     },
     BackgroundAgent {
         conversation_id: String,
@@ -68,6 +73,22 @@ pub enum ApprovalSource {
 }
 
 impl ApprovalSource {
+    /// Preserve the ingress principal while retaining the historical wire scope.
+    pub fn remote_peer(conversation_id: String, principal: &PolicyPrincipal) -> Self {
+        Self::RemotePeer {
+            conversation_id,
+            peer_id: principal.peer().clone(),
+            principal: Some(principal.clone()),
+        }
+    }
+
+    pub fn policy_principal(&self) -> Option<&PolicyPrincipal> {
+        match self {
+            Self::RemotePeer { principal, .. } => principal.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Return the conversation_id from any variant.
     pub fn conversation_id(&self) -> &str {
         match self {
@@ -125,6 +146,7 @@ impl ApprovalSource {
             ApprovalSource::RemotePeer {
                 conversation_id,
                 peer_id,
+                ..
             } => {
                 crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
                     conversation_id,
@@ -549,6 +571,12 @@ mod tests {
                 task_id: "task-1".into(),
                 subagent_type: "general".into(),
             },
+            ApprovalSource::remote_peer(
+                "conv-4".to_owned(),
+                &PolicyPrincipal::rap(
+                    crate::domain::models::PeerId::from_public_key(&[4; 32]).unwrap(),
+                ),
+            ),
         ];
         for original in variants {
             let json = serde_json::to_string(&original).unwrap();

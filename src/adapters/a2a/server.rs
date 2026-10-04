@@ -60,7 +60,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::domain::models::{
-    AppConfig, CapabilityRegistry, ItemAddress, ItemId, PeerId, RapTaskState,
+    AppConfig, CapabilityRegistry, ItemAddress, ItemId, PeerId, PolicyPrincipal, RapTaskState,
     RecipientItemAllocator, RetractOutcome, RoomEvent, SemanticMessageType,
 };
 use crate::domain::ports::{InboundApprovalTicket, InboundPeerRuntime, InboundPeerTask};
@@ -367,8 +367,9 @@ async fn reconcile_after_restart(state: &ServerState, pending: &[PendingTaskReco
         let Some((submitter, task_id)) = parse_inbound_node_id(&node_id) else {
             continue;
         };
-        let peer_id = submitter.pseudonymous_peer_id();
-        let principal = crate::domain::models::ItemPrincipal::A2aPseudonym(peer_id.clone());
+        let policy_principal = submitter.policy_principal();
+        let principal =
+            crate::domain::models::ItemPrincipal::A2aPseudonym(policy_principal.peer().clone());
         let capability_class = state
             .recipient_items
             .task_capability_classes(&principal, &task_id)
@@ -403,7 +404,7 @@ async fn reconcile_after_restart(state: &ServerState, pending: &[PendingTaskReco
         };
         if state
             .transparency
-            .has_recorded_status_query(&peer_id, &task_id)
+            .has_recorded_status_query(&policy_principal, &task_id)
             .await
         {
             task.restore_status_query();
@@ -562,7 +563,7 @@ async fn reconcile_pending_after_restart(
             continue;
         }
         let submitter = SubmitterKey::from_encoded(record.submitter.clone());
-        let peer_id = submitter.pseudonymous_peer_id();
+        let policy_principal = submitter.policy_principal();
         let Some(task) = state
             .tasks
             .insert(
@@ -578,7 +579,7 @@ async fn reconcile_pending_after_restart(
         };
         if state
             .transparency
-            .has_recorded_status_query(&peer_id, &record.task_id)
+            .has_recorded_status_query(&policy_principal, &record.task_id)
             .await
         {
             task.restore_status_query();
@@ -1179,7 +1180,7 @@ async fn start_task(
         .runtime
         .clone()
         .ok_or_else(|| "no execution runtime".to_owned())?;
-    let peer_id = caller.key.pseudonymous_peer_id();
+    let principal = caller.key.policy_principal();
     // Keyed by the SUBMITTER, so a restart can rebuild scoping from the tree.
     let node_id = mint_inbound_node_id(&caller.key, &task_id);
     let task = state
@@ -1206,7 +1207,7 @@ async fn start_task(
             task,
             task_id,
             text,
-            peer_id,
+            principal,
             message_type,
             facts,
             needs_approval,
@@ -1230,11 +1231,12 @@ async fn setup_task(
     task: Arc<super::exec::InboundTask>,
     task_id: String,
     text: String,
-    peer_id: PeerId,
+    principal: PolicyPrincipal,
     message_type: SemanticMessageType,
     facts: IngressFacts,
     needs_approval: bool,
 ) -> Result<serde_json::Value, String> {
+    let peer_id = principal.peer().clone();
     if needs_approval || runtime.enforces_sender_consent() {
         let consent_parked = runtime.enforces_sender_consent();
         if consent_parked
@@ -1246,7 +1248,7 @@ async fn setup_task(
             terminalize_start_failure(&state, &task, &peer_id, None).await;
             return task_projection(&state, &task, &peer_id).await;
         }
-        let ticket = match runtime.request_admission_approval(&peer_id, &text).await {
+        let ticket = match runtime.request_admission_approval(&principal, &text).await {
             Ok(ticket) => ticket,
             Err(error) => {
                 if consent_parked {
@@ -1270,7 +1272,7 @@ async fn setup_task(
             let _ = state
                 .transparency
                 .record(InboundOutcome::AwaitingApproval {
-                    peer: peer_id.clone(),
+                    principal: principal.clone(),
                     task_id: task_id.clone(),
                 })
                 .await;
@@ -1286,7 +1288,7 @@ async fn setup_task(
                 runtime,
                 task.clone(),
                 text,
-                peer_id,
+                principal,
                 message_type,
                 facts,
                 pending,
@@ -1342,7 +1344,7 @@ async fn setup_task(
         &runtime,
         &task,
         text,
-        peer_id.clone(),
+        principal,
         message_type,
         facts,
         None,
@@ -1442,19 +1444,20 @@ async fn watch_pending_approval(
     runtime: Arc<dyn InboundPeerRuntime>,
     task: Arc<super::exec::InboundTask>,
     text: String,
-    peer_id: PeerId,
+    principal: PolicyPrincipal,
     message_type: SemanticMessageType,
     facts: IngressFacts,
     pending: PendingTaskRecord,
     ticket: InboundApprovalTicket,
 ) {
+    let peer_id = principal.peer();
     // Cancellation wins an already-ready grant too. Dropping the ticket receiver
     // on this branch withdraws this task's interest in the operator decision.
     let decision = tokio::select! {
         biased;
         _ = task.cancel.cancelled() => {
             runtime.discard_pending_consent_node(&task.node_id).await;
-            terminalize_canceled(&state, &task, &peer_id, Some(&pending)).await;
+            terminalize_canceled(&state, &task, peer_id, Some(&pending)).await;
             return;
         }
         decision = ticket.decision => decision.unwrap_or(
@@ -1471,7 +1474,7 @@ async fn watch_pending_approval(
         let _ = state
             .transparency
             .record(InboundOutcome::Refused {
-                peer: peer_id,
+                peer: peer_id.clone(),
                 task_id: task.id.clone(),
                 reason,
             })
@@ -1481,7 +1484,7 @@ async fn watch_pending_approval(
     }
     if task.cancel.is_cancelled() {
         runtime.discard_pending_consent_node(&task.node_id).await;
-        terminalize_canceled(&state, &task, &peer_id, Some(&pending)).await;
+        terminalize_canceled(&state, &task, peer_id, Some(&pending)).await;
         return;
     }
     let _ = launch(
@@ -1489,7 +1492,7 @@ async fn watch_pending_approval(
         &runtime,
         &task,
         text,
-        peer_id,
+        principal,
         message_type,
         facts,
         Some(pending),
@@ -1504,11 +1507,12 @@ async fn launch(
     runtime: &Arc<dyn InboundPeerRuntime>,
     task: &Arc<super::exec::InboundTask>,
     text: String,
-    peer_id: PeerId,
+    principal: PolicyPrincipal,
     message_type: SemanticMessageType,
     facts: IngressFacts,
     pending: Option<PendingTaskRecord>,
 ) -> Result<(), String> {
+    let peer_id = principal.peer().clone();
     let address = match state
         .item_allocator
         .allocate_a2a_ingress(peer_id.clone())
@@ -1595,12 +1599,12 @@ async fn launch(
         return Err(error.to_string());
     }
     task.advance(RapTaskState::Working).await;
-    let response_policy = runtime.response_policy(&peer_id, message_type);
+    let response_policy = runtime.response_policy(&principal, message_type);
     let started = runtime
         .start(
             InboundPeerTask {
                 node_id: task.node_id.clone(),
-                peer_id: peer_id.clone(),
+                principal,
                 text,
                 subagent_type: INBOUND_SUBAGENT_TYPE.to_owned(),
                 response_policy,
@@ -1748,6 +1752,7 @@ async fn tasks_get(
     echo: serde_json::Value,
 ) -> Result<serde_json::Value, JsonRpcErrorResponse> {
     let task = scoped_task(state, caller, params, &echo).await?;
+    let principal = caller.key.policy_principal();
     // FR92 (P-5): journal the FIRST status query observed for a task and
     // nothing thereafter. The task-local state has an in-flight claim, not a
     // boolean: a failed append releases the claim so a later poll can retry
@@ -1756,7 +1761,7 @@ async fn tasks_get(
         let recorded = state
             .transparency
             .record(InboundOutcome::StatusQueried {
-                peer: caller.key.pseudonymous_peer_id(),
+                principal: principal.clone(),
                 task_id: task.id.clone(),
             })
             .await;
@@ -1766,8 +1771,7 @@ async fn tasks_get(
             task.release_status_query();
         }
     }
-    let peer_id = caller.key.pseudonymous_peer_id();
-    task_projection(state, &task, &peer_id)
+    task_projection(state, &task, principal.peer())
         .await
         .map_err(|error| {
             tracing::error!(%error, task = %task.id, "withholding unjournaled A2A result");

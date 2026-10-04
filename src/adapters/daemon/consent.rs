@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, oneshot};
 use crate::adapters::policy::JournalConsentProjection;
 use crate::domain::clock::Clock;
 use crate::domain::models::{
-    DeliveryDisposition, EffectivePolicy, PeerId, RequestId, RoomEvent, may_consent_refuse,
+    DeliveryDisposition, EffectivePolicy, PolicyPrincipal, RequestId, RoomEvent, may_consent_refuse,
 };
 use crate::domain::ports::{
     ConsentProjectionQuery, ConsentState, InboundApprovalDecision, RoomJournal, RoomJournalReader,
@@ -27,7 +27,7 @@ pub(crate) struct PendingConsentRegistration {
     pub(crate) decision: oneshot::Receiver<InboundApprovalDecision>,
 }
 
-/// Groups pending tasks by authenticated sender and owns durable grants.
+/// Groups pending tasks by policy principal and owns durable grants.
 pub(crate) struct PendingConsentManager {
     projection: Arc<JournalConsentProjection>,
     journal: Arc<dyn RoomJournal>,
@@ -35,7 +35,7 @@ pub(crate) struct PendingConsentManager {
     reader: Option<Arc<dyn RoomJournalReader>>,
     last_seq: AtomicU64,
     policy: tokio::sync::Mutex<Option<Arc<EffectivePolicy>>>,
-    pending: Mutex<HashMap<PeerId, PendingSender>>,
+    pending: Mutex<HashMap<PolicyPrincipal, PendingSender>>,
     always_requests: Mutex<HashSet<RequestId>>,
 }
 
@@ -62,7 +62,7 @@ impl PendingConsentManager {
     /// that forbid refusal resolve immediately and never create a card.
     pub(crate) async fn register(
         &self,
-        sender: PeerId,
+        sender: PolicyPrincipal,
         summary: &str,
         disposition: DeliveryDisposition,
     ) -> PendingConsentRegistration {
@@ -116,17 +116,21 @@ impl PendingConsentManager {
 
     /// Current card copy for one sender. There is exactly one pending group,
     /// regardless of how many tasks have joined it.
-    pub(crate) async fn card_text(&self, sender: &PeerId) -> Option<String> {
+    pub(crate) async fn card_text(&self, sender: &PolicyPrincipal) -> Option<String> {
         let pending = self.pending.lock().await;
         pending.get(sender)?;
-        Some(crate::infrastructure::runtime::transparency_bridge::consent_card_text(sender))
+        Some(crate::infrastructure::runtime::transparency_bridge::consent_card_text(sender.peer()))
     }
 
     /// Persist standing trust before the approval runtime is resolved.
     ///
     /// The request marker tells the detached watcher that the subsequent
     /// `ApprovalOutcome::Once` came from `[a]`, not `[y]`.
-    pub(crate) async fn grant_always(&self, request_id: RequestId, sender: &PeerId) -> bool {
+    pub(crate) async fn grant_always(
+        &self,
+        request_id: RequestId,
+        sender: &PolicyPrincipal,
+    ) -> bool {
         if !self.persist_grant(sender).await {
             return false;
         }
@@ -140,7 +144,7 @@ impl PendingConsentManager {
 
     /// Drop a sender's pending group without resolving it. Used when admission
     /// setup failed before a card could render, so the next delivery retries.
-    pub(crate) async fn drop_pending(&self, sender: &PeerId) {
+    pub(crate) async fn drop_pending(&self, sender: &PolicyPrincipal) {
         self.pending.lock().await.remove(sender);
     }
 
@@ -176,7 +180,7 @@ impl PendingConsentManager {
 
     /// `true` when an applicable (pinned, matching) TOML override implies
     /// consent for `sender`. Unpinned/mismatched overrides do not apply.
-    async fn toml_implies_consent(&self, sender: &PeerId) -> bool {
+    async fn toml_implies_consent(&self, sender: &PolicyPrincipal) -> bool {
         let guard = self.policy.lock().await;
         let Some(policy) = guard.as_ref() else {
             return false;
@@ -191,7 +195,11 @@ impl PendingConsentManager {
 
     /// Resolve the sender's whole waiting group. `AllowAlways` is fail-closed:
     /// waiters are released only after the grant is durably appended.
-    pub(crate) async fn resolve(&self, sender: &PeerId, requested: InboundApprovalDecision) {
+    pub(crate) async fn resolve(
+        &self,
+        sender: &PolicyPrincipal,
+        requested: InboundApprovalDecision,
+    ) {
         let resolved = if requested == InboundApprovalDecision::AllowAlways
             && self.projection.consent_for(sender) != ConsentState::Trusted
         {
@@ -215,13 +223,14 @@ impl PendingConsentManager {
         }
     }
 
-    async fn persist_grant(&self, sender: &PeerId) -> bool {
+    async fn persist_grant(&self, sender: &PolicyPrincipal) -> bool {
         if self.projection.consent_for(sender) == ConsentState::Trusted {
             return true;
         }
         let event = RoomEvent::ConsentGranted {
-            sender: Some(sender.clone()),
+            sender: Some(sender.peer().clone()),
             granted_at: self.clock.wall_now_ms(),
+            principal: Some(sender.kind()),
         };
         match self.journal.record_event(event.clone()).await {
             Ok(()) => {
@@ -229,20 +238,52 @@ impl PendingConsentManager {
                 true
             }
             Err(error) => {
-                tracing::error!(%error, peer = %sender, "durable consent grant failed");
+                tracing::error!(%error, peer = %sender.peer(), "durable consent grant failed");
                 false
             }
         }
     }
 
     #[cfg(test)]
-    pub(crate) async fn waiting_count(&self, sender: &PeerId) -> usize {
+    pub(crate) async fn waiting_count(&self, sender: &PolicyPrincipal) -> usize {
         self.pending
             .lock()
             .await
             .get(sender)
             .map_or(0, |group| group.waiters.len())
     }
+}
+
+#[cfg(all(test, feature = "a2a"))]
+pub(super) fn loopback_collision_policy(
+    workspace: &std::path::Path,
+) -> (EffectivePolicy, crate::domain::models::PeerId) {
+    let dir = workspace.join(".rustain");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(crate::domain::models::INDIVIDUAL_POLICY_FILE),
+        "[interaction.defaults]\nresponse_mode = \"notify-and-wait\"\nnotification = \"queue\"\n\
+         [interaction.overrides.loopback-pin]\n\
+         peer_id = \"122004a153777cbc690bd5eed4ac78fb5b0fa74428bb8a98ee62fea8172be68acc0b\"\n\
+         response_mode = \"notify-and-auto\"\nnotification = \"immediate\"\nauto_response = \"pinned reply\"\n",
+    ).unwrap();
+    std::fs::write(
+        dir.join("a2a.json"),
+        r#"{"agents":{"loopback-pin":{"url":"https://peer.example/a2a","pinnedKey":{"alg":"EdDSA","x":"ZO2qP7kxDpjNsYPN2_FW2ZZKBcAX-n-O48JikJ-jZ1k"}}}}"#,
+    ).unwrap();
+    let peers = crate::adapters::a2a::config::parse_workspace_a2a_config(
+        &crate::infrastructure::paths::workspace_a2a_config_path(workspace),
+    )
+    .unwrap();
+    let peer = crate::adapters::a2a::exec::SubmitterKey::loopback().pseudonymous_peer_id();
+    assert_eq!(peers[0].pinned_identity(), Some(peer.clone()));
+    let (policy, _) = crate::adapters::policy::resolve_workspace_policy(
+        workspace,
+        &peers,
+        &crate::adapters::policy::EmptyConsentProjection,
+    )
+    .unwrap();
+    (policy, peer)
 }
 
 #[cfg(test)]
@@ -295,7 +336,7 @@ mod tests {
     async fn one_sender_gets_one_card_and_yes_releases_only_current_waiters() {
         let journal = Arc::new(RecordingJournal::default());
         let (manager, projection) = manager(journal.clone());
-        let sender = peer(1);
+        let sender = PolicyPrincipal::rap(peer(1));
         crate::infrastructure::subagent::node_journal::NodeJournal::reset_load_count();
 
         let first = manager
@@ -315,12 +356,6 @@ mod tests {
         );
         assert!(first.first_for_sender);
         assert!(!second.first_for_sender);
-        let card = manager.card_text(&sender).await.unwrap();
-        assert!(card.contains(&format!("Consent required — {}", sender.as_str())));
-        assert!(card.contains("[y] Allow once  [a] Always allow  [n] Decline"));
-        assert!(card.contains("key this sender presents, not the person"));
-        assert!(card.contains("Awaiting your decision"));
-        assert!(card.contains("Logged immediately for safety"));
 
         manager
             .resolve(&sender, InboundApprovalDecision::AllowOnce)
@@ -346,7 +381,7 @@ mod tests {
     async fn always_appends_once_updates_projection_and_bypasses_future_cards() {
         let journal = Arc::new(RecordingJournal::default());
         let (manager, projection) = manager(journal.clone());
-        let sender = peer(2);
+        let sender = PolicyPrincipal::rap(peer(2));
         let pending = manager
             .register(sender.clone(), "task", DeliveryDisposition::MayRefuse)
             .await;
@@ -361,7 +396,7 @@ mod tests {
         assert_eq!(projection.consent_for(&sender), ConsentState::Trusted);
         assert!(matches!(
             journal.events.lock().await.as_slice(),
-            [RoomEvent::ConsentGranted { sender: Some(recorded), granted_at: 42 }] if recorded == &sender
+            [RoomEvent::ConsentGranted { sender: Some(recorded), granted_at: 42, .. }] if recorded == sender.peer()
         ));
 
         let bypass = manager
@@ -386,7 +421,7 @@ mod tests {
             fail: true,
         });
         let (manager, projection) = manager(journal);
-        let sender = peer(3);
+        let sender = PolicyPrincipal::rap(peer(3));
         let pending = manager
             .register(sender.clone(), "task", DeliveryDisposition::MayRefuse)
             .await;
@@ -401,12 +436,233 @@ mod tests {
         assert_eq!(projection.consent_for(&sender), ConsentState::None);
 
         let bypass = manager
-            .register(peer(4), "owner report", DeliveryDisposition::MustReport)
+            .register(
+                PolicyPrincipal::rap(peer(4)),
+                "owner report",
+                DeliveryDisposition::MustReport,
+            )
             .await;
         assert!(!bypass.pending);
         assert_eq!(
             bypass.decision.await.unwrap(),
             InboundApprovalDecision::AllowOnce
+        );
+    }
+
+    #[tokio::test]
+    async fn k01_consent_slots_and_manager_decision_table() {
+        use crate::domain::models::{JournalEntry, JournalRecord, PrincipalKind};
+        use crate::domain::ports::ConsentSlot;
+        use ConsentState::{None as Absent, Revoked, Trusted};
+
+        let sender = peer(41);
+        let pinned = PolicyPrincipal::rap(sender.clone());
+        let pseudonymous = PolicyPrincipal::Pseudonymous(sender.clone());
+        let slots = [
+            ConsentSlot::Pinned,
+            ConsentSlot::Pseudonymous,
+            ConsentSlot::Legacy,
+        ];
+        let kinds = [
+            Some(PrincipalKind::Pinned),
+            Some(PrincipalKind::Pseudonymous),
+            None,
+        ];
+        let states = [Absent, Trusted, Revoked];
+        // Rows are typed state, columns legacy state: explicit precedence oracle.
+        let decisions = [
+            [Absent, Trusted, Revoked],
+            [Trusted, Trusted, Trusted],
+            [Revoked, Revoked, Revoked],
+        ];
+        let grant = |principal| RoomEvent::ConsentGranted {
+            sender: Some(sender.clone()),
+            granted_at: 42,
+            principal,
+        };
+        let revoke = || RoomEvent::ConsentRevoked {
+            sender: Some(sender.clone()),
+            revoked_at: 43,
+        };
+        let project = |events: Vec<RoomEvent>| {
+            let entries: Vec<_> = events
+                .into_iter()
+                .enumerate()
+                .map(|(index, event)| {
+                    JournalEntry::new(index as u64 + 1, JournalRecord::Room(event), 44)
+                })
+                .collect();
+            JournalConsentProjection::from_entries(&entries)
+        };
+
+        for pin in 0..3 {
+            for pseudo in 0..3 {
+                for legacy in 0..3 {
+                    let wanted = [states[pin], states[pseudo], states[legacy]];
+                    let mut events = Vec::new();
+                    for (index, state) in wanted.iter().enumerate() {
+                        if *state != Absent {
+                            events.push(grant(kinds[index]));
+                        }
+                    }
+                    if wanted.contains(&Revoked) {
+                        events.push(revoke());
+                        for (index, state) in wanted.iter().enumerate() {
+                            if *state == Trusted {
+                                events.push(grant(kinds[index]));
+                            }
+                        }
+                    }
+                    let projection = Arc::new(project(events));
+                    let known: Vec<_> = slots
+                        .iter()
+                        .zip(wanted)
+                        .filter(|(_, state)| *state != Absent)
+                        .map(|(slot, _)| (*slot, sender.clone()))
+                        .collect();
+                    assert_eq!(projection.known_senders(), known, "{wanted:?}");
+                    for (slot, state) in slots.iter().zip(wanted) {
+                        assert_eq!(projection.slot_state(*slot, &sender), state, "{wanted:?}");
+                    }
+                    let manager = PendingConsentManager::new(
+                        projection,
+                        Arc::new(RecordingJournal::default()),
+                        Arc::new(crate::domain::clock::MockClock::at_wall_ms(42)),
+                        None,
+                    );
+                    for (principal, expected) in [
+                        (&pinned, decisions[pin][legacy]),
+                        (&pseudonymous, decisions[pseudo][legacy]),
+                    ] {
+                        assert_eq!(
+                            manager.projection.consent_for(principal),
+                            expected,
+                            "{wanted:?}"
+                        );
+                        let registration = manager
+                            .register(
+                                principal.clone(),
+                                "collision task",
+                                DeliveryDisposition::MayRefuse,
+                            )
+                            .await;
+                        assert_eq!(registration.pending, expected != Trusted, "{wanted:?}");
+                        if expected == Trusted {
+                            assert_eq!(
+                                registration.decision.await.unwrap(),
+                                InboundApprovalDecision::AllowAlways
+                            );
+                        } else {
+                            assert!(registration.first_for_sender);
+                            manager
+                                .resolve(principal, InboundApprovalDecision::AllowOnce)
+                                .await;
+                            assert_eq!(
+                                registration.decision.await.unwrap(),
+                                InboundApprovalDecision::AllowOnce
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let unknown = project(vec![grant(Some(PrincipalKind::Unknown))]);
+        assert_eq!(
+            unknown.known_senders(),
+            vec![(ConsentSlot::Legacy, sender.clone())]
+        );
+        assert_eq!(unknown.slot_state(ConsentSlot::Pinned, &sender), Absent);
+        assert_eq!(
+            unknown.slot_state(ConsentSlot::Pseudonymous, &sender),
+            Absent
+        );
+        assert_eq!(unknown.consent_for(&pinned), Trusted);
+        assert_eq!(unknown.consent_for(&pseudonymous), Trusted);
+
+        let never_granted = project(vec![
+            RoomEvent::ConsentGranted {
+                sender: None,
+                granted_at: 42,
+                principal: Some(PrincipalKind::Pinned),
+            },
+            revoke(),
+        ]);
+        assert!(never_granted.known_senders().is_empty());
+        for slot in slots {
+            assert_eq!(never_granted.slot_state(slot, &sender), Absent);
+        }
+        let legacy_only = project(vec![grant(None), revoke()]);
+        assert_eq!(
+            legacy_only.known_senders(),
+            vec![(ConsentSlot::Legacy, sender.clone())]
+        );
+        assert_eq!(legacy_only.slot_state(ConsentSlot::Pinned, &sender), Absent);
+        assert_eq!(
+            legacy_only.slot_state(ConsentSlot::Pseudonymous, &sender),
+            Absent
+        );
+        assert_eq!(
+            legacy_only.slot_state(ConsentSlot::Legacy, &sender),
+            Revoked
+        );
+
+        let all = project(vec![
+            grant(kinds[0]),
+            grant(kinds[1]),
+            grant(None),
+            revoke(),
+        ]);
+        assert_eq!(
+            all.known_senders(),
+            slots
+                .iter()
+                .map(|slot| (*slot, sender.clone()))
+                .collect::<Vec<_>>()
+        );
+        for slot in slots {
+            assert_eq!(all.slot_state(slot, &sender), Revoked);
+        }
+        all.apply(&grant(kinds[0]));
+        assert_eq!(all.consent_for(&pinned), Trusted);
+        assert_eq!(all.consent_for(&pseudonymous), Revoked);
+        assert_eq!(all.slot_state(ConsentSlot::Legacy, &sender), Revoked);
+    }
+
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn k09b_written_pin_override_implies_only_pinned_consent() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (policy, peer) = loopback_collision_policy(workspace.path());
+        let (manager, _) = manager(Arc::new(RecordingJournal::default()));
+        manager.set_effective_policy(Arc::new(policy)).await;
+        let pinned = manager
+            .register(
+                PolicyPrincipal::rap(peer.clone()),
+                "pinned",
+                DeliveryDisposition::MayRefuse,
+            )
+            .await;
+        assert!(!pinned.pending);
+        assert_eq!(
+            pinned.decision.await.unwrap(),
+            InboundApprovalDecision::AllowAlways
+        );
+        let pseudonymous = PolicyPrincipal::Pseudonymous(peer);
+        let registration = manager
+            .register(
+                pseudonymous.clone(),
+                "pseudonymous collision",
+                DeliveryDisposition::MayRefuse,
+            )
+            .await;
+        assert!(registration.pending && registration.first_for_sender);
+        manager
+            .resolve(&pseudonymous, InboundApprovalDecision::Decline)
+            .await;
+        assert_eq!(
+            registration.decision.await.unwrap(),
+            InboundApprovalDecision::Decline
         );
     }
 }

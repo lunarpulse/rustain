@@ -36,8 +36,8 @@ use std::collections::BTreeMap;
 
 use crate::domain::models::{
     A2aPeerSpec, EffectivePolicy, INDIVIDUAL_POLICY_FILE, IndividualPolicy, InvalidMessageTypeKey,
-    InvalidMessageTypeKeyReason, MessageTypeOverride, NotificationUrgency, PeerId, PolicySource,
-    Resolved, ResponseMode, SemanticMessageType, SenderBinding, SenderIdentity,
+    InvalidMessageTypeKeyReason, MessageTypeOverride, NotificationUrgency, PeerId, PolicyPrincipal,
+    PolicySource, Resolved, ResponseMode, SemanticMessageType, SenderBinding, SenderIdentity,
     SenderIdentityConflict, SenderPolicy, SharingBreadth, TEAM_POLICY_FILE, TeamPolicy,
     TeamTypeOverride, TransparencyInvariant, semantic_message_type_metadata,
 };
@@ -440,12 +440,16 @@ impl std::ops::Deref for SenderPolicyMatch<'_> {
     }
 }
 
-/// Look a resolved override up by verified identity and closed message type.
+/// Look a resolved override up by pinned identity and closed message type.
 pub fn sender_policy_for<'a>(
     policy: &'a EffectivePolicy,
-    sender: &PeerId,
+    principal: &PolicyPrincipal,
     message_type: SemanticMessageType,
 ) -> Option<SenderPolicyMatch<'a>> {
+    let sender = match principal {
+        PolicyPrincipal::Pinned { peer, .. } => peer,
+        PolicyPrincipal::Pseudonymous(_) => return None,
+    };
     policy
         .sender_overrides
         .iter()
@@ -1443,9 +1447,13 @@ mod tests {
         // Before the rename.
         let before = resolve_effective_policy(&policy, None, &[peer("marcus-arch", Some(key))]);
         assert_eq!(
-            sender_policy_for(&before, &identity, SemanticMessageType::Unknown)
-                .and_then(|sender| sender.response_mode.clone())
-                .map(|resolved| resolved.value),
+            sender_policy_for(
+                &before,
+                &PolicyPrincipal::rap(identity.clone()),
+                SemanticMessageType::Unknown
+            )
+            .and_then(|sender| sender.response_mode.clone())
+            .map(|resolved| resolved.value),
             Some(ResponseMode::NotifyAndDraft)
         );
 
@@ -1453,9 +1461,13 @@ mod tests {
         // file's alias alone. The binding is the identity, so it holds.
         let after = resolve_effective_policy(&policy, None, &[peer("marcus", Some(key))]);
         assert_eq!(
-            sender_policy_for(&after, &identity, SemanticMessageType::Unknown)
-                .and_then(|sender| sender.response_mode.clone())
-                .map(|resolved| resolved.value),
+            sender_policy_for(
+                &after,
+                &PolicyPrincipal::rap(identity.clone()),
+                SemanticMessageType::Unknown
+            )
+            .and_then(|sender| sender.response_mode.clone())
+            .map(|resolved| resolved.value),
             Some(ResponseMode::NotifyAndDraft),
             "an explicit identity binding must survive an alias rename"
         );
@@ -1478,9 +1490,13 @@ mod tests {
         let effective = resolve_effective_policy(&policy, None, &[peer("lena-po", Some(key))]);
         let identity = PeerId::from_public_key(&key).unwrap();
         assert_eq!(
-            sender_policy_for(&effective, &identity, SemanticMessageType::Unknown)
-                .and_then(|sender| sender.notification.clone())
-                .map(|resolved| resolved.value),
+            sender_policy_for(
+                &effective,
+                &PolicyPrincipal::rap(identity),
+                SemanticMessageType::Unknown
+            )
+            .and_then(|sender| sender.notification.clone())
+            .map(|resolved| resolved.value),
             Some(NotificationUrgency::Immediate)
         );
     }
@@ -1503,7 +1519,7 @@ mod tests {
         assert_eq!(
             sender_policy_for(
                 &effective,
-                &alias_pseudonym("drive-by"),
+                &PolicyPrincipal::Pseudonymous(alias_pseudonym("drive-by")),
                 SemanticMessageType::Unknown,
             ),
             None,
@@ -1559,9 +1575,13 @@ mod tests {
         // sender that presents this key in a signed envelope resolves to the
         // pinned identity, so the override really does bind for it …
         assert_eq!(
-            sender_policy_for(&effective, &pinned, SemanticMessageType::Unknown)
-                .and_then(|sender| sender.response_mode.clone())
-                .map(|resolved| resolved.value),
+            sender_policy_for(
+                &effective,
+                &PolicyPrincipal::rap(pinned.clone()),
+                SemanticMessageType::Unknown
+            )
+            .and_then(|sender| sender.response_mode.clone())
+            .map(|resolved| resolved.value),
             Some(ResponseMode::NotifyAndAuto),
             "a declared pin must still bind for the identity it names"
         );
@@ -1571,7 +1591,7 @@ mod tests {
             assert_eq!(
                 sender_policy_for(
                     &effective,
-                    &alias_pseudonym(handle),
+                    &PolicyPrincipal::Pseudonymous(alias_pseudonym(handle)),
                     SemanticMessageType::Unknown,
                 ),
                 None,
@@ -1617,7 +1637,7 @@ mod tests {
         assert_eq!(
             sender_policy_for(
                 &effective,
-                &alias_pseudonym("ghost"),
+                &PolicyPrincipal::Pseudonymous(alias_pseudonym("ghost")),
                 SemanticMessageType::Unknown,
             ),
             None
@@ -1653,8 +1673,12 @@ mod tests {
 
         let effective =
             resolve_effective_policy(&policy, Some(&team_policy), &[peer("peer", Some(key))]);
-        let sender = sender_policy_for(&effective, &identity, SemanticMessageType::Unknown)
-            .expect("sender policy");
+        let sender = sender_policy_for(
+            &effective,
+            &PolicyPrincipal::rap(identity),
+            SemanticMessageType::Unknown,
+        )
+        .expect("sender policy");
         assert_eq!(
             sender.response_mode.as_ref().map(|resolved| resolved.value),
             Some(ResponseMode::NotifyAndWait)
@@ -1719,7 +1743,11 @@ mod tests {
         assert!(effective.sender_overrides.is_empty());
         assert_eq!(effective.sender_conflicts.len(), 1);
         assert_eq!(
-            sender_policy_for(&effective, &identity, SemanticMessageType::Unknown),
+            sender_policy_for(
+                &effective,
+                &PolicyPrincipal::rap(identity),
+                SemanticMessageType::Unknown
+            ),
             None
         );
         let explanation = explain_effective_policy(&effective, &[]);
@@ -1729,6 +1757,121 @@ mod tests {
                 && row.detail.contains("first")
                 && row.detail.contains("second")
         }));
+    }
+
+    /// K09a: the lookup is keyed on provenance. A pinned override reaches `rap(pin)`
+    /// for every message type, and never a `Pseudonymous` principal — even one whose
+    /// `PeerId` bytes equal the pin (the A2A loopback pseudonym, `sha256("loopback")`).
+    #[test]
+    fn sender_policy_lookup_matches_pinned_principals_and_never_a_colliding_pseudonym() {
+        use sha2::Digest as _;
+        let collision_key: [u8; 32] = sha2::Sha256::digest(b"loopback").into();
+        let collision = PeerId::from_public_key(&collision_key).unwrap();
+        assert_eq!(collision, alias_pseudonym("loopback"));
+        let other_key = [9u8; 32];
+        let other = PeerId::from_public_key(&other_key).unwrap();
+        let unregistered = PeerId::from_public_key(&[10u8; 32]).unwrap();
+
+        let mut policy = IndividualPolicy::default();
+        policy.overrides.insert(
+            "collides".to_owned(),
+            SenderOverride {
+                peer_id: Some(collision.as_str().to_owned()),
+                response_mode: Some(ResponseMode::NotifyAndDraft),
+                per_type: std::collections::BTreeMap::from([(
+                    "bug_report".to_owned(),
+                    crate::domain::models::MessageTypeOverride {
+                        response_mode: Some(ResponseMode::NotifyAndWait),
+                        ..Default::default()
+                    },
+                )]),
+                ..SenderOverride::default()
+            },
+        );
+        policy.overrides.insert(
+            "other".to_owned(),
+            SenderOverride {
+                peer_id: Some(other.as_str().to_owned()),
+                notification: Some(NotificationUrgency::Immediate),
+                ..SenderOverride::default()
+            },
+        );
+        let effective = resolve_effective_policy(
+            &policy,
+            None,
+            &[
+                peer("collides", Some(collision_key)),
+                peer("other", Some(other_key)),
+            ],
+        );
+        assert_eq!(effective.sender_overrides.len(), 2);
+
+        // Positive controls: a RAP principal reaches its own override only.
+        let hit = sender_policy_for(
+            &effective,
+            &PolicyPrincipal::rap(collision.clone()),
+            SemanticMessageType::Consultation,
+        )
+        .expect("rap(pin) matches the pinned override");
+        assert_eq!(
+            hit.response_mode.as_ref().map(|resolved| resolved.value),
+            Some(ResponseMode::NotifyAndDraft)
+        );
+        assert!(
+            hit.type_override.is_none(),
+            "no per-type block for this type"
+        );
+        let typed = sender_policy_for(
+            &effective,
+            &PolicyPrincipal::rap(collision.clone()),
+            SemanticMessageType::BugReport,
+        )
+        .expect("rap(pin) matches for the typed lookup");
+        assert_eq!(
+            typed.type_override.and_then(|block| block.response_mode),
+            Some(ResponseMode::NotifyAndWait)
+        );
+        let other_hit = sender_policy_for(
+            &effective,
+            &PolicyPrincipal::rap(other.clone()),
+            SemanticMessageType::Unknown,
+        )
+        .expect("the second pinned override matches its own peer");
+        assert_eq!(
+            other_hit
+                .notification
+                .as_ref()
+                .map(|resolved| resolved.value),
+            Some(NotificationUrgency::Immediate)
+        );
+        assert!(other_hit.response_mode.is_none());
+        assert!(
+            sender_policy_for(
+                &effective,
+                &PolicyPrincipal::rap(unregistered.clone()),
+                SemanticMessageType::Unknown,
+            )
+            .is_none()
+        );
+
+        // The collision and every other pseudonym: never a match, for any type.
+        for peer_id in [&collision, &other, &unregistered] {
+            for message_type in [
+                SemanticMessageType::Unknown,
+                SemanticMessageType::Consultation,
+                SemanticMessageType::BugReport,
+            ] {
+                assert!(
+                    sender_policy_for(
+                        &effective,
+                        &PolicyPrincipal::Pseudonymous(peer_id.clone()),
+                        message_type,
+                    )
+                    .is_none(),
+                    "a pseudonym equal to a pin must not inherit its override ({peer_id:?})"
+                );
+            }
+        }
     }
 
     #[test]

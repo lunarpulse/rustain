@@ -84,7 +84,7 @@ fn should_warn_auto_authority_widening(
     peers: &[A2aPeerSpec],
     projection: &dyn crate::domain::ports::ConsentProjectionQuery,
 ) -> bool {
-    use crate::domain::models::{ResponseMode, SenderPolicy};
+    use crate::domain::models::{PolicyPrincipal, ResponseMode, SenderPolicy};
     use crate::domain::ports::ConsentState;
 
     if admission != crate::adapters::a2a::config::A2aAdmissionPolicy::Allow {
@@ -107,8 +107,8 @@ fn should_warn_auto_authority_widening(
             .map_or(default_auto, |mode| {
                 mode.value == ResponseMode::NotifyAndAuto
             });
-        let has_consent =
-            sender_override.is_some() || projection.consent_for(&peer_id) == ConsentState::Trusted;
+        let has_consent = sender_override.is_some()
+            || projection.consent_for(&PolicyPrincipal::rap(peer_id)) == ConsentState::Trusted;
         effective_auto && !has_consent
     })
 }
@@ -259,6 +259,7 @@ mod tests {
         projection.apply(&RoomEvent::ConsentGranted {
             sender: Some(trusted_id),
             granted_at: 1,
+            principal: None,
         });
         let mut policy = validate_startup_policies(
             tempfile::tempdir().unwrap().path(),
@@ -307,6 +308,69 @@ mod tests {
                 &projection,
             ),
             "a rotated pin is a new untrusted sender and re-opens the warning"
+        );
+    }
+
+    /// K03d: the widening warning asks `consent_for(rap(pin))`. A typed `Pseudonymous`
+    /// grant that merely shares the pin's `PeerId` must not silence it; a `Pinned` or
+    /// legacy grant does.
+    #[test]
+    fn widening_warning_ignores_a_pseudonymous_grant_sharing_the_pin() {
+        use crate::adapters::a2a::config::A2aAdmissionPolicy;
+        use crate::domain::models::{
+            A2aPeerSource, PinnedKey, PinnedKeyAlgorithm, PrincipalKind, RedactedUrl, ResponseMode,
+            RoomEvent,
+        };
+        use base64::Engine as _;
+
+        let roster = [A2aPeerSpec::new(
+            "pinned-peer",
+            RedactedUrl::new("https://peer.example/a2a".to_owned()),
+            A2aPeerSource::Workspace,
+        )
+        .with_pinned_key(Some(PinnedKey::new(
+            PinnedKeyAlgorithm::EdDsa,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([21u8; 32]),
+            None,
+        )))];
+        let pin = roster[0].pinned_identity().unwrap();
+        let mut policy = validate_startup_policies(
+            tempfile::tempdir().unwrap().path(),
+            &roster,
+            &crate::adapters::policy::EmptyConsentProjection,
+        )
+        .unwrap();
+        policy.automation.value = ResponseMode::NotifyAndAuto;
+
+        let warns = |principal: Option<Option<PrincipalKind>>| {
+            let projection = crate::adapters::policy::JournalConsentProjection::default();
+            if let Some(principal) = principal {
+                projection.apply(&RoomEvent::ConsentGranted {
+                    sender: Some(pin.clone()),
+                    granted_at: 1,
+                    principal,
+                });
+            }
+            should_warn_auto_authority_widening(
+                A2aAdmissionPolicy::Allow,
+                &policy,
+                &roster,
+                &projection,
+            )
+        };
+
+        assert!(warns(None), "control: no grant still warns");
+        assert!(
+            warns(Some(Some(PrincipalKind::Pseudonymous))),
+            "a pseudonymous grant sharing the pin's PeerId must not silence the warning"
+        );
+        assert!(
+            !warns(Some(Some(PrincipalKind::Pinned))),
+            "a typed pinned grant narrows the warning"
+        );
+        assert!(
+            !warns(Some(None)),
+            "a legacy grant reaches the RAP sender and narrows the warning"
         );
     }
 }

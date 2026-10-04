@@ -318,6 +318,7 @@ impl Supervisor {
             coordinator: coordinator.clone(),
             spoke: spoke.to_string(),
             gate: gate.to_string(),
+            principal: None,
         };
         // Durable-first (R5): a refusal is operator-observable across a restart,
         // not just a transient live event.

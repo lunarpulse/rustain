@@ -88,7 +88,7 @@ impl DeliveryPolicy for ModePolicy {
 
     fn response_policy_for_peer(
         &self,
-        _peer_id: &rustain::domain::models::PeerId,
+        _principal: &rustain::domain::models::PolicyPrincipal,
         _message_type: rustain::domain::models::SemanticMessageType,
     ) -> rustain::domain::ports::PeerResponsePolicy {
         rustain::domain::ports::PeerResponsePolicy {

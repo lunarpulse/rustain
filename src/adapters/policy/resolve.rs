@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use crate::domain::models::{A2aPeerSpec, EffectivePolicy};
-use crate::domain::ports::{ConsentProjectionQuery, ConsentState};
+use crate::domain::ports::{ConsentProjectionQuery, ConsentState, peer_consent_state};
 use crate::domain::services::team_policy::{
     ConsentLine, ConsentSource, PolicyExplanation, explain_effective_policy,
     resolve_effective_policy,
@@ -66,7 +66,13 @@ pub fn collect_consent_lines(
     policy: &EffectivePolicy,
     projection: &dyn ConsentProjectionQuery,
 ) -> Vec<ConsentLine> {
-    let journaled = projection.known_senders();
+    let mut journaled: Vec<_> = projection
+        .known_senders()
+        .into_iter()
+        .map(|(_, peer)| peer)
+        .collect();
+    journaled.sort();
+    journaled.dedup();
     let mut lines: Vec<ConsentLine> = journaled
         .iter()
         .map(|sender| {
@@ -81,7 +87,7 @@ pub fn collect_consent_lines(
             ConsentLine {
                 sender: display,
                 source: ConsentSource::Journaled,
-                state: projection.consent_for(sender),
+                state: peer_consent_state(projection, sender),
             }
         })
         .collect();
@@ -104,12 +110,14 @@ pub fn collect_consent_lines(
 
 #[cfg(test)]
 mod tests {
+    use super::super::JournalConsentProjection;
     use super::*;
     use crate::domain::models::{
-        A2aPeerSource, A2aPeerSpec, INDIVIDUAL_POLICY_FILE, IndividualPolicy, NotificationUrgency,
-        PeerId, PinnedKey, PinnedKeyAlgorithm, RedactedUrl, ResponseMode, SenderOverride,
-        TEAM_POLICY_FILE,
+        A2aPeerSource, A2aPeerSpec, INDIVIDUAL_POLICY_FILE, IndividualPolicy, JournalEntry,
+        JournalRecord, NotificationUrgency, PeerId, PinnedKey, PinnedKeyAlgorithm, PrincipalKind,
+        RedactedUrl, ResponseMode, RoomEvent, SenderOverride, TEAM_POLICY_FILE,
     };
+    use crate::domain::ports::ConsentSlot;
     use base64::Engine as _;
 
     fn write(dir: &Path, name: &str, body: &str) {
@@ -192,7 +200,7 @@ mod tests {
         assert!(
             crate::domain::services::team_policy::sender_policy_for(
                 &policy,
-                &identity,
+                &crate::domain::models::PolicyPrincipal::rap(identity.clone()),
                 crate::domain::models::SemanticMessageType::Unknown,
             )
             .is_some()
@@ -270,7 +278,7 @@ mod tests {
             let (resolved, _) = resolve(dir.path()).expect("policy resolves");
             let bound = crate::domain::services::team_policy::sender_policy_for(
                 &resolved,
-                &identity,
+                &crate::domain::models::PolicyPrincipal::rap(identity.clone()),
                 crate::domain::models::SemanticMessageType::Unknown,
             )
             .unwrap_or_else(|| panic!("override lost after the peer was renamed to `{alias}`"));
@@ -288,11 +296,15 @@ mod tests {
     fn a_journaled_sender_is_not_duplicated_by_the_toml_pass() {
         struct OneGrant(PeerId);
         impl ConsentProjectionQuery for OneGrant {
-            fn known_senders(&self) -> Vec<PeerId> {
-                vec![self.0.clone()]
+            fn known_senders(&self) -> Vec<(ConsentSlot, PeerId)> {
+                vec![(ConsentSlot::Legacy, self.0.clone())]
             }
-            fn consent_for(&self, _sender: &PeerId) -> ConsentState {
-                ConsentState::Trusted
+            fn slot_state(&self, slot: ConsentSlot, sender: &PeerId) -> ConsentState {
+                if slot == ConsentSlot::Legacy && sender == &self.0 {
+                    ConsentState::Trusted
+                } else {
+                    ConsentState::None
+                }
             }
         }
 
@@ -341,5 +353,111 @@ mod tests {
         assert_eq!(lines[0].sender, "lena-po");
         assert_eq!(lines[0].source, ConsentSource::TomlImplied);
         assert_eq!(lines[0].state, ConsentState::None);
+    }
+
+    /// K03c: the production path (written files -> `resolve_workspace_policy`) shows
+    /// one consent line per distinct journal `PeerId`, whatever slots it holds, and
+    /// suppresses the TOML-implied duplicate only for journaled pins.
+    #[test]
+    fn written_files_yield_one_consent_line_per_distinct_journal_peer() {
+        let key_p = [11u8; 32];
+        let key_q = [12u8; 32];
+        let key_r = [13u8; 32];
+        let key_z = [14u8; 32];
+        let (p, q, r) = (
+            PeerId::from_public_key(&key_p).unwrap(),
+            PeerId::from_public_key(&key_q).unwrap(),
+            PeerId::from_public_key(&key_r).unwrap(),
+        );
+        let pin = |key: [u8; 32]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            INDIVIDUAL_POLICY_FILE,
+            "[interaction.overrides.marcus]\nnotification = \"immediate\"\n\
+             [interaction.overrides.lena]\nnotification = \"immediate\"\n\
+             [interaction.overrides.zed]\nnotification = \"immediate\"\n",
+        );
+        write(
+            dir.path(),
+            "a2a.json",
+            &format!(
+                r#"{{"agents":{{
+                "marcus":{{"url":"https://p.example/a2a","pinnedKey":{{"alg":"EdDSA","x":"{}"}}}},
+                "lena":{{"url":"https://q.example/a2a","pinnedKey":{{"alg":"EdDSA","x":"{}"}}}},
+                "zed":{{"url":"https://z.example/a2a","pinnedKey":{{"alg":"EdDSA","x":"{}"}}}}}}}}"#,
+                pin(key_p),
+                pin(key_q),
+                pin(key_z)
+            ),
+        );
+
+        let grant = |seq: u64, sender: &PeerId, principal: Option<PrincipalKind>| {
+            JournalEntry::new(
+                seq,
+                JournalRecord::Room(RoomEvent::ConsentGranted {
+                    sender: Some(sender.clone()),
+                    granted_at: seq as i64,
+                    principal,
+                }),
+                seq as i64,
+            )
+        };
+        let revoke = |seq: u64, sender: &PeerId| {
+            JournalEntry::new(
+                seq,
+                JournalRecord::Room(RoomEvent::ConsentRevoked {
+                    sender: Some(sender.clone()),
+                    revoked_at: seq as i64,
+                }),
+                seq as i64,
+            )
+        };
+        // P: legacy + pseudonymous + pinned slots (revoke between, then a pinned
+        // re-grant); Q: legacy grant then revoke; R: pseudonymous-only, no alias.
+        let entries = vec![
+            grant(1, &p, None),
+            grant(2, &p, Some(PrincipalKind::Pseudonymous)),
+            revoke(3, &p),
+            grant(4, &p, Some(PrincipalKind::Pinned)),
+            grant(5, &q, None),
+            revoke(6, &q),
+            grant(7, &r, Some(PrincipalKind::Pseudonymous)),
+        ];
+        let projection = JournalConsentProjection::from_entries(&entries);
+        assert_eq!(
+            projection.known_senders().len(),
+            5,
+            "fixture must hold three slots for P, one each for Q and R"
+        );
+
+        let peers = crate::adapters::a2a::config::parse_workspace_a2a_config(
+            &crate::infrastructure::paths::workspace_a2a_config_path(dir.path()),
+        )
+        .unwrap();
+        let (_, explanation) =
+            resolve_workspace_policy(dir.path(), &peers, &projection).expect("policy resolves");
+
+        let mut journaled: Vec<(&PeerId, &str, ConsentState)> = vec![
+            (&p, "marcus", ConsentState::Trusted),
+            (&q, "lena", ConsentState::Revoked),
+            (&r, r.as_str(), ConsentState::Trusted),
+        ];
+        journaled.sort_by(|a, b| a.0.cmp(b.0));
+        let mut expected: Vec<(String, ConsentSource, ConsentState)> = journaled
+            .into_iter()
+            .map(|(_, label, state)| (label.to_owned(), ConsentSource::Journaled, state))
+            .collect();
+        expected.push((
+            "zed".to_owned(),
+            ConsentSource::TomlImplied,
+            ConsentState::None,
+        ));
+        let actual: Vec<_> = explanation
+            .consent
+            .iter()
+            .map(|line| (line.sender.clone(), line.source, line.state))
+            .collect();
+        assert_eq!(actual, expected);
     }
 }

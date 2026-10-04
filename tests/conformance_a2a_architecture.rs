@@ -226,6 +226,176 @@ fn every_public_a2a_enum_is_non_exhaustive() {
     );
 }
 
+/// K08a: policy authority is introduced only at the two ingress funnels.
+#[test]
+fn k08a_policy_principal_construction_funnel() {
+    let src = root().join("src");
+    let mut sites = Vec::new();
+    let forbidden_impl = regex::Regex::new(
+        r"impl(?:\s*<[^>]*>)?\s+(?:From\s*<[^>]*\bPeerId\s*>|Default)\s+for\s+(?:[\w:]+::)?PolicyPrincipal\b",
+    )
+    .unwrap();
+    let construction =
+        regex::Regex::new(r"\b(?:PolicyPrincipal|Self)::(?:Pseudonymous\s*\(|Pinned\s*\{)")
+            .unwrap();
+    let variant_import =
+        regex::Regex::new(r"PolicyPrincipal\s*::\s*[{*]|PolicyPrincipal\s+as\s").unwrap();
+    visit_rs(&src, &mut |path, text| {
+        let production = without_test_items(text);
+        let relative = path.strip_prefix(&src).unwrap();
+        let joined = production
+            .iter()
+            .map(|(_, line)| *line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !forbidden_impl.is_match(&joined),
+            "implicit principal construction in {}",
+            relative.display()
+        );
+        for (number, line) in production {
+            let line = line.trim();
+            if line.starts_with("//") {
+                continue;
+            }
+            assert!(
+                !line.starts_with("use ") || !variant_import.is_match(line),
+                "aliased principal variants in {}:{number}",
+                relative.display()
+            );
+            if construction.is_match(expression_side(line)) {
+                sites.push((relative.to_path_buf(), number));
+            }
+        }
+    });
+    let files: Vec<_> = sites.iter().map(|(path, _)| path.clone()).collect();
+    assert_eq!(sites.len(), 2, "principal construction sites: {sites:?}");
+    assert_eq!(
+        files.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            PathBuf::from("domain/models/policy_principal.rs"),
+            PathBuf::from("adapters/a2a/exec.rs"),
+        ]),
+        "principal construction sites: {sites:?}"
+    );
+}
+
+/// Production lines of a rustfmt-formatted file, numbered from 1: every item
+/// carrying `#[cfg(test)]` or `#[cfg(all(test, …))]` is dropped through its
+/// closing line at the item's own indentation. Relies on `cargo fmt --check`
+/// (CI); a misformatted test item leaks into the scan and fails loudly, and
+/// the skip never runs past a dedent, so it cannot swallow enclosing code.
+fn without_test_items(text: &str) -> Vec<(usize, &str)> {
+    let test_cfg = regex::Regex::new(r"^#\[cfg\((?:test|all\((?:[^()]*,\s*)?test\s*[,)])").unwrap();
+    let indent_of = |line: &str| line.len() - line.trim_start().len();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut kept = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if !test_cfg.is_match(trimmed) {
+            kept.push((index + 1, lines[index]));
+            index += 1;
+            continue;
+        }
+        // The item starts on the attribute line itself (`#[cfg(test)] use x;`)
+        // or after any further attributes and comments.
+        let inline_item = trimmed
+            .find(']')
+            .is_some_and(|end| !trimmed[end + 1..].trim().is_empty());
+        if !inline_item {
+            index += 1;
+            while index < lines.len() {
+                let next = lines[index].trim_start();
+                if !(next.starts_with("#[") || next.starts_with("//")) {
+                    break;
+                }
+                index += 1;
+            }
+        }
+        let Some(start) = lines.get(index) else {
+            break;
+        };
+        let indent = indent_of(start);
+        let start = start.trim_end();
+        index += 1;
+        if start.ends_with(';') || (start.ends_with('}') && start.contains('{')) {
+            continue;
+        }
+        while let Some(line) = lines.get(index) {
+            let body = line.trim();
+            if !body.is_empty() && indent_of(line) < indent {
+                break;
+            }
+            index += 1;
+            if indent_of(line) == indent
+                && body.starts_with(['}', ']', ')'])
+                && !body.ends_with('{')
+            {
+                break;
+            }
+        }
+    }
+    kept
+}
+
+/// The part of a line in expression position: right of the last `=>` in a
+/// match arm, right of `=` in any `let` / `if let` / `while let` binding;
+/// nothing for `matches!` (its principal argument is a pattern).
+fn expression_side(line: &str) -> &str {
+    if let Some((_, right)) = line.rsplit_once("=>") {
+        return right;
+    }
+    if line.contains("matches!") {
+        return "";
+    }
+    if line.starts_with("let ") || line.contains("if let ") || line.contains("while let ") {
+        return line.split_once(" = ").map_or("", |(_, right)| right);
+    }
+    line
+}
+
+/// K08b: future principal and storage kinds require explicit policy decisions.
+#[test]
+fn k08b_policy_principal_enums_are_non_exhaustive() {
+    let mut found = BTreeSet::new();
+    for file in [
+        "src/domain/models/policy_principal.rs",
+        "src/domain/ports/consent_projection.rs",
+    ] {
+        let text = source(file);
+        let lines: Vec<_> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("pub enum ") else {
+                continue;
+            };
+            let name = rest.split_whitespace().next().unwrap();
+            if !matches!(
+                name,
+                "PolicyPrincipal" | "PinnedVia" | "PrincipalKind" | "ConsentSlot"
+            ) {
+                continue;
+            }
+            assert!(
+                lines[index.saturating_sub(4)..index]
+                    .join("\n")
+                    .contains("#[non_exhaustive]"),
+                "{name} in {file} must be #[non_exhaustive]"
+            );
+            found.insert(name.to_owned());
+        }
+    }
+    assert_eq!(
+        found,
+        BTreeSet::from([
+            "PolicyPrincipal".to_owned(),
+            "PinnedVia".to_owned(),
+            "PrincipalKind".to_owned(),
+            "ConsentSlot".to_owned(),
+        ])
+    );
+}
+
 #[test]
 fn signature_verification_remains_a_pure_raw_payload_function() {
     let jws = source("src/adapters/a2a/jws.rs");

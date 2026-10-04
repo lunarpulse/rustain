@@ -7754,6 +7754,7 @@ mod tests {
                     coordinator,
                     spoke,
                     gate,
+                    ..
                 } => {
                     let c = it.sym(coordinator.as_str());
                     lines.push(format!(
@@ -7911,7 +7912,9 @@ mod tests {
                         "journal PeerDigestFlushed flushed_at={flushed_at} count={count}"
                     ));
                 }
-                RoomEvent::ConsentGranted { sender, granted_at } => {
+                RoomEvent::ConsentGranted {
+                    sender, granted_at, ..
+                } => {
                     lines.push(format!(
                         "journal ConsentGranted sender={sender:?} granted_at={granted_at}"
                     ));

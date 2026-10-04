@@ -323,6 +323,7 @@ mod tests {
             .append_room(crate::domain::models::RoomEvent::ConsentGranted {
                 sender: Some(sender.clone()),
                 granted_at: 10,
+                principal: None,
             })
             .await
             .unwrap();

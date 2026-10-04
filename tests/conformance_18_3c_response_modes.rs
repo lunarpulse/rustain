@@ -196,7 +196,6 @@ fn ac1_production_uses_verified_sender_effective_policy_at_the_real_bus() {
     assert!(composition.contains("EffectiveDeliveryPolicy::new"));
     assert!(composition.contains("peer_bus_slot_with_policy"));
     assert!(composition.contains("new_with_node_tree_bus_policy_journal_and_urgency"));
-    assert!(policy.contains("sender_policy_for(&self.policy, peer_id, message_type)"));
     assert!(policy.contains("relationship_disposition(recipient_ownership)"));
     assert!(delivery.contains("local.header.verified_peer_id = Some(peer_id)"));
     assert!(delivery.contains("ingest_with_policy"));

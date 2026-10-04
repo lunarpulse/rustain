@@ -131,7 +131,7 @@ impl InboundPeerRuntime for DisclosureRuntime {
 
     async fn request_admission_approval(
         &self,
-        _peer_id: &PeerId,
+        _principal: &rustain::domain::models::PolicyPrincipal,
         _summary: &str,
     ) -> Result<InboundApprovalTicket, InboundPeerError> {
         Err(InboundPeerError::unavailable(
@@ -164,12 +164,12 @@ struct TypeRecordingRuntime {
 impl InboundPeerRuntime for TypeRecordingRuntime {
     fn response_policy(
         &self,
-        peer_id: &PeerId,
+        principal: &rustain::domain::models::PolicyPrincipal,
         message_type: SemanticMessageType,
     ) -> rustain::domain::ports::PeerResponsePolicy {
         let response = self.policy.as_ref().map_or_else(
             rustain::domain::ports::PeerResponsePolicy::default,
-            |policy| policy.response_policy_for_peer(peer_id, message_type),
+            |policy| policy.response_policy_for_peer(principal, message_type),
         );
         self.seen.lock().expect("seen lock").push(message_type);
         self.modes.lock().expect("mode lock").push(response.mode);
@@ -188,7 +188,7 @@ impl InboundPeerRuntime for TypeRecordingRuntime {
 
     async fn request_admission_approval(
         &self,
-        _peer_id: &PeerId,
+        _principal: &rustain::domain::models::PolicyPrincipal,
         _summary: &str,
     ) -> Result<InboundApprovalTicket, InboundPeerError> {
         Err(InboundPeerError::unavailable("approval is not used"))

@@ -1296,13 +1296,13 @@ async fn persist_sender_consent(
     trust: bool,
     now: i64,
 ) -> Result<(String, Option<crate::domain::models::RoomEvent>), String> {
-    use crate::domain::ports::ConsentProjectionQuery;
+    use crate::domain::ports::peer_consent_state;
 
     let sender = crate::adapters::tui::handlers::team_command::resolve_peer_target(target, peers)?;
     let projection = crate::adapters::policy::JournalConsentProjection::load_workspace(workspace)
         .await
         .map_err(|error| error.to_string())?;
-    let current = projection.consent_for(&sender);
+    let current = peer_consent_state(&projection, &sender);
     if trust && current == crate::domain::ports::ConsentState::Trusted {
         return Ok((
             format!("{target} ({sender}) is already trusted; no new grant was recorded."),
@@ -1320,6 +1320,7 @@ async fn persist_sender_consent(
         crate::domain::models::RoomEvent::ConsentGranted {
             sender: Some(sender.clone()),
             granted_at: now,
+            principal: None,
         }
     } else {
         crate::domain::models::RoomEvent::ConsentRevoked {
@@ -1487,7 +1488,10 @@ mod tests {
             crate::adapters::policy::JournalConsentProjection::load_workspace(workspace.path())
                 .await
                 .unwrap();
-        assert_eq!(projection.consent_for(&sender), ConsentState::Trusted);
+        assert_eq!(
+            projection.consent_for(&crate::domain::models::PolicyPrincipal::rap(sender.clone())),
+            ConsentState::Trusted
+        );
 
         let (_, duplicate) = persist_sender_consent(workspace.path(), &[], target, true, 11)
             .await
@@ -1511,7 +1515,10 @@ mod tests {
             crate::adapters::policy::JournalConsentProjection::load_workspace(workspace.path())
                 .await
                 .unwrap();
-        assert_eq!(projection.consent_for(&sender), ConsentState::Revoked);
+        assert_eq!(
+            projection.consent_for(&crate::domain::models::PolicyPrincipal::rap(sender)),
+            ConsentState::Revoked
+        );
         let reader =
             crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
                 workspace.path(),
@@ -1532,6 +1539,204 @@ mod tests {
                 }
             ]
         ));
+    }
+
+    /// Task 0 goldens (rustain HEAD e70db869; Story 19.18d0 Debug Log References):
+    /// `G1` is the `ConsentGranted` line, `G3` the bare `ConsentRevoked` line that
+    /// `persist_sender_consent(trust=false, now=1_700_000_000_000)` wrote. Both come
+    /// from production writers; the stamps below are the repro run's own.
+    const G1_SENDER: &str = "1220fd4baad8bbc21b3d13fcc22ab21561129ab39d9c335fd4f7509cf26ba15f7569";
+    const G1_CONSENT_GRANTED: &str = r##"{"schema_version":1,"seq":1,"recorded_at_ms":1790974662796,"record":{"kind":"room","payload":{"event":"consent_granted","sender":"1220fd4baad8bbc21b3d13fcc22ab21561129ab39d9c335fd4f7509cf26ba15f7569","granted_at":1790974662796}}}"##;
+    const G3_CONSENT_REVOKED: &str = r##"{"schema_version":1,"seq":2,"recorded_at_ms":1790974663108,"record":{"kind":"room","payload":{"event":"consent_revoked","sender":"1220fd4baad8bbc21b3d13fcc22ab21561129ab39d9c335fd4f7509cf26ba15f7569","revoked_at":1700000000000}}}"##;
+
+    fn golden_line(
+        seq: u64,
+        recorded_at_ms: i64,
+        event: crate::domain::models::RoomEvent,
+    ) -> String {
+        serde_json::to_string(&crate::domain::models::JournalEntry::new(
+            seq,
+            crate::domain::models::JournalRecord::Room(event),
+            recorded_at_ms,
+        ))
+        .unwrap()
+    }
+
+    /// K03b (untrust): any `Trusted` slot is revocable by `PeerId` — including a
+    /// pseudonym-only or legacy-only grant that `consent_for(rap(..))` cannot see —
+    /// with the bare `G3` event, every slot ends `Revoked`, a second untrust is a
+    /// no-op, and a later typed `Pinned` re-grant re-trusts `rap` only.
+    #[tokio::test]
+    async fn k03b_sender_revocation_and_legacy_trust_bytes() {
+        use crate::domain::models::{PolicyPrincipal, PrincipalKind, RoomEvent};
+        use crate::domain::ports::{ConsentSlot, peer_consent_state};
+
+        let sender = crate::domain::models::PeerId::parse(G1_SENDER).unwrap();
+        let target = sender.as_str();
+        let scenarios: [(&str, Vec<Option<PrincipalKind>>); 3] = [
+            ("pseudonym-only", vec![Some(PrincipalKind::Pseudonymous)]),
+            ("legacy-only", vec![None]),
+            (
+                "all-slots",
+                vec![
+                    Some(PrincipalKind::Pinned),
+                    Some(PrincipalKind::Pseudonymous),
+                    None,
+                ],
+            ),
+        ];
+
+        for (name, grants) in scenarios {
+            let workspace = tempfile::TempDir::new().unwrap();
+            let journal =
+                crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+                    workspace.path(),
+                )
+                .await
+                .unwrap();
+            for principal in &grants {
+                journal
+                    .append_room(RoomEvent::ConsentGranted {
+                        sender: Some(sender.clone()),
+                        granted_at: 5,
+                        principal: *principal,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let load = || async {
+                crate::adapters::policy::JournalConsentProjection::load_workspace(workspace.path())
+                    .await
+                    .unwrap()
+            };
+            let before = load().await;
+            assert_eq!(
+                peer_consent_state(&before, &sender),
+                ConsentState::Trusted,
+                "{name}"
+            );
+            assert_eq!(before.known_senders().len(), grants.len(), "{name}");
+            // The reason untrust must not ask `consent_for(rap(..))`.
+            let rap_view = before.consent_for(&PolicyPrincipal::rap(sender.clone()));
+            match name {
+                "pseudonym-only" => assert_eq!(rap_view, ConsentState::None),
+                _ => assert_eq!(rap_view, ConsentState::Trusted),
+            }
+
+            let (message, revoke) =
+                persist_sender_consent(workspace.path(), &[], target, false, 1_700_000_000_000)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                message,
+                format!("Revoked trust for {target} ({sender}). Future tasks require consent."),
+                "{name}"
+            );
+            let revoke = revoke.unwrap_or_else(|| panic!("{name}: untrust must revoke"));
+            assert_eq!(
+                golden_line(2, 1790974663108, revoke),
+                G3_CONSENT_REVOKED,
+                "{name}"
+            );
+
+            let after = load().await;
+            let cells = after.known_senders();
+            assert_eq!(cells.len(), grants.len(), "{name}: revoke adds no cells");
+            for (slot, peer) in &cells {
+                assert_eq!(
+                    after.slot_state(*slot, peer),
+                    ConsentState::Revoked,
+                    "{name}: {slot:?}"
+                );
+            }
+            assert_eq!(
+                peer_consent_state(&after, &sender),
+                ConsentState::Revoked,
+                "{name}"
+            );
+
+            let (message, again) =
+                persist_sender_consent(workspace.path(), &[], target, false, 1_700_000_000_001)
+                    .await
+                    .unwrap();
+            assert!(again.is_none(), "{name}");
+            assert_eq!(
+                message,
+                format!("No active grant for {target} ({sender}); nothing changed."),
+                "{name}"
+            );
+
+            // A later typed `Pinned` grant re-trusts the RAP principal only.
+            journal
+                .append_room(RoomEvent::ConsentGranted {
+                    sender: Some(sender.clone()),
+                    granted_at: 20,
+                    principal: Some(PrincipalKind::Pinned),
+                })
+                .await
+                .unwrap();
+            let regranted = load().await;
+            assert_eq!(
+                regranted.consent_for(&PolicyPrincipal::rap(sender.clone())),
+                ConsentState::Trusted,
+                "{name}"
+            );
+            assert_eq!(
+                regranted.consent_for(&PolicyPrincipal::Pseudonymous(sender.clone())),
+                ConsentState::Revoked,
+                "{name}: a pinned re-grant must not re-trust the pseudonym"
+            );
+            assert_eq!(
+                regranted.slot_state(ConsentSlot::Pseudonymous, &sender) == ConsentState::Revoked,
+                grants.contains(&Some(PrincipalKind::Pseudonymous)),
+                "{name}"
+            );
+        }
+        check_legacy_trust_bytes().await;
+    }
+
+    /// K03b (unchanged `trust` branch, D2): no production caller, no provenance
+    /// invented — the emitted bytes are `G1` (`principal` absent) for a raw hex
+    /// target and for a roster alias.
+    async fn check_legacy_trust_bytes() {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+
+        let raw = tempfile::TempDir::new().unwrap();
+        let (_, event) = persist_sender_consent(raw.path(), &[], G1_SENDER, true, 1790974662796)
+            .await
+            .unwrap();
+        assert_eq!(
+            golden_line(1, 1790974662796, event.unwrap()),
+            G1_CONSENT_GRANTED
+        );
+
+        let handle = format!(
+            "apikey:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(Sha256::digest(b"rustain-19-18d0-r1"))
+        );
+        let key = Sha256::digest(handle.as_bytes());
+        let pinned_peer = crate::domain::models::PeerId::from_public_key(&key).unwrap();
+        assert_eq!(pinned_peer.as_str(), G1_SENDER);
+        let roster = [crate::domain::models::A2aPeerSpec::new(
+            "alice",
+            crate::domain::models::RedactedUrl::new("https://alice.example/a2a".to_owned()),
+            crate::domain::models::A2aPeerSource::Workspace,
+        )
+        .with_pinned_key(Some(crate::domain::models::PinnedKey::new(
+            crate::domain::models::PinnedKeyAlgorithm::EdDsa,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key),
+            None,
+        )))];
+        let aliased = tempfile::TempDir::new().unwrap();
+        let (_, event) =
+            persist_sender_consent(aliased.path(), &roster, "alice", true, 1790974662796)
+                .await
+                .unwrap();
+        let line = golden_line(1, 1790974662796, event.unwrap());
+        assert_eq!(line, G1_CONSENT_GRANTED);
+        assert!(!line.contains("principal"), "{line}");
     }
 
     /// A real `AppState` over `workspace`, composed exactly as the startup

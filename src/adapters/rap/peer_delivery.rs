@@ -1604,7 +1604,7 @@ mod tests {
 
         fn response_policy_for_peer(
             &self,
-            _peer_id: &PeerId,
+            _principal: &crate::domain::models::PolicyPrincipal,
             _message_type: crate::domain::models::SemanticMessageType,
         ) -> crate::domain::ports::PeerResponsePolicy {
             crate::domain::ports::PeerResponsePolicy {
@@ -1625,7 +1625,7 @@ mod tests {
 
         fn response_policy_for_peer(
             &self,
-            _peer_id: &PeerId,
+            _principal: &crate::domain::models::PolicyPrincipal,
             message_type: crate::domain::models::SemanticMessageType,
         ) -> crate::domain::ports::PeerResponsePolicy {
             self.0.lock().push(message_type);

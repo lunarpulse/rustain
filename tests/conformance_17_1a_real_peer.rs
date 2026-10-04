@@ -220,6 +220,7 @@ async fn real_daemon_accepts_signed_envelope_and_rejects_mutations() {
         .append_room(rustain::domain::models::RoomEvent::ConsentGranted {
             sender: Some(signer.identity().peer_id.clone()),
             granted_at: SystemClock::default().wall_now_ms(),
+            principal: None,
         })
         .await
         .expect("pre-grant real peer");

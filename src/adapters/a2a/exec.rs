@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::models::{AgentId, ItemAddress, NodeState, PeerId, RapTaskState};
+use crate::domain::models::{
+    AgentId, ItemAddress, NodeState, PeerId, PolicyPrincipal, RapTaskState,
+};
 
 /// Whether a task is waiting on a human before it may run.
 ///
@@ -105,6 +107,12 @@ impl SubmitterKey {
     #[must_use]
     pub fn pseudonymous_peer_id(&self) -> PeerId {
         PeerId::from_public_key(&Sha256::digest(self.0.as_bytes())).unwrap()
+    }
+
+    /// Every current submitter handle is a pseudonym, not a pinned identity.
+    #[must_use]
+    pub fn policy_principal(&self) -> PolicyPrincipal {
+        PolicyPrincipal::Pseudonymous(self.pseudonymous_peer_id())
     }
 
     /// The opaque handle, for encoding into a node id.
@@ -705,6 +713,22 @@ mod tests {
             SubmitterKey::loopback().pseudonymous_peer_id(),
             first.pseudonymous_peer_id()
         );
+    }
+
+    #[test]
+    fn every_submitter_handle_remains_pseudonymous() {
+        for submitter in [
+            SubmitterKey::loopback(),
+            SubmitterKey::from_api_key("key"),
+            SubmitterKey::from_encoded("future:opaque-handle".to_owned()),
+        ] {
+            let principal = submitter.policy_principal();
+            assert_eq!(
+                principal.kind(),
+                crate::domain::models::PrincipalKind::Pseudonymous
+            );
+            assert_eq!(principal.peer(), &submitter.pseudonymous_peer_id());
+        }
     }
 
     #[test]

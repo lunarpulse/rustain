@@ -5,7 +5,7 @@
 //! after successful consent appends. This keeps journal I/O out of the domain
 //! resolver and the delivery hot path.
 
-use crate::domain::models::PeerId;
+use crate::domain::models::{PeerId, PinnedVia, PolicyPrincipal};
 
 /// Whether a sender holds a consent grant.
 #[non_exhaustive]
@@ -20,17 +20,60 @@ pub enum ConsentState {
     None,
 }
 
+/// Storage namespace for typed grants and grants written before provenance.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConsentSlot {
+    Pinned,
+    Pseudonymous,
+    Legacy,
+}
+
 /// Read-only view of journaled per-sender consent.
 ///
 /// Sync and effect-free at the trait level: the explainer that consumes it is a
 /// decision core, and an `async` query here would drag the fold into an async
 /// shell — the anti-pattern `architecture.md:1775` names.
 pub trait ConsentProjectionQuery: Send + Sync {
-    /// Senders the projection knows about at all.
-    ///
-    /// Empty is a legitimate answer and the explainer states it out loud.
-    fn known_senders(&self) -> Vec<PeerId>;
+    /// Known cells, sorted by sender label then storage slot.
+    fn known_senders(&self) -> Vec<(ConsentSlot, PeerId)>;
 
-    /// The consent state for one sender.
-    fn consent_for(&self, sender: &PeerId) -> ConsentState;
+    /// Raw state of one storage cell, without legacy reach.
+    fn slot_state(&self, slot: ConsentSlot, sender: &PeerId) -> ConsentState;
+
+    /// Typed decisions take precedence; only an absent typed cell reaches legacy.
+    fn consent_for(&self, principal: &PolicyPrincipal) -> ConsentState {
+        let slot = match principal {
+            PolicyPrincipal::Pinned { .. } => ConsentSlot::Pinned,
+            PolicyPrincipal::Pseudonymous(_) => ConsentSlot::Pseudonymous,
+        };
+        match self.slot_state(slot, principal.peer()) {
+            ConsentState::None => match principal {
+                PolicyPrincipal::Pinned { via, .. } => match via {
+                    PinnedVia::Rap => self.slot_state(ConsentSlot::Legacy, principal.peer()),
+                },
+                PolicyPrincipal::Pseudonymous(_) => {
+                    self.slot_state(ConsentSlot::Legacy, principal.peer())
+                }
+            },
+            state => state,
+        }
+    }
+}
+
+/// Operator display/revocation view only, never a policy-admission decision.
+pub fn peer_consent_state(query: &dyn ConsentProjectionQuery, peer: &PeerId) -> ConsentState {
+    let mut state = ConsentState::None;
+    for slot in [
+        ConsentSlot::Pinned,
+        ConsentSlot::Pseudonymous,
+        ConsentSlot::Legacy,
+    ] {
+        match query.slot_state(slot, peer) {
+            ConsentState::Trusted => return ConsentState::Trusted,
+            ConsentState::Revoked => state = ConsentState::Revoked,
+            ConsentState::None => {}
+        }
+    }
+    state
 }
