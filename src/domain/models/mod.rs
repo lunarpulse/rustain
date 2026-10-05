@@ -234,9 +234,10 @@ pub use plan::{
 };
 pub use policy_principal::{PinnedVia, PolicyPrincipal, PrincipalKind};
 pub use recipient_item::{
-    ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, MAX_REPLY_BYTES, REPLY_TURN_ID_PREFIX,
-    RecipientItemAllocator, RecipientItemState, RecipientItemView, ReplyAuthorship, ReplyTurnId,
-    ReplyTurnView, RetractOutcome, TurnAddress, claim_reply_turn_id, fresh_reply_turn_candidate,
+    A2aIngressPrincipal, ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, ItemScope,
+    MAX_REPLY_BYTES, REPLY_TURN_ID_PREFIX, RecipientItemAllocator, RecipientItemState,
+    RecipientItemView, ReplyAuthorship, ReplyTurnId, ReplyTurnView, RetractOutcome, TurnAddress,
+    claim_reply_turn_id, fresh_reply_turn_candidate,
 };
 pub use redacted_url::RedactedUrl;
 #[allow(unused_imports)]

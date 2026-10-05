@@ -1118,9 +1118,11 @@ async fn tls_host(
     options.consent = consent;
     options.security = A2aServerSecurity {
         tls: Some(material),
-        auth: Some(A2aServerAuth::ApiKey {
-            keys: keys.iter().map(|key| (*key).into()).collect(),
-        }),
+        auth: Some(A2aServerAuth::ApiKey(
+            rustain::adapters::a2a::auth::ApiKeySet::unbound(
+                keys.iter().map(|key| (*key).into()).collect(),
+            ),
+        )),
         thread_reads: setting,
     };
     TlsPeer {

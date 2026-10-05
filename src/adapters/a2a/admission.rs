@@ -23,6 +23,10 @@ pub enum SubmitterTrust {
     Loopback,
     /// Presented a valid API key on a TLS-protected non-loopback socket.
     ApiKey,
+    /// Story 19.18d `A7` — presented a valid API key that the operator bound
+    /// to a pinned roster peer in `server.peerKeys`. The principal is that
+    /// pin; it holds only its own items, so no co-holder caveat applies.
+    BoundApiKey,
 }
 
 /// The effect-free inputs of an admission decision.
@@ -151,6 +155,8 @@ pub const THREAD_ACCESS_OFF: &str = "thread access for API-key callers is off on
 ///
 /// - Loopback → allowed: every local caller already runs code here, and the
 ///   response discloses the collapse (19.16b `A13`).
+/// - Bound API key → allowed (Story 19.18d `A7`, the flip 19.18 `A17` named):
+///   its principal holds only its own items.
 /// - API key + `credential-scoped` → allowed.
 /// - API key + `off` or a value this build cannot name → refused. ⛔ Never
 ///   fail open on `Unknown` (`M46`).
@@ -163,9 +169,8 @@ pub fn admit_thread_access(
     setting: ThreadReads,
 ) -> Result<(), &'static str> {
     match (trust, setting) {
-        (SubmitterTrust::Loopback, _) | (SubmitterTrust::ApiKey, ThreadReads::CredentialScoped) => {
-            Ok(())
-        }
+        (SubmitterTrust::Loopback | SubmitterTrust::BoundApiKey, _)
+        | (SubmitterTrust::ApiKey, ThreadReads::CredentialScoped) => Ok(()),
         (SubmitterTrust::ApiKey, ThreadReads::Off | ThreadReads::Unknown) => Err(THREAD_ACCESS_OFF),
     }
 }
@@ -200,6 +205,8 @@ pub enum CapabilityVerdict {
 /// reveals nothing about the id (19.18 `M44`). A caller that presents one is
 /// classified after the lookup, by [`post_lookup`]. Pure; exhaustive over
 /// [`SubmitterTrust`] with no wildcard, so a new trust class must decide.
+/// Story 19.18d: a bound key meets the same gate, which [`admit_thread_access`]
+/// opens for it — the gate's one rule decides both key kinds.
 ///
 /// # Errors
 ///
@@ -213,7 +220,7 @@ pub fn pre_lookup(
 ) -> Result<(), &'static str> {
     match trust {
         SubmitterTrust::Loopback => Ok(()),
-        SubmitterTrust::ApiKey => match verb {
+        SubmitterTrust::ApiKey | SubmitterTrust::BoundApiKey => match verb {
             CapabilityGatedVerb::ThreadOrFollowUp if !presented => {
                 admit_thread_access(trust, setting)
             }
@@ -230,6 +237,10 @@ pub fn pre_lookup(
 /// - API key, capability-bearing item → serve iff `matched`, else not-found.
 /// - API key, legacy item → thread/follow-up keep the `threadReads` gate;
 ///   retract and `tasks/*` stay credential-scoped (disclosed).
+/// - Bound API key (Story 19.18d `A7`): the same table — a capability-bearing
+///   item needs its capability (19.18c kept as defence in depth), and
+///   [`admit_thread_access`] opens the legacy thread gate, so every legacy
+///   verb serves.
 ///
 /// Pure; exhaustive over [`SubmitterTrust`] with no wildcard.
 #[must_use]
@@ -242,7 +253,7 @@ pub fn post_lookup(
 ) -> CapabilityVerdict {
     match trust {
         SubmitterTrust::Loopback => CapabilityVerdict::Serve,
-        SubmitterTrust::ApiKey => match (item_hash, verb) {
+        SubmitterTrust::ApiKey | SubmitterTrust::BoundApiKey => match (item_hash, verb) {
             (Some(_), _) if matched => CapabilityVerdict::Serve,
             (Some(_), _) => CapabilityVerdict::NotFound,
             (None, CapabilityGatedVerb::ThreadOrFollowUp) => {
@@ -256,10 +267,12 @@ pub fn post_lookup(
     }
 }
 
+/// The credential named in a policy refusal. A bound key reads `api-key`
+/// too (Story 19.18d `A7`): the refusal bytes reveal nothing about binding.
 fn credential_label(trust: SubmitterTrust) -> &'static str {
     match trust {
         SubmitterTrust::Loopback => "loopback",
-        SubmitterTrust::ApiKey => "api-key",
+        SubmitterTrust::ApiKey | SubmitterTrust::BoundApiKey => "api-key",
     }
 }
 
@@ -482,6 +495,44 @@ mod tests {
                 ThreadReads::CredentialScoped
             ),
             Serve
+        );
+    }
+}
+
+#[cfg(test)]
+mod bound_key_tests {
+    use super::*;
+
+    /// Story 19.18d `A7` — the bound row of the decision table: no
+    /// `threadReads` gate on any setting, a capability-bearing item still
+    /// needs its capability, legacy items serve on every verb, and a policy
+    /// refusal names `api-key` exactly as for an unbound key.
+    #[test]
+    fn a_bound_key_flips_the_thread_gate_and_keeps_the_capability() {
+        use CapabilityGatedVerb::{RetractOrTask, ThreadOrFollowUp};
+        use CapabilityVerdict::{NotFound, Serve};
+        let trust = SubmitterTrust::BoundApiKey;
+        for setting in [
+            ThreadReads::Off,
+            ThreadReads::CredentialScoped,
+            ThreadReads::Unknown,
+        ] {
+            assert_eq!(admit_thread_access(trust, setting), Ok(()));
+            for verb in [ThreadOrFollowUp, RetractOrTask] {
+                for presented in [false, true] {
+                    assert_eq!(pre_lookup(trust, verb, presented, setting), Ok(()));
+                }
+                assert_eq!(post_lookup(trust, verb, Some("00"), true, setting), Serve);
+                assert_eq!(
+                    post_lookup(trust, verb, Some("00"), false, setting),
+                    NotFound
+                );
+                assert_eq!(post_lookup(trust, verb, None, false, setting), Serve);
+            }
+        }
+        assert_eq!(
+            admit_item_retract(A2aAdmissionPolicy::Deny, trust),
+            admit_item_retract(A2aAdmissionPolicy::Deny, SubmitterTrust::ApiKey)
         );
     }
 }

@@ -18,6 +18,9 @@ pub enum PolicyPrincipal {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PinnedVia {
     Rap,
+    /// Story 19.18d — an inbound A2A key the operator bound to this pin in
+    /// `server.peerKeys`: an operator assertion of key possession (`B1`).
+    BoundA2a,
 }
 
 #[non_exhaustive]
@@ -36,6 +39,16 @@ impl PolicyPrincipal {
         PolicyPrincipal::Pinned {
             peer,
             via: PinnedVia::Rap,
+        }
+    }
+
+    /// Construct the principal at the A2A ingress for a key the operator bound
+    /// to `peer` (Story 19.18d). The only place `Pinned { via: BoundA2a }` is
+    /// written.
+    pub fn bound_a2a(peer: PeerId) -> Self {
+        PolicyPrincipal::Pinned {
+            peer,
+            via: PinnedVia::BoundA2a,
         }
     }
 

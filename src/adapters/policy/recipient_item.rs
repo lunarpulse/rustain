@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::domain::models::{
-    AgentId, ItemAddress, ItemPrincipal, JournalEntry, JournalRecord, RecipientItemState,
-    RecipientItemView, ReplyTurnView, RoomEvent, TurnAddress,
+    AgentId, ItemAddress, ItemPrincipal, ItemScope, JournalEntry, JournalRecord,
+    RecipientItemState, RecipientItemView, ReplyTurnView, RoomEvent, TurnAddress,
 };
 
 // The single-writer ratchet's counter is **per thread**, deliberately.
@@ -353,33 +353,48 @@ impl JournalRecipientItemProjection {
             .cloned()
     }
 
-    /// Every item addressed to one principal, in arrival order.
+    /// Every item readable in one caller's scope, in arrival order.
     ///
     /// Story 19.16b `AC3(a)` — the server-side enumerator behind
-    /// `x-rustain-items/list`. Follows [`Self::find_by_task`]'s idiom minus the
-    /// task predicate and the `max_by_key`.
+    /// `x-rustain-items/list`. Story 19.18d `A11`/`P8`: one membership filter
+    /// over the deduplicated scope, then ONE global `journal_order` sort — never
+    /// a per-principal concatenation.
     ///
-    /// ⛔ **The principal filter is the whole authorization boundary** and it
-    /// runs before any caller classifies a tombstone (`A22`): another
-    /// principal's removed item is absent, byte-identical to an id that never
-    /// existed.
+    /// ⛔ **The scope filter is the whole authorization boundary** and it runs
+    /// before any caller classifies a tombstone (`A22`): another principal's
+    /// removed item is absent, byte-identical to an id that never existed.
     ///
     /// ⚠ Removals are **retained** here, unlike [`Self::find_by_task`]: this is
     /// the read that has to report a tombstone (`AD-1822`), not the read that
     /// re-binds a task to one.
     #[must_use]
-    pub fn find_by_principal(&self, principal: &ItemPrincipal) -> Vec<RecipientItemView> {
+    pub fn find_in_scope(&self, scope: &ItemScope) -> Vec<RecipientItemView> {
         let snapshot = self.snapshot.load();
         let mut owned = snapshot
             .items
             .values()
-            .filter(|item| item.address.principal() == principal)
+            .filter(|item| scope.contains(item.address.principal()))
             .cloned()
             .collect::<Vec<_>>();
         // `journal_order` orders identically under both assignment schemes even
         // though the numbers differ; only the ordering is used, and only here.
         owned.sort_by_key(|item| item.journal_order);
         owned
+    }
+
+    /// Story 19.18d `F6` — the item with id `id` readable in `scope`, or
+    /// `None`. Item ids are globally unique, so at most one matches; the
+    /// retract then works on this item's **stored** address.
+    #[must_use]
+    pub fn item_in_scope(&self, scope: &ItemScope, id: &str) -> Option<RecipientItemView> {
+        self.snapshot
+            .load()
+            .items
+            .values()
+            .find(|item| {
+                scope.contains(item.address.principal()) && item.address.item().as_str() == id
+            })
+            .cloned()
     }
 
     /// Story 19.18 `AC4(f)` — how many reply turns directly answer `item`
@@ -422,17 +437,15 @@ impl JournalRecipientItemProjection {
     }
 
     /// Story 19.18c `A8` — the capability class of `id`'s **nearest item**
-    /// inside `principal`: the item itself for an item id, the item a reply
-    /// turn answers for a turn id. `None` when `id` names nothing of this
-    /// principal — byte-identical, for a caller, to one that never existed
-    /// (R21). Replaces 19.18's boolean `resolves_in_principal`: the follow-up
-    /// reference check needs the class too.
+    /// inside `scope`: the item itself for an item id, the item a reply turn
+    /// answers for a turn id. `None` when `id` names nothing in this scope —
+    /// byte-identical, for a caller, to one that never existed (R21).
     #[must_use]
-    pub fn nearest_item(&self, principal: &ItemPrincipal, id: &str) -> Option<NearestItem> {
+    pub fn nearest_item(&self, scope: &ItemScope, id: &str) -> Option<NearestItem> {
         let snapshot = self.snapshot.load();
         let item_of = |item_id: &str| {
             snapshot.items.values().find(|item| {
-                item.address.principal() == principal && item.address.item().as_str() == item_id
+                scope.contains(item.address.principal()) && item.address.item().as_str() == item_id
             })
         };
         let item = item_of(id).or_else(|| {
@@ -440,7 +453,7 @@ impl JournalRecipientItemProjection {
                 .replies
                 .values()
                 .find(|turn| {
-                    turn.address.principal() == principal && turn.address.turn().as_str() == id
+                    scope.contains(turn.address.principal()) && turn.address.turn().as_str() == id
                 })
                 .and_then(|turn| item_of(turn.answers.as_str()))
         })?;
@@ -473,13 +486,15 @@ impl JournalRecipientItemProjection {
             .collect()
     }
 
-    /// Story 19.18 `AC4(b)` — one principal's thread containing `id`, in the
-    /// one fold order, or `None` when `id` names nothing of this principal.
+    /// Story 19.18 `AC4(b)` — the thread containing `id` within one caller's
+    /// scope, in the one fold order, or `None` when `id` names nothing there.
     ///
-    /// ⛔ **Principal first** (`A6`): only this principal's items and turns
-    /// are indexed, so another principal's id is absent — byte-identical to
-    /// one that never existed — and an `in_reply_to` into another principal's
-    /// thread ends the walk instead of crossing into it.
+    /// ⛔ **Scope first** (`A6`): only this scope's items and turns are
+    /// indexed, so another principal's id is absent — byte-identical to one
+    /// that never existed — and an `in_reply_to` outside the scope ends the
+    /// walk instead of crossing into it. Story 19.18d `A11`/`P7`: inside the
+    /// scope an edge may cross principal variants only where the capability
+    /// class below already permits it.
     ///
     /// `id` resolves to its **root** by walking `in_reply_to` (items) and
     /// `answers` (turns) upward. The walk is bounded by the index size and
@@ -494,18 +509,18 @@ impl JournalRecipientItemProjection {
     /// an unmatched link never joins a capability-bearing thread. Reply-turn
     /// edges (minted by this host's operator) always count.
     #[must_use]
-    pub fn thread(&self, principal: &ItemPrincipal, id: &str) -> Option<(String, Vec<ThreadTurn>)> {
+    pub fn thread(&self, scope: &ItemScope, id: &str) -> Option<(String, Vec<ThreadTurn>)> {
         let snapshot = self.snapshot.load();
         let items: HashMap<&str, &RecipientItemView> = snapshot
             .items
             .values()
-            .filter(|item| item.address.principal() == principal)
+            .filter(|item| scope.contains(item.address.principal()))
             .map(|item| (item.address.item().as_str(), item))
             .collect();
         let answered: HashMap<&str, &str> = snapshot
             .replies
             .values()
-            .filter(|turn| turn.address.principal() == principal)
+            .filter(|turn| scope.contains(turn.address.principal()))
             .map(|turn| (turn.address.turn().as_str(), turn.answers.as_str()))
             .collect();
         // The capability class of a reference's nearest item (`A8`).
@@ -537,7 +552,7 @@ impl JournalRecipientItemProjection {
         for turn in snapshot
             .replies
             .values()
-            .filter(|turn| turn.address.principal() == principal)
+            .filter(|turn| scope.contains(turn.address.principal()))
         {
             index.insert(
                 turn.address.turn().as_str(),
@@ -982,12 +997,14 @@ mod tests {
         principal: &crate::domain::models::ItemPrincipal,
         id: &str,
     ) -> Option<(String, Vec<String>)> {
-        projection.thread(principal, id).map(|(root, turns)| {
-            (
-                root,
-                turns.iter().map(|turn| turn.id().to_owned()).collect(),
-            )
-        })
+        projection
+            .thread(&ItemScope::exact(principal.clone()), id)
+            .map(|(root, turns)| {
+                (
+                    root,
+                    turns.iter().map(|turn| turn.id().to_owned()).collect(),
+                )
+            })
     }
 
     /// Story 19.18 `K20` — interleaved live `apply` of items and reply turns
@@ -1075,12 +1092,15 @@ mod tests {
         // Story 19.18c `A8` — a reply turn's nearest item is the item it
         // answers; another principal's id resolves to nothing.
         assert_eq!(
-            projection.nearest_item(&principal, "rr_3"),
+            projection.nearest_item(&ItemScope::exact(principal.clone()), "rr_3"),
             Some(NearestItem {
                 capability_hash: None
             })
         );
-        assert_eq!(projection.nearest_item(&principal, "ri_x"), None);
+        assert_eq!(
+            projection.nearest_item(&ItemScope::exact(principal), "ri_x"),
+            None
+        );
     }
 
     /// Story 19.18 `AC4(b)` — the chain walk is bounded and cycle-safe: two
@@ -1102,6 +1122,10 @@ mod tests {
             entry(2, item("ri_b", "ri_a")),
         ]);
         let principal = crate::domain::models::ItemPrincipal::A2aPseudonym(peer);
-        assert!(projection.thread(&principal, "ri_a").is_some());
+        assert!(
+            projection
+                .thread(&ItemScope::exact(principal), "ri_a")
+                .is_some()
+        );
     }
 }

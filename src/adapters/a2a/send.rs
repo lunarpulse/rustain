@@ -607,6 +607,10 @@ pub struct PreviewedItem {
     pub task: Option<String>,
     pub state: super::board::BoardItemState,
     pub retracted_at_ms: Option<i64>,
+    /// Story 19.18d `A13` — the host answered `principalBound: true`: this
+    /// host's key is bound to its own pinned peer there, so no co-holder
+    /// caveat applies. Absent or non-bool → `false` (fails toward disclosure).
+    pub principal_bound: bool,
 }
 
 /// The confirm-time read (Story 19.16f `AC4(c)`).
@@ -709,7 +713,18 @@ pub async fn preview_item_retract(
         retracted_at_ms: item
             .get("retractedAtMs")
             .and_then(serde_json::Value::as_i64),
+        principal_bound: principal_bound_flag(&result),
     })
+}
+
+/// Story 19.18d `A13` — `true` only for a literal `principalBound: true`;
+/// absent, `false`, a string or a number all read `false`, so the co-holder
+/// sentence renders (the board's fail-safe direction).
+fn principal_bound_flag(result: &serde_json::Value) -> bool {
+    result
+        .get("principalBound")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Dispatch one accepted retract (Story 19.16f `AC2`, `AC5`, `AC10`).
@@ -826,6 +841,9 @@ pub struct ServedThread {
     pub omitted_before: usize,
     /// Fails SAFE: an absent flag is read as collapsed, like the board.
     pub principal_collapsed: bool,
+    /// Story 19.18d `A13` — fails toward disclosure: absent or non-bool reads
+    /// `false`, so the co-holder sentence renders.
+    pub principal_bound: bool,
 }
 
 /// What one `/team thread` read produced.
@@ -1030,6 +1048,7 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
             .get("principalCollapsed")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),
+        principal_bound: principal_bound_flag(result),
     })
 }
 
@@ -1269,5 +1288,33 @@ mod tests {
         let unknown_kind =
             serde_json::json!({ "root": "ri_q", "turns": [turn("ri_q", "verdict", "x")] });
         assert!(parse_thread(&unknown_kind).is_none());
+    }
+
+    /// Story 19.18d `K08` (parser half) — only a literal `principalBound: true`
+    /// suppresses the co-holder sentence; absent, `false`, a string or a
+    /// number read `false`, so the sentence renders (`M17`, `M46`).
+    #[test]
+    fn principal_bound_is_true_only_for_a_literal_true() {
+        let thread = |flag: Option<serde_json::Value>| {
+            let mut result = serde_json::json!({
+                "root": "ri_q",
+                "turns": [{ "turnId": "ri_q", "kind": "item", "content": "q", "ordinal": 0 }],
+                "omittedBefore": 0,
+                "principalCollapsed": false,
+            });
+            if let Some(flag) = flag {
+                result["principalBound"] = flag;
+            }
+            parse_thread(&result).expect("usable").principal_bound
+        };
+        assert!(thread(Some(serde_json::json!(true))), "positive control");
+        for flag in [
+            None,
+            Some(serde_json::json!(false)),
+            Some(serde_json::json!("true")),
+            Some(serde_json::json!(1)),
+        ] {
+            assert!(!thread(flag.clone()), "{flag:?}");
+        }
     }
 }

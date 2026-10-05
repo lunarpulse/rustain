@@ -3386,7 +3386,9 @@ async fn run_approval_gate(
                 // unrendered, so the peer hangs on auth-required with no card.
                 // Re-insert + re-send any pending consent request the broadcast
                 // dropped; cards already tracked are left as-is.
-                for (id, peer_id, risk) in approval.pending_sender_consent().await {
+                // Story 19.18d `P22`: the preview is the request's stored one,
+                // never re-derived here, so a bound card stays a bound card.
+                for (id, input_preview, risk) in approval.pending_sender_consent().await {
                     let mut cards = pending_consent_cards.lock().await;
                     if cards.contains_key(&id) {
                         continue;
@@ -3394,10 +3396,7 @@ async fn run_approval_gate(
                     let frame = DaemonFrame::ApprovalRequest {
                         request_id: id.clone(),
                         tool: "a2a/sender-consent".to_owned(),
-                        input_preview:
-                            crate::infrastructure::runtime::transparency_bridge::consent_card_text(
-                                &peer_id,
-                            ),
+                        input_preview,
                         risk,
                     };
                     cards.insert(id.clone(), frame.clone());

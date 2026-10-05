@@ -108,6 +108,55 @@ pub struct A2aServerConfig {
     /// [`ThreadReads::Off`].
     #[serde(default, rename = "threadReads", alias = "thread_reads")]
     pub thread_reads: Option<ThreadReads>,
+    /// Story 19.18d `A9` — environment-variable **name** → the roster peer the
+    /// key held there is bound to. A bound key is attributed to that pinned
+    /// peer (an operator assertion of key possession, `B1`); it is never also
+    /// listed in [`Self::api_keys`]/[`Self::api_key_env`] (`R3`). Several names
+    /// may bind one alias (rotation). An older build ignores this field.
+    #[serde(default, rename = "peerKeys", alias = "peer_keys")]
+    pub peer_keys: BTreeMap<String, PeerKeyBinding>,
+    /// Story 19.18d `A15` — refuse to start while any configured key is not
+    /// bound in [`Self::peer_keys`] (`R5`). A startup validation, never a wire
+    /// refusal.
+    #[serde(default, rename = "requirePeerBinding", alias = "require_peer_binding")]
+    pub require_peer_binding: bool,
+}
+
+/// Story 19.18d `A9` — one `server.peerKeys` value: a roster alias, or an
+/// object that also opts the binding into reading the key's pre-binding items
+/// (`B3`, `adoptLegacyItems`, default false). The two forms are equivalent for
+/// the same alias and adoption flag.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum PeerKeyBinding {
+    Alias(String),
+    Detailed {
+        peer: String,
+        #[serde(default, rename = "adoptLegacyItems", alias = "adopt_legacy_items")]
+        adopt_legacy_items: bool,
+    },
+}
+
+impl PeerKeyBinding {
+    /// The roster alias this key is bound to.
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        match self {
+            Self::Alias(alias) | Self::Detailed { peer: alias, .. } => alias,
+        }
+    }
+
+    /// Whether this binding reads the key's pre-binding (pseudonym) items.
+    #[must_use]
+    pub fn adopt_legacy_items(&self) -> bool {
+        match self {
+            Self::Alias(_) => false,
+            Self::Detailed {
+                adopt_legacy_items, ..
+            } => *adopt_legacy_items,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

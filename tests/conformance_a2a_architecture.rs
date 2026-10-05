@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 fn root() -> PathBuf {
@@ -216,6 +216,9 @@ fn every_public_a2a_enum_is_non_exhaustive() {
             "Disclosure".to_owned(),
             "InboundOutcome".to_owned(),
             "PendingAuth".to_owned(),
+            // Story 19.18d `A9`: one `server.peerKeys` value (alias string or
+            // object); a new form must be decided, not defaulted.
+            "PeerKeyBinding".to_owned(),
             "PinnedKeyAlgorithm".to_owned(),
             "SubmitterTrust".to_owned(),
             // Story 19.18 `AC12`: the thread-access setting; an unrecognised
@@ -226,7 +229,10 @@ fn every_public_a2a_enum_is_non_exhaustive() {
     );
 }
 
-/// K08a: policy authority is introduced only at the two ingress funnels.
+/// K08a: policy authority is introduced only at the ingress funnels. Story
+/// 19.18d `F8`: per-file counts — `rap()` and `bound_a2a()` in the principal
+/// module, the pseudonymous arm of `SubmitterKey::policy_principal` in exec —
+/// so a direct `Pinned { … }` in exec cannot stand in for a missing funnel.
 #[test]
 fn k08a_policy_principal_construction_funnel() {
     let src = root().join("src");
@@ -268,15 +274,95 @@ fn k08a_policy_principal_construction_funnel() {
             }
         }
     });
-    let files: Vec<_> = sites.iter().map(|(path, _)| path.clone()).collect();
-    assert_eq!(sites.len(), 2, "principal construction sites: {sites:?}");
+    let mut per_file = BTreeMap::<PathBuf, usize>::new();
+    for (path, _) in &sites {
+        *per_file.entry(path.clone()).or_default() += 1;
+    }
     assert_eq!(
-        files.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            PathBuf::from("domain/models/policy_principal.rs"),
-            PathBuf::from("adapters/a2a/exec.rs"),
+        per_file,
+        BTreeMap::from([
+            (PathBuf::from("domain/models/policy_principal.rs"), 2),
+            (PathBuf::from("adapters/a2a/exec.rs"), 1),
         ]),
         "principal construction sites: {sites:?}"
+    );
+}
+
+/// Story 19.18d `K13` (`F7`, supplemental to the behavioural keystones) — the
+/// one production derivation of an A2A credential pseudonym is
+/// `SubmitterKey::ingress_principal`; item principals are built only by
+/// `SubmitterKey::principal`'s mapping and the item model's constructors. A
+/// site that derives a pseudonym ad hoc would silently mint
+/// `A2aPseudonym(…)` where a bound caller's items live under `A2aBound(pin)`.
+/// `M42` turns this RED.
+#[test]
+fn k13_one_production_pseudonym_derivation() {
+    let src = root().join("src");
+    let call = regex::Regex::new(r"\.pseudonymous_peer_id\(").unwrap();
+    let construction = regex::Regex::new(r"ItemPrincipal::A2aPseudonym\(").unwrap();
+    let declaration = regex::Regex::new(r"\bfn\s+(\w+)").unwrap();
+    let mut calls = Vec::new();
+    let mut constructions = BTreeMap::<PathBuf, usize>::new();
+    visit_rs(&src, &mut |path, text| {
+        let relative = path.strip_prefix(&src).unwrap().to_path_buf();
+        let mut enclosing = String::new();
+        for (number, line) in without_test_items(text) {
+            let trimmed = line.trim();
+            if let Some(captures) = declaration.captures(trimmed) {
+                enclosing = captures[1].to_owned();
+            }
+            if trimmed.starts_with("//") || trimmed.starts_with('|') {
+                continue;
+            }
+            if call.is_match(trimmed) {
+                calls.push((relative.clone(), number, enclosing.clone()));
+            }
+            if construction.is_match(expression_side(trimmed)) {
+                *constructions.entry(relative.clone()).or_default() += 1;
+            }
+        }
+    });
+    assert_eq!(
+        calls.len(),
+        1,
+        "production pseudonym derivations: {calls:?}"
+    );
+    assert_eq!(
+        (calls[0].0.as_path(), calls[0].2.as_str()),
+        (Path::new("adapters/a2a/exec.rs"), "ingress_principal"),
+        "production pseudonym derivations: {calls:?}"
+    );
+    assert_eq!(
+        constructions,
+        BTreeMap::from([
+            // `SubmitterKey::principal`'s pseudonym arm.
+            (PathBuf::from("adapters/a2a/exec.rs"), 1),
+            // `ItemAddress::from_a2a_ingress` and the address wire decoder.
+            (PathBuf::from("domain/models/recipient_item.rs"), 2),
+        ]),
+        "item-principal pseudonym constructions"
+    );
+}
+
+/// Story 19.18d `AC13(d)` — the A2A ingress principal lives in the domain
+/// model, outside the fixed inventory above; a new ingress kind must be
+/// decided by every match, not defaulted.
+#[test]
+fn the_a2a_ingress_principal_is_non_exhaustive() {
+    let text = source("src/domain/models/recipient_item.rs");
+    let lines: Vec<_> = text.lines().collect();
+    let index = lines
+        .iter()
+        .position(|line| {
+            line.trim_start()
+                .starts_with("pub enum A2aIngressPrincipal")
+        })
+        .expect("A2aIngressPrincipal is declared");
+    assert!(
+        lines[index.saturating_sub(4)..index]
+            .join("\n")
+            .contains("#[non_exhaustive]"),
+        "A2aIngressPrincipal must be #[non_exhaustive]"
     );
 }
 

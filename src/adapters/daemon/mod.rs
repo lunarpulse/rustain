@@ -58,6 +58,29 @@ pub(crate) mod urgency;
 #[cfg(unix)]
 pub use lifecycle::{duration_until_next, emit_session_boundary};
 
+/// An operator-facing daemon refusal whose `Display` is the complete,
+/// already-actionable diagnostic. `run_daemon` returns it instead of printing
+/// and then bailing with a second, generic message, so the single stderr
+/// report belongs to the caller (`startup`), which prints it verbatim rather
+/// than wrapping it in the generic `rustain: daemon failed:` prefix. Any other
+/// daemon error (e.g. a `peerKeys` binding refusal) is still reported by that
+/// same caller with the prefix.
+#[derive(Debug)]
+pub(crate) struct DaemonRefusal(pub(crate) String);
+
+impl std::fmt::Display for DaemonRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DaemonRefusal {}
+
+#[cfg(unix)]
+fn already_running_message(pid: u32) -> String {
+    format!("Daemon already running (PID: {pid}). Use 'rustain daemon stop' first.")
+}
+
 /// Dispatch a `daemon` subcommand. `memory_adapter` is the active profile's
 /// resolved memory port name (used only by the `__run`/foreground body to compose
 /// the headless memory sink); `config` carries `[daemon]` settings + profile.
@@ -142,12 +165,13 @@ pub async fn run_daemon(
 
 #[cfg(not(unix))]
 fn windows_not_supported() -> Result<()> {
-    eprintln!(
+    Err(DaemonRefusal(
         "Error: `rustain daemon` requires Unix sockets (Linux or macOS). \
          Windows daemon support (named pipes) is deferred to a future release (NFR33). \
          Run rustain in interactive (TUI) mode instead."
-    );
-    anyhow::bail!("daemon mode is not supported on this platform")
+            .to_string(),
+    )
+    .into())
 }
 
 // ── Unix implementation ──────────────────────────────────────────────────────
@@ -180,11 +204,7 @@ async fn run_daemon_start(
     // Already-running guard (AC-12-1a-9) — exact message, stale reclaim.
     match pidfile::check_running(&pid_path) {
         GuardOutcome::Running(pf) => {
-            eprintln!(
-                "Daemon already running (PID: {}). Use 'rustain daemon stop' first.",
-                pf.pid
-            );
-            anyhow::bail!("daemon already running");
+            return Err(DaemonRefusal(already_running_message(pf.pid)).into());
         }
         GuardOutcome::Stale => {
             // A leftover PID file whose process is gone is an unclean exit
@@ -312,12 +332,15 @@ async fn run_daemon_foreground(
         &crate::infrastructure::paths::workspace_a2a_config_path(&workspace),
     ) {
         Ok(config) => {
+            // Story 19.18d `A25` — derived from a borrow before `config` moves.
+            let bound_pins = policy_startup::bound_pins(config.as_ref(), &a2a_peers);
             let admission = config.map_or_else(Default::default, |server| server.admission);
             policy_startup::report_auto_authority_widening(
                 admission,
                 &effective_policy,
                 &a2a_peers,
                 consent_projection.as_ref(),
+                &bound_pins,
             );
         }
         Err(error) => policy_startup::report_unknown_admission_posture(&error),
@@ -336,11 +359,7 @@ async fn run_daemon_foreground(
         .map_err(|error| anyhow::anyhow!("acquiring daemon singleton: {error}"))?;
     match pidfile::check_running(&pid_path) {
         GuardOutcome::Running(pf) => {
-            eprintln!(
-                "Daemon already running (PID: {}). Use 'rustain daemon stop' first.",
-                pf.pid
-            );
-            anyhow::bail!("daemon already running");
+            return Err(DaemonRefusal(already_running_message(pf.pid)).into());
         }
         GuardOutcome::Stale => {
             // Unclean prior exit → record + announce, then reclaim and start normally
@@ -625,6 +644,7 @@ async fn run_daemon_foreground(
         &config,
         server.clone(),
         transparency,
+        a2a_peers,
         a2a_shutdown.child_token(),
     )
     .await?;
@@ -786,15 +806,16 @@ async fn spawn_a2a_listener(
     config: &AppConfig,
     server: std::sync::Arc<crate::adapters::daemon::server::AttachServer>,
     transparency: std::sync::Arc<crate::adapters::a2a::transparency::TransparencySink>,
+    a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {
     let Some(addr) = addr else {
-        let _ = (workspace, config, server, transparency, shutdown);
+        let _ = (workspace, config, server, transparency, a2a_peers, shutdown);
         return Ok(None);
     };
     #[cfg(not(feature = "a2a"))]
     {
-        let _ = (workspace, config, server, transparency, shutdown);
+        let _ = (workspace, config, server, transparency, a2a_peers, shutdown);
         anyhow::bail!(
             "--serve-a2a={addr} was requested but this build has the `a2a` feature disabled"
         );
@@ -815,6 +836,7 @@ async fn spawn_a2a_listener(
                     workspace,
                     Some(runtime),
                     transparency,
+                    a2a_peers,
                     Some(ready_tx),
                 ) => {
                     match result {

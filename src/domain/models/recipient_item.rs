@@ -3,7 +3,8 @@
 //! The address retains principal provenance. AD-1821's stronger transport-
 //! authenticated identity is represented by [`ItemPrincipal::Rap`]; the A2A
 //! ingress in Story 19.16 is legal only through AD-1825's pseudonymous
-//! provenance narrowing.
+//! provenance narrowing; Story 19.18d adds the operator-bound pin
+//! ([`ItemPrincipal::A2aBound`]), a third provenance kept apart from both.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -29,6 +30,12 @@ impl ItemId {
 }
 
 /// Principal provenance carried as part of every durable-item address.
+///
+/// Story 19.18d `A4`/`OQ2` — persisted only through [`ItemAddress`] and
+/// [`TurnAddress`], whose wire form carries a bound pin in a sibling
+/// `boundPeer` field so an older build reads `{"kind":"a2a_bound"}` as
+/// [`Self::Unknown`] instead of failing the whole journal. `A2aBound` is
+/// therefore skipped by this type's own serde: it has no direct encoding.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "peer")]
@@ -37,9 +44,148 @@ pub enum ItemPrincipal {
     Rap(PeerId),
     /// Stable pseudonym derived from the credential accepted by A2A ingress.
     A2aPseudonym(PeerId),
+    /// Story 19.18d — the pinned roster peer an operator bound the presented
+    /// A2A key to: an operator assertion of key possession, never the person.
+    #[serde(skip)]
+    A2aBound(PeerId),
     /// A provenance written by a newer build.
     #[serde(other)]
     Unknown,
+}
+
+/// Story 19.18d `A6` — the only principals A2A ingress can mint items under.
+/// It names no RAP variant, so the A2A allocator cannot construct `Rap`.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum A2aIngressPrincipal {
+    /// The pseudonym of the presented credential (unbound key or loopback).
+    Pseudonym(PeerId),
+    /// The pin an operator bound the presented key to.
+    Bound(PeerId),
+}
+
+/// Story 19.18d `A11` — the item principals one caller may read: its own,
+/// plus, for a bound caller, the pseudonyms of keys bound to the same pin
+/// with `adoptLegacyItems`. Deduplicated; membership is the projection's one
+/// read predicate. Minting and task lookup stay on the exact principal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemScope {
+    members: Vec<ItemPrincipal>,
+}
+
+impl ItemScope {
+    /// A scope of exactly one principal.
+    #[must_use]
+    pub fn exact(principal: ItemPrincipal) -> Self {
+        Self {
+            members: vec![principal],
+        }
+    }
+
+    /// `principal` plus every adopted principal, without duplicates.
+    #[must_use]
+    pub fn with_adopted(
+        principal: ItemPrincipal,
+        adopted: impl IntoIterator<Item = ItemPrincipal>,
+    ) -> Self {
+        let mut members = vec![principal];
+        for member in adopted {
+            if !members.contains(&member) {
+                members.push(member);
+            }
+        }
+        Self { members }
+    }
+
+    /// Whether an item or turn under `principal` is readable in this scope.
+    #[must_use]
+    pub fn contains(&self, principal: &ItemPrincipal) -> bool {
+        self.members.contains(principal)
+    }
+}
+
+/// Story 19.18d `A4` — the on-disk principal of an address. Identical to
+/// [`ItemPrincipal`]'s encoding for every pre-19.18d kind; the bound kind is
+/// the unit `{"kind":"a2a_bound"}`, its pin in the address's `boundPeer`.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "peer")]
+enum WirePrincipal {
+    Rap(PeerId),
+    A2aPseudonym(PeerId),
+    A2aBound,
+    #[serde(other)]
+    Unknown,
+}
+
+impl WirePrincipal {
+    fn split(principal: &ItemPrincipal) -> (Self, Option<String>) {
+        match principal {
+            ItemPrincipal::Rap(peer) => (Self::Rap(peer.clone()), None),
+            ItemPrincipal::A2aPseudonym(peer) => (Self::A2aPseudonym(peer.clone()), None),
+            ItemPrincipal::A2aBound(pin) => (Self::A2aBound, Some(pin.as_str().to_owned())),
+            ItemPrincipal::Unknown => (Self::Unknown, None),
+        }
+    }
+
+    /// `boundPeer` is read as text and parsed here (`F10`): a malformed pin
+    /// folds this one address to `Unknown` — fail closed — instead of failing
+    /// the whole journal. A stray `boundPeer` on another kind is ignored.
+    fn join(self, bound_peer: Option<String>) -> ItemPrincipal {
+        match self {
+            Self::Rap(peer) => ItemPrincipal::Rap(peer),
+            Self::A2aPseudonym(peer) => ItemPrincipal::A2aPseudonym(peer),
+            Self::A2aBound => bound_peer
+                .and_then(|pin| PeerId::parse(pin).ok())
+                .map_or(ItemPrincipal::Unknown, ItemPrincipal::A2aBound),
+            Self::Unknown => ItemPrincipal::Unknown,
+        }
+    }
+}
+
+/// `boundPeer` as text, or `None` for anything that is not a JSON string
+/// (`A4`: an unreadable bound pin folds the one address to `Unknown`, never
+/// a journal error).
+fn bound_peer_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(text) => Some(text),
+        _ => None,
+    })
+}
+
+#[derive(Serialize, Deserialize)]
+struct ItemAddressWire {
+    principal: WirePrincipal,
+    item: ItemId,
+    #[serde(
+        default,
+        rename = "boundPeer",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "bound_peer_text"
+    )]
+    bound_peer: Option<String>,
+}
+
+impl From<ItemAddress> for ItemAddressWire {
+    fn from(address: ItemAddress) -> Self {
+        let (principal, bound_peer) = WirePrincipal::split(&address.principal);
+        Self {
+            principal,
+            item: address.item,
+            bound_peer,
+        }
+    }
+}
+
+impl From<ItemAddressWire> for ItemAddress {
+    fn from(wire: ItemAddressWire) -> Self {
+        Self {
+            principal: wire.principal.join(wire.bound_peer),
+            item: wire.item,
+        }
+    }
 }
 
 /// Complete recipient-side address.
@@ -50,6 +196,7 @@ pub enum ItemPrincipal {
 /// alone. AD-1825's per-`(provenance, PeerId)` rule is the floor this exceeds,
 /// never a cap.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "ItemAddressWire", from = "ItemAddressWire")]
 pub struct ItemAddress {
     principal: ItemPrincipal,
     item: ItemId,
@@ -62,6 +209,16 @@ impl ItemAddress {
     pub fn from_a2a_ingress(peer: PeerId, item: ItemId) -> Self {
         Self {
             principal: ItemPrincipal::A2aPseudonym(peer),
+            item,
+        }
+    }
+
+    /// Story 19.18d — construct only at the A2A ingress for a key the operator
+    /// bound to the pinned peer `pin`.
+    #[must_use]
+    pub fn from_a2a_bound(pin: PeerId, item: ItemId) -> Self {
+        Self {
+            principal: ItemPrincipal::A2aBound(pin),
             item,
         }
     }
@@ -284,19 +441,26 @@ impl RecipientItemAllocator {
         }
     }
 
-    /// Mint an opaque id independent of every sender-controlled field.
-    pub async fn allocate_a2a_ingress(&self, peer: PeerId) -> Result<ItemAddress, ItemIdCollision> {
-        self.claim_a2a_candidate(peer, ItemId(format!("ri_{}", nanoid::nanoid!(32))))
+    /// Mint an opaque id independent of every sender-controlled field, under
+    /// the ingress principal the caller's credential resolved to.
+    pub async fn allocate_a2a_ingress(
+        &self,
+        principal: A2aIngressPrincipal,
+    ) -> Result<ItemAddress, ItemIdCollision> {
+        self.claim_a2a_candidate(principal, ItemId(format!("ri_{}", nanoid::nanoid!(32))))
             .await
     }
 
     async fn claim_a2a_candidate(
         &self,
-        peer: PeerId,
+        principal: A2aIngressPrincipal,
         item: ItemId,
     ) -> Result<ItemAddress, ItemIdCollision> {
         let id = item.as_str().to_owned();
-        let address = ItemAddress::from_a2a_ingress(peer, item);
+        let address = match principal {
+            A2aIngressPrincipal::Pseudonym(peer) => ItemAddress::from_a2a_ingress(peer, item),
+            A2aIngressPrincipal::Bound(pin) => ItemAddress::from_a2a_bound(pin, item),
+        };
         // One lock, one check: the id is the acknowledge command's only handle,
         // so it must be unique even across principals.
         if !self.claimed_ids.lock().await.insert(id) {
@@ -326,10 +490,45 @@ impl ReplyTurnId {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct TurnAddressWire {
+    principal: WirePrincipal,
+    turn: ReplyTurnId,
+    #[serde(
+        default,
+        rename = "boundPeer",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "bound_peer_text"
+    )]
+    bound_peer: Option<String>,
+}
+
+impl From<TurnAddress> for TurnAddressWire {
+    fn from(address: TurnAddress) -> Self {
+        let (principal, bound_peer) = WirePrincipal::split(&address.principal);
+        Self {
+            principal,
+            turn: address.turn,
+            bound_peer,
+        }
+    }
+}
+
+impl From<TurnAddressWire> for TurnAddress {
+    fn from(wire: TurnAddressWire) -> Self {
+        Self {
+            principal: wire.principal.join(wire.bound_peer),
+            turn: wire.turn,
+        }
+    }
+}
+
 /// Story 19.18 — a reply turn's complete address. The principal is the
 /// **answered item's** (the thread lives under the asker's principal, `A1`),
-/// so the served thread read filters it exactly like an item.
+/// so the served thread read filters it exactly like an item. Story 19.18d
+/// `A4`: persisted through the same `boundPeer` shim as [`ItemAddress`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "TurnAddressWire", from = "TurnAddressWire")]
 pub struct TurnAddress {
     principal: ItemPrincipal,
     turn: ReplyTurnId,
@@ -461,7 +660,10 @@ mod tests {
 
         assert_eq!(
             allocator
-                .claim_a2a_candidate(peer, ItemId::from_replay("ri_fixed"))
+                .claim_a2a_candidate(
+                    A2aIngressPrincipal::Pseudonym(peer),
+                    ItemId::from_replay("ri_fixed")
+                )
                 .await,
             Err(ItemIdCollision)
         );
@@ -478,7 +680,10 @@ mod tests {
 
         assert_eq!(
             allocator
-                .claim_a2a_candidate(second_peer, ItemId::from_replay("ri_fixed"))
+                .claim_a2a_candidate(
+                    A2aIngressPrincipal::Bound(second_peer),
+                    ItemId::from_replay("ri_fixed")
+                )
                 .await,
             Err(ItemIdCollision)
         );

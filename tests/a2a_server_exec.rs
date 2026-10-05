@@ -1582,22 +1582,22 @@ fn api_key_security(key: &str) -> A2aServerSecurity {
         // point under test is the per-request credential gate, not the bind
         // gate (which `tests/a2a_server.rs` covers at the socket).
         tls: None,
-        auth: Some(A2aServerAuth::ApiKey {
-            keys: vec![key.into()],
-        }),
+        auth: Some(A2aServerAuth::ApiKey(
+            rustain::adapters::a2a::auth::ApiKeySet::unbound(vec![key.into()]),
+        )),
         thread_reads: Default::default(),
     }
 }
 
 #[tokio::test]
 async fn configured_api_keys_accept_only_their_own_credentials() {
-    let auth = A2aServerAuth::ApiKey {
-        keys: vec!["s3cret-key".into()],
-    };
+    let auth = A2aServerAuth::ApiKey(rustain::adapters::a2a::auth::ApiKeySet::unbound(vec![
+        "s3cret-key".into(),
+    ]));
     use rustain::adapters::a2a::auth::AuthOutcome;
     assert_eq!(
         auth.verify(Some("s3cret-key"), false),
-        AuthOutcome::Authenticated
+        AuthOutcome::Authenticated { slot: 0 }
     );
     assert_eq!(auth.verify(Some("wrong"), false), AuthOutcome::Rejected);
     assert_eq!(auth.verify(None, true), AuthOutcome::NoCredential);
@@ -2866,9 +2866,9 @@ async fn wildcard_bind_requires_an_advertised_authority_even_with_tls_and_auth()
             signer,
             security: A2aServerSecurity {
                 tls: Some(material),
-                auth: Some(A2aServerAuth::ApiKey {
-                    keys: vec!["configured-key".into()],
-                }),
+                auth: Some(A2aServerAuth::ApiKey(
+                    rustain::adapters::a2a::auth::ApiKeySet::unbound(vec!["configured-key".into()]),
+                )),
                 thread_reads: Default::default(),
             },
             runtime: None,
@@ -2896,9 +2896,12 @@ async fn a_non_loopback_listener_serves_only_over_tls_and_only_with_the_key() {
     let material = load_tls_material(&cert, &key).expect("load tls material");
     let security = A2aServerSecurity {
         tls: Some(material),
-        auth: Some(A2aServerAuth::ApiKey {
-            keys: vec!["s3cret-key".into(), "second-key".into()],
-        }),
+        auth: Some(A2aServerAuth::ApiKey(
+            rustain::adapters::a2a::auth::ApiKeySet::unbound(vec![
+                "s3cret-key".into(),
+                "second-key".into(),
+            ]),
+        )),
         thread_reads: Default::default(),
     };
 

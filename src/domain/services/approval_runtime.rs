@@ -190,25 +190,28 @@ impl ApprovalRuntime {
         self.events.subscribe()
     }
 
-    /// Pending sender-consent requests (tool `a2a/sender-consent`) with their
-    /// peer id (F10). The approval gate uses this after a broadcast `Lagged` to
-    /// re-render cards the bus dropped, so a never-expiring consent request
-    /// cannot hang silently with no card on screen.
-    pub async fn pending_sender_consent(
-        &self,
-    ) -> Vec<(RequestId, crate::domain::models::PeerId, ToolRisk)> {
+    /// Pending sender-consent requests (tool `a2a/sender-consent`) with the
+    /// card preview their `Requested` event carried (F10). The approval gate
+    /// uses this after a broadcast `Lagged` to re-render cards the bus
+    /// dropped, so a never-expiring consent request cannot hang silently with
+    /// no card on screen. Story 19.18d `P22`: the preview comes from the
+    /// request's stored input through the same derivation `request` used, so a
+    /// re-render never re-derives copy (a bound card stays a bound card).
+    pub async fn pending_sender_consent(&self) -> Vec<(RequestId, String, ToolRisk)> {
         let pending = self.pending.read().await;
         pending
             .values()
             .filter_map(|record| {
-                if record.request.tool != "a2a/sender-consent" {
+                if record.request.tool != "a2a/sender-consent"
+                    || !matches!(record.request.source, ApprovalSource::RemotePeer { .. })
+                {
                     return None;
                 }
-                let peer_id = match &record.request.source {
-                    ApprovalSource::RemotePeer { peer_id, .. } => peer_id.clone(),
-                    _ => return None,
-                };
-                Some((record.request.id.clone(), peer_id, record.request.risk))
+                Some((
+                    record.request.id.clone(),
+                    sender_consent_preview(&record.request.input),
+                    record.request.risk,
+                ))
             })
             .collect()
     }
@@ -304,11 +307,7 @@ impl ApprovalRuntime {
         let id = RequestId::new();
         let (tx, rx) = oneshot::channel();
         let input_preview = if sender_consent_request {
-            input
-                .get("card")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| summarize_for_display(&input, 140))
+            sender_consent_preview(&input)
         } else {
             summarize_for_display(&input, 140)
         };
@@ -526,6 +525,17 @@ fn summarize_for_display(input: &serde_json::Value, max_len: usize) -> String {
         let truncated: String = s.chars().take(max_len).collect();
         format!("{}...", truncated)
     }
+}
+
+/// Story 19.18d `P22` — the one derivation of a sender-consent request's
+/// preview: the card the requester rendered, else the generic summary. Both
+/// the `Requested` event and the `Lagged` re-render read it, so the two can
+/// never show different copy.
+fn sender_consent_preview(input: &serde_json::Value) -> String {
+    input
+        .get("card")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| summarize_for_display(input, 140), str::to_owned)
 }
 
 #[cfg(test)]

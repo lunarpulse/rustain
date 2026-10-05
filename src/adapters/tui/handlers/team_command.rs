@@ -763,7 +763,9 @@ pub fn render_team_thread(
             );
         }
     }
-    if credentialed {
+    // Story 19.18d `A13` — a host that answered `principalBound: true` holds
+    // this host's key as its own pinned peer: no co-holder caveat applies.
+    if credentialed && !thread.principal_bound {
         text.push('\n');
         text.push_str(&one_credential_sentence(&alias));
     }
@@ -1588,6 +1590,7 @@ mod tests {
             turns,
             omitted_before: 0,
             principal_collapsed: false,
+            principal_bound: false,
         }
     }
 

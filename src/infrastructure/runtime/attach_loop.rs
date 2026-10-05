@@ -416,15 +416,30 @@ fn peer_response_card_lines(pending: &PendingPeerResponse) -> Vec<ratatui::text:
     }
 }
 
+/// The consent card's lines, each wrapped to the card's inner `width` when
+/// longer than it (Story 19.18d `P22` dev smoke: the decision card renders
+/// without wrap, so an overlong line — the bound `[a]` clause is 115
+/// characters — was cut at the 60-column floor). A line that fits is kept
+/// byte-for-byte, double spaces included.
 fn consent_approval_card_lines(
     pending: &PendingConsentApproval,
     queued: usize,
+    width: usize,
 ) -> Vec<ratatui::text::Line<'static>> {
-    let mut lines: Vec<_> = pending
-        .input_preview
-        .lines()
-        .map(|line| ratatui::text::Line::from(line.to_owned()))
-        .collect();
+    use crate::adapters::tui::widgets::chat_pane::word_wrap::wrap_text;
+
+    let mut lines = Vec::new();
+    for line in pending.input_preview.lines() {
+        if width == 0 || line.chars().count() <= width {
+            lines.push(ratatui::text::Line::from(line.to_owned()));
+        } else {
+            lines.extend(
+                wrap_text(line, width)
+                    .into_iter()
+                    .map(ratatui::text::Line::from),
+            );
+        }
+    }
     if queued > 0 {
         lines.push(ratatui::text::Line::from(format!(
             "  [{queued} more queued]"
@@ -956,6 +971,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     consent_approval_card_lines(
                         pending,
                         pending_consent_approvals.len().saturating_sub(1),
+                        usize::from(layout.chat_pane.width.saturating_sub(2)),
                     ),
                     state.theme.colors.accent,
                     layout.chat_pane,
@@ -1426,7 +1442,7 @@ mod tests {
             input_preview: "Consent required\n[y] Allow once  [a] Always allow  [n] Decline"
                 .to_owned(),
         };
-        let text = consent_approval_card_lines(&pending, 2)
+        let text = consent_approval_card_lines(&pending, 2, 200)
             .into_iter()
             .flat_map(|line| line.spans)
             .map(|span| span.content.into_owned())
@@ -1434,6 +1450,59 @@ mod tests {
             .join("\n");
         assert!(text.contains("[2 more queued]"));
         assert!(text.contains("[y] Allow once  [a] Always allow  [n] Decline"));
+    }
+
+    /// Story 19.18d `P22` dev smoke, kept as a regression: at the 60-column
+    /// layout floor the bound card's `[a]` line renders whole — wrapped inside
+    /// the decision card, never cut — and a line that fits keeps its bytes.
+    #[test]
+    fn an_overlong_consent_line_wraps_inside_the_card_at_the_layout_floor() {
+        use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card;
+        use crate::domain::services::peer_admission::BOUND_KEY_CONSENT_LINE;
+
+        let pin = crate::domain::models::PeerId::from_public_key(&[9; 32]).unwrap();
+        let pending = PendingConsentApproval {
+            request_id: crate::domain::models::RequestId::new(),
+            tool: "a2a/sender-consent".to_owned(),
+            input_preview: crate::infrastructure::runtime::transparency_bridge::consent_card_text(
+                &crate::domain::models::PolicyPrincipal::bound_a2a(pin),
+            ),
+        };
+        let pane = ratatui::layout::Rect::new(0, 0, 60, 30);
+        let lines = consent_approval_card_lines(&pending, 0, usize::from(pane.width - 2));
+        let mut buffer = ratatui::buffer::Buffer::empty(pane);
+        render_bottom_anchored_decision_card(
+            &mut buffer,
+            lines.clone(),
+            ratatui::style::Color::Reset,
+            pane,
+        );
+        let rendered: String = (0..pane.height)
+            .map(|y| {
+                (1..pane.width - 1)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let words = |text: &str| {
+            text.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let rendered_words = words(&rendered);
+        let clause = words(&format!("[a] {BOUND_KEY_CONSENT_LINE}"));
+        assert!(
+            rendered_words
+                .windows(clause.len())
+                .any(|window| window == clause.as_slice()),
+            "the whole bound clause is visible at 60 columns: {rendered}"
+        );
+        let kept = "[y] Allow once  [a] Always allow  [n] Decline";
+        assert!(
+            lines.iter().any(|line| line.to_string() == kept),
+            "a line that fits keeps its bytes"
+        );
     }
 
     // ── Story 18.3c (AC3/AC5) — peer response decision-core coverage ────────

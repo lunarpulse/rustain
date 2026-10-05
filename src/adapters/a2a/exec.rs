@@ -18,7 +18,8 @@ use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::{
-    AgentId, ItemAddress, NodeState, PeerId, PolicyPrincipal, RapTaskState,
+    A2aIngressPrincipal, AgentId, ItemAddress, ItemPrincipal, NodeState, PeerId, PolicyPrincipal,
+    RapTaskState,
 };
 
 /// Whether a task is waiting on a human before it may run.
@@ -77,8 +78,19 @@ pub const fn project_node_to_rap(node: NodeState, pending: PendingAuth) -> RapTa
 /// that holds submitter API keys is a credential store nobody designed. The
 /// digest is only ever compared to another digest, so a plain `==` is correct
 /// here — there is no secret to leak a prefix of.
+///
+/// Three forms, and only these (Story 19.18d `A5`/`P4`): `loopback`,
+/// `apikey:<b64(sha256(key))>` for an unbound key, and `peer:<PeerId>` for a
+/// key the operator bound to a pinned roster peer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SubmitterKey(String);
+
+/// The handle prefix of a key bound to a pinned peer (Story 19.18d `A5`).
+const BOUND_HANDLE_PREFIX: &str = "peer:";
+/// The handle prefix of an unbound API key.
+const API_KEY_HANDLE_PREFIX: &str = "apikey:";
+/// The loopback socket's one handle.
+const LOOPBACK_HANDLE: &str = "loopback";
 
 impl SubmitterKey {
     /// The single submitter identity of the plaintext loopback socket. Loopback
@@ -86,16 +98,30 @@ impl SubmitterKey {
     /// which is accurate: they all already run code on this machine.
     #[must_use]
     pub fn loopback() -> Self {
-        Self("loopback".to_owned())
+        Self(LOOPBACK_HANDLE.to_owned())
     }
 
     /// Digest of a presented API key.
     #[must_use]
     pub fn from_api_key(key: &str) -> Self {
+        Self::from_api_key_digest(&Sha256::digest(key.as_bytes()).into())
+    }
+
+    /// The handle of an API key already reduced to its SHA-256 digest — the
+    /// same handle [`Self::from_api_key`] gives the key itself.
+    #[must_use]
+    pub fn from_api_key_digest(digest: &[u8; 32]) -> Self {
         Self(format!(
-            "apikey:{}",
-            URL_SAFE_NO_PAD.encode(Sha256::digest(key.as_bytes()))
+            "{API_KEY_HANDLE_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(digest)
         ))
+    }
+
+    /// Story 19.18d `A5` — a key bound to the pinned roster peer `pin`. Every
+    /// key bound to one pin yields this one handle, so they are one submitter.
+    #[must_use]
+    pub fn bound(pin: &PeerId) -> Self {
+        Self(format!("{BOUND_HANDLE_PREFIX}{}", pin.as_str()))
     }
 
     /// A stable, pseudonymous peer id for this submitting principal.
@@ -109,10 +135,38 @@ impl SubmitterKey {
         PeerId::from_public_key(&Sha256::digest(self.0.as_bytes())).unwrap()
     }
 
-    /// Every current submitter handle is a pseudonym, not a pinned identity.
+    /// Story 19.18d `F5` — the one place a handle becomes an identity:
+    /// `loopback`/`apikey:` → the handle's pseudonym, `peer:` → the bound pin.
+    /// [`Self::principal`] and [`Self::policy_principal`] are views of this.
+    #[must_use]
+    pub fn ingress_principal(&self) -> A2aIngressPrincipal {
+        match self
+            .0
+            .strip_prefix(BOUND_HANDLE_PREFIX)
+            .and_then(|pin| PeerId::parse(pin).ok())
+        {
+            Some(pin) => A2aIngressPrincipal::Bound(pin),
+            None => A2aIngressPrincipal::Pseudonym(self.pseudonymous_peer_id()),
+        }
+    }
+
+    /// The item principal this submitter's recipient items live under.
+    #[must_use]
+    pub fn principal(&self) -> ItemPrincipal {
+        match self.ingress_principal() {
+            A2aIngressPrincipal::Pseudonym(peer) => ItemPrincipal::A2aPseudonym(peer),
+            A2aIngressPrincipal::Bound(pin) => ItemPrincipal::A2aBound(pin),
+        }
+    }
+
+    /// The consent/policy identity: a pseudonym stays `Pseudonymous`; a bound
+    /// key is the pinned peer, reached over operator-bound A2A (`OQ3` = A).
     #[must_use]
     pub fn policy_principal(&self) -> PolicyPrincipal {
-        PolicyPrincipal::Pseudonymous(self.pseudonymous_peer_id())
+        match self.ingress_principal() {
+            A2aIngressPrincipal::Pseudonym(peer) => PolicyPrincipal::Pseudonymous(peer),
+            A2aIngressPrincipal::Bound(pin) => PolicyPrincipal::bound_a2a(pin),
+        }
     }
 
     /// The opaque handle, for encoding into a node id.
@@ -121,14 +175,28 @@ impl SubmitterKey {
         &self.0
     }
 
-    /// Rebuild a key from an encoded handle recovered after a restart.
-    ///
-    /// Only ever fed a value this type produced (via a node id), which is why it
-    /// is not a parser: there is nothing to validate that the digest itself does
-    /// not already guarantee.
+    /// Rebuild a key from an encoded handle recovered after a restart (a node
+    /// id or `a2a-pending.json`). Story 19.18d `A5`/`P4` — validating: accepts
+    /// exactly `loopback`, `apikey:` + the canonical unpadded URL-safe base64
+    /// of 32 bytes, and `peer:` + a canonical `PeerId`. Anything else is
+    /// `None`; the caller warns and skips the record, and ⛔ never re-derives
+    /// a principal from it.
     #[must_use]
-    pub fn from_encoded(handle: String) -> Self {
-        Self(handle)
+    pub fn from_encoded(handle: String) -> Option<Self> {
+        let canonical = if handle == LOOPBACK_HANDLE {
+            true
+        } else if let Some(digest) = handle.strip_prefix(API_KEY_HANDLE_PREFIX) {
+            URL_SAFE_NO_PAD
+                .decode(digest)
+                .ok()
+                .filter(|bytes| bytes.len() == 32)
+                .is_some_and(|bytes| URL_SAFE_NO_PAD.encode(bytes) == digest)
+        } else if let Some(pin) = handle.strip_prefix(BOUND_HANDLE_PREFIX) {
+            PeerId::parse(pin).is_ok()
+        } else {
+            false
+        };
+        canonical.then_some(Self(handle))
     }
 }
 
@@ -553,7 +621,9 @@ pub fn mint_inbound_node_id(submitter: &SubmitterKey, task_id: &str) -> AgentId 
 }
 
 /// Recover `(submitter, task_id)` from a node id minted by
-/// [`mint_inbound_node_id`].
+/// [`mint_inbound_node_id`]. `None` for a node id this function cannot read,
+/// including a submitter handle [`SubmitterKey::from_encoded`] rejects (Story
+/// 19.18d `P4`): the caller warns and skips the node.
 #[must_use]
 pub fn parse_inbound_node_id(node_id: &AgentId) -> Option<(SubmitterKey, String)> {
     let rest = node_id
@@ -570,12 +640,14 @@ pub fn parse_inbound_node_id(node_id: &AgentId) -> Option<(SubmitterKey, String)
     if peer.is_empty() || task.is_empty() {
         return None;
     }
-    Some((SubmitterKey::from_encoded(peer), task))
+    Some((SubmitterKey::from_encoded(peer)?, task))
 }
 
 /// Story 19.18 `P4` — the recipient item an inbound peer-response node
 /// answers, derived from the **journal** fold through the existing join:
-/// node id → `(submitter, task)` → pseudonymous principal → `find_by_task`.
+/// node id → `(submitter, task)` → the submitter's item principal →
+/// `find_by_task`. Story 19.18d: a bound submitter's items live under
+/// `A2aBound(pin)`, so the principal comes from [`SubmitterKey::principal`].
 ///
 /// ⛔ No in-memory node→item map: a restart would wipe it, and a card can
 /// still be resolved after one. `find_by_task` skips tombstones, which is
@@ -587,9 +659,7 @@ pub fn recipient_item_for_node(
     node_id: &AgentId,
 ) -> Option<crate::domain::models::RecipientItemView> {
     let (submitter, task) = parse_inbound_node_id(node_id)?;
-    let principal =
-        crate::domain::models::ItemPrincipal::A2aPseudonym(submitter.pseudonymous_peer_id());
-    projection.find_by_task(&principal, &task)
+    projection.find_by_task(&submitter.principal(), &task)
 }
 
 /// The opaque reason a task resolves `failed` before its local turn can start.
@@ -686,7 +756,7 @@ mod tests {
             (SubmitterKey::loopback(), "task-1"),
             (SubmitterKey::from_api_key("k"), "a/b/c"),
             (
-                SubmitterKey::from_encoded("../../etc/passwd".to_owned()),
+                SubmitterKey::bound(&PeerId::from_public_key(&[3; 32]).unwrap()),
                 "τask",
             ),
         ] {
@@ -715,19 +785,91 @@ mod tests {
         );
     }
 
+    /// Story 19.18d `F13` — the three views of one handle: `loopback` and
+    /// `apikey:` stay pseudonymous on every axis; `peer:` is the bound pin on
+    /// every axis, reached over operator-bound A2A.
     #[test]
-    fn every_submitter_handle_remains_pseudonymous() {
-        for submitter in [
-            SubmitterKey::loopback(),
-            SubmitterKey::from_api_key("key"),
-            SubmitterKey::from_encoded("future:opaque-handle".to_owned()),
-        ] {
-            let principal = submitter.policy_principal();
+    fn a_bound_handle_is_the_pin_and_every_other_handle_stays_pseudonymous() {
+        use crate::domain::models::PrincipalKind;
+        for submitter in [SubmitterKey::loopback(), SubmitterKey::from_api_key("key")] {
+            let pseudonym = submitter.pseudonymous_peer_id();
             assert_eq!(
-                principal.kind(),
-                crate::domain::models::PrincipalKind::Pseudonymous
+                submitter.ingress_principal(),
+                A2aIngressPrincipal::Pseudonym(pseudonym.clone())
             );
-            assert_eq!(principal.peer(), &submitter.pseudonymous_peer_id());
+            assert_eq!(
+                submitter.principal(),
+                ItemPrincipal::A2aPseudonym(pseudonym.clone())
+            );
+            assert_eq!(
+                submitter.policy_principal(),
+                PolicyPrincipal::Pseudonymous(pseudonym)
+            );
+        }
+        let pin = PeerId::from_public_key(&[5; 32]).unwrap();
+        let bound = SubmitterKey::bound(&pin);
+        assert_eq!(bound.as_str(), format!("peer:{pin}"));
+        assert_eq!(
+            bound.ingress_principal(),
+            A2aIngressPrincipal::Bound(pin.clone())
+        );
+        assert_eq!(bound.principal(), ItemPrincipal::A2aBound(pin.clone()));
+        assert_eq!(
+            bound.policy_principal(),
+            PolicyPrincipal::bound_a2a(pin.clone())
+        );
+        assert_eq!(bound.policy_principal().kind(), PrincipalKind::Pinned);
+        assert_ne!(bound.policy_principal(), PolicyPrincipal::rap(pin));
+    }
+
+    /// Story 19.18d `K06-P` (table half) — the persisted-handle parser accepts
+    /// exactly the three canonical forms. `M48` (accept any prefixed handle)
+    /// turns the reject rows RED.
+    #[test]
+    fn k06p_only_canonical_submitter_handles_are_accepted() {
+        let pin = PeerId::from_public_key(&[6; 32]).unwrap();
+        let digest = URL_SAFE_NO_PAD.encode([0xab_u8; 32]);
+        for accepted in [
+            "loopback".to_owned(),
+            format!("apikey:{digest}"),
+            SubmitterKey::from_api_key("some-key").as_str().to_owned(),
+            format!("peer:{pin}"),
+        ] {
+            assert_eq!(
+                SubmitterKey::from_encoded(accepted.clone()).map(|key| key.as_str().to_owned()),
+                Some(accepted.clone()),
+                "{accepted}"
+            );
+        }
+        let mut noncanonical = digest.clone();
+        noncanonical.pop();
+        noncanonical.push('B');
+        for rejected in [
+            String::new(),
+            "apikey:".to_owned(),
+            "peer:".to_owned(),
+            format!(
+                "apikey:{}",
+                base64::engine::general_purpose::URL_SAFE.encode([0xab_u8; 32])
+            ),
+            format!("apikey:{}", URL_SAFE_NO_PAD.encode([0xab_u8; 31])),
+            format!("apikey:{}", URL_SAFE_NO_PAD.encode([0xab_u8; 33])),
+            format!("apikey:{}+", &digest[..42]),
+            format!("apikey:{noncanonical}"),
+            format!("peer:{}", pin.as_str().to_ascii_uppercase()),
+            "peer:zz".to_owned(),
+            "future:opaque-handle".to_owned(),
+            "../../etc/passwd".to_owned(),
+            format!("peer:peer:{pin}"),
+            format!("apikey:apikey:{digest}"),
+            "loopback:".to_owned(),
+            " loopback".to_owned(),
+        ] {
+            assert_eq!(
+                SubmitterKey::from_encoded(rejected.clone()),
+                None,
+                "{rejected:?}"
+            );
         }
     }
 

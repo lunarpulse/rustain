@@ -410,13 +410,31 @@ pub(crate) fn fanout_command(
 /// [`crate::domain::services::peer_admission::ROTATED_KEY_DOCTRINE`] (Story
 /// 18.4b): AC4's key-mismatch alarm states the same doctrine, and two literals
 /// are two doctrines waiting to diverge. The rendered string is unchanged.
-pub(crate) fn consent_card_text(sender: &crate::domain::models::PeerId) -> String {
-    let doctrine = crate::domain::services::peer_admission::ROTATED_KEY_DOCTRINE;
+///
+/// Story 19.18d `P22` — exhaustive over the principal's rail: a pseudonym and
+/// a RAP pin keep today's bytes; an operator-bound A2A key's `[a]` line says
+/// what `[a]` trusts there, the pin
+/// ([`crate::domain::services::peer_admission::BOUND_KEY_CONSENT_LINE`]).
+pub(crate) fn consent_card_text(sender: &crate::domain::models::PolicyPrincipal) -> String {
+    use crate::domain::models::{PinnedVia, PolicyPrincipal};
+    use crate::domain::services::peer_admission::{BOUND_KEY_CONSENT_LINE, ROTATED_KEY_DOCTRINE};
+
+    let peer = sender.peer();
+    let key_line = || {
+        format!("[a] trusts the key this sender presents, not the person; {ROTATED_KEY_DOCTRINE}.")
+    };
+    let trust_line = match sender {
+        PolicyPrincipal::Pseudonymous(_) => key_line(),
+        PolicyPrincipal::Pinned { via, .. } => match via {
+            PinnedVia::Rap => key_line(),
+            PinnedVia::BoundA2a => format!("[a] {BOUND_KEY_CONSENT_LINE}"),
+        },
+    };
     format!(
-        "Consent required — {sender}\n\
+        "Consent required — {peer}\n\
          No standing consent is recorded for this sender.\n\
          [y] Allow once  [a] Always allow  [n] Decline\n\
-         [a] trusts the key this sender presents, not the person; {doctrine}.\n\
+         {trust_line}\n\
          Awaiting your decision.\n\
          Logged immediately for safety; interruption timing follows your policy."
     )
@@ -902,8 +920,15 @@ pub async fn team_retract_preview(
 
     let alias = retract_alias(peer);
     let shown_item = sanitize_disclosable(item, MAX_PEER_ID_BYTES);
-    let (rows, armed, key_line, task) = match preview_item_retract(runtime, peer, item).await {
+    // Story 19.18d `A13` — the co-holder sentence is omitted only when the
+    // host's list answered `principalBound: true`; an unverified read keeps it.
+    let (rows, armed, key_line, task, principal_bound) = match preview_item_retract(
+        runtime, peer, item,
+    )
+    .await
+    {
         RetractPreview::Found(found) => {
+            let principal_bound = found.principal_bound;
             let mark = match (found.state, found.retracted_at_ms) {
                 (BoardItemState::Removed, _) => "removed there — nothing to mark".to_owned(),
                 (_, Some(ms)) => format!("already retracted {}", mark_clock(ms)),
@@ -927,6 +952,7 @@ pub async fn team_retract_preview(
                         "Already removed on {alias}'s host — nothing to mark.  [n] Cancel (Esc)"
                     ),
                     found.task,
+                    principal_bound,
                 )
             } else {
                 (
@@ -934,6 +960,7 @@ pub async fn team_retract_preview(
                     true,
                     "Awaiting your decision.  [y] Retract  [n] Cancel (Esc)".to_owned(),
                     found.task,
+                    principal_bound,
                 )
             }
         }
@@ -956,18 +983,26 @@ pub async fn team_retract_preview(
             false,
             format!("Cannot verify on {alias}'s host.  [n] Cancel (Esc)"),
             None,
+            false,
         ),
+    };
+    let credential = if principal_bound {
+        String::new()
+    } else {
+        format!(
+            "{}\n\n",
+            crate::adapters::tui::handlers::team_command::one_credential_sentence(&alias)
+        )
     };
     TeamRetractPreview::Card(TeamRetractCard {
         peer: peer.to_owned(),
         item_id: item.to_owned(),
         task,
         body: format!(
-            "Retract on {alias}'s host\n\n{rows}\n\n{}\n\n\
+            "Retract on {alias}'s host\n\n{rows}\n\n{credential}\
              This marks the item on their host. It does not delete it, and there is no \
              un-retract. What they already read, they already read.\n\n\
-             {key_line}",
-            crate::adapters::tui::handlers::team_command::one_credential_sentence(&alias)
+             {key_line}"
         ),
         armed,
     })

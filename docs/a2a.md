@@ -254,7 +254,11 @@ caller that presents no item capability is refused before a thread lookup or
 follow-up mutation. Loopback is always served, and the thread block discloses
 its collapsed principal. Story
 19.18c's per-item capability nonce (below) shipped the first follow-up
-hardening row; Story 19.18d's per-peer credential binding is the next.
+hardening row; Story 19.18d's per-peer credential binding (see
+*Binding API keys to pinned peers*) is the next. `threadReads` governs unbound
+API-key callers only: a key bound to a pinned peer reads that peer's own legacy
+items' threads with `threadReads` off (a capability-bearing item still needs its
+capability).
 
 ## Per-item capabilities (Story 19.18c, 2026-09-30)
 
@@ -389,6 +393,11 @@ The `server` block of `.rustain/a2a.json`:
     "admission": "ask",
     "apiKeyEnv": "RUSTAIN_A2A_API_KEY",
     "apiKeys": ["RUSTAIN_A2A_API_KEY_NEXT"],
+    "peerKeys": {
+      "RUSTAIN_A2A_KEY_ALICE": "alice-dev",
+      "RUSTAIN_A2A_KEY_BOB": { "peer": "bob-ci", "adoptLegacyItems": true }
+    },
+    "requirePeerBinding": false,
     "advertisedHost": "a2a.example.com:8443",
     "tls": { "cert": "certs/server.pem", "key": "certs/server.key" }
 }
@@ -399,6 +408,8 @@ The `server` block of `.rustain/a2a.json`:
 | `admission` | `deny` (default), `ask`, `allow` | What to do with a task from a remote agent |
 | `apiKeyEnv` / `api_key_env` | env var **name** | Legacy primary API-key variable. It remains honored. The key itself never lives in the file |
 | `apiKeys` / `api_keys` | array of env var **names** | Additional API keys. The effective set is the union with `apiKeyEnv`; each configured key is a distinct submitting principal |
+| `peerKeys` / `peer_keys` | map of env var **name** to a roster alias, or to `{ "peer": "<alias>", "adoptLegacyItems": bool }` (`adopt_legacy_items`, default `false`) | Binds an inbound API key to one **pinned** roster peer. Several names may bind one alias. A name is either bound here or unbound in `apiKeyEnv`/`apiKeys`, never both. See *Binding API keys to pinned peers* |
+| `requirePeerBinding` / `require_peer_binding` | `false` (default), `true` | Startup validation: every configured key must be bound in `peerKeys`, so no unbound caller can exist |
 | `threadReads` / `thread_reads` | `off` (default), `credential-scoped` | Thread and follow-up access for legacy items from API-key callers |
 | `advertisedHost` / `advertised_host` | public `host[:port]` authority | Authority published in the AgentCard. Required for `0.0.0.0` or `::` binds |
 | `tls.cert` / `tls.key` | workspace-relative PEM paths | Certificate chain and private key |
@@ -433,6 +444,101 @@ when it never sent one is a lie. The served AgentCard publishes
 `securitySchemes` and `security` describing exactly what the server enforces, and
 the card itself stays reachable unauthenticated — gating it would gate the
 document that explains how to get past the gate.
+
+### Binding API keys to pinned peers (Story 19.18d)
+
+`server.peerKeys` lets the operator bind each inbound API key to one roster peer
+that declares a `pinnedKey`. A call made with a bound key is attributed to that
+pinned peer instead of to a pseudonym derived from the key. A binding is the
+operator's assertion that the holder of the key is that peer: it records
+possession of the key, never the person. Several keys may be bound to the same
+peer; they are then one principal, so moving a peer from one bound key to
+another, with both configured, keeps its items, tasks and consent. Two aliases
+that share one pin are also one principal, but each item records the alias of
+the key that was actually presented.
+
+Both forms are equivalent in meaning; the object form adds the adoption switch:
+
+```json
+"peerKeys": {
+  "RUSTAIN_A2A_KEY_ALICE": "alice-dev",
+  "RUSTAIN_A2A_KEY_BOB": { "peer": "bob-ci", "adoptLegacyItems": true }
+}
+```
+
+Startup refuses, in this order and naming environment variable names and aliases
+(never values): a name in both `peerKeys` and `apiKeyEnv`/`apiKeys`; an alias
+that is not in the roster; an alias with no pinned key; `requirePeerBinding`
+with an unbound key; an unset or empty variable; and one key value bound to two
+different bindings (same alias, peer and `adoptLegacyItems` is accepted).
+
+The roster is the active profile's `a2a.json`, for the daemon and for standalone
+`--serve-a2a` alike. An absent or empty roster fails as a missing alias. A
+refusal on `daemon start --foreground` and on standalone `--serve-a2a` reaches
+stderr (`rustain: daemon failed: <error>` and `rustain: A2A server failed:
+<error>`); a detached `daemon start` still shows the child's refusal in the log
+only.
+
+**Listener behaviour.** Bindings take effect on a non-loopback listener only. A
+loopback listener ignores the keys: every caller is the one local principal, and
+a bound key configured there logs `A2A peer bindings: this server listens on
+loopback, where every caller is one local principal; server.peerKeys takes effect
+only on a non-loopback listener.` A bound-only configuration counts as having an
+API key for the non-loopback bind check.
+
+**What a bound caller sees.** Keys bound to different peers are separate
+principals on list, thread, follow-up, retract, `tasks/get` and `tasks/cancel`;
+a foreign id answers the same not-found as a never-existing id. Successful list,
+thread and retract answers to a bound caller carry `principalBound: true` and
+`principalCollapsed: false` (an additive field; unbound and loopback answers are
+byte-identical to before). A sender omits its "one credential" sentence for a
+host that answers `principalBound: true`. A bound caller is not refused by
+`threadReads = off` for its own legacy items; a capability-bearing item still
+needs its item capability, and a missing or wrong one is the same not-found.
+The startup posture lines about shared keys count only the unbound keys.
+
+**Adoption.** Items received under a key before it was bound belong to that
+key's pseudonym and are not visible to the bound peer. They stay in the journal,
+and startup logs the count: `A2A recipient items: {count} item(s) belong to
+identities that no caller of this listener has, so no caller can list, read or
+retract them; they stay in the journal. Off loopback, configuring the original
+API key again (unbound, or in server.peerKeys with adoptLegacyItems) or binding
+any key to the same pinned peer makes them reachable.` With
+`adoptLegacyItems: true`, every key bound to that peer reads the legacy items of
+that same key value: a read union for list, thread and retract only, in one
+global journal order. Adoption does not change the capability-class edge: a
+legacy follow-up joins an adopted legacy thread, while a capability-bearing
+follow-up of a legacy root starts its own root. Tasks are never adopted:
+`tasks/get`, `tasks/cancel` and new tasks stay on the exact bound handle, so a
+task submitted before the key was bound answers not-found (a later story owns
+that, `DF-19-18D-TASKS-NOT-ADOPTED`). A bound peer's items and a RAP peer's
+items of the same pin stay separate (`DF-19-18D-CROSS-RAIL-PRINCIPAL`).
+
+The orphan count also includes bound items when every key bound to their pin is
+removed. On a loopback listener, all bound items and all non-loopback API-key
+pseudonym items count as unreachable, because configured keys are ignored.
+On a non-loopback listener, binding any key to the original pin restores access
+to its bound items. Legacy pseudonymous items instead require the original key
+value, configured either unbound or bound with `adoptLegacyItems: true`; binding
+a different key to the same pin does not adopt that original key's items.
+
+**Older builds and changes (disclosed).**
+
+- (a) An older build ignores `peerKeys`: a bound-only configuration has no key
+  there and refuses to start off loopback; a mixed configuration answers a
+  bound-only credential 401.
+- (b) Journal addresses of bound items, on received items and on reply turns,
+  read as unknown in an older build, one item at a time, and are not served
+  there.
+- (c) Binding a key that was unbound, without adoption, leaves its earlier items
+  unreachable and its earlier tasks answering not-found.
+- (d) Two aliases with one pin are one item and consent principal; distinct keys
+  journal their own matched aliases, and one key value under two different
+  aliases is refused.
+
+A restart keeps identity, not execution: a task in flight at restart becomes a
+failed projection under the same bound handle, and another key bound to that
+peer may query it.
 
 ### Task lifecycle
 
@@ -477,18 +583,23 @@ even against a modified requesting client.
 Sender-consent grants saved by the approval card's **Always** action now carry a
 `principal` kind:
 
-- `pinned`: a RAP sender whose identity was authenticated by the transport.
+- `pinned`: a sender identified by a roster pin. Either a RAP sender whose
+  identity the transport authenticated (`via` RAP), or an inbound A2A caller
+  whose API key the operator bound to that pin in `server.peerKeys` (`via`
+  bound A2A: the operator's assertion that the key holder is that peer).
 - `pseudonymous`: an A2A submitter identified by the loopback or API-key handle.
 
 These are separate consent slots even when their `PeerId` hex labels are
 identical. Trusting the A2A pseudonym does not trust the colliding RAP principal,
 and trusting the RAP principal does not trust the A2A pseudonym. Per-sender
-policy overrides, including their implied consent, apply only to pinned
-principals; an A2A pseudonym cannot inherit one by matching its label. Global
+policy overrides, including their implied consent, apply to pinned principals
+(RAP senders and operator-bound A2A callers of that pin); an unbound A2A
+pseudonym cannot inherit one by matching its label. An override applies only when
+it is applicable to the sender and not in conflict with another override. Global
 and message-type policy still apply.
 
 Existing grants without `principal` remain **legacy grants**. They still admit
-RAP and A2A callers exactly as before, unless that caller has an explicit
+RAP and unbound A2A callers exactly as before, unless that caller has an explicit
 typed-slot decision. Loading or using a legacy grant does not rewrite it
 as a typed grant. Newly saved sender-consent grants are typed; this is not a
 migration of old journal rows.
@@ -506,6 +617,26 @@ that display aggregate is not the admission decision.
 Approval-source provenance is carried in memory. Its serialized `RemotePeer`
 shape remains unchanged, and decoding it does not reconstruct trusted
 provenance from `peer_id`.
+
+### Consent for a bound caller (Story 19.18d)
+
+A bound caller's consent identity is the pin it is bound to. A typed `pinned`
+grant therefore covers every key bound to that peer and the same peer over RAP,
+and a grant written through either path holds on the other. A legacy grant
+(one saved before typed grants) never admits a bound caller, whichever kind of
+caller it was recorded for, so the first call after a key is bound asks once
+again; legacy grants still admit RAP and unbound A2A callers exactly as before.
+
+A RAP sender and the bound callers of one pin share **one** pending consent card
+and one answer: answering it releases all of them. The card's wording and
+instruction are those of whichever delivery arrived first. A bound caller's card
+says `[a] trusts the pinned peer this key is bound to, not the person; every key
+bound to that peer shares this decision.`; the cards for RAP and unbound callers
+are unchanged.
+
+The startup warning about auto-response authority is no longer silenced by a
+legacy grant for a pin that a `server.peerKeys` entry reaches; a typed pinned
+grant or a per-sender override silences it.
 
 **Downgrade caveat:** an older build ignores `principal` and folds a typed grant
 as a bare grant. Its reach then equals pre-19.18d0 behavior; typed separation

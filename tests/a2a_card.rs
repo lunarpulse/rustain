@@ -90,9 +90,9 @@ async fn served_signed_cards_are_bounded_truncated_and_deterministic() {
     let signer = IdentityKeyStore::new(key_dir.path())
         .load_or_generate()
         .expect("test signing identity");
-    let auth = A2aServerAuth::ApiKey {
-        keys: vec![SecretString::from("test-api-key")],
-    };
+    let auth = A2aServerAuth::ApiKey(rustain::adapters::a2a::auth::ApiKeySet::unbound(vec![
+        SecretString::from("test-api-key"),
+    ]));
     let endpoint = "https://a2a.example.test:8443";
 
     let first = SignedCardCache::new()

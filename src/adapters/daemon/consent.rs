@@ -9,13 +9,18 @@ use tokio::sync::{Mutex, oneshot};
 use crate::adapters::policy::JournalConsentProjection;
 use crate::domain::clock::Clock;
 use crate::domain::models::{
-    DeliveryDisposition, EffectivePolicy, PolicyPrincipal, RequestId, RoomEvent, may_consent_refuse,
+    DeliveryDisposition, EffectivePolicy, PeerId, PolicyPrincipal, RequestId, RoomEvent,
+    may_consent_refuse,
 };
 use crate::domain::ports::{
-    ConsentProjectionQuery, ConsentState, InboundApprovalDecision, RoomJournal, RoomJournalReader,
+    ConsentProjectionQuery, ConsentSlot, ConsentState, InboundApprovalDecision, RoomJournal,
+    RoomJournalReader,
 };
 
 struct PendingSender {
+    /// The group's first registrant: its card copy is the group's (Story
+    /// 19.18d `P21`, disclosed); a joiner's summary is pooled, not shown.
+    first: PolicyPrincipal,
     summaries: Vec<String>,
     waiters: Vec<oneshot::Sender<InboundApprovalDecision>>,
 }
@@ -27,7 +32,15 @@ pub(crate) struct PendingConsentRegistration {
     pub(crate) decision: oneshot::Receiver<InboundApprovalDecision>,
 }
 
-/// Groups pending tasks by policy principal and owns durable grants.
+/// Story 19.18d `P21` — a pending group is one consent **cell**: the slot a
+/// grant for this principal writes, plus its peer. A RAP sender and the bound
+/// A2A callers of one pin share a cell, so they share one card and one answer;
+/// a pseudonym and a pin with equal bytes stay two cells.
+fn pending_key(principal: &PolicyPrincipal) -> (ConsentSlot, PeerId) {
+    (ConsentSlot::of(principal), principal.peer().clone())
+}
+
+/// Groups pending tasks by consent cell and owns durable grants.
 pub(crate) struct PendingConsentManager {
     projection: Arc<JournalConsentProjection>,
     journal: Arc<dyn RoomJournal>,
@@ -35,7 +48,7 @@ pub(crate) struct PendingConsentManager {
     reader: Option<Arc<dyn RoomJournalReader>>,
     last_seq: AtomicU64,
     policy: tokio::sync::Mutex<Option<Arc<EffectivePolicy>>>,
-    pending: Mutex<HashMap<PolicyPrincipal, PendingSender>>,
+    pending: Mutex<HashMap<(ConsentSlot, PeerId), PendingSender>>,
     always_requests: Mutex<HashSet<RequestId>>,
 }
 
@@ -100,8 +113,10 @@ impl PendingConsentManager {
         }
 
         let mut pending = self.pending.lock().await;
-        let first_for_sender = !pending.contains_key(&sender);
-        let group = pending.entry(sender).or_insert_with(|| PendingSender {
+        let key = pending_key(&sender);
+        let first_for_sender = !pending.contains_key(&key);
+        let group = pending.entry(key).or_insert_with(|| PendingSender {
+            first: sender,
             summaries: Vec::new(),
             waiters: Vec::new(),
         });
@@ -114,12 +129,13 @@ impl PendingConsentManager {
         }
     }
 
-    /// Current card copy for one sender. There is exactly one pending group,
-    /// regardless of how many tasks have joined it.
+    /// Current card copy for one sender's consent cell. There is exactly one
+    /// pending group per cell, regardless of how many tasks have joined it;
+    /// its copy is the first registrant's (Story 19.18d `P21`/`P22`).
     pub(crate) async fn card_text(&self, sender: &PolicyPrincipal) -> Option<String> {
         let pending = self.pending.lock().await;
-        pending.get(sender)?;
-        Some(crate::infrastructure::runtime::transparency_bridge::consent_card_text(sender.peer()))
+        let group = pending.get(&pending_key(sender))?;
+        Some(crate::infrastructure::runtime::transparency_bridge::consent_card_text(&group.first))
     }
 
     /// Persist standing trust before the approval runtime is resolved.
@@ -145,7 +161,7 @@ impl PendingConsentManager {
     /// Drop a sender's pending group without resolving it. Used when admission
     /// setup failed before a card could render, so the next delivery retries.
     pub(crate) async fn drop_pending(&self, sender: &PolicyPrincipal) {
-        self.pending.lock().await.remove(sender);
+        self.pending.lock().await.remove(&pending_key(sender));
     }
 
     /// Re-fold the cached projection from the durable journal when it has
@@ -216,7 +232,7 @@ impl PendingConsentManager {
             .pending
             .lock()
             .await
-            .remove(sender)
+            .remove(&pending_key(sender))
             .map_or_else(Vec::new, |group| group.waiters);
         for waiter in waiters {
             let _ = waiter.send(resolved);
@@ -249,7 +265,7 @@ impl PendingConsentManager {
         self.pending
             .lock()
             .await
-            .get(sender)
+            .get(&pending_key(sender))
             .map_or(0, |group| group.waiters.len())
     }
 }

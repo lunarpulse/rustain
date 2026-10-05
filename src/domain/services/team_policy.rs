@@ -930,19 +930,21 @@ pub fn explain_effective_policy(
                 binding: SenderBinding::DeclaredPeerId,
             } => rows.push(PolicyRow {
                 key: format!("sender:{}", sender.alias),
-                // The binding is real, but only for a sender that PRESENTS this
-                // key. An inbound A2A HTTP submitter's identity is a digest of
-                // the credential it presented (`loopback`, `apikey:<…>`), never a
-                // pinned public key, so this override cannot match one — and the
-                // row used to reassure the operator that it did. Scoped, not
-                // blanket: a signed-envelope peer carrying this key does bind
-                // here (DF-18-4e-OVERRIDE-UNREACHABLE).
+                // The binding is real for a sender that PRESENTS this key in a
+                // signed envelope, and (Story 19.18d) for an inbound A2A HTTP
+                // caller whose API key `server.peerKeys` binds to this peer — an
+                // operator assertion of key possession, never a transport
+                // property. An UNBOUND A2A submitter's identity is a digest of
+                // the credential it presented (`loopback`, `apikey:<…>`), never
+                // a pinned key, so the override still cannot match one; the row
+                // says so rather than reassuring the operator.
                 detail: format!(
-                    "per-sender override `{}` binds to declared pinned identity {} for a sender \
-                     that presents that key in a signed envelope, and is rename-stable; it can \
-                     never match an inbound A2A HTTP submitter, whose identity is derived from \
-                     the credential presented rather than from a pinned key \
-                     (DF-18-4e-OVERRIDE-UNREACHABLE); {values}",
+                    "per-sender override `{}` binds to declared pinned identity {} and is \
+                     rename-stable; it applies to a sender that presents that key in a signed \
+                     envelope and to an inbound A2A HTTP caller whose API key server.peerKeys \
+                     binds to this peer (the operator's assertion that the key holder is this \
+                     peer); it never matches an unbound A2A HTTP submitter, whose identity is \
+                     derived from the credential presented; {values}",
                     sender.alias,
                     short_id(peer_id)
                 ),
@@ -1538,21 +1540,15 @@ mod tests {
         );
     }
 
-    /// Story 18.4e AC7 — the explainer must not reassure an operator about a
-    /// binding that cannot fire on the path they are configuring.
+    /// Story 18.4e AC7, re-scoped by Story 19.18d — the explainer must state
+    /// exactly the paths the override can fire on: a signed-envelope sender
+    /// of the key and an inbound A2A caller whose key `server.peerKeys` binds
+    /// to the peer, and never an unbound A2A submitter.
     ///
     /// Front door: the row `explain_effective_policy` renders, reached through the
     /// real `resolve_effective_policy`. ⛔ Not the enum variant — a
     /// `matches!(SenderBinding::DeclaredPeerId, …)` assertion says nothing about
     /// what the operator is told.
-    ///
-    /// Mutants this must turn RED:
-    /// (a) restore the old unqualified *"binds to declared pinned identity … and
-    ///     is rename-stable"* wording — the A2A clause and the DF id disappear;
-    /// (b) make the honesty clause **blanket** (the `is NOT applied` phrasing the
-    ///     genuinely-inapplicable arms use) — the signed-envelope clause
-    ///     disappears, and it would contradict the behaviour asserted below,
-    ///     because this override really does resolve for the identity it names.
     ///
     /// Positive control: the row still exists. Trading a misleading line for an
     /// invisible one is not a fix.
@@ -1585,8 +1581,20 @@ mod tests {
             Some(ResponseMode::NotifyAndAuto),
             "a declared pin must still bind for the identity it names"
         );
-        // … while an inbound A2A HTTP submitter's identity is `sha256(<credential
-        // handle>)`, which no pinned public key can equal.
+        // … and so does an inbound A2A caller whose key the operator bound to
+        // this peer (Story 19.18d), while an unbound A2A submitter's identity is
+        // `sha256(<credential handle>)`, which no pinned public key can equal.
+        assert_eq!(
+            sender_policy_for(
+                &effective,
+                &PolicyPrincipal::bound_a2a(pinned.clone()),
+                SemanticMessageType::Unknown
+            )
+            .and_then(|sender| sender.response_mode.clone())
+            .map(|resolved| resolved.value),
+            Some(ResponseMode::NotifyAndAuto),
+            "a declared pin binds for an A2A caller bound to it"
+        );
         for handle in ["loopback", "apikey:some-presented-key"] {
             assert_eq!(
                 sender_policy_for(
@@ -1595,7 +1603,7 @@ mod tests {
                     SemanticMessageType::Unknown,
                 ),
                 None,
-                "an A2A submitter identity must never resolve a pinned override"
+                "an unbound A2A submitter identity must never resolve a pinned override"
             );
         }
 
@@ -1607,8 +1615,8 @@ mod tests {
             .expect("the override must still be explained, never silently dropped");
         for expected in [
             "in a signed envelope",
-            "never match an inbound A2A HTTP submitter",
-            "DF-18-4e-OVERRIDE-UNREACHABLE",
+            "server.peerKeys binds to this peer",
+            "never matches an unbound A2A HTTP submitter",
         ] {
             assert!(
                 row.detail.contains(expected),
@@ -1616,11 +1624,14 @@ mod tests {
                 row.detail
             );
         }
-        assert!(
-            !row.detail.contains("is NOT applied"),
-            "the honesty clause must be scoped to the A2A path, not a blanket refusal: {}",
-            row.detail
-        );
+        let lower = row.detail.to_ascii_lowercase();
+        for overclaim in ["authenticated", "verified", "is not applied"] {
+            assert!(
+                !lower.contains(overclaim),
+                "the row must not claim `{overclaim}`: {}",
+                row.detail
+            );
+        }
     }
 
     #[test]

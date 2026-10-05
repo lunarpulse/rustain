@@ -19,7 +19,8 @@
 use rustain::adapters::a2a::exec::SubmitterKey;
 use rustain::adapters::policy::recipient_item::JournalRecipientItemProjection;
 use rustain::domain::models::{
-    ItemAddress, ItemId, ItemPrincipal, JournalEntry, JournalRecord, RecipientItemState, RoomEvent,
+    ItemAddress, ItemId, ItemPrincipal, ItemScope, JournalEntry, JournalRecord, RecipientItemState,
+    RoomEvent,
 };
 
 fn entry(seq: u64, event: RoomEvent) -> JournalEntry {
@@ -44,6 +45,10 @@ fn address_for(key: &SubmitterKey, item: &str) -> ItemAddress {
 
 fn principal_of(key: &SubmitterKey) -> ItemPrincipal {
     ItemPrincipal::A2aPseudonym(key.pseudonymous_peer_id())
+}
+
+fn scope_of(key: &SubmitterKey) -> ItemScope {
+    ItemScope::exact(principal_of(key))
 }
 
 /// Story 19.16b AC1(c) — the enumeration is scoped to the caller's own
@@ -74,7 +79,7 @@ fn ac1_the_enumerator_returns_the_callers_own_items_and_none_of_another_principa
     ];
     let projection = JournalRecipientItemProjection::from_entries(&entries);
 
-    let found = projection.find_by_principal(&principal_of(&alpha));
+    let found = projection.find_in_scope(&scope_of(&alpha));
     assert_eq!(
         found
             .iter()
@@ -84,7 +89,7 @@ fn ac1_the_enumerator_returns_the_callers_own_items_and_none_of_another_principa
         "the caller reads its own set — and exactly its own set"
     );
     assert_eq!(
-        projection.find_by_principal(&principal_of(&beta)).len(),
+        projection.find_in_scope(&scope_of(&beta)).len(),
         1,
         "control: beta's own read is not empty either, so the filter is a \
          filter and not a constant"
@@ -124,7 +129,7 @@ fn ac1_another_principals_tombstone_is_byte_identical_to_an_id_that_never_existe
 
     // Positive control: the tombstone really is present for its OWN principal,
     // so "absent for alpha" is not vacuous.
-    let owner_view = projection.find_by_principal(&principal_of(&beta));
+    let owner_view = projection.find_in_scope(&scope_of(&beta));
     assert_eq!(owner_view.len(), 1);
     assert_eq!(
         owner_view[0].state,
@@ -137,7 +142,7 @@ fn ac1_another_principals_tombstone_is_byte_identical_to_an_id_that_never_existe
     // swap mutant both principals receive the tombstone, so the two reads stay
     // equal. The assertion that bites is that the neighbour's removed item is
     // ABSENT from a read it does not own.
-    let stranger = projection.find_by_principal(&principal_of(&alpha));
+    let stranger = projection.find_in_scope(&scope_of(&alpha));
     assert!(
         stranger.is_empty(),
         "a tombstone classified BEFORE the principal filter answers \
@@ -146,7 +151,7 @@ fn ac1_another_principals_tombstone_is_byte_identical_to_an_id_that_never_existe
     );
     assert_eq!(
         stranger,
-        projection.find_by_principal(&principal_of(&never)),
+        projection.find_in_scope(&scope_of(&never)),
         "…and a principal whose neighbour removed an item must read \
          byte-identically to one that never minted anything"
     );
@@ -189,14 +194,14 @@ fn ac1_the_enumeration_order_survives_a_cold_fold_versus_a_live_apply() {
         live.apply(event);
     }
 
-    let principal = principal_of(&key);
+    let principal = scope_of(&key);
     let cold_ids: Vec<String> = cold
-        .find_by_principal(&principal)
+        .find_in_scope(&principal)
         .iter()
         .map(|item| item.address.item().as_str().to_owned())
         .collect();
     let live_ids: Vec<String> = live
-        .find_by_principal(&principal)
+        .find_in_scope(&principal)
         .iter()
         .map(|item| item.address.item().as_str().to_owned())
         .collect();
@@ -204,12 +209,12 @@ fn ac1_the_enumeration_order_survives_a_cold_fold_versus_a_live_apply() {
     assert_eq!(cold_ids, live_ids, "both folds agree on the ORDER");
 
     let cold_numbers: Vec<u64> = cold
-        .find_by_principal(&principal)
+        .find_in_scope(&principal)
         .iter()
         .map(|item| item.journal_order)
         .collect();
     let live_numbers: Vec<u64> = live
-        .find_by_principal(&principal)
+        .find_in_scope(&principal)
         .iter()
         .map(|item| item.journal_order)
         .collect();
@@ -291,7 +296,7 @@ fn ac4_a_removed_item_never_re_binds_a_task_and_never_shadows_a_live_one() {
     // of item state).
     assert_eq!(
         removed_only
-            .find_by_principal(&principal)
+            .find_in_scope(&scope_of(&key))
             .first()
             .map(|item| item.state.wire_name()),
         Some("removed"),

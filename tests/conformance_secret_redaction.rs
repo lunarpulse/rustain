@@ -109,9 +109,9 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
 
     let expected: BTreeSet<String> = [
         // Story 18.1b — the ONE place the served API key is read, and it reads
-        // it only to hash it: `constant_time_secret_eq` feeds both sides through
-        // SHA-256 before comparing with `subtle::ConstantTimeEq`, so the
-        // plaintext never reaches a comparison, a log line, or a `Debug`.
+        // it only to hash it: Story 19.18d moved it into `digest_of`, which
+        // reduces each configured key to its SHA-256 digest at resolve time, so
+        // the plaintext never reaches a comparison, a log line, or a `Debug`.
         "adapters/a2a/auth.rs",
         // Story 19.14 — the ONE place the A2A CLIENT's credential is read, and it
         // reads it only to build the `x-api-key` header value, which is marked

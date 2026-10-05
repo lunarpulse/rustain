@@ -44,6 +44,14 @@ use crate::domain::models::{P2pConfigState, P2pPeerSpec, PeerId, PinnedKey};
 /// sentence.
 pub const ROTATED_KEY_DOCTRINE: &str = "a rotated key is a new peer";
 
+/// Story 19.18d `P22` — the consent card's `[a]` clause for an inbound A2A
+/// caller whose key the operator bound to a pinned peer. `[a]` there trusts
+/// the pin, so every key bound to it (and RAP from it) shares the decision,
+/// and rotating between those keys is not a new peer. Owner-approved text
+/// (2026-10-04); rewording follows the procedure recorded in the story.
+pub const BOUND_KEY_CONSENT_LINE: &str = "trusts the pinned peer this key is bound to, not the \
+     person; every key bound to that peer shares this decision.";
+
 /// What a ticket import should do, decided before anything is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]

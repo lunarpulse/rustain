@@ -2041,9 +2041,9 @@ async fn thread_access_is_off_by_default_for_api_key_callers() {
         options.bind = "0.0.0.0:0";
         options.security = A2aServerSecurity {
             tls: Some(material),
-            auth: Some(A2aServerAuth::ApiKey {
-                keys: vec!["k21-key".into()],
-            }),
+            auth: Some(A2aServerAuth::ApiKey(
+                rustain::adapters::a2a::auth::ApiKeySet::unbound(vec!["k21-key".into()]),
+            )),
             thread_reads: setting,
         };
         let b = Host::serve_with(options).await;

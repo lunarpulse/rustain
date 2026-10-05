@@ -331,16 +331,16 @@ fn item_address_preserves_principal_provenance_without_a_bare_peer_accessor() {
 
 #[tokio::test]
 async fn recipient_allocator_mints_distinct_opaque_ids_per_principal() {
-    use rustain::domain::models::RecipientItemAllocator;
+    use rustain::domain::models::{A2aIngressPrincipal, RecipientItemAllocator};
 
     let allocator = RecipientItemAllocator::from_addresses([]);
     let principal = peer(9);
     let first = allocator
-        .allocate_a2a_ingress(principal.clone())
+        .allocate_a2a_ingress(A2aIngressPrincipal::Pseudonym(principal.clone()))
         .await
         .expect("first allocation");
     let second = allocator
-        .allocate_a2a_ingress(principal)
+        .allocate_a2a_ingress(A2aIngressPrincipal::Pseudonym(principal))
         .await
         .expect("second allocation");
 
@@ -481,3 +481,8 @@ fn find_by_task_binds_the_newest_item_when_a_message_id_is_resent() {
         "a restarted task belongs to the newest execution's durable item"
     );
 }
+
+// Story 19.18d K09 (AC9, A4, P14, F10): the durable-journal cases, shared with
+// the 19.18d CI target.
+#[path = "conformance_19_18d/k09_journal.rs"]
+mod k09_journal;

@@ -410,26 +410,27 @@ fn start_status_stop_full_lifecycle() {
 }
 
 #[test]
-fn second_start_reports_already_running_with_exact_message() {
+fn second_start_reports_one_refusal_without_stopping_the_running_daemon() {
     let d = dirs();
     d.cmd().args(["daemon", "start"]).assert().success();
+    let original_pid_file = std::fs::read_to_string(d.pid_path()).expect("pid file");
 
-    let pid_body = std::fs::read_to_string(d.pid_path()).expect("pid file");
-    // pull the numeric pid out of the TOML `pid = N` line for the exact-message check
-    let pid: u32 = pid_body
-        .lines()
-        .find_map(|l| l.strip_prefix("pid = "))
-        .and_then(|n| n.trim().parse().ok())
-        .expect("pid in file");
-
-    d.cmd()
-        .args(["daemon", "start"])
-        .assert()
-        .failure()
-        .stderr(contains(format!(
-            "Daemon already running (PID: {pid}). Use 'rustain daemon stop' first."
-        )));
-
+    let second = d.cmd().args(["daemon", "start"]).assert().failure();
+    let stderr = String::from_utf8_lossy(&second.get_output().stderr);
+    assert_eq!(
+        stderr.matches("already running").count(),
+        1,
+        "expected one refusal, not a second generic restatement: {stderr}"
+    );
+    assert!(
+        stderr.contains("rustain daemon stop"),
+        "the refusal must retain actionable stop guidance: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.pid_path()).expect("original daemon still owns its PID file"),
+        original_pid_file
+    );
+    d.cmd().args(["daemon", "status"]).assert().success();
     d.cmd().args(["daemon", "stop"]).assert().success();
 }
 

@@ -24,7 +24,6 @@
 
 #![cfg(feature = "a2a")]
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 use std::time::Duration;
@@ -32,7 +31,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use futures::stream::BoxStream;
 use rustain::adapters::a2a::admission::{A2aAdmissionPolicy, ThreadReads};
-use rustain::adapters::a2a::auth::{A2aServerAuth, A2aServerSecurity, API_KEY_HEADER};
+use rustain::adapters::a2a::auth::{A2aServerSecurity, API_KEY_HEADER};
 use rustain::adapters::a2a::card_cache::SignedCardCache;
 use rustain::adapters::a2a::config::{A2aServerConfig, parse_workspace_a2a_server_config};
 use rustain::adapters::a2a::exec::{SubmitterKey, mint_inbound_node_id};
@@ -686,17 +685,13 @@ async fn keyed_peer(mode: ResponseMode, consent: bool) -> Peer {
             "apiKeys": [KEY_TWO_ENV],
         }),
     );
-    let names: BTreeSet<String> = config
-        .api_key_env
-        .iter()
-        .cloned()
-        .chain(config.api_keys.iter().flatten().cloned())
-        .collect();
-    assert_eq!(
-        names,
-        BTreeSet::from([KEY_ONE_ENV.to_owned(), KEY_TWO_ENV.to_owned()]),
-        "the written a2a.json names both keys"
-    );
+    // Story 19.18d `F12` — the production resolver reads the written names
+    // and the values `setup()` installed; ⛔ never a hand-built key set.
+    let auth = rustain::adapters::a2a::auth::resolve_server_auth(&config, &[], |name| {
+        std::env::var(name).ok()
+    })
+    .expect("the written a2a.json resolves")
+    .expect("the written a2a.json names keys");
     let cert =
         rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("certificate");
     let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
@@ -709,16 +704,7 @@ async fn keyed_peer(mode: ResponseMode, consent: bool) -> Peer {
         mode,
         security: A2aServerSecurity {
             tls: Some(material),
-            auth: Some(A2aServerAuth::ApiKey {
-                keys: names
-                    .iter()
-                    .map(|name| {
-                        std::env::var(name)
-                            .expect("setup() installed the key")
-                            .into()
-                    })
-                    .collect(),
-            }),
+            auth: Some(auth),
             thread_reads: config.thread_reads.unwrap_or(ThreadReads::Off),
         },
         bind: "0.0.0.0:0",

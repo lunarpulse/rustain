@@ -786,6 +786,9 @@ fn item_principal_label(principal: &crate::domain::models::ItemPrincipal) -> Str
     match principal {
         crate::domain::models::ItemPrincipal::Rap(peer)
         | crate::domain::models::ItemPrincipal::A2aPseudonym(peer) => peer.as_str().to_owned(),
+        // Story 19.18d `OQ1` = A — a bound row renders the pin's `PeerId`
+        // exactly as a `Rap` row does; the matched alias is not rendered here.
+        crate::domain::models::ItemPrincipal::A2aBound(pin) => pin.as_str().to_owned(),
         crate::domain::models::ItemPrincipal::Unknown => "unknown-peer".to_owned(),
     }
 }

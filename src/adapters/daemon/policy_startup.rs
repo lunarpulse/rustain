@@ -28,11 +28,12 @@
 //! for this validation, not the excluded one; gating on a TTY would disable the
 //! report exactly where it matters most.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Result;
 
-use crate::domain::models::{A2aPeerSpec, EffectivePolicy};
+use crate::domain::models::{A2aPeerSpec, EffectivePolicy, PeerId};
 use crate::domain::services::team_policy::{PolicyExplanation, PolicyNotice};
 
 /// The log line every successful startup emits, whatever the policy says.
@@ -67,8 +68,9 @@ pub(crate) fn report_auto_authority_widening(
     policy: &EffectivePolicy,
     peers: &[A2aPeerSpec],
     projection: &dyn crate::domain::ports::ConsentProjectionQuery,
+    bound_pins: &HashSet<PeerId>,
 ) {
-    if should_warn_auto_authority_widening(admission, policy, peers, projection) {
+    if should_warn_auto_authority_widening(admission, policy, peers, projection, bound_pins) {
         tracing::warn!("{AUTO_AUTHORITY_WARNING}");
     }
 }
@@ -78,11 +80,31 @@ pub(crate) fn report_unknown_admission_posture(error: &dyn std::fmt::Display) {
     tracing::warn!("{AUTO_AUTHORITY_WARNING}");
 }
 
+/// Story 19.18d `A25` — the roster pins some `server.peerKeys` entry (string
+/// or object form) binds a key to. An alias absent from the roster or
+/// unpinned is ignored here; the listener's resolver refuses it (`R1`/`R2`).
+pub(crate) fn bound_pins(
+    server: Option<&crate::adapters::a2a::config::A2aServerConfig>,
+    roster: &[A2aPeerSpec],
+) -> HashSet<PeerId> {
+    server
+        .into_iter()
+        .flat_map(|server| server.peer_keys.values())
+        .filter_map(|binding| {
+            roster
+                .iter()
+                .find(|spec| spec.id == binding.alias())
+                .and_then(A2aPeerSpec::pinned_identity)
+        })
+        .collect()
+}
+
 fn should_warn_auto_authority_widening(
     admission: crate::adapters::a2a::config::A2aAdmissionPolicy,
     policy: &EffectivePolicy,
     peers: &[A2aPeerSpec],
     projection: &dyn crate::domain::ports::ConsentProjectionQuery,
+    bound_pins: &HashSet<PeerId>,
 ) -> bool {
     use crate::domain::models::{PolicyPrincipal, ResponseMode, SenderPolicy};
     use crate::domain::ports::ConsentState;
@@ -107,8 +129,16 @@ fn should_warn_auto_authority_widening(
             .map_or(default_auto, |mode| {
                 mode.value == ResponseMode::NotifyAndAuto
             });
+        // Story 19.18d `A25` — a pin a bound A2A key reaches needs consent on
+        // that rail too: a legacy grant reaches RAP but never a bound caller.
+        // An override stays TOML-implied consent for both rails.
+        let trusted = |principal: PolicyPrincipal| {
+            projection.consent_for(&principal) == ConsentState::Trusted
+        };
         let has_consent = sender_override.is_some()
-            || projection.consent_for(&PolicyPrincipal::rap(peer_id)) == ConsentState::Trusted;
+            || (trusted(PolicyPrincipal::rap(peer_id.clone()))
+                && (!bound_pins.contains(&peer_id)
+                    || trusted(PolicyPrincipal::bound_a2a(peer_id.clone()))));
         effective_auto && !has_consent
     })
 }
@@ -217,12 +247,14 @@ mod tests {
             &policy,
             &[],
             &crate::adapters::policy::EmptyConsentProjection,
+            &HashSet::new(),
         ));
         assert!(!should_warn_auto_authority_widening(
             A2aAdmissionPolicy::Ask,
             &policy,
             &[],
             &crate::adapters::policy::EmptyConsentProjection,
+            &HashSet::new(),
         ));
         policy.automation.value = ResponseMode::NotifyAndWait;
         assert!(!should_warn_auto_authority_widening(
@@ -230,6 +262,7 @@ mod tests {
             &policy,
             &[],
             &crate::adapters::policy::EmptyConsentProjection,
+            &HashSet::new(),
         ));
     }
 
@@ -275,6 +308,7 @@ mod tests {
                 &policy,
                 std::slice::from_ref(&trusted),
                 &projection,
+                &HashSet::new(),
             ),
             "a journal grant narrows the warning for the configured sender"
         );
@@ -296,6 +330,7 @@ mod tests {
                 &override_policy,
                 std::slice::from_ref(&trusted),
                 &crate::adapters::policy::EmptyConsentProjection,
+                &HashSet::new(),
             ),
             "an identity-bound TOML override implies consent"
         );
@@ -306,6 +341,7 @@ mod tests {
                 &policy,
                 &[trusted, untrusted],
                 &projection,
+                &HashSet::new(),
             ),
             "a rotated pin is a new untrusted sender and re-opens the warning"
         );
@@ -356,6 +392,7 @@ mod tests {
                 &policy,
                 &roster,
                 &projection,
+                &HashSet::new(),
             )
         };
 
@@ -371,6 +408,87 @@ mod tests {
         assert!(
             !warns(Some(None)),
             "a legacy grant reaches the RAP sender and narrows the warning"
+        );
+    }
+
+    /// Story 19.18d `A25`/`K14` (vi), pure half — for a pin a written
+    /// `server.peerKeys` entry reaches, a legacy-only grant no longer silences
+    /// the warning; a typed pinned grant or a TOML override does; without a
+    /// binding the RAP rule is unchanged. `M64` (ignore `bound_pins`) turns the
+    /// first cell RED.
+    #[test]
+    fn widening_warning_requires_consent_a_bound_caller_can_use() {
+        use crate::adapters::a2a::config::{A2aAdmissionPolicy, A2aServerConfig};
+        use crate::domain::models::{
+            A2aPeerSource, PinnedKey, PinnedKeyAlgorithm, PrincipalKind, RedactedUrl, ResponseMode,
+            RoomEvent,
+        };
+        use base64::Engine as _;
+
+        let roster = [A2aPeerSpec::new(
+            "p1",
+            RedactedUrl::new("https://p1.example/a2a".to_owned()),
+            A2aPeerSource::Workspace,
+        )
+        .with_pinned_key(Some(PinnedKey::new(
+            PinnedKeyAlgorithm::EdDsa,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([22_u8; 32]),
+            None,
+        )))];
+        let pin = roster[0].pinned_identity().unwrap();
+        let bound: A2aServerConfig =
+            serde_json::from_value(serde_json::json!({ "peerKeys": { "K_P1A": "p1" } })).unwrap();
+        let unbound: A2aServerConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        let auto_policy = |dir: &Path| {
+            let mut policy = validate_startup_policies(
+                dir,
+                &roster,
+                &crate::adapters::policy::EmptyConsentProjection,
+            )
+            .unwrap();
+            policy.automation.value = ResponseMode::NotifyAndAuto;
+            policy
+        };
+        let plain = auto_policy(tempfile::tempdir().unwrap().path());
+        let override_dir = tempfile::tempdir().unwrap();
+        write(
+            override_dir.path(),
+            INDIVIDUAL_POLICY_FILE,
+            "[interaction.overrides.\"p1\"]\nresponse_mode = \"notify-and-auto\"\n",
+        );
+        let overridden = auto_policy(override_dir.path());
+        let warns =
+            |policy: &EffectivePolicy, server: &A2aServerConfig, kind: Option<PrincipalKind>| {
+                let projection = crate::adapters::policy::JournalConsentProjection::default();
+                projection.apply(&RoomEvent::ConsentGranted {
+                    sender: Some(pin.clone()),
+                    granted_at: 1,
+                    principal: kind,
+                });
+                should_warn_auto_authority_widening(
+                    A2aAdmissionPolicy::Allow,
+                    policy,
+                    &roster,
+                    &projection,
+                    &bound_pins(Some(server), &roster),
+                )
+            };
+
+        assert!(
+            warns(&plain, &bound, None),
+            "a legacy-only grant does not reach a bound caller of the pin"
+        );
+        assert!(
+            !warns(&plain, &bound, Some(PrincipalKind::Pinned)),
+            "a typed pinned grant reaches both rails"
+        );
+        assert!(
+            !warns(&plain, &unbound, None),
+            "without a binding the RAP rule is unchanged"
+        );
+        assert!(
+            !warns(&overridden, &bound, None),
+            "an override is TOML-implied consent for a bound caller too"
         );
     }
 }

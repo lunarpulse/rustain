@@ -60,8 +60,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::domain::models::{
-    AppConfig, CapabilityRegistry, ItemAddress, ItemId, PeerId, PolicyPrincipal, RapTaskState,
-    RecipientItemAllocator, RetractOutcome, RoomEvent, SemanticMessageType,
+    A2aPeerSpec, AppConfig, CapabilityRegistry, ItemPrincipal, ItemScope, PeerId, PolicyPrincipal,
+    RapTaskState, RecipientItemAllocator, RetractOutcome, RoomEvent, SemanticMessageType,
 };
 use crate::domain::ports::{InboundApprovalTicket, InboundPeerRuntime, InboundPeerTask};
 
@@ -291,6 +291,16 @@ pub async fn serve(
     let item_allocator = Arc::new(RecipientItemAllocator::from_addresses(
         recipient_items.snapshot().items.keys().cloned(),
     ));
+    // Story 19.18d `A12`/`P10`/`P23` — "startup says so": the same startup fold
+    // classifies every projected item no caller of this listener can reach.
+    let orphaned =
+        orphaned_recipient_items(&recipient_items, config.security.auth.as_ref(), loopback);
+    if orphaned > 0 {
+        tracing::warn!(
+            "{}",
+            ORPHANED_RECIPIENT_ITEMS_WARNING.replace("{count}", &orphaned.to_string())
+        );
+    }
     let state = ServerState {
         registry: config.registry,
         signer: Arc::new(config.signer),
@@ -365,11 +375,16 @@ async fn reconcile_after_restart(state: &ServerState, pending: &[PendingTaskReco
         .await
     {
         let Some((submitter, task_id)) = parse_inbound_node_id(&node_id) else {
+            // Story 19.18d `P4` — a node id whose submitter handle is not one
+            // of the three canonical forms restores nothing under any
+            // fallback principal.
+            tracing::warn!(node = %node_id, "skipping malformed A2A inbound task node");
             continue;
         };
         let policy_principal = submitter.policy_principal();
-        let principal =
-            crate::domain::models::ItemPrincipal::A2aPseudonym(policy_principal.peer().clone());
+        // Story 19.18d `F5` — the item principal comes from the handle, never
+        // from the policy principal's display peer.
+        let principal = submitter.principal();
         let capability_class = state
             .recipient_items
             .task_capability_classes(&principal, &task_id)
@@ -555,14 +570,15 @@ async fn reconcile_pending_after_restart(
     };
     let path = pending_tasks_path(state);
     for record in &records {
-        if record.task_id.is_empty()
-            || record.task_id.len() > MAX_TASK_ID_BYTES
-            || record.submitter.is_empty()
-        {
+        // Story 19.18d `P4` — a handle that is not one of the three canonical
+        // forms is malformed like an empty one: one warning, nothing restored.
+        let submitter = SubmitterKey::from_encoded(record.submitter.clone());
+        let Some(submitter) = submitter
+            .filter(|_| !record.task_id.is_empty() && record.task_id.len() <= MAX_TASK_ID_BYTES)
+        else {
             tracing::warn!(path = %path.display(), "skipping malformed A2A pending task record");
             continue;
-        }
-        let submitter = SubmitterKey::from_encoded(record.submitter.clone());
+        };
         let policy_principal = submitter.policy_principal();
         let Some(task) = state
             .tasks
@@ -671,6 +687,10 @@ async fn serve_agent_card(State(state): State<ServerState>) -> Response {
 struct Caller {
     key: SubmitterKey,
     trust: SubmitterTrust,
+    /// Story 19.18d `A7`/`P2` — the roster alias of the bound slot this
+    /// caller's key matched (display attribution, never identity). `None` for
+    /// loopback and unbound keys; ⛔ never synthesized from the pin.
+    ingress_alias: Option<String>,
 }
 
 /// Authenticate one request. Runs **before** dispatch, so a rejected caller
@@ -682,6 +702,7 @@ fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Caller, Box<
         return Ok(Caller {
             key: SubmitterKey::loopback(),
             trust: SubmitterTrust::Loopback,
+            ingress_alias: None,
         });
     }
     let Some(auth) = state.security.auth.as_ref() else {
@@ -704,9 +725,19 @@ fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Caller, Box<
         });
 
     match auth.verify(presented, has_bearer) {
-        AuthOutcome::Authenticated => Ok(Caller {
-            key: SubmitterKey::from_api_key(presented.unwrap_or_default()),
-            trust: SubmitterTrust::ApiKey,
+        // Story 19.18d `A7` — the selected slot decides: a bound slot makes the
+        // caller its pinned peer, an unbound one keeps the key's pseudonym.
+        AuthOutcome::Authenticated { slot } => Ok(match auth.binding(slot) {
+            Some(binding) => Caller {
+                key: SubmitterKey::bound(binding.peer()),
+                trust: SubmitterTrust::BoundApiKey,
+                ingress_alias: Some(binding.alias().to_owned()),
+            },
+            None => Caller {
+                key: SubmitterKey::from_api_key(presented.unwrap_or_default()),
+                trust: SubmitterTrust::ApiKey,
+                ingress_alias: None,
+            },
         }),
         AuthOutcome::NoCredential => Err(unauthorized(
             "missing API key: present it in the `x-api-key` header (an Authorization: Bearer \
@@ -885,11 +916,11 @@ async fn dispatch(
         super::ITEMS_LIST_METHOD => items_list(state, caller).await,
         // Story 19.16d AC1(a) — the fifth arm, a write. ⚠ A notification never
         // reaches it: `handle_jsonrpc` refuses that form first (`P3`). The
-        // principal is derived HERE from the authenticated caller and handed
+        // scope is derived HERE from the authenticated caller and handed
         // down; ⛔ nothing in `params` can name it (`AC1(c)`, R21).
         super::ITEMS_RETRACT_METHOD => {
-            let principal = caller.key.pseudonymous_peer_id();
-            items_retract(state, principal, caller.trust, &params, echo).await
+            let scope = caller_scope(state, caller);
+            items_retract(state, &scope, caller.trust, &params, echo).await
         }
         // Story 19.18 `AC4(a)` — the per-item thread read. A notification
         // carries no response, so it answers `Null` and reads nothing, like
@@ -962,7 +993,10 @@ async fn message_send(
             "Invalid params",
         ));
     };
-    let peer_id = caller.key.pseudonymous_peer_id();
+    // Story 19.18d `F5`/`F6` — the refusal row shows the caller's display
+    // peer (the pin for a bound key, the pseudonym otherwise); the class
+    // check below runs on the caller's exact item principal, ⛔ never scope.
+    let peer_id = caller.key.policy_principal().peer().clone();
     let reference =
         follow_up_reference(state, caller, params, &echo, reply_capability.as_ref()).await?;
     // Story 19.18c `A22` — one capability class per `(principal, task)`,
@@ -970,7 +1004,14 @@ async fn message_send(
     // writes zero rows. A co-holder that resubmits another sender's task id
     // after a restart or an eviction gets today's in-memory duplicate answer,
     // byte for byte, instead of an item the operator's answer would land on.
-    if !task_class_admits(state, &peer_id, &task_id, item_capability.as_ref()).await {
+    if !task_class_admits(
+        state,
+        &caller.key.principal(),
+        &task_id,
+        item_capability.as_ref(),
+    )
+    .await
+    {
         return Err(JsonRpcErrorResponse::new(
             echo,
             CODE_INTERNAL_ERROR,
@@ -983,6 +1024,7 @@ async fn message_send(
             .as_ref()
             .map(PresentedCapability::stored_hash),
         reply_capability_matched: reference.is_some_and(|reference| reference.matched),
+        ingress_alias: caller.ingress_alias.clone(),
     };
 
     // ── Decision core. Effect-free: no lock, no node, no journal write. ──
@@ -1037,13 +1079,36 @@ struct IngressFacts {
     capability_hash: Option<String>,
     /// `A15` — the reply capability matched the reference's nearest item.
     reply_capability_matched: bool,
+    /// Story 19.18d `F11` — the matched bound slot's roster alias, written into
+    /// `RecipientItemReceived.alias` by `launch` on the direct and the
+    /// approval path alike. `None` for loopback and unbound keys.
+    ingress_alias: Option<String>,
 }
 
-/// A follow-up reference that resolved inside the caller's principal.
+/// A follow-up reference that resolved inside the caller's scope.
 struct FollowUpReference {
     id: String,
     /// The presented reply capability matched the reference's nearest item.
     matched: bool,
+}
+
+/// Story 19.18d `A11` — the item principals this caller may read: its own,
+/// and for a bound caller also the pseudonyms of every key bound to the same
+/// pin with `adoptLegacyItems`. Every other caller's scope is exact.
+fn caller_scope(state: &ServerState, caller: &Caller) -> ItemScope {
+    let principal = caller.key.principal();
+    match (&principal, state.security.auth.as_ref()) {
+        (ItemPrincipal::A2aBound(pin), Some(auth)) => {
+            let adopted = auth
+                .keys()
+                .adopted_for(pin)
+                .iter()
+                .map(SubmitterKey::principal)
+                .collect::<Vec<_>>();
+            ItemScope::with_adopted(principal, adopted)
+        }
+        _ => ItemScope::exact(principal),
+    }
 }
 
 /// Story 19.18c `A22` — whether a `message/send` for `task_id` keeps one
@@ -1051,24 +1116,24 @@ struct FollowUpReference {
 /// Removed included, must carry the presented class and hash (`None` is a
 /// class). Lookup first, refresh on a miss; a refresh that fails refuses
 /// rather than decide on a stale fold. Cost: one O(items) scan per send
-/// (`DF-19-16B-ACK-READ-REFOLDS-THE-WHOLE-JOURNAL`).
+/// (`DF-19-16B-ACK-READ-REFOLDS-THE-WHOLE-JOURNAL`). Story 19.18d: the
+/// caller's exact item principal, ⛔ never its adoption scope.
 async fn task_class_admits(
     state: &ServerState,
-    peer_id: &PeerId,
+    principal: &ItemPrincipal,
     task_id: &str,
     presented: Option<&PresentedCapability>,
 ) -> bool {
-    let principal = crate::domain::models::ItemPrincipal::A2aPseudonym(peer_id.clone());
     let mut classes = state
         .recipient_items
-        .task_capability_classes(&principal, task_id);
+        .task_capability_classes(principal, task_id);
     if classes.is_empty() {
         if !refresh_recipient_items(state).await {
             return false;
         }
         classes = state
             .recipient_items
-            .task_capability_classes(&principal, task_id);
+            .task_capability_classes(principal, task_id);
     }
     classes
         .iter()
@@ -1130,14 +1195,14 @@ async fn follow_up_reference(
         setting,
     )
     .map_err(refused)?;
-    let principal =
-        crate::domain::models::ItemPrincipal::A2aPseudonym(caller.key.pseudonymous_peer_id());
+    // Story 19.18d `A11` — the reference resolves in the caller's scope.
+    let scope = caller_scope(state, caller);
     let not_found = || JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, ITEM_NOT_FOUND);
-    let nearest = match state.recipient_items.nearest_item(&principal, reference) {
+    let nearest = match state.recipient_items.nearest_item(&scope, reference) {
         Some(nearest) => nearest,
         None if refresh_recipient_items(state).await => state
             .recipient_items
-            .nearest_item(&principal, reference)
+            .nearest_item(&scope, reference)
             .ok_or_else(not_found)?,
         None => return Err(not_found()),
     };
@@ -1513,9 +1578,11 @@ async fn launch(
     pending: Option<PendingTaskRecord>,
 ) -> Result<(), String> {
     let peer_id = principal.peer().clone();
+    // Story 19.18d `F5` — the item principal comes from the submitter handle
+    // (`A2aBound(pin)` for a bound key), ⛔ never from the policy principal.
     let address = match state
         .item_allocator
-        .allocate_a2a_ingress(peer_id.clone())
+        .allocate_a2a_ingress(task.submitter.ingress_principal())
         .await
     {
         Ok(address) => address,
@@ -1531,7 +1598,9 @@ async fn launch(
     let received = RoomEvent::RecipientItemReceived {
         address: address.clone(),
         task: task.id.clone(),
-        alias: None,
+        // Story 19.18d `P2`/`F11` — the matched bound slot's alias (display
+        // attribution only); `None` for loopback and unbound keys.
+        alias: facts.ingress_alias,
         content: text.clone(),
         // Story 19.18 `AC5(c)` — the reference `message_send` already
         // resolved inside this caller's principal, stored raw.
@@ -1794,7 +1863,8 @@ async fn tasks_cancel(
         task.cancel.cancel();
         let _ = tokio::time::timeout(CANCEL_WAIT_TIMEOUT, task.wait_for_terminal()).await;
     }
-    let peer_id = caller.key.pseudonymous_peer_id();
+    // Story 19.18d `F5` — the same display peer `tasks_get` shows.
+    let peer_id = caller.key.policy_principal().peer().clone();
     task_projection(state, &task, &peer_id)
         .await
         .map_err(|error| {
@@ -1818,14 +1888,14 @@ async fn tasks_cancel(
 /// writes: the only journal traffic is the read-side re-fold below, and the
 /// keystone ratchet is journal-length equality across N calls.
 ///
-/// **The principal filter runs FIRST, the tombstone classification second**
-/// (`A22`). The address comes from the authenticated caller through
-/// [`SubmitterKey::pseudonymous_peer_id`], exactly as
-/// `ItemAddress::from_a2a_ingress` minted it — ⛔ never from a request
-/// parameter. Classifying a tombstone before filtering would answer *"that id
-/// exists but is not yours"* and reconstitute the cross-peer enumeration
-/// oracle `ADR-17-4a-01` R21 kills; another principal's removed item is
-/// **absent**, byte-identical to an id that never existed.
+/// **The scope filter runs FIRST, the tombstone classification second**
+/// (`A22`). The scope comes from the authenticated caller through
+/// [`caller_scope`] — the caller's item principal plus, for a bound key, the
+/// pseudonyms its bindings adopted (Story 19.18d `A11`) — ⛔ never from a
+/// request parameter. Classifying a tombstone before filtering would answer
+/// *"that id exists but is not yours"* and reconstitute the cross-peer
+/// enumeration oracle `ADR-17-4a-01` R21 kills; another principal's removed
+/// item is **absent**, byte-identical to an id that never existed.
 ///
 /// ⛔ `journal_order` never reaches the wire (AC1(f)): it is *not* stable
 /// across the cold-fold and live-apply assignment schemes, so a leaked number
@@ -1837,11 +1907,10 @@ async fn items_list(
     caller: &Caller,
 ) -> Result<serde_json::Value, JsonRpcErrorResponse> {
     refresh_recipient_items(state).await;
-    let principal =
-        crate::domain::models::ItemPrincipal::A2aPseudonym(caller.key.pseudonymous_peer_id());
+    let scope = caller_scope(state, caller);
     let items = state
         .recipient_items
-        .find_by_principal(&principal)
+        .find_in_scope(&scope)
         .into_iter()
         .enumerate()
         .map(|(ordinal, item)| {
@@ -1874,7 +1943,7 @@ async fn items_list(
             row
         })
         .collect::<Vec<_>>();
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "items": items,
         // Story 19.16b AC2(c) — fail-closed on authority, fail-LOUD on
         // legibility. On a loopback bind `authenticate` returns
@@ -1886,7 +1955,9 @@ async fn items_list(
         // have. One rule, keyed off the trust the caller already carries; ⛔ no
         // second code path, and ⛔ never only in a log.
         "principalCollapsed": principal_collapsed(caller.trust),
-    }))
+    });
+    mark_principal_bound(&mut result, caller.trust);
+    Ok(result)
 }
 
 /// Story 19.16b AC2(c) / 19.16d AC2(c) — the collapse disclosure's one rule,
@@ -1894,9 +1965,31 @@ async fn items_list(
 /// durable record alike. `true` exactly when the caller reached this host over
 /// a loopback bind, where `authenticate` answers `SubmitterKey::loopback()`
 /// for everyone. ⛔ A legibility statement about attribution, never a claim
-/// about who acted; ⛔ no second code path computes it.
+/// about who acted; ⛔ no second code path computes it. Exhaustive, so a new
+/// trust class decides (Story 19.18d: a bound key is never collapsed).
 fn principal_collapsed(trust: SubmitterTrust) -> bool {
-    matches!(trust, SubmitterTrust::Loopback)
+    match trust {
+        SubmitterTrust::Loopback => true,
+        SubmitterTrust::ApiKey | SubmitterTrust::BoundApiKey => false,
+    }
+}
+
+/// Story 19.18d `A8` — the one rule for the `principalBound` wire flag: `true`
+/// only for a caller whose key the operator bound to a pinned peer.
+fn principal_bound(trust: SubmitterTrust) -> bool {
+    match trust {
+        SubmitterTrust::BoundApiKey => true,
+        SubmitterTrust::Loopback | SubmitterTrust::ApiKey => false,
+    }
+}
+
+/// Story 19.18d `A8`/`P12` — add `principalBound: true` to a successful
+/// list/thread/retract payload, and only when true: an unbound or loopback
+/// response stays byte-identical to 19.18c's. Additive (AD-1826).
+fn mark_principal_bound(result: &mut serde_json::Value, trust: SubmitterTrust) {
+    if principal_bound(trust) {
+        result["principalBound"] = serde_json::Value::Bool(true);
+    }
 }
 
 // ── x-rustain-items/thread ──────────────────────────────────────────────────
@@ -1959,12 +2052,12 @@ async fn items_thread(
     )
     .map_err(refused)?;
     refresh_recipient_items(state).await;
-    let principal =
-        crate::domain::models::ItemPrincipal::A2aPseudonym(caller.key.pseudonymous_peer_id());
+    // Story 19.18d `A11` — the caller's scope, as the list reads it.
+    let scope = caller_scope(state, caller);
     let not_found = || JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, ITEM_NOT_FOUND);
     let nearest = state
         .recipient_items
-        .nearest_item(&principal, item_id)
+        .nearest_item(&scope, item_id)
         .ok_or_else(not_found)?;
     let hash = nearest.capability_hash.as_deref();
     match post_lookup(
@@ -1978,16 +2071,18 @@ async fn items_thread(
         CapabilityVerdict::NotFound => return Err(not_found()),
         CapabilityVerdict::AccessOff => return Err(refused(THREAD_ACCESS_OFF)),
     }
-    let Some((root, turns)) = state.recipient_items.thread(&principal, item_id) else {
+    let Some((root, turns)) = state.recipient_items.thread(&scope, item_id) else {
         return Err(not_found());
     };
     let (served, omitted_before) = bounded_thread(state, &root, &turns);
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "root": root,
         "turns": served,
         "omittedBefore": omitted_before,
         "principalCollapsed": principal_collapsed(caller.trust),
-    }))
+    });
+    mark_principal_bound(&mut result, caller.trust);
+    Ok(result)
 }
 
 /// Serialize one thread under the count and byte budgets, newest turns
@@ -2120,14 +2215,17 @@ fn withhold_turn_content(value: &mut serde_json::Value) {
 ///
 /// 1. **The item id is the only parameter** (`AC1(c)`), hand-read from the
 ///    `Value` — ⛔ no closed schema, so an unknown field from a newer build is
-///    ignored (`AD-1826`). The principal arrives from `dispatch`, derived from
+///    ignored (`AD-1826`). The scope arrives from `dispatch`, derived from
 ///    the authenticated caller; ⛔ nothing in `params` can name it.
 /// 2. **Authority before any mutation** (`AC1(g)`, NFR70): the pure
 ///    `admit_item_retract` refuses under `deny` and `ask` before the fold or
 ///    the journal is touched.
 /// 3. **Not-yours is byte-identical to never-existed** (`AC1(d)`, R21): the
-///    lookup is by the full `(principal, item)` address, and both misses leave
-///    through ONE `JsonRpcErrorResponse::new` site with ONE message.
+///    item is resolved by id **within the caller's scope**, and both misses
+///    leave through ONE `JsonRpcErrorResponse::new` site with ONE message.
+///    Story 19.18d `F6`: from then on the retract uses that item's **stored**
+///    address — the re-lookup and the journaled record — ⛔ never an address
+///    rebuilt from the caller (an adopted item lives under its old pseudonym).
 /// 4. **Lookup first, refresh only on a miss, then ONE critical section**
 ///    (`P4`): an unowned or fabricated id costs the O(1) tail probe and never
 ///    takes the fold lock; an owned id takes it once for decide + append +
@@ -2149,7 +2247,7 @@ fn withhold_turn_content(value: &mut serde_json::Value) {
 /// (Rule 2).
 async fn items_retract(
     state: &ServerState,
-    principal: PeerId,
+    scope: &ItemScope,
     trust: SubmitterTrust,
     params: &serde_json::Value,
     echo: serde_json::Value,
@@ -2171,20 +2269,23 @@ async fn items_retract(
         JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason)
     })?;
 
-    let address = ItemAddress::from_a2a_ingress(principal, ItemId::from_replay(item_id));
     let not_found = || JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, ITEM_NOT_FOUND);
     let internal_error =
         || JsonRpcErrorResponse::new(echo.clone(), CODE_INTERNAL_ERROR, "Internal error");
 
-    let item = match state.recipient_items.get(&address) {
+    let item = match state.recipient_items.item_in_scope(scope, item_id) {
         Some(item) => item,
         None => {
             if !refresh_recipient_items(state).await {
                 return Err(internal_error());
             }
-            state.recipient_items.get(&address).ok_or_else(not_found)?
+            state
+                .recipient_items
+                .item_in_scope(scope, item_id)
+                .ok_or_else(not_found)?
         }
     };
+    let address = item.address.clone();
     // Story 19.18c `D2`/`AC4(c)` — the capability check runs HERE, at the
     // pre-lock lookup: before the fold lock and before `retract_outcome`, so
     // a miss never reaches the tombstone (`-32041`) or `alreadyRetracted`
@@ -2215,12 +2316,7 @@ async fn items_retract(
     let retracted_at_ms = match item.retract_outcome() {
         RetractOutcome::Mark => wall_now_ms(),
         RetractOutcome::AlreadyMarked => {
-            return Ok(retract_result(
-                item_id,
-                item.retracted_at_ms,
-                true,
-                collapsed,
-            ));
+            return Ok(retract_result(item_id, item.retracted_at_ms, true, trust));
         }
         RetractOutcome::RefusedRemoved => {
             return Err(JsonRpcErrorResponse::new(
@@ -2275,7 +2371,7 @@ async fn items_retract(
             item_id,
             Some(stamp),
             stamp != retracted_at_ms,
-            collapsed,
+            trust,
         )),
         None if persisted_outcome == RetractOutcome::RefusedRemoved => Err(
             JsonRpcErrorResponse::new(echo.clone(), CODE_ITEM_REMOVED, ITEM_REMOVED),
@@ -2286,19 +2382,22 @@ async fn items_retract(
 
 /// The retract's success payload. `alreadyRetracted` tells a repeated call
 /// from the one that landed the mark (the sender renders them differently);
-/// `principalCollapsed` is the same disclosure the list carries.
+/// `principalCollapsed` is the same disclosure the list carries, and
+/// `principalBound` (Story 19.18d `A8`) rides only when true.
 fn retract_result(
     item_id: &str,
     retracted_at_ms: Option<i64>,
     already_retracted: bool,
-    principal_collapsed: bool,
+    trust: SubmitterTrust,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut result = serde_json::json!({
         "itemId": item_id,
         "retractedAtMs": retracted_at_ms,
         "alreadyRetracted": already_retracted,
-        "principalCollapsed": principal_collapsed,
-    })
+        "principalCollapsed": principal_collapsed(trust),
+    });
+    mark_principal_bound(&mut result, trust);
+    result
 }
 
 /// This host's wall clock, the only source of a retract's stamp (⛔ never the
@@ -2500,13 +2599,15 @@ fn json_response(value: &impl Serialize, status: StatusCode) -> Response {
 ///
 /// `runtime` is `None` for a discovery-only deployment and `Some` when a core is
 /// composed behind it (`rustain daemon start --serve-a2a=…`, or the standalone
-/// path once it has built its core).
+/// path once it has built its core). `roster` is the active profile's resolved
+/// A2A roster (Story 19.18d `A17`): `server.peerKeys` binds keys against it.
 pub async fn run(
     addr: String,
     app_config: AppConfig,
     workspace: PathBuf,
     runtime: Option<Arc<dyn InboundPeerRuntime>>,
     transparency: Arc<TransparencySink>,
+    roster: Vec<A2aPeerSpec>,
     ready: Option<oneshot::Sender<Result<(), String>>>,
 ) -> anyhow::Result<()> {
     let mut ready = ready;
@@ -2516,6 +2617,7 @@ pub async fn run(
         workspace,
         runtime,
         transparency,
+        &roster,
         &mut ready,
     )
     .await;
@@ -2528,12 +2630,12 @@ pub async fn run(
 }
 
 /// Story 19.16d `Q1` (owner answer 2+4 = A) — the retract's ownership check is
-/// principal equality, and off loopback the principal is a digest of the
-/// **presented key**: nothing binds a key to a peer, and `verify` cannot say
-/// which configured key matched. ⛔ A legibility statement, never a security
-/// claim; the real control is `server.admission` (`AC1(g)`). Story 19.18c
-/// `AC9(a)`: an item carrying a per-item capability needs it; legacy items
-/// keep the credential-scoped rule.
+/// principal equality, and off loopback an **unbound** key's principal is a
+/// digest of the presented key: nothing binds it to a peer. ⛔ A legibility
+/// statement, never a security claim; the real control is `server.admission`
+/// (`AC1(g)`). Story 19.18c `AC9(a)`: an item carrying a per-item capability
+/// needs it; legacy items keep the credential-scoped rule. Story 19.18d
+/// `A18`/`B5`: stated only while at least one unbound key is configured.
 const CREDENTIAL_SCOPED_RETRACT_DISCLOSURE: &str = "A2A item retraction: ownership is \
      credential-scoped, not peer-scoped — every caller presenting the same API key is one \
      principal. An item a rustain sender tagged with its per-item capability can be retracted \
@@ -2550,22 +2652,18 @@ const KEY_ROTATION_ORPHANS_RETRACT_WARNING: &str = "A2A item retraction: more th
 
 /// The startup lines `run_inner` emits for the retract's ownership posture.
 /// Pure, so the posture → disclosure mapping is provable without a socket.
+/// Story 19.18d `A18`: only **unbound** keys count — the credential-scoped
+/// line with at least one, the rotation warning with two distinct values.
 fn retract_ownership_disclosures(auth: Option<&A2aServerAuth>) -> Vec<&'static str> {
-    match auth {
-        None => Vec::new(),
-        Some(A2aServerAuth::ApiKey { keys }) => {
-            let mut lines = vec![CREDENTIAL_SCOPED_RETRACT_DISCLOSURE];
-            let has_distinct_rotation_key = keys.first().is_some_and(|first| {
-                keys[1..]
-                    .iter()
-                    .any(|candidate| candidate.expose_secret() != first.expose_secret())
-            });
-            if has_distinct_rotation_key {
-                lines.push(KEY_ROTATION_ORPHANS_RETRACT_WARNING);
-            }
-            lines
-        }
+    let unbound = auth.map_or(0, |auth| auth.keys().distinct_unbound_count());
+    let mut lines = Vec::new();
+    if unbound >= 1 {
+        lines.push(CREDENTIAL_SCOPED_RETRACT_DISCLOSURE);
     }
+    if unbound >= 2 {
+        lines.push(KEY_ROTATION_ORPHANS_RETRACT_WARNING);
+    }
+    lines
 }
 
 /// Story 19.18 `AC12(c)` (`P11(iii)`) — the thread posture, stated at
@@ -2589,7 +2687,8 @@ const THREAD_ACCESS_UNKNOWN_WARNING: &str = "A2A threads: server.threadReads nam
 
 /// The startup lines for the thread posture. Pure, like
 /// [`retract_ownership_disclosures`], so the mapping is provable without a
-/// socket.
+/// socket. Story 19.18d `A18`: the posture line only while an unbound key is
+/// configured (a bound key meets no `threadReads` gate).
 fn thread_access_disclosures(
     auth: Option<&A2aServerAuth>,
     thread_reads: ThreadReads,
@@ -2598,7 +2697,7 @@ fn thread_access_disclosures(
     if thread_reads == ThreadReads::Unknown {
         lines.push(THREAD_ACCESS_UNKNOWN_WARNING);
     }
-    if auth.is_some() {
+    if auth.is_some_and(|auth| auth.keys().distinct_unbound_count() >= 1) {
         lines.push(match thread_reads {
             ThreadReads::CredentialScoped => THREAD_ACCESS_CREDENTIAL_SCOPED_DISCLOSURE,
             ThreadReads::Off | ThreadReads::Unknown => THREAD_ACCESS_OFF_DISCLOSURE,
@@ -2607,12 +2706,85 @@ fn thread_access_disclosures(
     lines
 }
 
+/// Story 19.18d `A18` — `server.peerKeys` on a loopback listener has no
+/// effect: `authenticate` answers every loopback caller as one local
+/// principal before any key is read.
+pub const PEER_BINDING_LOOPBACK_WARNING: &str = "A2A peer bindings: this server listens on \
+     loopback, where every caller is one local principal; server.peerKeys takes effect only on \
+     a non-loopback listener.";
+
+/// The startup lines for the listener's peer-binding posture (Story 19.18d
+/// `A18`). Pure, so the mapping is provable without a socket.
+fn peer_binding_disclosures(auth: Option<&A2aServerAuth>, loopback: bool) -> Vec<&'static str> {
+    if loopback && auth.is_some_and(|auth| auth.keys().has_bindings()) {
+        vec![PEER_BINDING_LOOPBACK_WARNING]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Story 19.18d `A12`/`P23` — emitted once per startup when the startup fold
+/// finds recipient items no caller of this listener can act as. `{count}` is
+/// replaced with that number.
+pub const ORPHANED_RECIPIENT_ITEMS_WARNING: &str = "A2A recipient items: {count} item(s) belong \
+     to identities that no caller of this listener has, so no caller can list, read or retract \
+     them; they stay in the journal. Off loopback, configuring the original API key again \
+     (unbound, or in server.peerKeys with adoptLegacyItems) or binding any key to the same \
+     pinned peer makes them reachable.";
+
+/// Story 19.18d `A12`/`P10`/`P23` — how many projected recipient items (each
+/// counted once, Removed and retracted included; never reply turns or act
+/// rows) no caller of this listener can reach:
+///
+/// - an API-key pseudonym item: on loopback always (keys are ignored there);
+///   off loopback unless its key is configured unbound or adopted by a
+///   binding. The loopback pseudonym is never counted — this warning is about
+///   API-key items.
+/// - a bound item: on loopback always; off loopback unless some configured
+///   slot is bound to its pin.
+///
+/// RAP and unknown-provenance items are another rail's and never counted.
+fn orphaned_recipient_items(
+    projection: &JournalRecipientItemProjection,
+    auth: Option<&A2aServerAuth>,
+    loopback: bool,
+) -> usize {
+    let loopback_principal = SubmitterKey::loopback().principal();
+    let (reachable_pseudonyms, bound_pins) = match auth.filter(|_| !loopback) {
+        Some(auth) => {
+            let keys = auth.keys();
+            let bound_pins = keys.bound_pins();
+            let reachable = keys
+                .unbound_submitters()
+                .into_iter()
+                .chain(bound_pins.iter().flat_map(|pin| keys.adopted_for(pin)))
+                .map(|submitter| submitter.principal())
+                .collect::<Vec<_>>();
+            (reachable, bound_pins)
+        }
+        None => (Vec::new(), BTreeSet::new()),
+    };
+    projection
+        .snapshot()
+        .items
+        .keys()
+        .filter(|address| match address.principal() {
+            principal @ ItemPrincipal::A2aPseudonym(_) => {
+                *principal != loopback_principal && !reachable_pseudonyms.contains(principal)
+            }
+            ItemPrincipal::A2aBound(pin) => !bound_pins.contains(pin),
+            ItemPrincipal::Rap(_) | ItemPrincipal::Unknown => false,
+        })
+        .count()
+}
+
 async fn run_inner(
     addr: String,
     app_config: AppConfig,
     workspace: PathBuf,
     runtime: Option<Arc<dyn InboundPeerRuntime>>,
     transparency: Arc<TransparencySink>,
+    roster: &[A2aPeerSpec],
     ready: &mut Option<oneshot::Sender<Result<(), String>>>,
 ) -> anyhow::Result<()> {
     let server_config = super::config::parse_workspace_a2a_server_config(
@@ -2626,41 +2798,19 @@ async fn run_inner(
         .as_ref()
         .and_then(|config| config.advertised_host.clone());
 
-    // The legacy name remains valid and the additional names are a set union:
-    // duplicate env-var names do not create duplicate comparisons or principals.
-    let mut key_names = BTreeSet::new();
-    if let Some(config) = server_config.as_ref() {
-        if let Some(name) = config
-            .api_key_env
-            .as_deref()
-            .filter(|name| !name.is_empty())
-        {
-            key_names.insert(name.to_owned());
-        }
-        for name in config.api_keys.as_deref().unwrap_or_default() {
-            if !name.is_empty() {
-                key_names.insert(name.clone());
-            }
-        }
-    }
-    let auth = if key_names.is_empty() {
-        None
-    } else {
-        let mut keys = Vec::with_capacity(key_names.len());
-        for name in key_names {
-            // `env_var_trimmed` is the project's single env-read chokepoint; it
-            // also strips the trailing newline a `export KEY=$(cat …)` leaves
-            // behind, which would otherwise make every request fail the
-            // comparison for a reason no log line could explain.
-            let key = crate::infrastructure::utils::env_var_trimmed(&name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "A2A API-key configuration names {name}, but that environment variable is \
-                     unset or empty"
-                )
-            })?;
-            keys.push(key.into());
-        }
-        Some(A2aServerAuth::ApiKey { keys })
+    // Story 19.18d `A16` — the one production resolver: names → roster
+    // validation (`R1`–`R5`) → values → digest slots. `env_var_trimmed` is the
+    // project's single env-read chokepoint; it also strips the trailing
+    // newline a `export KEY=$(cat …)` leaves behind, which would otherwise
+    // make every request fail the comparison for a reason no log line could
+    // explain.
+    let auth = match server_config.as_ref() {
+        Some(config) => super::auth::resolve_server_auth(
+            config,
+            roster,
+            crate::infrastructure::utils::env_var_trimmed,
+        )?,
+        None => None,
     };
     for line in retract_ownership_disclosures(auth.as_ref()) {
         tracing::warn!("{line}");
@@ -2767,6 +2917,9 @@ async fn run_inner(
         "refusing to serve A2A on wildcard address {bound} without `server.advertised_host`; \
          configure a client-reachable advertised_host in .rustain/a2a.json"
     );
+    for line in peer_binding_disclosures(security.auth.as_ref(), loopback) {
+        tracing::warn!("{line}");
+    }
 
     // The listener exists and every pre-serve safety gate has passed. The daemon
     // may now publish readiness; later serving errors belong to its supervised
@@ -2939,6 +3092,118 @@ mod tests {
     fn the_collapse_disclosure_is_present_on_loopback_and_absent_behind_a_key() {
         assert!(principal_collapsed(SubmitterTrust::Loopback));
         assert!(!principal_collapsed(SubmitterTrust::ApiKey));
+        assert!(!principal_collapsed(SubmitterTrust::BoundApiKey));
+    }
+
+    /// Story 19.18d `A8` — the bound flag's one rule over every trust.
+    #[test]
+    fn only_a_bound_key_is_flagged_principal_bound() {
+        assert!(principal_bound(SubmitterTrust::BoundApiKey));
+        assert!(!principal_bound(SubmitterTrust::ApiKey));
+        assert!(!principal_bound(SubmitterTrust::Loopback));
+    }
+
+    /// Story 19.18d `K10` (lib table) — written `a2a.json` → both production
+    /// parsers → the production resolver → the startup mappers: disclosures
+    /// count only unbound keys, a bound-only set is network-ready, and the
+    /// loopback line names an ineffective binding. `M19` (count every key)
+    /// turns the bound-only rows RED.
+    #[test]
+    fn k10_startup_disclosures_count_only_unbound_keys() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let resolve = |server: serde_json::Value| {
+            let path = dir.path().join("a2a.json");
+            std::fs::write(
+                &path,
+                serde_json::json!({
+                    "agents": {
+                        "p1": {
+                            "url": "https://p1.example/",
+                            "pinnedKey": {
+                                "alg": "EdDSA",
+                                "x": base64::engine::general_purpose::URL_SAFE_NO_PAD
+                                    .encode([41_u8; 32]),
+                            },
+                        },
+                    },
+                    "server": server,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let roster = super::super::config::parse_workspace_a2a_config(&path).unwrap();
+            let config = super::super::config::parse_workspace_a2a_server_config(&path)
+                .unwrap()
+                .unwrap();
+            super::super::auth::resolve_server_auth(&config, &roster, |name| {
+                Some(format!("value-of-{name}"))
+            })
+            .unwrap()
+            .unwrap()
+        };
+        let bound_only = resolve(serde_json::json!({ "peerKeys": { "K_A": "p1", "K_B": "p1" } }));
+        assert!(retract_ownership_disclosures(Some(&bound_only)).is_empty());
+        assert!(thread_access_disclosures(Some(&bound_only), ThreadReads::Off).is_empty());
+        assert!(
+            BindEvidence::from_security(
+                &A2aServerSecurity {
+                    auth: Some(bound_only.clone()),
+                    ..A2aServerSecurity::default()
+                },
+                true
+            )
+            .api_key_auth,
+            "a bound-only key set is network-ready (`M24`)"
+        );
+        let one_unbound = resolve(serde_json::json!({
+            "peerKeys": { "K_A": "p1" },
+            "apiKeys": ["K_U"],
+        }));
+        assert_eq!(
+            retract_ownership_disclosures(Some(&one_unbound)),
+            vec![CREDENTIAL_SCOPED_RETRACT_DISCLOSURE]
+        );
+        assert_eq!(
+            thread_access_disclosures(Some(&one_unbound), ThreadReads::Off),
+            vec![THREAD_ACCESS_OFF_DISCLOSURE]
+        );
+        let two_unbound = resolve(serde_json::json!({
+            "peerKeys": { "K_A": "p1" },
+            "apiKeys": ["K_U", "K_V"],
+        }));
+        assert_eq!(
+            retract_ownership_disclosures(Some(&two_unbound)),
+            vec![
+                CREDENTIAL_SCOPED_RETRACT_DISCLOSURE,
+                KEY_ROTATION_ORPHANS_RETRACT_WARNING
+            ]
+        );
+        assert_eq!(
+            peer_binding_disclosures(Some(&bound_only), true),
+            vec![PEER_BINDING_LOOPBACK_WARNING]
+        );
+        assert!(peer_binding_disclosures(Some(&bound_only), false).is_empty());
+        let unbound_only = resolve(serde_json::json!({ "apiKeys": ["K_U"] }));
+        assert!(peer_binding_disclosures(Some(&unbound_only), true).is_empty());
+        for line in [
+            PEER_BINDING_LOOPBACK_WARNING,
+            ORPHANED_RECIPIENT_ITEMS_WARNING,
+        ] {
+            let lower = line.to_ascii_lowercase();
+            for banned in [
+                "authenticated",
+                "tamper",
+                "signed",
+                "audit",
+                "proof",
+                "evidence",
+                "verified",
+                "attested",
+            ] {
+                assert!(!lower.contains(banned), "{banned:?} in {line:?}");
+            }
+        }
     }
 
     /// Story 19.18c `AC3(c)`/`A6` — the pending record carries the capability
@@ -2967,9 +3232,8 @@ mod tests {
     /// posture is stated either way.
     #[test]
     fn the_thread_access_disclosure_follows_the_configured_posture() {
-        let keys = A2aServerAuth::ApiKey {
-            keys: vec!["key-0".into()],
-        };
+        let keys =
+            A2aServerAuth::ApiKey(super::super::auth::ApiKeySet::unbound(vec!["key-0".into()]));
         assert!(thread_access_disclosures(None, ThreadReads::Off).is_empty());
         assert_eq!(
             thread_access_disclosures(None, ThreadReads::Unknown),
@@ -3013,19 +3277,23 @@ mod tests {
     /// both.
     #[test]
     fn the_retract_ownership_disclosure_follows_the_configured_key_set() {
-        let keys = |count: usize| A2aServerAuth::ApiKey {
-            keys: (0..count)
-                .map(|index| format!("key-{index}").into())
-                .collect(),
+        let keys = |count: usize| {
+            A2aServerAuth::ApiKey(super::super::auth::ApiKeySet::unbound(
+                (0..count)
+                    .map(|index| format!("key-{index}").into())
+                    .collect(),
+            ))
         };
         assert!(retract_ownership_disclosures(None).is_empty());
         assert_eq!(
             retract_ownership_disclosures(Some(&keys(1))),
             vec![CREDENTIAL_SCOPED_RETRACT_DISCLOSURE]
         );
-        let duplicate_names_same_value = A2aServerAuth::ApiKey {
-            keys: vec!["same-key".into(), "same-key".into()],
-        };
+        let duplicate_names_same_value =
+            A2aServerAuth::ApiKey(super::super::auth::ApiKeySet::unbound(vec![
+                "same-key".into(),
+                "same-key".into(),
+            ]));
         assert_eq!(
             retract_ownership_disclosures(Some(&duplicate_names_same_value)),
             vec![CREDENTIAL_SCOPED_RETRACT_DISCLOSURE],

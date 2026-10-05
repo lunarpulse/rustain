@@ -29,6 +29,19 @@ pub enum ConsentSlot {
     Legacy,
 }
 
+impl ConsentSlot {
+    /// The typed cell a principal's grant is written to and read from first.
+    /// Exhaustive and never `Legacy`: every `Pinned` rail shares one cell
+    /// (Story 19.18d `P21`, `OQ3` = A).
+    #[must_use]
+    pub fn of(principal: &PolicyPrincipal) -> Self {
+        match principal {
+            PolicyPrincipal::Pinned { .. } => Self::Pinned,
+            PolicyPrincipal::Pseudonymous(_) => Self::Pseudonymous,
+        }
+    }
+}
+
 /// Read-only view of journaled per-sender consent.
 ///
 /// Sync and effect-free at the trait level: the explainer that consumes it is a
@@ -42,15 +55,14 @@ pub trait ConsentProjectionQuery: Send + Sync {
     fn slot_state(&self, slot: ConsentSlot, sender: &PeerId) -> ConsentState;
 
     /// Typed decisions take precedence; only an absent typed cell reaches legacy.
+    /// Story 19.18d: an operator-bound A2A caller never reaches legacy, so no
+    /// grant written before typed provenance admits it.
     fn consent_for(&self, principal: &PolicyPrincipal) -> ConsentState {
-        let slot = match principal {
-            PolicyPrincipal::Pinned { .. } => ConsentSlot::Pinned,
-            PolicyPrincipal::Pseudonymous(_) => ConsentSlot::Pseudonymous,
-        };
-        match self.slot_state(slot, principal.peer()) {
+        match self.slot_state(ConsentSlot::of(principal), principal.peer()) {
             ConsentState::None => match principal {
                 PolicyPrincipal::Pinned { via, .. } => match via {
                     PinnedVia::Rap => self.slot_state(ConsentSlot::Legacy, principal.peer()),
+                    PinnedVia::BoundA2a => ConsentState::None,
                 },
                 PolicyPrincipal::Pseudonymous(_) => {
                     self.slot_state(ConsentSlot::Legacy, principal.peer())

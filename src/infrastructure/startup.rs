@@ -51,6 +51,17 @@ impl std::fmt::Display for SubcommandExit {
 
 impl std::error::Error for SubcommandExit {}
 
+/// Story 19.18d `A17` — the active profile's resolved A2A roster: the one
+/// derivation both `--serve-a2a` roots (the daemon and standalone) hand the
+/// listener, so `server.peerKeys` binds against the same peers in both. An
+/// unresolved profile is an empty roster; a binding then refuses as `R1`,
+/// naming the alias.
+fn active_a2a_roster(
+    profile: Option<crate::domain::models::profile::ResolvedProfile>,
+) -> Vec<crate::domain::models::A2aPeerSpec> {
+    profile.map(|profile| profile.a2a_peers).unwrap_or_default()
+}
+
 fn ensure_a2a_feature_enabled(
     peers: &[crate::domain::models::A2aPeerSpec],
     serve_requested: bool,
@@ -1011,10 +1022,7 @@ pub async fn run() -> Result<()> {
             })
             .unwrap_or_else(|| "noop".to_string());
         let selection = resolved_selection.cloned().unwrap_or_default();
-        let a2a_peers = resolved_profile
-            .as_ref()
-            .map(|profile| profile.a2a_peers.clone())
-            .unwrap_or_default();
+        let a2a_peers = active_a2a_roster(resolved_profile);
         // 18.9b-a review patch — refuse only the actions that BOOT a daemon
         // (AC3(a) demands refusing start). Gating every DaemonAction left a
         // feature-off binary unable to stop/status/attach to a daemon an
@@ -1035,6 +1043,18 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Daemon subcommand failed: {e}");
+            // Story 19.18d `A19` (`OQ5` = A) — a daemon refusal (a `peerKeys`
+            // binding refusal among them) must reach the operator, not only
+            // the log: the standalone `--serve-a2a` precedent below. This is
+            // the ONE stderr report for a daemon failure; the daemon adapter
+            // returns its errors rather than printing them. A
+            // `DaemonRefusal` already reads as the finished diagnostic, so it
+            // prints verbatim; anything else gets the generic prefix.
+            if let Some(refusal) = e.downcast_ref::<crate::adapters::daemon::DaemonRefusal>() {
+                eprintln!("{refusal}");
+            } else {
+                eprintln!("rustain: daemon failed: {e:#}");
+            }
             SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
@@ -1069,12 +1089,16 @@ pub async fn run() -> Result<()> {
             let transparency = std::sync::Arc::new(
                 crate::adapters::a2a::transparency::TransparencySink::new(room),
             );
+            // Story 19.18d `A17` — the same roster derivation the daemon
+            // branch uses, so `server.peerKeys` binds against it here too.
+            let roster = active_a2a_roster(profile_resolver_arc.resolve_active());
             return crate::adapters::a2a::server::run(
                 addr,
                 app_config,
                 workspace,
                 None,
                 transparency,
+                roster,
                 None,
             )
             .await
