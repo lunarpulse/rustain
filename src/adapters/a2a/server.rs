@@ -1092,23 +1092,29 @@ struct FollowUpReference {
     matched: bool,
 }
 
+/// Story 19.18e `A3` — the submitter handles this caller adopts: for a bound
+/// caller, the key handle of every slot bound to the same pin with
+/// `adoptPreBinding` (`ApiKeySet::adopted_for`); empty for loopback, an unbound
+/// key, or a listener without keys. The one source of both the item scope
+/// ([`caller_scope`]) and the adopted task lookup ([`scoped_task`]).
+fn adopted_submitters(state: &ServerState, caller: &Caller) -> Vec<SubmitterKey> {
+    match (caller.key.principal(), state.security.auth.as_ref()) {
+        (ItemPrincipal::A2aBound(pin), Some(auth)) => auth.keys().adopted_for(&pin),
+        _ => Vec::new(),
+    }
+}
+
 /// Story 19.18d `A11` — the item principals this caller may read: its own,
 /// and for a bound caller also the pseudonyms of every key bound to the same
-/// pin with `adoptLegacyItems`. Every other caller's scope is exact.
+/// pin with `adoptPreBinding` ([`adopted_submitters`]). Every other caller's
+/// scope is exact.
 fn caller_scope(state: &ServerState, caller: &Caller) -> ItemScope {
-    let principal = caller.key.principal();
-    match (&principal, state.security.auth.as_ref()) {
-        (ItemPrincipal::A2aBound(pin), Some(auth)) => {
-            let adopted = auth
-                .keys()
-                .adopted_for(pin)
-                .iter()
-                .map(SubmitterKey::principal)
-                .collect::<Vec<_>>();
-            ItemScope::with_adopted(principal, adopted)
-        }
-        _ => ItemScope::exact(principal),
-    }
+    ItemScope::with_adopted(
+        caller.key.principal(),
+        adopted_submitters(state, caller)
+            .iter()
+            .map(SubmitterKey::principal),
+    )
 }
 
 /// Story 19.18c `A22` — whether a `message/send` for `task_id` keeps one
@@ -1769,6 +1775,13 @@ async fn launch(
 /// response of a task that does not exist. See `exec::InboundTaskStore::get_scoped`
 /// and the ADR for why the imprecision is deliberate.
 ///
+/// Story 19.18e `A4` — a bound caller whose pin adopts pre-binding keys
+/// ([`adopted_submitters`], computed only after its own handle misses) also
+/// reaches those keys' tasks recovered at the restart that applied the
+/// binding: exact first, one terminal adopted hit served, a live or ambiguous
+/// one not found (`exec::InboundTaskStore::get_in_scope`). The capability gate
+/// below applies to whichever task the lookup returned.
+///
 /// Story 19.18c `A6`/`P8` — for an API-key caller a capability-bearing task is
 /// served only with its capability, presented in the A2A extension slot
 /// `params.metadata["x-rustain-item-capability"]`; a miss is the same
@@ -1798,7 +1811,7 @@ async fn scoped_task(
     let not_found = || JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, TASK_NOT_FOUND);
     let task = state
         .tasks
-        .get_scoped(id, &caller.key)
+        .get_in_scope(id, &caller.key, || adopted_submitters(state, caller))
         .await
         .ok_or_else(not_found)?;
     let hash = task.capability_hash.as_deref();
@@ -2729,7 +2742,7 @@ fn peer_binding_disclosures(auth: Option<&A2aServerAuth>, loopback: bool) -> Vec
 pub const ORPHANED_RECIPIENT_ITEMS_WARNING: &str = "A2A recipient items: {count} item(s) belong \
      to identities that no caller of this listener has, so no caller can list, read or retract \
      them; they stay in the journal. Off loopback, configuring the original API key again \
-     (unbound, or in server.peerKeys with adoptLegacyItems) or binding any key to the same \
+     (unbound, or in server.peerKeys with adoptPreBinding) or binding any key to the same \
      pinned peer makes them reachable.";
 
 /// Story 19.18d `A12`/`P10`/`P23` — how many projected recipient items (each

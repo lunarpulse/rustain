@@ -124,8 +124,9 @@ pub struct A2aServerConfig {
 
 /// Story 19.18d `A9` — one `server.peerKeys` value: a roster alias, or an
 /// object that also opts the binding into reading the key's pre-binding items
-/// (`B3`, `adoptLegacyItems`, default false). The two forms are equivalent for
-/// the same alias and adoption flag.
+/// and recovered tasks (`B3`, `adoptPreBinding`, default false; the key was
+/// renamed by Story 19.18e before its first release). The two forms are
+/// equivalent for the same alias and adoption flag.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
@@ -133,8 +134,8 @@ pub enum PeerKeyBinding {
     Alias(String),
     Detailed {
         peer: String,
-        #[serde(default, rename = "adoptLegacyItems", alias = "adopt_legacy_items")]
-        adopt_legacy_items: bool,
+        #[serde(default, rename = "adoptPreBinding", alias = "adopt_pre_binding")]
+        adopt_pre_binding: bool,
     },
 }
 
@@ -147,14 +148,15 @@ impl PeerKeyBinding {
         }
     }
 
-    /// Whether this binding reads the key's pre-binding (pseudonym) items.
+    /// Whether this binding reads the key's pre-binding (pseudonym) items and
+    /// its tasks recovered at the restart that applied the binding.
     #[must_use]
-    pub fn adopt_legacy_items(&self) -> bool {
+    pub fn adopt_pre_binding(&self) -> bool {
         match self {
             Self::Alias(_) => false,
             Self::Detailed {
-                adopt_legacy_items, ..
-            } => *adopt_legacy_items,
+                adopt_pre_binding, ..
+            } => *adopt_pre_binding,
         }
     }
 }

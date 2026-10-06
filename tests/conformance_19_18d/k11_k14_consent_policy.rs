@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use rustain::adapters::a2a::config::parse_workspace_a2a_config;
 use rustain::adapters::a2a::exec::SubmitterKey;
-use rustain::adapters::a2a::transparency::{APPROVAL_GATE_PREFIX, STATUS_QUERY_GATE_PREFIX};
+use rustain::adapters::a2a::transparency::APPROVAL_GATE_PREFIX;
 use rustain::adapters::policy::JournalConsentProjection;
 use rustain::adapters::rap::{
     AgentSigner, IdentityKeyStore, PeerDeliveryError, PeerTopicStore, VerifiedPeerFrameHandler,
@@ -54,7 +54,7 @@ use rustain::infrastructure::runtime::transparency_bridge::team_command;
 use crate::harness::{
     BoundHost, HostSpec, K_P1A, K_P1B, K_P1C, K_P2, K_P2_ENV, K_U, K_U_ENV, Operator, RawClient,
     Reply, Roster, SETTLE, bound_item_address, item_id_for_task, listed_ids, operator_app_state,
-    pin_of, raw_payloads, received_row_for_task, setup,
+    pin_of, raw_payloads, received_row_for_task, setup, status_rows,
 };
 
 type Events = tokio::sync::broadcast::Receiver<ApprovalRuntimeEvent>;
@@ -153,21 +153,6 @@ async fn next_requested(events: &mut Events) -> Requested {
 /// `task`, in journal order (the raw on-disk wire).
 fn parked_rows(host: &BoundHost, task: &str) -> Vec<(String, Option<String>)> {
     let gate = format!("{APPROVAL_GATE_PREFIX}{task}");
-    raw_payloads(&host.journal, "admission_deferred")
-        .into_iter()
-        .filter(|row| row["gate"] == gate)
-        .map(|row| {
-            (
-                row["spoke"].as_str().expect("spoke").to_owned(),
-                row["principal"].as_str().map(str::to_owned),
-            )
-        })
-        .collect()
-}
-
-/// `(spoke, principal)` of every first-status-query row for `task`.
-fn status_rows(host: &BoundHost, task: &str) -> Vec<(String, Option<String>)> {
-    let gate = format!("{STATUS_QUERY_GATE_PREFIX}{task}");
     raw_payloads(&host.journal, "admission_deferred")
         .into_iter()
         .filter(|row| row["gate"] == gate)

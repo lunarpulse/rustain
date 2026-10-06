@@ -395,7 +395,7 @@ The `server` block of `.rustain/a2a.json`:
     "apiKeys": ["RUSTAIN_A2A_API_KEY_NEXT"],
     "peerKeys": {
       "RUSTAIN_A2A_KEY_ALICE": "alice-dev",
-      "RUSTAIN_A2A_KEY_BOB": { "peer": "bob-ci", "adoptLegacyItems": true }
+      "RUSTAIN_A2A_KEY_BOB": { "peer": "bob-ci", "adoptPreBinding": true }
     },
     "requirePeerBinding": false,
     "advertisedHost": "a2a.example.com:8443",
@@ -408,7 +408,7 @@ The `server` block of `.rustain/a2a.json`:
 | `admission` | `deny` (default), `ask`, `allow` | What to do with a task from a remote agent |
 | `apiKeyEnv` / `api_key_env` | env var **name** | Legacy primary API-key variable. It remains honored. The key itself never lives in the file |
 | `apiKeys` / `api_keys` | array of env var **names** | Additional API keys. The effective set is the union with `apiKeyEnv`; each configured key is a distinct submitting principal |
-| `peerKeys` / `peer_keys` | map of env var **name** to a roster alias, or to `{ "peer": "<alias>", "adoptLegacyItems": bool }` (`adopt_legacy_items`, default `false`) | Binds an inbound API key to one **pinned** roster peer. Several names may bind one alias. A name is either bound here or unbound in `apiKeyEnv`/`apiKeys`, never both. See *Binding API keys to pinned peers* |
+| `peerKeys` / `peer_keys` | map of env var **name** to a roster alias, or to `{ "peer": "<alias>", "adoptPreBinding": bool }` (`adopt_pre_binding`, default `false`) | Binds an inbound API key to one **pinned** roster peer. Several names may bind one alias. A name is either bound here or unbound in `apiKeyEnv`/`apiKeys`, never both. See *Binding API keys to pinned peers* |
 | `requirePeerBinding` / `require_peer_binding` | `false` (default), `true` | Startup validation: every configured key must be bound in `peerKeys`, so no unbound caller can exist |
 | `threadReads` / `thread_reads` | `off` (default), `credential-scoped` | Thread and follow-up access for legacy items from API-key callers |
 | `advertisedHost` / `advertised_host` | public `host[:port]` authority | Authority published in the AgentCard. Required for `0.0.0.0` or `::` binds |
@@ -462,7 +462,7 @@ Both forms are equivalent in meaning; the object form adds the adoption switch:
 ```json
 "peerKeys": {
   "RUSTAIN_A2A_KEY_ALICE": "alice-dev",
-  "RUSTAIN_A2A_KEY_BOB": { "peer": "bob-ci", "adoptLegacyItems": true }
+  "RUSTAIN_A2A_KEY_BOB": { "peer": "bob-ci", "adoptPreBinding": true }
 }
 ```
 
@@ -470,7 +470,7 @@ Startup refuses, in this order and naming environment variable names and aliases
 (never values): a name in both `peerKeys` and `apiKeyEnv`/`apiKeys`; an alias
 that is not in the roster; an alias with no pinned key; `requirePeerBinding`
 with an unbound key; an unset or empty variable; and one key value bound to two
-different bindings (same alias, peer and `adoptLegacyItems` is accepted).
+different bindings (same alias, peer and `adoptPreBinding` is accepted).
 
 The roster is the active profile's `a2a.json`, for the daemon and for standalone
 `--serve-a2a` alike. An absent or empty roster fails as a missing alias. A
@@ -502,24 +502,48 @@ key's pseudonym and are not visible to the bound peer. They stay in the journal,
 and startup logs the count: `A2A recipient items: {count} item(s) belong to
 identities that no caller of this listener has, so no caller can list, read or
 retract them; they stay in the journal. Off loopback, configuring the original
-API key again (unbound, or in server.peerKeys with adoptLegacyItems) or binding
+API key again (unbound, or in server.peerKeys with adoptPreBinding) or binding
 any key to the same pinned peer makes them reachable.` With
-`adoptLegacyItems: true`, every key bound to that peer reads the legacy items of
-that same key value: a read union for list, thread and retract only, in one
-global journal order. Adoption does not change the capability-class edge: a
-legacy follow-up joins an adopted legacy thread, while a capability-bearing
-follow-up of a legacy root starts its own root. Tasks are never adopted:
-`tasks/get`, `tasks/cancel` and new tasks stay on the exact bound handle, so a
-task submitted before the key was bound answers not-found (a later story owns
-that, `DF-19-18D-TASKS-NOT-ADOPTED`). A bound peer's items and a RAP peer's
+`adoptPreBinding: true`, every key bound to that peer reads the legacy items of
+that same key value: a read union for list, thread and retract, and the
+recovered tasks of `tasks/get` and `tasks/cancel`, in one global journal order.
+Adoption does not change the capability-class edge: a legacy follow-up joins an
+adopted legacy thread, while a capability-bearing follow-up of a legacy root
+starts its own root. The opt-in was renamed to `adoptPreBinding` before its
+first release; no other spelling is read. A bound peer's items and a RAP peer's
 items of the same pin stay separate (`DF-19-18D-CROSS-RAIL-PRINCIPAL`).
+
+**Adopted tasks.** Bindings apply only at startup, and startup fails every task
+that was in flight. With adoption, `tasks/get` and `tasks/cancel` from any key
+bound to the peer also reach the original key's tasks recovered at the restart
+that applied the binding: they answer `failed` with the restart reason, and
+`tasks/cancel` changes nothing. A capability-bearing task still needs its item
+capability; a missing or wrong one is the same not-found. No live task is ever
+adopted. Recovered tasks last until the next restart or until evicted, and tasks
+that had already finished before the restart are not kept; a standalone
+`--serve-a2a` start recovers only approval-pending tasks, so an admitted task
+surfaces at the next daemon start. The bound peer's own task with the same id
+takes precedence, and an id that two adopted keys both used answers not-found.
+Without adoption, earlier tasks answer not-found. New tasks are always created
+under the bound peer. This is visible to an A2A client that polls or cancels
+after the host restarts.
+
+| Change applied at a restart | Who reads the earlier tasks through `tasks/get` / `tasks/cancel` |
+|---|---|
+| Unbound key bound to a peer **with** `adoptPreBinding` | every key bound to that peer: the recovered `failed` projection; cancel changes nothing |
+| Unbound key bound **without** adoption | nobody: not-found (its items are unreachable likewise) |
+| Two keys bound to one peer, only one adopting | both read the adopting key's recovered tasks; neither reads the other key's pre-binding tasks |
+| A bound key moved from peer P to peer Q | Q never reads P's tasks; P's tasks recovered at that restart stay readable by keys still bound to P |
+| A key removed from the configuration | its unbound tasks are unreachable; its bound peer's tasks stay readable by that peer's other keys |
+| Any later restart | the recovered projections are gone; finished tasks are never kept |
+| The key's value rotated at the binding restart | nothing is adopted: adoption follows the key value |
 
 The orphan count also includes bound items when every key bound to their pin is
 removed. On a loopback listener, all bound items and all non-loopback API-key
 pseudonym items count as unreachable, because configured keys are ignored.
 On a non-loopback listener, binding any key to the original pin restores access
 to its bound items. Legacy pseudonymous items instead require the original key
-value, configured either unbound or bound with `adoptLegacyItems: true`; binding
+value, configured either unbound or bound with `adoptPreBinding: true`; binding
 a different key to the same pin does not adopt that original key's items.
 
 **Older builds and changes (disclosed).**
@@ -531,22 +555,25 @@ a different key to the same pin does not adopt that original key's items.
   read as unknown in an older build, one item at a time, and are not served
   there.
 - (c) Binding a key that was unbound, without adoption, leaves its earlier items
-  unreachable and its earlier tasks answering not-found.
+  unreachable and its earlier tasks answering not-found; with adoption, its
+  tasks recovered at that restart answer `failed` with the restart reason.
 - (d) Two aliases with one pin are one item and consent principal; distinct keys
   journal their own matched aliases, and one key value under two different
   aliases is refused.
 
 A restart keeps identity, not execution: a task in flight at restart becomes a
 failed projection under the same bound handle, and another key bound to that
-peer may query it.
+peer may query it. A task in flight under an unbound key that the same restart
+binds with adoption becomes a failed projection under that key's own handle,
+which every key bound to the peer may query.
 
 ### Task lifecycle
 
 | Method | Behaviour |
 |---|---|
 | `message/send` | Admits the task and answers immediately. Never blocks on a human |
-| `tasks/get` | Current state, scoped to the submitting credential |
-| `tasks/cancel` | Cancels the running turn, scoped to the submitting credential |
+| `tasks/get` | Current state, scoped to the submitting credential (a bound key with adoption also reaches its adopted keys' recovered tasks) |
+| `tasks/cancel` | Cancels the running turn, scoped to the submitting credential (a bound key with adoption also reaches its adopted keys' recovered tasks) |
 
 Under `admission: "ask"`, `message/send` answers `auth-required` and the client
 polls `tasks/get`; the operator's decision arrives out of band. The request is

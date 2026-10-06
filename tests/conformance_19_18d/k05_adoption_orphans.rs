@@ -1,6 +1,6 @@
-//! `K05` (AC6, `A11`, `A12`, `P7`–`P10`, `P23`, `F6`) — adoption, task
-//! non-adoption and the orphan notice, over ONE workspace journal across
-//! restarts, every phase read through a phase-local log cursor.
+//! `K05` (AC6, `A11`, `A12`, `P7`–`P10`, `P23`, `F6`) — adoption and the
+//! orphan notice, over ONE workspace journal across restarts, every phase
+//! read through a phase-local log cursor.
 //!
 //! Credentials (the harness table): `K` = `K_P1A` (the credential that gets
 //! bound), `K2` = `K_P1B` (the second credential of the same pin), the
@@ -10,14 +10,16 @@
 //!
 //! Mutants this keystone turns RED (story MUTANT REGISTER), with the
 //! killing arithmetic at each assertion: `M04`, `M20`, `M26`, `M30`–`M35`,
-//! `M52`, `M53`, `M56`, `M57`, `M68`, `M72`.
+//! `M52`, `M56`, `M57`, `M68`, `M72`.
 //!
-//! Three tests:
+//! Two tests:
 //! * [`k05_orphan_phases_across_restarts`] — phases (0)–(6), the loopback
 //!   startup, the merged list, the M68 retract;
-//! * [`k05_p9_twin_recovery_control`] — recovered in-flight task, unbound
-//!   (served) vs bound+adopt (not found);
 //! * [`k05_adoption_follow_up_edges`] — `P7`'s capability-class edge.
+//!
+//! Story 19.18e moved the recovered-task twin control to its own target
+//! (`conformance_19_18e_a2a_task_continuity`): adopted keys' recovered tasks
+//! are now served, so the twin's not-found leg is retired.
 //!
 //! The follow-up edges live in their own workspace on purpose: every follow-up
 //! mints an `A2aBound(P)` item, and the main test's exact counts (phase (5) =
@@ -26,10 +28,10 @@
 
 use crate::harness::{
     BoundHost, HostSpec, K_P1A, K_P1A_ENV, K_P1B, K_P1B_ENV, K_P2, K_P2_ENV, K_U, K_U_ENV, Listen,
-    P1_X, RawClient, Roster, SETTLE, Sender, bound_item_address, follow_up_metadata,
-    host_log_since, item_id_for_task, items, listed_ids, log_cursor, log_since, pin_hex,
-    raw_payloads, received_row_for_task, received_rows, room_events, sender_key, served_ids, setup,
-    wire,
+    P1_X, SETTLE, Sender, adopting, bound_item_address, follow_up_metadata, host_log_since,
+    item_id_for_task, items, listed_ids, log_cursor, log_since, park_in_flight, pin_hex,
+    raw_payloads, received_row_for_task, received_rows, restart_phase_after_crash, room_events,
+    sender_key, served_ids, server, setup, spec, wire,
 };
 use rustain::adapters::a2a::exec::RESTART_DETAIL;
 use rustain::adapters::a2a::server::ORPHANED_RECIPIENT_ITEMS_WARNING;
@@ -37,27 +39,6 @@ use rustain::adapters::tui::state::TuiState;
 use serde_json::{Value, json};
 
 // ── Config builders (the `server` block of the written `a2a.json`) ──────────
-
-/// `admission` + `peerKeys` (env NAME → alias or `{peer, adoptLegacyItems}`)
-/// + `apiKeys` (unbound env NAMEs).
-fn server(admission: &str, peer_keys: Value, api_keys: &[&str]) -> Value {
-    let mut block = json!({ "admission": admission });
-    if peer_keys.as_object().is_some_and(|keys| !keys.is_empty()) {
-        block["peerKeys"] = peer_keys;
-    }
-    if !api_keys.is_empty() {
-        block["apiKeys"] = json!(api_keys);
-    }
-    block
-}
-
-fn adopting(peer: &str) -> Value {
-    json!({ "peer": peer, "adoptLegacyItems": true })
-}
-
-fn spec(server: Value) -> HostSpec {
-    HostSpec::with_server(server).roster(Roster::standard())
-}
 
 /// `K` and the control unbound, `K2` not configured.
 fn unbound_spec(admission: &str) -> HostSpec {
@@ -79,7 +60,7 @@ fn bound_spec() -> HostSpec {
     ))
 }
 
-/// Phase (4): `K` and `K2` bound to `p1`, both with `adoptLegacyItems`.
+/// Phase (4): `K` and `K2` bound to `p1`, both with `adoptPreBinding`.
 fn adopting_spec() -> HostSpec {
     spec(server(
         "allow",
@@ -144,15 +125,6 @@ async fn restart_phase(host: BoundHost, spec: HostSpec) -> (BoundHost, String) {
     (host, window)
 }
 
-/// [`restart_phase`] over [`BoundHost::restart_after_crash`]: the pending
-/// record a killed process leaves behind survives into the new `serve`.
-async fn restart_phase_after_crash(host: BoundHost, spec: HostSpec) -> (BoundHost, String) {
-    let cursor = log_cursor();
-    let host = host.restart_after_crash(spec).await;
-    let window = host_log_since(cursor, &host);
-    (host, window)
-}
-
 /// Bounded wait until the production removal frame's tombstone is journaled
 /// (the daemon answers a successful removal with no frame).
 async fn wait_removed(host: &BoundHost, item: &str) {
@@ -172,23 +144,6 @@ async fn wait_removed(host: &BoundHost, item: &str) {
     }
 }
 
-/// Bounded wait until `a2a-pending.json` names `task` (an approval-pending
-/// task; ask mode, no durable item yet).
-async fn wait_pending_record(host: &BoundHost, task: &str) {
-    let path = host.journal.path.join(".rustain/a2a-pending.json");
-    let deadline = tokio::time::Instant::now() + SETTLE;
-    loop {
-        if std::fs::read_to_string(&path).is_ok_and(|raw| raw.contains(task)) {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "no pending record for {task}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
 fn retracted_rows(host: &BoundHost) -> Vec<Value> {
     raw_payloads(&host.journal, "recipient_item_retracted")
 }
@@ -201,24 +156,6 @@ fn listed_row<'a>(list: &'a Value, item: &str) -> &'a Value {
         .iter()
         .find(|row| row["itemId"] == item)
         .unwrap_or_else(|| panic!("{item} not listed: {list}"))
-}
-
-/// Seed `K`'s in-flight task WITHOUT a durable item: `admission: ask` parks
-/// the task on an operator decision and writes only `a2a-pending.json`.
-async fn park_in_flight(host: &BoundHost, client: &RawClient, task: &str) {
-    let items_before = received_rows(&host.journal).len();
-    let sent = client.message_send(1, task, task, json!({})).await;
-    assert_eq!(
-        sent.json["result"]["status"]["state"], "auth-required",
-        "{task} must park on the operator decision: {}",
-        sent.body
-    );
-    wait_pending_record(host, task).await;
-    assert_eq!(
-        received_rows(&host.journal).len(),
-        items_before,
-        "an approval-pending task has no durable item"
-    );
 }
 
 // ── The main keystone ───────────────────────────────────────────────────────
@@ -417,7 +354,7 @@ async fn k05_orphan_phases_across_restarts() {
         "no never-id-equivalent probe wrote a row"
     );
 
-    // ── Phase (4): K and K2 bound to P with adoptLegacyItems → exactly 0,
+    // ── Phase (4): K and K2 bound to P with adoptPreBinding → exactly 0,
     // and all three legacy items are served through K2.
     // `M20`/`M26`/`M31`: n/a (0 expected — any miscount is a line).
     let (host_4, window) = restart_phase(host, adopting_spec()).await;
@@ -551,62 +488,6 @@ async fn k05_orphan_phases_across_restarts() {
     host = host_6;
     assert_orphans(&window, 5, "phase (6)");
     drop(host);
-}
-
-// ── P9: the twin recovery control ───────────────────────────────────────────
-
-#[tokio::test(flavor = "multi_thread")]
-async fn k05_p9_twin_recovery_control() {
-    setup();
-    const TASK: &str = "k05-twin-flight";
-    let seed = || spec(server("ask", json!({}), &[K_P1A_ENV]));
-
-    // Twin A — UNCHANGED unbound config: K's recovered in-flight task is
-    // served as failed + RESTART_DETAIL (the live control).
-    let host = BoundHost::start(seed()).await;
-    park_in_flight(&host, &host.client(K_P1A), TASK).await;
-    let (host, _) = restart_phase_after_crash(host, seed()).await;
-    let served = host.client(K_P1A).tasks_get(11, TASK, None).await;
-    assert_eq!(
-        served.json["result"]["status"]["state"], "failed",
-        "{}",
-        served.body
-    );
-    assert!(
-        served.body.contains(&RESTART_DETAIL[..40]),
-        "{}",
-        served.body
-    );
-    drop(host);
-
-    // Twin B — same seed, then K and K2 bound to P with adoptLegacyItems:
-    // adoption never reaches tasks (`A11`, `P9`, `M53`): the SAME recovered
-    // task answers not-found under K and K2, byte-identical to a never id.
-    let host = BoundHost::start(seed()).await;
-    park_in_flight(&host, &host.client(K_P1A), TASK).await;
-    let (host, window) = restart_phase_after_crash(
-        host,
-        spec(server(
-            "ask",
-            json!({ K_P1A_ENV: adopting("p1"), K_P1B_ENV: adopting("p1") }),
-            &[],
-        )),
-    )
-    .await;
-    let _ = window; // Twin A above is the live control for this exact seed.
-    for client in [host.client(K_P1A), host.client(K_P1B)] {
-        let never = client.tasks_get(11, "k05-never-task", None).await.body;
-        assert!(never.contains("-32001"), "{never}");
-        assert_eq!(
-            client.tasks_get(11, TASK, None).await.body,
-            never,
-            "`M53`: the bound caller never sees the apikey: task"
-        );
-        assert_eq!(
-            client.tasks_cancel(12, TASK, None).await.body,
-            client.tasks_cancel(12, "k05-never-task", None).await.body
-        );
-    }
 }
 
 // ── P7: adoption keeps the 19.18c capability-class edge ─────────────────────

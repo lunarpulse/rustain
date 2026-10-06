@@ -323,7 +323,7 @@ fn k07_the_first_check_wins_whatever_the_name_order() {
 }
 
 /// `P2` — one key value identifies one binding: only identical
-/// `(alias, pin, adoptLegacyItems)` metadata is accepted, as two slots.
+/// `(alias, pin, adoptPreBinding)` metadata is accepted, as two slots.
 #[test]
 fn k07_one_key_value_identifies_one_binding() {
     let shared = [
@@ -359,7 +359,7 @@ fn k07_one_key_value_identifies_one_binding() {
             serde_json::json!({
                 "peerKeys": {
                     "A_KEY": "p1",
-                    "B_KEY": { "peer": "p1", "adoptLegacyItems": true },
+                    "B_KEY": { "peer": "p1", "adoptPreBinding": true },
                 },
             }),
             &shared
@@ -407,7 +407,7 @@ fn k07_forms_are_equivalent_and_the_slot_carries_its_binding() {
             "apiKeyEnv": "K_U",
             "peerKeys": {
                 "K_P1A": "p1",
-                "K_P1B": { "peer": "p1", "adoptLegacyItems": true },
+                "K_P1B": { "peer": "p1", "adoptPreBinding": true },
                 "K_P2": { "peer": "p2" },
             },
         }),
@@ -419,8 +419,8 @@ fn k07_forms_are_equivalent_and_the_slot_carries_its_binding() {
         serde_json::json!({
             "api_key_env": "K_U",
             "peer_keys": {
-                "K_P1A": { "peer": "p1", "adopt_legacy_items": false },
-                "K_P1B": { "peer": "p1", "adopt_legacy_items": true },
+                "K_P1A": { "peer": "p1", "adopt_pre_binding": false },
+                "K_P1B": { "peer": "p1", "adopt_pre_binding": true },
                 "K_P2": "p2",
             },
         }),
@@ -437,7 +437,7 @@ fn k07_forms_are_equivalent_and_the_slot_carries_its_binding() {
                 (
                     binding.alias().to_owned(),
                     binding.peer().clone(),
-                    binding.adopt_legacy_items(),
+                    binding.adopt_pre_binding(),
                 )
             })
         };

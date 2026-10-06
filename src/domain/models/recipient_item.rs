@@ -66,8 +66,10 @@ pub enum A2aIngressPrincipal {
 
 /// Story 19.18d `A11` — the item principals one caller may read: its own,
 /// plus, for a bound caller, the pseudonyms of keys bound to the same pin
-/// with `adoptLegacyItems`. Deduplicated; membership is the projection's one
-/// read predicate. Minting and task lookup stay on the exact principal.
+/// with `adoptPreBinding`. Deduplicated; membership is the projection's one
+/// read predicate. Minting stays on the exact principal; `tasks/get` and
+/// `tasks/cancel` of a bound caller also resolve its adopted keys' recovered
+/// terminal tasks (Story 19.18e).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemScope {
     members: Vec<ItemPrincipal>,

@@ -162,6 +162,7 @@ jobs:
             --test conformance_19_18c_a2a_item_capability \
             --test conformance_19_18d0_a2a_typed_policy_principal \
             --test conformance_19_18d_a2a_peer_binding \
+            --test conformance_19_18e_a2a_task_continuity \
             --test conformance_a2a_architecture \
             --test conformance_18_3c_response_modes \
             --test conformance_18_3a_c_artifacts \

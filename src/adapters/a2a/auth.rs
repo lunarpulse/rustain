@@ -118,7 +118,7 @@ impl ConfiguredKey {
 pub struct KeyBinding {
     alias: String,
     peer: PeerId,
-    adopt_legacy_items: bool,
+    adopt_pre_binding: bool,
 }
 
 impl KeyBinding {
@@ -134,10 +134,11 @@ impl KeyBinding {
         &self.peer
     }
 
-    /// Whether this binding reads the key's pre-binding items (`B3`).
+    /// Whether this binding reads the key's pre-binding items and its tasks
+    /// recovered at the restart that applied the binding (`B3`; Story 19.18e).
     #[must_use]
-    pub fn adopt_legacy_items(&self) -> bool {
-        self.adopt_legacy_items
+    pub fn adopt_pre_binding(&self) -> bool {
+        self.adopt_pre_binding
     }
 }
 
@@ -153,9 +154,10 @@ impl ApiKeySet {
         }
     }
 
-    /// The pseudonymous submitters whose pre-binding items every key bound to
-    /// `pin` may read (`A11`): the key of each slot bound to `pin` **with**
-    /// `adoptLegacyItems`, deduplicated by value.
+    /// The pseudonymous submitters whose pre-binding items — and, Story 19.18e,
+    /// whose tasks recovered at the restart that applied the binding — every
+    /// key bound to `pin` may read (`A11`): the key of each slot bound to `pin`
+    /// **with** `adoptPreBinding`, deduplicated by value, in slot order.
     #[must_use]
     pub fn adopted_for(&self, pin: &PeerId) -> Vec<SubmitterKey> {
         let mut seen = BTreeSet::new();
@@ -164,7 +166,7 @@ impl ApiKeySet {
             .filter(|slot| {
                 slot.binding
                     .as_ref()
-                    .is_some_and(|binding| binding.adopt_legacy_items && &binding.peer == pin)
+                    .is_some_and(|binding| binding.adopt_pre_binding && &binding.peer == pin)
             })
             .filter(|slot| seen.insert(*slot.digest))
             .map(|slot| SubmitterKey::from_api_key_digest(&slot.digest))
@@ -410,7 +412,7 @@ pub fn resolve_server_auth(
             KeyBinding {
                 alias: alias.to_owned(),
                 peer,
-                adopt_legacy_items: binding.adopt_legacy_items(),
+                adopt_pre_binding: binding.adopt_pre_binding(),
             },
         ));
     }

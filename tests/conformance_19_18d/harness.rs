@@ -65,11 +65,12 @@ use rustain::adapters::a2a::config::{
     parse_workspace_a2a_config, parse_workspace_a2a_server_config,
 };
 use rustain::adapters::a2a::egress::A2aEgress;
+use rustain::adapters::a2a::exec::INBOUND_SUBAGENT_TYPE;
 use rustain::adapters::a2a::item_capability::{
     ItemCapabilityKey, ItemCapabilityKeyStore, derive_item_capability, load_item_capability_key,
 };
 use rustain::adapters::a2a::server::{ServeConfig, serve};
-use rustain::adapters::a2a::transparency::TransparencySink;
+use rustain::adapters::a2a::transparency::{STATUS_QUERY_GATE_PREFIX, TransparencySink};
 use rustain::adapters::daemon::protocol::{
     AttachMode, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION, read_frame, write_frame,
 };
@@ -1853,6 +1854,14 @@ impl BoundHost {
     /// dead process never does. The file's bytes from BEFORE the teardown are
     /// put back once the teardown has settled, so the new `serve` finds
     /// exactly what a killed process left on disk.
+    ///
+    /// Story 19.18e `P6` — each declined watcher removes its own record in a
+    /// separate read-modify-write that shares no lock with the new server, so
+    /// with several parked records a late writer could clobber the restored
+    /// bytes. Settle (bounded: the file has changed and then held still for
+    /// five 20 ms polls, or 1 s passed — some seeds never change it), restore,
+    /// then verify five reads at 20 ms; any difference rewrites, at most three
+    /// rounds, else the restart panics rather than serve a lost seed.
     pub async fn restart_after_crash(self, spec: HostSpec) -> Self {
         let pending_path = self.journal.path.join(".rustain/a2a-pending.json");
         let snapshot = std::fs::read(&pending_path).ok();
@@ -1883,17 +1892,225 @@ impl BoundHost {
         drop(journal);
         let _ = std::fs::remove_file(workspace.path().join("daemon.sock"));
         if let Some(bytes) = snapshot {
-            // Let the declined watchers finish rewriting the file (bounded),
-            // then restore the pre-teardown bytes.
+            let read = || std::fs::read(&pending_path).ok();
             let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-            while std::fs::read(&pending_path).ok().as_deref() == Some(bytes.as_slice())
-                && tokio::time::Instant::now() < deadline
-            {
+            let mut last = read();
+            let mut changed = last.as_deref() != Some(bytes.as_slice());
+            let mut stable = 0;
+            while !(changed && stable >= 5) && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(20)).await;
+                let now = read();
+                changed |= now.as_deref() != Some(bytes.as_slice());
+                if now == last {
+                    stable += 1;
+                } else {
+                    stable = 0;
+                    last = now;
+                }
             }
-            std::fs::write(&pending_path, bytes).expect("restore the pending file");
+            let mut rounds = 0;
+            loop {
+                std::fs::write(&pending_path, &bytes).expect("restore the pending file");
+                let mut clobbered = false;
+                for _ in 0..5 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    if read().as_deref() != Some(bytes.as_slice()) {
+                        clobbered = true;
+                        break;
+                    }
+                }
+                if !clobbered {
+                    break;
+                }
+                rounds += 1;
+                if rounds == 3 {
+                    panic!("late pending-file writer clobbered the crash snapshot");
+                }
+            }
         }
         let listener = listener.unwrap_or_else(|| bind(wanted));
         Self::compose(open_journal(workspace).await, listener, keys, spec, true).await
     }
+}
+
+// ── Promoted from k05/k06/k11 (Story 19.18e `A11`; bodies unchanged) ────────
+
+/// `admission` + `peerKeys` (env NAME → alias or `{peer, adoptPreBinding}`)
+/// + `apiKeys` (unbound env NAMEs).
+pub fn server(
+    admission: &str,
+    peer_keys: serde_json::Value,
+    api_keys: &[&str],
+) -> serde_json::Value {
+    let mut block = serde_json::json!({ "admission": admission });
+    if peer_keys.as_object().is_some_and(|keys| !keys.is_empty()) {
+        block["peerKeys"] = peer_keys;
+    }
+    if !api_keys.is_empty() {
+        block["apiKeys"] = serde_json::json!(api_keys);
+    }
+    block
+}
+
+/// A `peerKeys` value binding to `peer` with the pre-binding adoption opt-in.
+pub fn adopting(peer: &str) -> serde_json::Value {
+    serde_json::json!({ "peer": peer, "adoptPreBinding": true })
+}
+
+/// A [`server`] block over the standard roster.
+pub fn spec(server: serde_json::Value) -> HostSpec {
+    HostSpec::with_server(server).roster(Roster::standard())
+}
+
+/// [`BoundHost::restart_after_crash`] returning the host plus its
+/// phase-local log: the pending record a killed process leaves behind
+/// survives into the new `serve`.
+pub async fn restart_phase_after_crash(host: BoundHost, spec: HostSpec) -> (BoundHost, String) {
+    let cursor = log_cursor();
+    let host = host.restart_after_crash(spec).await;
+    let window = host_log_since(cursor, &host);
+    (host, window)
+}
+
+/// Bounded wait until `a2a-pending.json` names `task` (an approval-pending
+/// task; ask mode, no durable item yet).
+pub async fn wait_pending_record(host: &BoundHost, task: &str) {
+    let path = host.journal.path.join(".rustain/a2a-pending.json");
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    loop {
+        if std::fs::read_to_string(&path).is_ok_and(|raw| raw.contains(task)) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no pending record for {task}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Seed `K`'s in-flight task WITHOUT a durable item: `admission: ask` parks
+/// the task on an operator decision and writes only `a2a-pending.json`.
+pub async fn park_in_flight(host: &BoundHost, client: &RawClient, task: &str) {
+    let items_before = received_rows(&host.journal).len();
+    let sent = client
+        .message_send(1, task, task, serde_json::json!({}))
+        .await;
+    assert_eq!(
+        sent.json["result"]["status"]["state"], "auth-required",
+        "{task} must park on the operator decision: {}",
+        sent.body
+    );
+    wait_pending_record(host, task).await;
+    assert_eq!(
+        received_rows(&host.journal).len(),
+        items_before,
+        "an approval-pending task has no durable item"
+    );
+}
+
+/// The restart warn lines the two passes emit per restored task
+/// (`server.rs`, `reconcile_after_restart` / `reconcile_pending_after_restart`).
+pub const ORPHAN_WARN: &str = "A2A inbound task failed by host restart";
+pub const PENDING_WARN: &str = "A2A approval-pending task failed by host restart";
+
+pub fn wire_state(reply: &Reply) -> &str {
+    reply.json["result"]["status"]["state"]
+        .as_str()
+        .unwrap_or("<no state>")
+}
+
+pub fn detail(reply: &Reply) -> Option<&str> {
+    reply.json["result"]["status"]["message"]["parts"][0]["text"].as_str()
+}
+
+/// Log lines (after `cursor`) carrying `message` AND `needle`: other tests in
+/// this binary write to the same buffer, so a count is only ever taken over a
+/// token unique to this test (a task id, a node id, this workspace's path).
+pub fn lines_with(cursor: usize, message: &str, needle: &str) -> usize {
+    log_since(cursor)
+        .lines()
+        .filter(|line| line.contains(message) && line.contains(needle))
+        .count()
+}
+
+/// Send `task` through `client` and release it with `[o]nce` on the plain
+/// approval card: the task launches, journals its item and parks `Waiting`
+/// (`NotifyAndWait`). Returns the durable item id.
+pub async fn send_and_admit(
+    host: &BoundHost,
+    operator: &mut Operator,
+    client: &RawClient,
+    task: &str,
+) -> String {
+    let sent = client
+        .message_send(1, task, task, serde_json::json!({}))
+        .await;
+    assert_eq!(wire_state(&sent), "auth-required", "{task}: {}", sent.body);
+    operator
+        .answer_card("a2a/message.send", ApprovalOutcome::Once)
+        .await;
+    let node = host.waiting_node(task).await;
+    host.pending_card(&node).await;
+    item_id_for_task(&host.journal, task)
+}
+
+/// Send `task` and leave the approval unanswered: the task is
+/// `auth-required`, has a pending-file record and NO node.
+pub async fn send_and_leave_pending(host: &BoundHost, client: &RawClient, task: &str) {
+    let sent = client
+        .message_send(1, task, task, serde_json::json!({}))
+        .await;
+    assert_eq!(wire_state(&sent), "auth-required", "{task}: {}", sent.body);
+    assert!(
+        !has_inbound_node(host, task).await,
+        "{task}: an unanswered approval has no node (only the pending file can restore it)"
+    );
+}
+
+pub async fn has_inbound_node(host: &BoundHost, task: &str) -> bool {
+    let suffix = format!("/t-{}", URL_SAFE_NO_PAD.encode(task));
+    host.node_tree.list().await.iter().any(|entry| {
+        entry.subagent_type == INBOUND_SUBAGENT_TYPE && entry.agent_id.as_str().ends_with(&suffix)
+    })
+}
+
+/// No inbound node of this host is still live: recovery failed every orphan
+/// and nothing resumed.
+pub async fn no_live_inbound_node(host: &BoundHost) -> bool {
+    host.node_tree.list().await.iter().all(|entry| {
+        entry.subagent_type != INBOUND_SUBAGENT_TYPE || entry.current_status.is_terminal()
+    })
+}
+
+/// `tasks/get` answers the same refusal a never-seen task id gets: an error,
+/// no result, and the same code and message as `control`.
+pub fn assert_not_found_like(reply: &Reply, control: &Reply, what: &str) {
+    assert!(reply.json["result"].is_null(), "{what}: {}", reply.body);
+    assert!(!reply.json["error"].is_null(), "{what}: {}", reply.body);
+    assert_eq!(
+        reply.json["error"]["code"], control.json["error"]["code"],
+        "{what}: {}",
+        reply.body
+    );
+    assert_eq!(
+        reply.json["error"]["message"], control.json["error"]["message"],
+        "{what}: {}",
+        reply.body
+    );
+}
+
+/// `(spoke, principal)` of every first-status-query row for `task`.
+pub fn status_rows(host: &BoundHost, task: &str) -> Vec<(String, Option<String>)> {
+    let gate = format!("{STATUS_QUERY_GATE_PREFIX}{task}");
+    raw_payloads(&host.journal, "admission_deferred")
+        .into_iter()
+        .filter(|row| row["gate"] == gate)
+        .map(|row| {
+            (
+                row["spoke"].as_str().expect("spoke").to_owned(),
+                row["principal"].as_str().map(str::to_owned),
+            )
+        })
+        .collect()
 }

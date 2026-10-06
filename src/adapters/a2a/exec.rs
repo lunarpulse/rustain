@@ -206,7 +206,9 @@ pub struct InboundTask {
     pub id: String,
     /// The local node this task executes as. Never disclosed.
     pub node_id: AgentId,
-    /// Who may `tasks/get` and `tasks/cancel` this task.
+    /// Who may `tasks/get` and `tasks/cancel` this task (and, by adoption,
+    /// keys bound to a pin that adopts this handle — recovered terminal tasks
+    /// only; Story 19.18e).
     pub submitter: SubmitterKey,
     /// The token `drive_preloaded_turn` selects on. `tasks/cancel` cancels it.
     pub cancel: CancellationToken,
@@ -569,6 +571,51 @@ impl InboundTaskStore {
             .await
             .get(&(submitter.clone(), id.to_owned()))
             .cloned()
+    }
+
+    /// Story 19.18e `A4` — look up a task **as** `exact`, then through the
+    /// handles a bound caller adopts.
+    ///
+    /// 1. **Exact first.** A task under `(exact, id)` is returned, live or
+    ///    terminal: it is the caller's own. `adopted` is not called, so an
+    ///    exact hit allocates no adopted handle.
+    /// 2. **Else adopted.** `adopted()` yields the caller's adopted handles —
+    ///    precondition: the distinct `apikey:` handles `ApiKeySet::adopted_for`
+    ///    yields for the caller's pin, never `exact` itself. No hit → `None`.
+    ///    Two or more hits → `None`: two adopted keys used one
+    ///    submitter-chosen id, and serving either would depend on env-var
+    ///    name order; live and terminal hits both count. One hit → served
+    ///    only if it is terminal: **a live adopted task is never served.**
+    ///
+    /// Every `None` is the same not-found [`Self::get_scoped`] gives.
+    ///
+    /// Future constraint: today every adopted hit is a restart projection —
+    /// bindings apply only at startup, startup fails every in-flight task, and
+    /// an adopted handle cannot be minted in the boot that adopts it. If
+    /// durable resumption (`DF-18-1-HOSTRECONCILE`) or a binding hot-reload
+    /// ever lands, that premise breaks: the terminal-only rule must stay, and
+    /// that story must decide live-task ownership on rebind explicitly.
+    pub async fn get_in_scope(
+        &self,
+        id: &str,
+        exact: &SubmitterKey,
+        adopted: impl FnOnce() -> Vec<SubmitterKey>,
+    ) -> Option<Arc<InboundTask>> {
+        let hit = {
+            let tasks = self.tasks.read().await;
+            if let Some(own) = tasks.get(&(exact.clone(), id.to_owned())) {
+                return Some(own.clone());
+            }
+            let mut hits = adopted()
+                .into_iter()
+                .filter_map(|handle| tasks.get(&(handle, id.to_owned())).cloned());
+            let hit = hits.next()?;
+            if hits.next().is_some() {
+                return None;
+            }
+            hit
+        };
+        hit.is_terminal().await.then_some(hit)
     }
 
     /// Lookup by the complete internal key.
@@ -1040,6 +1087,91 @@ mod tests {
             "terminal task retained"
         );
         let _ = live;
+    }
+
+    /// Story 19.18e `K04` (structural ratchet) — the production front door
+    /// cannot produce a live task under an adopted handle (bindings apply only
+    /// at startup, and startup fails every in-flight task), so the
+    /// terminal-only rule, the exact-first precedence and the ambiguity rule
+    /// of [`InboundTaskStore::get_in_scope`] are proven on the store itself.
+    #[tokio::test]
+    async fn get_in_scope_serves_an_adopted_task_only_when_terminal() {
+        let bound = SubmitterKey::bound(&PeerId::from_public_key(&[5; 32]).unwrap());
+        let adopted_a = SubmitterKey::from_api_key("adopted-a");
+        let adopted_b = SubmitterKey::from_api_key("adopted-b");
+        let store = InboundTaskStore::default();
+        let insert = |id: &str, submitter: &SubmitterKey| {
+            store.insert(
+                id.to_owned(),
+                mint_inbound_node_id(submitter, id),
+                submitter.clone(),
+                RapTaskState::Working,
+                None,
+            )
+        };
+
+        // (1) A live adopted task is never served; once terminal it is.
+        let recovered = insert("t", &adopted_a).await.expect("K04(1) insert");
+        assert!(
+            store
+                .get_in_scope("t", &bound, || vec![adopted_a.clone()])
+                .await
+                .is_none(),
+            "K04(1) a live adopted task must not be served"
+        );
+        assert!(
+            recovered.advance(RapTaskState::Failed).await,
+            "K04(1) Working -> Failed"
+        );
+        let served = store
+            .get_in_scope("t", &bound, || vec![adopted_a.clone()])
+            .await
+            .expect("K04(1) a terminal adopted task must be served");
+        assert!(
+            Arc::ptr_eq(&served, &recovered),
+            "K04(1) the served task is the adopted one"
+        );
+
+        // (2) The caller's own task wins while live, and the adopted handles
+        // are never computed on an exact hit.
+        let own = insert("own", &bound).await.expect("K04(2) insert");
+        insert("own", &adopted_a)
+            .await
+            .expect("K04(2) adopted twin")
+            .advance(RapTaskState::Failed)
+            .await;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let exact = store
+            .get_in_scope("own", &bound, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                vec![adopted_a.clone()]
+            })
+            .await
+            .expect("K04(2) a live exact task must be returned");
+        assert!(
+            Arc::ptr_eq(&exact, &own),
+            "K04(2) the exact task wins over the adopted one"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "K04(2) the adopted closure must not run on an exact hit"
+        );
+
+        // (3) Two adopted owners of one id refuse, live hits included.
+        insert("amb", &adopted_a).await.expect("K04(3) insert A");
+        insert("amb", &adopted_b)
+            .await
+            .expect("K04(3) insert B")
+            .advance(RapTaskState::Failed)
+            .await;
+        assert!(
+            store
+                .get_in_scope("amb", &bound, || vec![adopted_a.clone(), adopted_b.clone()])
+                .await
+                .is_none(),
+            "K04(3) a live A and a terminal B with one id must answer not-found"
+        );
     }
 
     #[tokio::test]

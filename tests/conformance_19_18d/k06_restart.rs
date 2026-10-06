@@ -29,20 +29,17 @@ use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use rustain::adapters::a2a::RECIPIENT_ITEM_METADATA_KEY;
 use rustain::adapters::a2a::exec::{INBOUND_NODE_PREFIX, INBOUND_SUBAGENT_TYPE, RESTART_DETAIL};
-use rustain::domain::models::{AgentId, ApprovalOutcome};
+use rustain::domain::models::AgentId;
 use rustain::domain::ports::InboundPeerRuntime;
 use tokio_util::sync::CancellationToken;
 
 use crate::harness::{
-    BoundHost, HostSpec, K_P1A, K_P1B, K_P1C, K_P2, K_U, Operator, P1_X, RawClient, Reply,
-    item_id_for_task, listed_ids, log_cursor, log_since, pin_hex, received_row_for_task,
-    received_rows, setup,
+    BoundHost, HostSpec, K_P1A, K_P1B, K_P1C, K_P2, K_U, ORPHAN_WARN, P1_X, PENDING_WARN,
+    assert_not_found_like, detail, lines_with, listed_ids, log_cursor, log_since,
+    no_live_inbound_node, pin_hex, received_row_for_task, received_rows, send_and_admit,
+    send_and_leave_pending, setup, wire_state,
 };
 
-/// The restart warn lines the two passes emit per restored task
-/// (`server.rs`, `reconcile_after_restart` / `reconcile_pending_after_restart`).
-const ORPHAN_WARN: &str = "A2A inbound task failed by host restart";
-const PENDING_WARN: &str = "A2A approval-pending task failed by host restart";
 /// The caller-owned skip warnings (`P4`).
 const NODE_SKIP_WARN: &str = "skipping malformed A2A inbound task node";
 const RECORD_SKIP_WARN: &str = "skipping malformed A2A pending task record";
@@ -58,16 +55,6 @@ fn ask_spec(with_unbound: bool) -> HostSpec {
     base.server_key("admission", "ask".into())
 }
 
-fn wire_state(reply: &Reply) -> &str {
-    reply.json["result"]["status"]["state"]
-        .as_str()
-        .unwrap_or("<no state>")
-}
-
-fn detail(reply: &Reply) -> Option<&str> {
-    reply.json["result"]["status"]["message"]["parts"][0]["text"].as_str()
-}
-
 fn pending_path(host: &BoundHost) -> std::path::PathBuf {
     host.journal.path.join(".rustain/a2a-pending.json")
 }
@@ -75,82 +62,6 @@ fn pending_path(host: &BoundHost) -> std::path::PathBuf {
 fn pending_records(host: &BoundHost) -> Vec<serde_json::Value> {
     serde_json::from_slice(&std::fs::read(pending_path(host)).expect("the pending file"))
         .expect("the pending file is a JSON array")
-}
-
-/// Log lines (after `cursor`) carrying `message` AND `needle`: other tests in
-/// this binary write to the same buffer, so a count is only ever taken over a
-/// token unique to this test (a task id, a node id, this workspace's path).
-fn lines_with(cursor: usize, message: &str, needle: &str) -> usize {
-    log_since(cursor)
-        .lines()
-        .filter(|line| line.contains(message) && line.contains(needle))
-        .count()
-}
-
-/// Send `task` through `client` and release it with `[o]nce` on the plain
-/// approval card: the task launches, journals its item and parks `Waiting`
-/// (`NotifyAndWait`). Returns the durable item id.
-async fn send_and_admit(
-    host: &BoundHost,
-    operator: &mut Operator,
-    client: &RawClient,
-    task: &str,
-) -> String {
-    let sent = client
-        .message_send(1, task, task, serde_json::json!({}))
-        .await;
-    assert_eq!(wire_state(&sent), "auth-required", "{task}: {}", sent.body);
-    operator
-        .answer_card("a2a/message.send", ApprovalOutcome::Once)
-        .await;
-    let node = host.waiting_node(task).await;
-    host.pending_card(&node).await;
-    item_id_for_task(&host.journal, task)
-}
-
-/// Send `task` and leave the approval unanswered: the task is
-/// `auth-required`, has a pending-file record and NO node.
-async fn send_and_leave_pending(host: &BoundHost, client: &RawClient, task: &str) {
-    let sent = client
-        .message_send(1, task, task, serde_json::json!({}))
-        .await;
-    assert_eq!(wire_state(&sent), "auth-required", "{task}: {}", sent.body);
-    assert!(
-        !has_inbound_node(host, task).await,
-        "{task}: an unanswered approval has no node (only the pending file can restore it)"
-    );
-}
-
-async fn has_inbound_node(host: &BoundHost, task: &str) -> bool {
-    let suffix = format!("/t-{}", URL_SAFE_NO_PAD.encode(task));
-    host.node_tree.list().await.iter().any(|entry| {
-        entry.subagent_type == INBOUND_SUBAGENT_TYPE && entry.agent_id.as_str().ends_with(&suffix)
-    })
-}
-
-/// No inbound node of this host is still live: recovery failed every orphan
-/// and nothing resumed.
-async fn no_live_inbound_node(host: &BoundHost) -> bool {
-    host.node_tree.list().await.iter().all(|entry| {
-        entry.subagent_type != INBOUND_SUBAGENT_TYPE || entry.current_status.is_terminal()
-    })
-}
-
-/// `tasks/get` answers the same refusal a never-seen task id gets: an error,
-/// no result, and the same code and message as `control`.
-fn assert_not_found_like(reply: &Reply, control: &Reply, what: &str) {
-    assert!(reply.json["result"].is_null(), "{what}: {}", reply.body);
-    assert!(!reply.json["error"].is_null(), "{what}: {}", reply.body);
-    assert_eq!(
-        reply.json["error"]["code"], control.json["error"]["code"],
-        "{what}: {}",
-        reply.body
-    );
-    assert_eq!(
-        reply.json["error"]["message"], control.json["error"]["message"],
-        "{what}: {}",
-        reply.body
-    );
 }
 
 /// `K06` — one bound pin, two in-flight tasks across a cold restart.
