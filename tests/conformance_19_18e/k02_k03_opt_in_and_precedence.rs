@@ -43,7 +43,7 @@ async fn k02_a_binding_without_adoption_answers_not_found() {
         assert_eq!(
             lines_with(cursor, warn, task),
             1,
-            "reseed {task}: restored exactly once by its pass:\n{}",
+            "AC2 reseed {task}: restored exactly once by its pass:\n{}",
             log_since(cursor)
         );
     }
@@ -81,7 +81,7 @@ async fn k03_the_bound_callers_own_task_wins_over_an_adopted_id() {
     assert_eq!(
         lines_with(cursor, PENDING_WARN, DUP),
         1,
-        "reseed {DUP}:\n{}",
+        "AC3(i) reseed {DUP}:\n{}",
         log_since(cursor)
     );
 
@@ -148,7 +148,7 @@ async fn pending_submitters(host: &BoundHost, task: &str, count: usize) -> Vec<S
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "{count} pending records for {task}, got {submitters:?}"
+            "AC3(ii) seed: {count} pending records for {task}, got {submitters:?}"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -169,7 +169,7 @@ async fn k03_two_adopted_owners_of_one_id_answer_not_found() {
     let submitters = pending_submitters(&host, AMB, 2).await;
     assert!(
         submitters.len() == 2 && submitters[0] != submitters[1],
-        "two {AMB} records under two handles before the restart: {submitters:?}"
+        "AC3(ii) seed: two {AMB} records under two handles before the restart: {submitters:?}"
     );
     drop(operator);
 
@@ -185,7 +185,7 @@ async fn k03_two_adopted_owners_of_one_id_answer_not_found() {
         assert_eq!(
             lines_with(cursor, PENDING_WARN, task),
             count,
-            "reseed {task}: one line per record:\n{}",
+            "AC3(ii) reseed {task}: one line per record:\n{}",
             log_since(cursor)
         );
     }

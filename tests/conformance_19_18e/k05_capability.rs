@@ -33,17 +33,22 @@ async fn k05_an_adopted_capability_bearing_task_needs_its_capability() {
         .client(K_P1A)
         .message_send(1, TASK, TASK, json!({ ITEM_CAPABILITY_METADATA_KEY: cap }))
         .await;
-    assert_eq!(wire_state(&sent), "auth-required", "{}", sent.body);
+    assert_eq!(
+        wire_state(&sent),
+        "auth-required",
+        "AC5 seed: {}",
+        sent.body
+    );
     wait_pending_record(&host, TASK).await;
     let path = host.journal.path.join(".rustain/a2a-pending.json");
     let records: Vec<serde_json::Value> =
-        serde_json::from_slice(&std::fs::read(&path).expect("the pending file"))
-            .expect("the pending file is a JSON array");
+        serde_json::from_slice(&std::fs::read(&path).expect("AC5 seed: the pending file"))
+            .expect("AC5 seed: the pending file is a JSON array");
     assert!(
         records
             .iter()
             .any(|record| record["task_id"] == TASK && record["capability_hash"].is_string()),
-        "the pending record carries the capability hash: {records:?}"
+        "AC5 seed: the pending record carries the capability hash: {records:?}"
     );
     drop(operator);
 
@@ -58,7 +63,7 @@ async fn k05_an_adopted_capability_bearing_task_needs_its_capability() {
     assert_eq!(
         lines_with(cursor, PENDING_WARN, TASK),
         1,
-        "reseed {TASK}:\n{}",
+        "AC5 reseed {TASK}:\n{}",
         log_since(cursor)
     );
 

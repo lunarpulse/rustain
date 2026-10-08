@@ -63,7 +63,7 @@ async fn k01_adopted_recovered_tasks_are_served_through_both_passes() {
         assert_eq!(
             lines_with(cursor, warn, task),
             1,
-            "reseed {task}: restored exactly once by its pass:\n{}",
+            "AC1 reseed {task}: restored exactly once by its pass:\n{}",
             log_since(cursor)
         );
     }
@@ -150,7 +150,7 @@ async fn k01c_unchanged_unbound_config_serves_the_same_projection() {
     assert_eq!(
         lines_with(cursor, PENDING_WARN, PENDING),
         1,
-        "reseed {PENDING}:\n{}",
+        "K01c reseed {PENDING}:\n{}",
         log_since(cursor)
     );
     assert_restart_projection(
