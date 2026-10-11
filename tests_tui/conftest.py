@@ -97,7 +97,13 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(scope="session", autouse=True)
 def build_binary():
-    """Build the rustain binary once per test session."""
+    """Build once only when the caller has not supplied an immutable binary."""
+    override = os.environ.get("RUSTAIN_TUI_BINARY")
+    if override:
+        named = Path(override).resolve()
+        if not named.is_file():
+            pytest.fail(f"Explicit RUSTAIN_TUI_BINARY is not a file: {named}")
+        return
     result = subprocess.run(
         ["cargo", "build"],
         cwd=PROJECT_ROOT,

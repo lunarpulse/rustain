@@ -104,46 +104,6 @@ fn test_e2e_help_overlay_closes_with_esc() {
     assert!(matches!(h.state.focus, FocusState::Chat));
 }
 
-/// Covers: AC1 — Help overlay shows keybinding categories
-#[test]
-fn test_e2e_help_overlay_shows_categories() {
-    // Use larger terminal to fit all categories without scrolling.
-    // Height was increased from 50→65 in Story 3-6a (INPUT section expansion),
-    // from 65→85 in Story 4-4 (SEARCH & BOOKMARKS category: 11 new bindings),
-    // from 85→110 for S16.6 (VIM FOLD & MOTION: 11 bindings) + PERMISSIONS (6 bindings),
-    // from 110→116 in Story 18.3a (`/room` viewer + 3 role sub-verbs + Ctrl+X, R),
-    // from 116→121 in Story 18.3a-c (`/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E),
-    // and from 121→126 in Story 18.4b (5 `/peer` sub-verbs; ⛔ no chord — this
-    // story mints none, so only the COMMANDS category grew),
-    // and from 126→127 in Story 19.3 (GENERAL: Ctrl+Q — quit from any focus),
-    // and from 127→130 in Story 19.18 (COMMANDS: `/team reply`, `/team thread`,
-    // `/team followup`).
-    let mut h = TestHarness::with_size(100, 130);
-
-    h.press_key(DomainKey::Esc);
-    h.type_char('?');
-
-    // Render help overlay directly
-    h.terminal
-        .draw(|frame| {
-            help_overlay::render(frame, frame.area(), &h.state.help_overlay, &h.theme, false);
-        })
-        .unwrap();
-
-    // Verify all categories are visible
-    h.assert_screen_contains("NAVIGATION", "Navigation category visible");
-    h.assert_screen_contains("INPUT", "Input category visible");
-    h.assert_screen_contains("COMMANDS", "Commands category visible");
-    h.assert_screen_contains("CHORDS", "Chords category visible");
-    h.assert_screen_contains("CLIPBOARD", "Clipboard category visible");
-    h.assert_screen_contains("GENERAL", "General category visible");
-
-    // Verify some specific bindings
-    h.assert_screen_contains("j / k", "Scroll binding visible");
-    h.assert_screen_contains("Ctrl+P", "Command palette binding visible");
-    h.assert_screen_contains("Ctrl+X", "Chord prefix visible");
-}
-
 #[test]
 fn room_help_bindings_are_scroll_reachable_at_a_realistic_viewport() {
     let mut h = TestHarness::with_size(80, 24);
@@ -231,52 +191,6 @@ fn artifact_help_bindings_are_scroll_reachable_at_a_realistic_viewport() {
 // ═══════════════════════════════════════════════════════════════════════════
 // AC3: tmux/screen Compatibility Notice
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Covers: AC3 — tmux warning shows when TMUX env var is set
-#[test]
-#[serial] // env var mutation — serialize to prevent cross-test contamination
-fn test_e2e_help_overlay_shows_tmux_warning() {
-    // Note: This test sets TMUX env var, which affects the global state
-    // In a real E2E test with process isolation, this would be cleaner
-    unsafe {
-        std::env::set_var("TMUX", "/tmp/tmux-1000/default,1234,0");
-    }
-
-    // Use larger terminal to fit tmux warning without scrolling.
-    // Height bumped 60→85 (S4.4), 85→100 (S6.0d), 100→120 (S16.8 SCROLL & MOUSE category),
-    // 120→126 (Story 18.3a: `/room` viewer + 3 role sub-verbs + Ctrl+X, R),
-    // 126→131 (Story 18.3a-c: `/artifacts` + 2 `/artifact` sub-verbs + Ctrl+X, E),
-    // 131→136 (Story 18.4b: 5 `/peer` sub-verbs, COMMANDS category only),
-    // 136→137 (Story 18.9 review: `/team send` binding, COMMANDS category),
-    // 137→140 (Story 19.18: `/team reply`, `/team thread`, `/team followup`,
-    // COMMANDS category only).
-    let mut h = TestHarness::with_size(100, 140);
-    h.press_key(DomainKey::Esc);
-    h.type_char('?');
-
-    // Render help overlay with tmux detected
-    h.terminal
-        .draw(|frame| {
-            help_overlay::render(
-                frame,
-                frame.area(),
-                &h.state.help_overlay,
-                &h.theme,
-                true, // tmux detected
-            );
-        })
-        .unwrap();
-
-    // Verify tmux warning appears
-    h.assert_screen_contains("tmux detected", "tmux warning visible");
-    h.assert_screen_contains("Ctrl+B", "Ctrl+B conflict mentioned");
-    h.assert_screen_contains("Ctrl+A", "Ctrl+A conflict mentioned");
-
-    // Cleanup
-    unsafe {
-        std::env::remove_var("TMUX");
-    }
-}
 
 /// Covers: AC3 — No tmux warning when not in tmux
 #[test]

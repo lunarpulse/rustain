@@ -514,6 +514,7 @@ impl RustainAcpAgent {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         }
     }
 
@@ -532,6 +533,7 @@ impl RustainAcpAgent {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         }
     }
 
@@ -655,6 +657,8 @@ impl RustainAcpAgent {
                     plans: Default::default(),
                     fork_source: None,
                     compaction: None,
+                    peer_row_controls: Default::default(),
+                    peer_row_revision: 0,
                 }
             }
         };
@@ -672,6 +676,7 @@ impl RustainAcpAgent {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
         let mut messages = message_builder::build_api_messages(&conversation);

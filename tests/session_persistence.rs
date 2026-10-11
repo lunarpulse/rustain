@@ -22,7 +22,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
             role,
             content: format!(
                 "Message {
-        }",
+                }",
                 i
             ),
             content_blocks: vec![],
@@ -42,6 +42,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
     }
 
@@ -64,6 +65,8 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -271,6 +274,8 @@ async fn test_slash_new_saves_and_creates_fresh_session() {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     assert!(new_conv.messages.is_empty());
     assert!(new_conv.title.is_empty());
@@ -311,6 +316,8 @@ async fn test_slash_new_empty_session_no_save() {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
 
     // /new with empty session: skip save (event loop checks messages.is_empty())

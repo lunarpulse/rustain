@@ -127,6 +127,14 @@ pub(crate) enum DraftState {
     Rejected,
 }
 
+/// Controller phase without copying its potentially large draft/answer body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DraftPhase {
+    Drafting,
+    Ready,
+    Settled,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DraftResolution {
     Approve,
@@ -169,6 +177,14 @@ impl PendingDraftController {
 
     pub(crate) async fn state(&self, id: &str) -> Option<DraftState> {
         self.states.lock().await.get(id).cloned()
+    }
+
+    pub(crate) async fn phase(&self, id: &str) -> Option<DraftPhase> {
+        self.states.lock().await.get(id).map(|state| match state {
+            DraftState::Drafting { .. } => DraftPhase::Drafting,
+            DraftState::Ready { .. } => DraftPhase::Ready,
+            DraftState::Sent { .. } | DraftState::Rejected => DraftPhase::Settled,
+        })
     }
 
     pub(crate) async fn resolve(

@@ -1,0 +1,74 @@
+{
+  "scene": "story-19-19-act2-v1",
+  "request_observations": {
+    "needles": {
+      "consultation_body": "CONSULT-BYTES-19-19",
+      "adr_body": "ADR047-LIVE-PUBLISH-AFTER-PERSIST"
+    }
+  },
+  "personas": {
+    "scene-marcus": {
+      "turns": [
+        {
+          "expect": "Update ADR-047",
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Write",
+              "input": {
+                "file_path": "ADR-047.md",
+                "content": "# ADR-047: Peer consultation delivery\n\nStatus: accepted\n\nDecision: Persist received peer rows before publishing live cards.\n\nRationale: Pending consultation responses retain their own queue ownership.\n\nEvidence marker: ADR047-LIVE-PUBLISH-AFTER-PERSIST\n"
+              }
+            }
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 13, "output_tokens": 21}
+        },
+        {
+          "expect": "ADR-047.md",
+          "content": [{"type": "text", "text": "Local file operation completed."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 29, "output_tokens": 9}
+        }
+      ]
+    },
+    "scene-jun": {
+      "turns": [
+        {
+          "expect": "default-before-adoption",
+          "content": [{"type": "text", "text": "Local check completed."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 11, "output_tokens": 7}
+        },
+        {
+          "expect": "explicit-adoption-check",
+          "content": [{"type": "text", "text": "Local check completed."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 11, "output_tokens": 7}
+        },
+        {
+          "expect": "after-off-check",
+          "content": [{"type": "text", "text": "Local check completed."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 11, "output_tokens": 7}
+        },
+        {
+          "expect": "guarded-canary-check",
+          "content": [{"type": "tool_use", "name": "Write", "input": {"file_path": "peer-canary.txt", "content": "unexpected peer-origin write\n"}}],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 13, "output_tokens": 21}
+        }
+      ]
+    },
+    "scene-dev2": {
+      "turns": [
+        {
+          "expect": "unused-local-check",
+          "content": [{"type": "text", "text": "Local check completed."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 11, "output_tokens": 7}
+        }
+      ]
+    }
+  }
+}

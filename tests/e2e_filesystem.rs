@@ -34,6 +34,7 @@ fn make_simple_conversation(id: &str) -> Conversation {
                 origin: rustain::domain::models::ChannelKind::Terminal,
                 authorship: Default::default(),
                 retracted_at_ms: None,
+                history_source: Default::default(),
             },
             ChatMessage {
                 synthetic: false,
@@ -49,6 +50,7 @@ fn make_simple_conversation(id: &str) -> Conversation {
                 origin: rustain::domain::models::ChannelKind::Terminal,
                 authorship: Default::default(),
                 retracted_at_ms: None,
+                history_source: Default::default(),
             },
         ],
         turns: Vec::new(),
@@ -60,6 +62,8 @@ fn make_simple_conversation(id: &str) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 

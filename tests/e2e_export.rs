@@ -31,6 +31,7 @@ fn msg(role: MessageRole, content: &str, created_at: i64) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 
@@ -67,6 +68,7 @@ fn msg_with_tool_call(
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 
@@ -84,6 +86,8 @@ fn conv(title: &str, messages: Vec<ChatMessage>) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 

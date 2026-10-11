@@ -20,6 +20,8 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -41,6 +43,7 @@ fn test_build_api_messages_maps_roles() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
         ChatMessage {
             synthetic: false,
@@ -56,6 +59,7 @@ fn test_build_api_messages_maps_roles() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
     ]);
 
@@ -108,6 +112,7 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
         ChatMessage {
             synthetic: false,
@@ -123,6 +128,7 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
         ChatMessage {
             synthetic: true,
@@ -138,6 +144,7 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
     ]);
 

@@ -1325,6 +1325,7 @@ async fn seed_item(
         ItemId::from_replay(item_id),
     );
     room.record_event(RoomEvent::RecipientItemReceived {
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address: address.clone(),
         task: task.to_owned(),
         alias: None,
@@ -1446,6 +1447,7 @@ async fn ac1_the_read_verb_serves_only_the_callers_own_set_through_the_real_fron
             ItemId::from_replay("ri_mine_acked_gone"),
         );
         room.record_event(RoomEvent::RecipientItemReceived {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             address: acked_gone.clone(),
             task: "task-acked-gone".to_owned(),
             alias: None,

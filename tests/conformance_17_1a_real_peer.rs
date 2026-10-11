@@ -116,7 +116,7 @@ async fn read_non_event(stream: &mut UnixStream) -> Option<DaemonFrame> {
             .await
             .expect("read response")
         {
-            Some(DaemonFrame::Event(_)) => continue,
+            Some(DaemonFrame::Event(_) | DaemonFrame::PeerRowOperation(_)) => continue,
             frame => return frame,
         }
     }
@@ -159,7 +159,7 @@ async fn expect_accepted(stream: &mut UnixStream, env: Box<AgentEnvelope<Value>>
                 {
                     delivered = true;
                 }
-                Some(DaemonFrame::Event(_)) => {}
+                Some(DaemonFrame::Event(_) | DaemonFrame::PeerRowOperation(_)) => {}
                 other => panic!(
                     "expected PeerAccepted and MessageDelivered in either order, got {other:?}"
                 ),

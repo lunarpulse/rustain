@@ -1488,6 +1488,7 @@ pub fn build_daemon_core(
                     .with_workspace_registrar(build_workspace_registrar()?),
                 );
                 Ok(Arc::new(DaemonTurnRuntime {
+                    recipient_context: Arc::new(Default::default()),
                     provider,
                     app_config: config.clone(),
                     security: security.clone(),

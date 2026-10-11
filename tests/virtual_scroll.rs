@@ -30,6 +30,7 @@ fn make_conversation(msg_count: usize) -> Conversation {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         })
         .collect();
 
@@ -46,6 +47,8 @@ fn make_conversation(msg_count: usize) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -463,7 +466,7 @@ fn test_virtual_scroll_only_user_messages() {
             role: MessageRole::User,
             content: format!(
                 "User message {
-        }",
+                }",
                 i
             ),
             content_blocks: vec![],
@@ -475,6 +478,7 @@ fn test_virtual_scroll_only_user_messages() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         })
         .collect();
     let conversation = Conversation {
@@ -490,6 +494,8 @@ fn test_virtual_scroll_only_user_messages() {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -580,6 +586,7 @@ fn make_turn_conversation_seeded(turn_count: usize) -> Conversation {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
     }
 
@@ -596,6 +603,8 @@ fn make_turn_conversation_seeded(turn_count: usize) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 

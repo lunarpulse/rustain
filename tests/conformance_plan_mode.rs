@@ -91,6 +91,7 @@ fn make_conv(assistant_turns: usize) -> Conversation {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
     }
     Conversation {
@@ -106,6 +107,8 @@ fn make_conv(assistant_turns: usize) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -318,6 +321,7 @@ fn ac4_approve_normal_transitions_mode_and_injects_synthetic() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     };
     assert!(msg.synthetic);
     assert_eq!(msg.role, MessageRole::User);
@@ -348,6 +352,7 @@ fn ac4_reject_routes_feedback_and_stays_in_plan() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     };
     assert!(msg.synthetic);
 }
@@ -513,6 +518,7 @@ fn ac8_reminder_envelope_not_displayed() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     };
     assert!(!msg.content.contains("<plan-mode>"));
     assert!(!msg.content.contains("</plan-mode>"));
@@ -549,6 +555,7 @@ fn ac9_synthetic_message_metadata() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     };
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.contains("synthetic"));

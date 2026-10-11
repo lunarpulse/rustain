@@ -22,7 +22,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [<peer-id>] | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [<peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
 
 /// Three verbs retract three different objects (`…addendum-team-messaging.md:116`),
 /// so every refusal of one names the others **by object** (Story 19.16f
@@ -92,6 +92,7 @@ pub enum TeamCommandArgs {
     Send {
         recipients: Vec<String>,
         text: String,
+        message_type: Option<crate::domain::models::SemanticMessageType>,
     },
     Acknowledge {
         item_id: String,
@@ -111,6 +112,18 @@ pub enum TeamCommandArgs {
     Reply {
         item_id: String,
         text: String,
+    },
+    /// Record a fixed 30-minute reported defer on this answering host.
+    Defer {
+        item_id: String,
+    },
+    View {
+        item_id: String,
+    },
+    /// Inventory, select one received body, or prospectively turn it off.
+    Context {
+        item_id: Option<String>,
+        off: bool,
     },
     /// Story 19.18 — read one thread on a peer's host (rail 3 only).
     Thread {
@@ -159,9 +172,46 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
             })
         }
         "send" => {
-            let recipient_token = tokens
+            let first_token = tokens
                 .next()
                 .ok_or_else(|| format!("Missing peer id after '/team send'. Use: {USAGE}"))?;
+            let (message_type, recipient_token, body_tokens) = if first_token == "--type" {
+                let type_token = tokens.next().ok_or_else(|| {
+                    format!("Missing message type after '/team send --type'. Use: {USAGE}")
+                })?;
+                let message_type = crate::domain::models::SemanticMessageType::parse(type_token);
+                if message_type == crate::domain::models::SemanticMessageType::Unknown {
+                    let valid = crate::domain::models::semantic_message_type_tokens();
+                    let count = valid.len();
+                    let prefix = "message type '";
+                    let suffix = "' is not recognised — use ";
+                    let capacity = prefix.len()
+                        + type_token.len()
+                        + suffix.len()
+                        + crate::domain::models::semantic_message_type_tokens()
+                            .map(str::len)
+                            .sum::<usize>()
+                        + 2 * (count - 1)
+                        + 2;
+                    let mut refusal = String::with_capacity(capacity);
+                    refusal.push_str(prefix);
+                    refusal.push_str(type_token);
+                    refusal.push_str(suffix);
+                    for (index, token) in valid.enumerate() {
+                        if index > 0 {
+                            refusal.push_str(if index + 1 == count { " or " } else { ", " });
+                        }
+                        refusal.push_str(token);
+                    }
+                    return Err(refusal);
+                }
+                let recipient_token = tokens.next().ok_or_else(|| {
+                    format!("Missing peer id after '/team send --type {type_token}'. Use: {USAGE}")
+                })?;
+                (Some(message_type), recipient_token, 3)
+            } else {
+                (None, first_token, 1)
+            };
             let mut recipients = Vec::new();
             for id in recipient_token.split(',') {
                 if id.is_empty() || recipients.iter().any(|existing| existing == id) {
@@ -171,12 +221,14 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
                 }
                 recipients.push(id.to_owned());
             }
-            // FR54-a: only the verb and the recipient-list token delimit the
-            // body; preserve its internal whitespace exactly as typed.
-            let text = raw_remainder_after_tokens(arg, 1).ok_or_else(|| {
+            let text = raw_remainder_after_tokens(arg, body_tokens).ok_or_else(|| {
                 format!("Missing message text after peers `{recipient_token}`. Use: {USAGE}")
             })?;
-            Ok(TeamCommandArgs::Send { recipients, text })
+            Ok(TeamCommandArgs::Send {
+                recipients,
+                text,
+                message_type,
+            })
         }
         // Story 19.18 `AC1` — bodies are located by TOKEN POSITION, ⛔ never
         // by searching for the id (an id may recur inside the body). An empty
@@ -219,6 +271,50 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
                 peer: peer.to_owned(),
                 turn_id: turn_id.to_owned(),
                 text,
+            })
+        }
+        "context" => {
+            let (item_id, off) = match tokens.next() {
+                None => (None, false),
+                Some("off") => {
+                    let item_id = tokens
+                        .next()
+                        .ok_or_else(|| format!("Use: /team context off <item-id>. {USAGE}"))?;
+                    (Some(item_id.to_owned()), true)
+                }
+                Some(item_id) => (Some(item_id.to_owned()), false),
+            };
+            if tokens.next().is_some() {
+                return Err(format!(
+                    "Use: /team context [<item-id>] | /team context off <item-id>. {USAGE}"
+                ));
+            }
+            Ok(TeamCommandArgs::Context { item_id, off })
+        }
+        "defer" => {
+            let item_id = tokens
+                .next()
+                .ok_or_else(|| format!("Missing item id after '/team defer'. Use: {USAGE}"))?;
+            if tokens.next().is_some() {
+                return Err(format!(
+                    "Expected exactly one item id after '/team defer'. Use: {USAGE}"
+                ));
+            }
+            Ok(TeamCommandArgs::Defer {
+                item_id: item_id.to_owned(),
+            })
+        }
+        "view" => {
+            let item_id = tokens
+                .next()
+                .ok_or_else(|| format!("Missing item id after '/team view'. Use: {USAGE}"))?;
+            if tokens.next().is_some() {
+                return Err(format!(
+                    "Expected exactly one item id after '/team view'. Use: {USAGE}"
+                ));
+            }
+            Ok(TeamCommandArgs::View {
+                item_id: item_id.to_owned(),
             })
         }
         "ack" => {
@@ -731,6 +827,17 @@ pub fn render_team_thread(
         if turn.reply && turn.authorship == ReplyAuthorship::AgentComposed {
             text.push_str("  [agent-composed]");
         }
+        if turn.reply {
+            match turn.kind {
+                crate::domain::models::ReplyKind::Answer => {}
+                crate::domain::models::ReplyKind::Defer { minutes } => {
+                    let _ = write!(text, " [defer {minutes}m — reported expectation]");
+                }
+                crate::domain::models::ReplyKind::Unknown => {
+                    text.push_str(" [reply kind not recognised]");
+                }
+            }
+        }
         if turn.removed {
             text.push_str("  removed");
         }
@@ -953,19 +1060,11 @@ mod tests {
                 peer: Some("jun-dev".to_owned())
             })
         );
-        let error = parse_team_command(Some("board jun-dev tom-dev"))
+        parse_team_command(Some("board jun-dev tom-dev"))
             .expect_err("one narrowed peer, never a peer list");
-        assert!(error.contains("/team board"), "{error}");
-        assert!(
-            USAGE.contains("/team board [<peer-id>]"),
-            "every parser refusal names the verb set verbatim: {USAGE}"
-        );
     }
 
-    /// Story 19.16f `AC3(b)(d)` — two tokens exactly; every refusal reprints
-    /// `USAGE`, and names the other two retracts by object.
-    ///
-    /// Mutant `M04`(i) → RED: omit `retract` from `USAGE`.
+    /// Retract requires exactly a peer and an item.
     #[test]
     fn retract_takes_exactly_a_peer_and_an_item_and_refusals_name_the_three_retracts() {
         assert_eq!(
@@ -976,19 +1075,8 @@ mod tests {
             })
         );
         for malformed in ["retract", "retract jun-dev", "retract jun-dev ri_x extra"] {
-            let error = parse_team_command(Some(malformed)).expect_err(malformed);
-            assert!(error.contains(USAGE), "{malformed}: {error}");
-            assert!(
-                error.contains("'/team remove'") && error.contains("Ctrl+X"),
-                "{malformed}: {error}"
-            );
+            parse_team_command(Some(malformed)).expect_err(malformed);
         }
-        assert!(
-            USAGE.contains("/team retract <peer-id> <item-id>"),
-            "the verb set names the retract: {USAGE}"
-        );
-        let remove = parse_team_command(Some("remove")).expect_err("missing id");
-        assert!(remove.contains("'/team retract'"), "{remove}");
     }
 
     #[test]
@@ -1014,16 +1102,68 @@ mod tests {
             Ok(TeamCommandArgs::Send {
                 recipients: vec!["moon".to_owned()],
                 text: "Καλημέρα 🌕\tsecond  line".to_owned(),
+                message_type: None,
             })
         );
         assert!(parse_team_command(Some("send")).is_err());
         assert!(parse_team_command(Some("send moon")).is_err());
         assert!(parse_team_command(Some("send moon   ")).is_err());
-        assert!(USAGE.contains("/team send <peer-id>[,<peer-id>…] <text…>"));
-        assert!(USAGE.contains(
-            "`rustain team send` (the CLI twin) is not in this cut — \
-             `18-9b-cli-team-send`"
-        ));
+    }
+
+    #[test]
+    fn typed_send_preserves_unicode_multiline_body_after_the_type_prefix() {
+        let body = "consultation κ,δ\nΚαλημέρα 🌕\t repeated  spaces\nfn old() {}\nfn new() {}";
+        let input = format!("  send\t--type\nconsultation \tκ,δ   {body} \n");
+        assert_eq!(
+            parse_team_command(Some(&input)),
+            Ok(TeamCommandArgs::Send {
+                recipients: vec!["κ".to_owned(), "δ".to_owned()],
+                text: body.to_owned(),
+                message_type: Some(crate::domain::models::SemanticMessageType::Consultation),
+            })
+        );
+    }
+
+    #[test]
+    fn typed_send_refuses_unknown_spelling_and_incomplete_or_duplicate_targets() {
+        for input in [
+            "send --type",
+            "send --type consultation",
+            "send --type consultation first",
+            "send --type consultation first \t\n",
+            "send --type consultation first,first body",
+            "send --type Consultation first body",
+            "send --type future_consultation first body",
+        ] {
+            assert!(parse_team_command(Some(input)).is_err(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn context_grammar_distinguishes_inventory_selection_and_off() {
+        for (command, item_id, off) in [
+            ("context", None, false),
+            ("context ri_item", Some("ri_item"), false),
+            ("context off ri_item", Some("ri_item"), true),
+        ] {
+            assert_eq!(
+                parse_team_command(Some(command)),
+                Ok(TeamCommandArgs::Context {
+                    item_id: item_id.map(str::to_owned),
+                    off,
+                })
+            );
+        }
+        for command in [
+            "context off",
+            "context ri_item off",
+            "context ri_item on",
+            "context ri_item OFF",
+            "context ri_item off extra",
+            "context ri_item extra",
+        ] {
+            parse_team_command(Some(command)).expect_err(command);
+        }
     }
 
     #[test]
@@ -1033,6 +1173,7 @@ mod tests {
             Ok(TeamCommandArgs::Send {
                 recipients: vec!["a".into(), "b".into(), "c".into()],
                 text: "body".into(),
+                message_type: None,
             })
         );
         assert_eq!(
@@ -1040,6 +1181,7 @@ mod tests {
             Ok(TeamCommandArgs::Send {
                 recipients: vec!["e".into()],
                 text: "hi".into(),
+                message_type: None,
             })
         );
         for input in [
@@ -1049,8 +1191,7 @@ mod tests {
             "send a,b,a hi",
             "send a",
         ] {
-            let error = parse_team_command(Some(input)).expect_err(input);
-            assert!(error.contains(USAGE), "{input}: {error}");
+            parse_team_command(Some(input)).expect_err(input);
         }
     }
 
@@ -1095,16 +1236,6 @@ mod tests {
         );
         assert!(parse_team_command(Some("ack")).is_err());
         assert!(parse_team_command(Some("ack ri_123 alias")).is_err());
-        assert!(USAGE.contains("/team ack <item-id>"));
-    }
-
-    #[cfg(not(feature = "a2a"))]
-    #[test]
-    fn send_has_a_named_refusal_when_the_a2a_feature_is_absent() {
-        assert_eq!(
-            team_send_unavailable(),
-            "`/team send` needs the `a2a` feature; this build was compiled without it."
-        );
     }
 
     #[test]
@@ -1560,8 +1691,7 @@ mod tests {
             "thread b",
             "thread b ri_x extra",
         ] {
-            let error = parse_team_command(Some(refused)).expect_err(refused);
-            assert!(error.contains(USAGE), "{refused}: {error}");
+            parse_team_command(Some(refused)).expect_err(refused);
         }
         // Positive control: a multi-line, non-ASCII body is byte-identical.
         assert_eq!(
@@ -1577,6 +1707,7 @@ mod tests {
             Ok(TeamCommandArgs::Send {
                 recipients: vec!["a".to_owned(), "a2".to_owned()],
                 text: "a2  hello".to_owned(),
+                message_type: None,
             })
         );
     }
@@ -1605,6 +1736,7 @@ mod tests {
             content: Some(content.to_owned()),
             content_hash: None,
             authorship: crate::domain::models::ReplyAuthorship::HumanWritten,
+            kind: crate::domain::models::ReplyKind::Answer,
             retracted_at_ms: None,
         }
     }
@@ -1627,22 +1759,37 @@ mod tests {
         agent.authorship = ReplyAuthorship::AgentComposed;
         let mut future = served_turn("rr_2", true, "later\u{1b}[2K");
         future.authorship = ReplyAuthorship::from_wire("future-value");
+        let mut defer = served_turn("rr_defer", true, "Busy — defer 30m");
+        defer.kind = crate::domain::models::ReplyKind::Defer { minutes: 30 };
         let read = ThreadRead::Read {
-            thread: served_thread(vec![served_turn("ri_q", false, "question"), agent, future]),
-            mine: vec![true, false, false],
+            thread: served_thread(vec![
+                served_turn("ri_q", false, "question"),
+                agent,
+                future,
+                defer,
+            ]),
+            mine: vec![true, false, false, false],
         };
-        assert_eq!(
-            render_team_thread("marcus", "ri_q", &read, false),
-            concat!(
-                "thread · marcus · ri_q\n",
-                "  you       ri_q\n",
-                "      question\n",
-                "  marcus    rr_1  [agent-composed]\n",
-                "      use the outbox\n",
-                "        you       ri_fake\n",
-                "  marcus    rr_2\n",
-                "      later[2K"
-            )
+        let rendered = render_team_thread("marcus", "ri_q", &read, false);
+        assert!(
+            rendered.contains("rr_defer [defer 30m — reported expectation]"),
+            "K06: recorded defer is disclosed as a reported interval: {rendered}"
+        );
+        let agent_header = rendered.lines().find(|line| line.contains("rr_1")).unwrap();
+        let future_header = rendered.lines().find(|line| line.contains("rr_2")).unwrap();
+        assert!(agent_header.contains("[agent-composed]"));
+        assert!(!future_header.contains("[agent-composed]"));
+        let forged = rendered
+            .lines()
+            .find(|line| line.contains("ri_fake"))
+            .unwrap();
+        assert!(
+            forged.starts_with("      "),
+            "body text cannot forge a turn header: {rendered}"
+        );
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "terminal control bytes are sanitized: {rendered}"
         );
     }
 

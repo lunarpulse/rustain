@@ -782,7 +782,7 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
     })
 }
 
-fn item_principal_label(principal: &crate::domain::models::ItemPrincipal) -> String {
+pub(crate) fn item_principal_label(principal: &crate::domain::models::ItemPrincipal) -> String {
     match principal {
         crate::domain::models::ItemPrincipal::Rap(peer)
         | crate::domain::models::ItemPrincipal::A2aPseudonym(peer) => peer.as_str().to_owned(),

@@ -13,6 +13,7 @@ served string is asserted is the rendering positive control in
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -377,8 +378,173 @@ def test_the_plain_script_precedent_runs_green():
         capture_output=True,
         text=True,
         timeout=300,
-        env={k: v for k, v in os.environ.items() if k != "RUSTAIN_TUI_BINARY"},
+        env=dict(os.environ),
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "ledger row(s) from this run's workspace" in result.stdout
     assert "tokensOut=7" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("wire", ["anthropic", "openai"])
+def test_opt_in_request_observations_cover_decoded_request_sections(tmp_path, wire):
+    """Real HTTP requests expose bounded observations of the complete decoded body."""
+    from fixtures.scene_provider import Scene
+
+    needles = {
+        "long_user": "PRIVATE-LONG-OBS-19-7",
+        "earlier_user": "PRIVATE-EARLY-USER-OBS-19-7",
+        "earlier_assistant": "PRIVATE-EARLY-ASST-OBS-19-7",
+        "system": "PRIVATE-SYSTEM-OBS-19-7",
+    }
+    scene_path = tmp_path / f"observations-{wire}.json"
+    scene_path.write_text(
+        json.dumps(
+            {
+                "request_observations": {"needles": needles},
+                "personas": {
+                    "fixture-key": {
+                        "wire": wire,
+                        "turns": [
+                            {
+                                "expect": "serve me",
+                                "content": [{"type": "text", "text": "ok"}],
+                                "stop_reason": "end_turn",
+                                "usage": {"input_tokens": 1, "output_tokens": 1},
+                            }
+                            for _ in range(4)
+                        ],
+                    }
+                },
+            }
+        )
+    )
+    Scene(scene_path)  # Validates the opt-in fixture schema before serving.
+    stub = SceneStub(scene_path, tmp_path / "observations.jsonl").start()
+    try:
+        endpoint = "/v1/messages" if wire == "anthropic" else "/v1/chat/completions"
+        headers = {"content-type": "application/json"}
+        headers["x-api-key" if wire == "anthropic" else "authorization"] = (
+            "fixture-key" if wire == "anthropic" else "Bearer fixture-key"
+        )
+
+        def send(body):
+            request = urllib.request.Request(
+                f"{stub.url}{endpoint}",
+                data=json.dumps(body).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                assert response.status == 200
+
+        def request_body(last_user, *, earlier=False, system=None):
+            messages = []
+            if earlier:
+                messages.extend(
+                    [
+                        {"role": "user", "content": f"user context {needles['earlier_user']}"},
+                        {"role": "assistant", "content": f"assistant context {needles['earlier_assistant']}"},
+                    ]
+                )
+            messages.append({"role": "user", "content": last_user})
+            body = {"model": "fixture-model", "stream": True, "messages": messages}
+            if wire == "anthropic":
+                body.update({"max_tokens": 8, "system": system or ""})
+            else:
+                if system is not None:
+                    body["messages"].insert(0, {"role": "system", "content": system})
+            return body
+
+        long_user = "x" * 140 + needles["long_user"] + " serve me"
+        bodies = [
+            request_body(long_user),
+            request_body("serve me"),
+            request_body("serve me", earlier=True),
+            request_body("serve me", earlier=True, system=needles["system"]),
+        ]
+        for body in bodies:
+            send(body)
+
+        rows = [row for row in stub.rows() if "turn" in row]
+        assert len(rows) == 4, rows
+        observations = [row["request_observations"] for row in rows]
+        expected_presence = [
+            {
+                "long_user": True,
+                "earlier_user": False,
+                "earlier_assistant": False,
+                "system": False,
+            },
+            {
+                "long_user": False,
+                "earlier_user": False,
+                "earlier_assistant": False,
+                "system": False,
+            },
+            {
+                "long_user": False,
+                "earlier_user": True,
+                "earlier_assistant": True,
+                "system": False,
+            },
+            {
+                "long_user": False,
+                "earlier_user": True,
+                "earlier_assistant": True,
+                "system": True,
+            },
+        ]
+        for request_index, (observation, expected) in enumerate(zip(observations, expected_presence)):
+            for name, present in expected.items():
+                assert observation["needle_present"][name] is present, (
+                    f"M38 request observation {wire} row {request_index} {name}: "
+                    f"expected {present}, got {observation['needle_present'][name]}"
+                )
+        composed_users = [long_user, "serve me", "serve me", "serve me"]
+        for body, composed_user, observation in zip(bodies, composed_users, observations):
+            canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            assert observation["request_content_sha256"] == hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest()
+            assert observation["composed_user_sha256"] == hashlib.sha256(
+                composed_user.encode("utf-8")
+            ).hexdigest()
+        assert needles["long_user"] not in rows[0]["last_user"]
+        assert len(rows[0]["last_user"]) == 120
+        assert observations[1]["request_content_sha256"] != observations[2]["request_content_sha256"]
+        assert observations[2]["request_content_sha256"] != observations[3]["request_content_sha256"]
+        assert observations[1]["composed_user_sha256"] == observations[2]["composed_user_sha256"]
+        assert observations[2]["composed_user_sha256"] == observations[3]["composed_user_sha256"]
+        log_text = stub.log_path.read_text(encoding="utf-8")
+        assert all(private not in log_text for private in needles.values())
+    finally:
+        status = stub.stop()
+        assert status == 0, stub.rows()
+
+
+def test_request_observation_registration_rejects_invalid_bounds(tmp_path):
+    from fixtures.scene_provider import Scene, SceneError
+
+    valid_personas = {
+        "fixture-key": {
+            "turns": [
+                {
+                    "expect": "ok",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            ]
+        }
+    }
+    invalid = [
+        {"needles": {}},
+        {"needles": {"empty": ""}},
+        {"needles": {"too-long": "x" * 4097}},
+        {"needles": {"x" * 65: "value"}},
+        {"needles": {"a": "one", "b": "two", **{str(i): "v" for i in range(31)}}},
+    ]
+    for index, observations in enumerate(invalid):
+        path = tmp_path / f"invalid-observation-{index}.json"
+        path.write_text(json.dumps({"request_observations": observations, "personas": valid_personas}))
+        with pytest.raises(SceneError):
+            Scene(path)

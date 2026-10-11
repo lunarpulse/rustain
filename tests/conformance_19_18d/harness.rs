@@ -72,7 +72,8 @@ use rustain::adapters::a2a::item_capability::{
 use rustain::adapters::a2a::server::{ServeConfig, serve};
 use rustain::adapters::a2a::transparency::{STATUS_QUERY_GATE_PREFIX, TransparencySink};
 use rustain::adapters::daemon::protocol::{
-    AttachMode, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION, read_frame, write_frame,
+    AttachMode, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION, RecipientAction,
+    RecipientActionOutcome, RecipientActionTarget, read_frame, write_frame,
 };
 use rustain::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
 use rustain::adapters::daemon::server::AttachServer;
@@ -477,16 +478,64 @@ pub fn raw_payloads(journal: &Journal, event: &str) -> Vec<serde_json::Value> {
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
         .collect();
     assert_eq!(files.len(), 1, "one room journal: {files:?}");
-    std::fs::read_to_string(&files[0])
+    // A concurrent append is not a committed JSONL record until its newline.
+    // Keep bytes intact so an unfinished UTF-8 suffix is not decoded either.
+    std::fs::read(&files[0])
         .expect("journal bytes")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a JSON line"))
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter(|line| line.ends_with(b"\n") && !line.iter().all(u8::is_ascii_whitespace))
+        .map(|line| serde_json::from_slice::<serde_json::Value>(line).expect("a JSON line"))
         .filter_map(|line| {
             let payload = line["record"]["payload"].clone();
             (payload["event"] == event).then_some(payload)
         })
         .collect()
+}
+
+#[tokio::test]
+async fn raw_payloads_waits_for_newline_commit_including_split_utf8() {
+    use std::io::Write as _;
+
+    let workspace = Arc::new(tempfile::tempdir().unwrap());
+    let journal = open_journal(workspace).await;
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(journal.node.path())
+        .unwrap();
+    let first = serde_json::json!({"record": {"payload": {"event": "fixture", "task": "first"}}});
+    writer
+        .write_all(&serde_json::to_vec(&first).unwrap())
+        .unwrap();
+    assert!(raw_payloads(&journal, "fixture").is_empty());
+    writer.write_all(b"\n").unwrap();
+
+    let second =
+        serde_json::json!({"record": {"payload": {"event": "fixture", "task": "second-β"}}});
+    let mut second_bytes = serde_json::to_vec(&second).unwrap();
+    second_bytes.push(b'\n');
+    let split = second_bytes.iter().position(|byte| *byte == 0xce).unwrap() + 1;
+    writer.write_all(&second_bytes[..split]).unwrap();
+    assert_eq!(
+        raw_payloads(&journal, "fixture"),
+        vec![first["record"]["payload"].clone()]
+    );
+    writer.write_all(&second_bytes[split..]).unwrap();
+    assert_eq!(
+        raw_payloads(&journal, "fixture"),
+        vec![
+            first["record"]["payload"].clone(),
+            second["record"]["payload"].clone()
+        ]
+    );
+}
+
+#[tokio::test]
+#[should_panic(expected = "a JSON line")]
+async fn raw_payloads_rejects_malformed_newline_committed_record() {
+    let workspace = Arc::new(tempfile::tempdir().unwrap());
+    let journal = open_journal(workspace).await;
+    std::fs::write(journal.node.path(), b"{\"record\":\n").unwrap();
+    raw_payloads(&journal, "fixture");
 }
 
 /// Every on-disk `recipient_item_received` row: `address` (the wire address
@@ -633,6 +682,7 @@ fn build_runtime(
         64,
     );
     Arc::new(DaemonTurnRuntime {
+        recipient_context: Arc::new(Default::default()),
         provider,
         app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
         security,
@@ -1290,7 +1340,7 @@ impl Drop for Operator {
 
 impl Operator {
     /// `conformance_19_18c…:902-914` (`next_answer`): the next frame that
-    /// answers an act — forwarded turn events / approval requests skipped.
+    /// answers an act — forwarded events, row operations and approval requests skipped.
     pub async fn next_answer(&mut self) -> DaemonFrame {
         loop {
             match tokio::time::timeout(SETTLE, read_frame::<_, DaemonFrame>(&mut self.stream))
@@ -1299,7 +1349,9 @@ impl Operator {
                 .expect("readable frame")
                 .expect("open socket")
             {
-                DaemonFrame::Event(_) | DaemonFrame::ApprovalRequest { .. } => {}
+                DaemonFrame::Event(_)
+                | DaemonFrame::PeerRowOperation(_)
+                | DaemonFrame::ApprovalRequest { .. } => {}
                 frame => return frame,
             }
         }
@@ -1362,13 +1414,21 @@ impl Operator {
     }
 }
 
-/// `conformance_19_18c…:987-992` (`frame_turn`): the `rr_…` turn id a
-/// `RecipientItemReplyRecorded` answer carries.
+/// `conformance_19_18c…:987-1001` (`frame_turn`): the `rr_…` turn id a
+/// durably applied recipient reply result carries.
 pub fn frame_turn(frame: &DaemonFrame) -> String {
-    let DaemonFrame::RecipientItemReplyRecorded { turn_id, .. } = frame else {
-        panic!("expected RecipientItemReplyRecorded, got {frame:?}");
+    let DaemonFrame::RecipientActionResult {
+        action: RecipientAction::Reply,
+        target: RecipientActionTarget::Item { item_id },
+        outcome: RecipientActionOutcome::Applied {
+            reply: Some(receipt),
+        },
+    } = frame
+    else {
+        panic!("expected applied recipient reply result, got {frame:?}");
     };
-    turn_id.clone()
+    assert_eq!(&receipt.item_id, item_id);
+    receipt.turn_id.clone()
 }
 
 // ── Raw JSON-RPC client ─────────────────────────────────────────────────────

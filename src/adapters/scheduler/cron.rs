@@ -398,6 +398,7 @@ async fn run_job(task: CronJobTask) {
             origin: ChannelKind::Cron,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
         conversation.updated_at = crate::domain::models::session_meta::now_unix();
         conversation.last_response_at = Some(conversation.updated_at);
@@ -424,6 +425,7 @@ async fn run_job(task: CronJobTask) {
             origin: ChannelKind::Cron,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
         conversation.updated_at = crate::domain::models::session_meta::now_unix();
         conversation.last_response_at = Some(conversation.updated_at);
@@ -928,6 +930,7 @@ mod tests {
         let tool_scheduler =
             ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 64);
         Arc::new(DaemonTurnRuntime {
+            recipient_context: Arc::new(Default::default()),
             provider,
             app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
             security,
@@ -1010,6 +1013,7 @@ mod tests {
         let tool_scheduler =
             ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 64);
         Arc::new(DaemonTurnRuntime {
+            recipient_context: Arc::new(Default::default()),
             provider,
             app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
             security,

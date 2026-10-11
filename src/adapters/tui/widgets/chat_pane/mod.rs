@@ -1424,6 +1424,7 @@ pub fn render_attached(
     tab_render_state: &mut TabRenderState,
     tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
+    active_feedback_id: Option<&str>,
 ) -> RenderResult {
     render_with_search_impl(
         frame,
@@ -1448,6 +1449,7 @@ pub fn render_attached(
         None, // open_prose
         None, // current_focus
         true,
+        active_feedback_id,
     )
 }
 
@@ -1519,6 +1521,7 @@ pub fn render_with_search(
         open_prose,
         current_focus,
         false,
+        None,
     )
 }
 
@@ -1549,6 +1552,7 @@ fn render_with_search_impl(
     // rows but that block is still visible — the `Tab` cycle depends on it.
     current_focus: Option<&str>,
     show_terminal_origin_prefix: bool,
+    active_feedback_id: Option<&str>,
 ) -> RenderResult {
     let empty = RenderResult {
         total_content_height: 0,
@@ -2263,7 +2267,12 @@ fn render_with_search_impl(
             }
             line_offset += spacing;
         }
-        for fb in feedback_blocks.values() {
+        for fb in feedback_blocks
+            .iter()
+            .filter(|(id, _)| Some(id.as_str()) != active_feedback_id)
+            .map(|(_, block)| block)
+            .chain(active_feedback_id.and_then(|id| feedback_blocks.get(id)))
+        {
             let fb_lines = feedback_block::render_feedback_lines(fb, area.width, theme);
             let fb_height = fb_lines.len();
             let fb_end = line_offset + fb_height;
@@ -3423,6 +3432,7 @@ mod parts_aware_tests {
                 origin: crate::domain::models::ChannelKind::Terminal,
                 authorship: Default::default(),
                 retracted_at_ms: None,
+                history_source: Default::default(),
             }],
             turns: vec![turn.clone()],
             created_at: 0,
@@ -3433,6 +3443,8 @@ mod parts_aware_tests {
             plans: HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
         let theme = Theme::dark();
         let streaming = StreamingState::default();
@@ -3628,6 +3640,8 @@ mod parts_aware_tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
         let view_state = ViewState::default();
         let mut trs = TabRenderState::default();
@@ -3674,6 +3688,8 @@ mod parts_aware_tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
         let view_state = ViewState::default();
         let mut trs = TabRenderState::default();
@@ -3729,6 +3745,8 @@ mod parts_aware_tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
         let mut view_state = ViewState::default();
         view_state.set_focused_turn(Some(turn2.id.clone()));

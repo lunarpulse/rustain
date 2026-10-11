@@ -590,7 +590,15 @@ async fn run_cli_share(
                     anyhow::bail!("peer share refused before anything was sent");
                 }
             },
-            Some(DaemonFrame::Event(_)) => continue,
+            // Asynchronous local operations are not the requested share result.
+            Some(
+                DaemonFrame::Event(_)
+                | DaemonFrame::PeerRowOperation(_)
+                | DaemonFrame::RecipientActionResult { .. }
+                | DaemonFrame::RecipientContextState { .. },
+            ) => {
+                continue;
+            }
             Some(DaemonFrame::Error(error)) => {
                 return refuse(
                     out,

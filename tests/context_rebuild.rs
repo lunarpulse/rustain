@@ -18,6 +18,7 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 

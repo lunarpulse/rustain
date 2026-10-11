@@ -81,6 +81,8 @@ fn make_conv(plan: Plan) -> (Conversation, TuiState) {
         plans: HashMap::from([(plan_id.clone(), plan)]),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.last_executed_plan_id = Some(plan_id);

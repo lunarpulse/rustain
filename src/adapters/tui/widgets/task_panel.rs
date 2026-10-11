@@ -588,6 +588,8 @@ mod tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
         let p1 = make_plan(
             PlanStatus::Completed,
@@ -619,6 +621,8 @@ mod tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
         let p2 = make_plan(
             PlanStatus::Executing,

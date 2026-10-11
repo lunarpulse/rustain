@@ -185,13 +185,18 @@ certificate (`DF-18-1-MTLS`).
 
 Peer entries are loaded once when rustain starts. After adding, removing, or changing an entry in `.rustain/a2a.json` or the active profile, restart rustain; `/team send` does not re-read configuration or discover a second source of truth.
 
-Address one or more roster IDs as a comma list, followed by the verbatim message body:
+Address one or more roster IDs as a comma list, optionally preceded by a semantic type, followed by the message body:
 
 ```text
 /team send security-peer,remote-reviewer review the authentication changes
+/team send --type consultation security-peer,remote-reviewer compare the old and new authentication code
 ```
 
 Every listed ID must be a configured, distinct, non-empty roster ID. An empty segment, duplicate, unknown ID, or missing body refuses the whole action before network I/O and writes no journal row. A roster ID containing `,` is therefore not addressable by this verb.
+
+The optional leading `--type <type>` accepts `consultation`, `story_assignment`, `design_update`, `status_request`, `bug_report`, `scope_change`, `architecture_update` or `retro_request`. It uses the existing A2A `message_type` metadata carrier for every recipient; the answering host stores the parsed type on the received item, including after sender-consent approval, so journal replay preserves it. The old untyped form is unchanged. An unknown operator token refuses the entire action by name with the valid vocabulary before any network I/O or journal write; this is distinct from the incoming-wire unknown-type fallback.
+
+Inherited outer whitespace trimming is unchanged. Interior spaces, tabs, newlines and code snippets remain verbatim; the parser consumes the type/recipient prefix by token position, not by searching for repeated words in the body.
 
 The action creates one stable, keyless `Info` block with one row per alias in the order typed. It has no header or aggregate result. Each recipient settles independently at its **first** `message/send` answer: `● delivered` means that answer carried a non-empty recipient item ID; `✗ declined` is a send-time rejection (including a `-32040` policy refusal); `⚠ unreachable` names a send that did not land, with a named preflight cause on its indented line when available. Tokenless rows name `sending…`, `awaiting their approval` (`auth-required` without an item), `accepted — this peer keeps no item id`, `no usable answer — '/team board' shows whether it arrived`, `asked a question this verb cannot answer (task … cancelled) — this peer uses A2A input-required, which rustain does not continue yet`, or `not sent — this host could not record the attempt`. The recipient's `server.admission` defaults to `deny`, so an unconfigured recipient declines a team message.
 
@@ -200,6 +205,128 @@ There is exactly one `message/send` attempt per recipient and no automatic retry
 Each recipient is journaled independently. A request that may leave the host records `dispatched` before its POST; a delivered or accepted answer adds `accepted`; a proved rejection (including JSON-RPC `-32040`), a connection that never opened, or a post-dispatch credential/trust-anchor refusal adds `refused`; and an approval-needed or no-usable-answer row (including a timeout, HTTP or other JSON-RPC error, or unreadable answer after dispatch) remains dispatch-only. A pre-I/O refusal writes one outbound `refused` row and no `dispatched` row. If durable dispatch recording fails, nothing is sent and no row is written. An accepted answer contributes a content hash, not stored reply text; a decline stores its sanitized reason. `/team send` never renders a peer reply and never materializes an `a2a-peer` node in the Agents panel. FR169 replies use `/team thread` as the later answer channel.
 
 `/team send` exists only in the interactive, non-attached TUI. On the attached rail it refuses aloud: `'/team send' needs this session's own A2A egress — run it in a non-attached session.` There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
+
+## Live daemon recipient rows
+
+Daemon attachments use protocol **v4**. Continuously attached trusted-local
+writers and read-only observers receive revisioned peer-row upserts and removals
+only after successful persistence. Snapshot and live updates use the same row
+identity; duplicate or older updates cannot restore a settled/deleted card.
+Failed persistence restores the staged transcript, control metadata and revision.
+Draft-ready, resolution, cancellation, queued/digest and RAP delivery, and
+auto-response retraction use this boundary.
+
+The pending card header takes its canonical type and policy-derived sender label
+from host-owned control metadata, never from the peer body. Controller capability
+is checked separately from saved placeholder text: an orphaned Drafting row keeps
+its item address but has no live node-resolution target. Control metadata and
+ordering revisions survive conversation persistence and trusted-local reattach.
+
+The new operations and snapshot control targets are omitted for authenticated
+Peer-tier attachments. Their existing read-only raw transcript/Event access is
+unchanged; this is **not** a new confidentiality guarantee for that legacy stream.
+This local synchronization is not A2A reply push. The plain attach reader emits
+addressed row-operation JSON, rather than presenting replacements as new replies.
+
+## Reading a received item locally
+
+**Updated 2026-10-09 (Story 19.19).** `/team view <item-id>` reads this host's
+workspace journal, not the remote asker's journal or model history. It works in
+attached writer/read-only sessions and standalone offline sessions. A
+notify-and-auto arrival includes `Open: /team view <item-id>` when the response
+has a journal-backed item; a pending card opens with Tab.
+
+The Info reader pins the explicitly opened item. Its canonical type, current
+principal label, raw body-byte manifest and full available body are scrollable;
+the thread root remains separately identified. The opened body appears once,
+not again in its chronological row. Missing ids refuse; removed bodies remain
+unavailable. Unknown legacy types use a fixed disclosure, not body-derived type.
+
+Each local page reserves the root and opened item, deduplicated within the
+50-turn/896-KiB bounds, then retains remaining turns chronologically. Bodies over
+64 KiB and display-expanded turns over 448 KiB are withheld with metadata, not
+silently clipped. `[p] Earlier` and `[l] Newer` deliberately read local journal
+pages; PgUp/PgDn scroll within the page. Header/footer remain outside the scroll
+area, including the 60×16 floor. No read/page acknowledges, sends, selects model
+context, contacts a peer or creates a model request.
+
+At a byte-saturated pinned page, root/linked-turn bodies can be unavailable on
+that page while their metadata remains readable; the opened body stays pinned
+and earlier/newer navigation advances actual linked turns within the same caps.
+
+For an item-backed card, Tab switches between Item actions and its verified
+response-node target when that target exists. The full Ready draft is scrollable;
+Respond/Edit require empty input and pin the exact target before returning to
+composition. Read-only observers cannot mutate either target. Offline sessions
+show local-view-only controls.
+
+Native confirmations take priority over an open reader, including the complete
+proposed plan and its approval controls. Rejecting the plan resumes the same
+pinned reader; opening a reader never accepts a hidden confirmation.
+
+### Explicit item-backed model context
+
+`/team context <item-id>` or `[c] Use as context` selects only that received
+body, by its existing principal/item reference. It does not adopt the displayed
+thread or replies. `[c] Stop using` and `/team context off <item-id>` remove
+the reference prospectively, including when its content became unavailable.
+An unselected id is a truthful no-op. Retracted text remains available with its
+mark; removed or withheld content is unavailable.
+
+Selections belong to the daemon's current process-lifetime conversation.
+Writer/read-only handovers share them; detach does not reset them. `/clear`
+and daemon restart do reset them, even when the restored conversation id is unchanged.
+Reset is ordered after earlier operator turns and their committed output; the
+socket remains available for permission responses while those turns finish.
+Managed A2A/RAP turns likewise finish their queued tool-display fold before a
+reset can be acknowledged, including turns with no emitted provider events.
+History fences and context commands follow those earlier turns in the writer's
+FIFO. Independent recipient actions remain available while a turn is composing.
+Only a trusted-local writer may select/remove. Bare `/team context`
+shows cached inventory to a writer or trusted-local reader without assembling
+context or calling the model. All context forms require daemon attachment.
+
+The next interactive turn resolves each currently selected body from the
+current journal projection. Default local memory keeps its own 2000-token cap;
+item data spends only the remaining shared 4096-token content-tier budget in
+deterministic item-id order. Inventory distinguishes not-used-yet, full,
+partial, skipped and unavailable entries, with last-use turn/cost. Selection
+is not a promise the complete body fits. Included bodies are attributed
+untrusted data and carry item-origin peer taint through the real tool gate.
+They are not signed RAP summaries or persona/system instructions.
+The Anthropic, OpenAI-compatible and Ollama adapters retain this attributed
+prefix in the outgoing user message, without changing tool-message ordering.
+
+Peer-display history stays visible but is excluded before ordinary
+Interactive/Channel/Cron assembly and windowing can promote it into context.
+Typed source lineage survives Turn migration and mirror rebuilds; known legacy
+`PeerText` remains display-only. Authorized inbound response drafting still
+receives its question and tools, isolated from the operator's tool buffer.
+Channel, cron and another runtime do not consume these selections. Off is not
+erasure of earlier consented or derived model history.
+
+### Deterministic operator-dispatch capture
+
+Story 19.19's committed `tests_tui/test_story_19_19_act2_consultation.py`
+executes the consultation/Busy/pull/answer/restart/ordinary ADR Write/independent
+notification/Ack/Discuss/context on-off path through real native clients.
+Build an A2A release binary, then name that immutable executable explicitly:
+
+```bash
+RUSTAIN_TUI_BINARY=/absolute/path/to/built/release/rustain \
+  tests_tui/.venv/bin/python -m pytest \
+  tests_tui/test_story_19_19_act2_consultation.py::test_act2_consultation_adr_fanout \
+  -p no:rerunfailures -n 0 --timeout=420 -v
+```
+
+Both 80-column and 130-column cases must run; zero selected tests or skips are
+not capture evidence. Receipts retain actual product team-log milliseconds,
+scene/driver hashes and binary identity. Opt-in SceneStub observations inspect
+the complete decoded provider request without storing raw system text.
+This is operator-approved dispatch, not the agent-mediated 19.26 journey.
+Loopback shares a principal; native Normal-mode tool blocking is not proof of
+differential taint enforcement or a nonexistent attached generic approval UI.
+
 
 ## Replying to a team message (FR169)
 
@@ -214,19 +341,66 @@ Use the verb on the rail that holds its object:
 - `/team reply <item-id> <text…>` is rail 4 only. It answers an item received
   on this host. Rail 3 refuses it because a recipient item needs a
   daemon-attached session.
+- `/team defer <item-id>` is rail 4 only. It records the fixed `Busy — defer
+  30m` body as an independent human-written reply on this host. Standalone
+  sessions refuse it; it does not resolve an answer card or select context.
+- `/team ack <item-id>` is rail 4 only. It records receipt, not an answer.
+  Standalone sessions refuse it; viewing or responding does not imply Ack.
 - `/team thread <peer-id> <item-id>` and
   `/team followup <peer-id> <turn-id> <text…>` are rail 3 only. Rail 4 refuses
   them because they need that session's A2A egress.
 - `/team board <peer-id>` is the asker's discovery step: its correlated item
   row supplies the root item id to paste into `/team thread`.
 
-`/team reply` records a reply turn on the answering host. When it finds a
-persisted pending peer-response card for that item, it resolves that card as
-the operator's own answer (`WriteOwn`) and records one turn; otherwise it
-records a direct turn. A later `ResolvePeerDraft` for the same node in the same
+`/team reply` records a reply turn on the answering host. When the item's
+pending peer-response card has a live process-owned controller, it resolves
+that card as the operator's own answer (`WriteOwn`) and records one turn;
+otherwise it records a direct turn without reviving the task. A later
+`ResolvePeerDraft` for the same node in the same
 process is an idempotent no-op; after restart it is refused as already settled.
 On restart, turns and follow-up links are rebuilt from the journal; the waiting
 node still fails, but the item remains answerable with `/team reply`.
+
+On an attached consultation card, Tab explicitly opens Item actions. `[b] Busy
+— defer 30m` and `/team defer` use the same trusted-local writer/room-content
+gate and journal-backed item lookup. Confirmation follows the durable append.
+The pending real-answer card, draft buffer and waiting task remain unchanged;
+there is no acknowledgement, deadline, timer, automatic retry or reverse send.
+Another deliberate defer creates another fresh reply turn. Busy is also legal
+while a live draft is composing.
+Defer requires the `a2a` feature, just like the existing item-reply command;
+a build without it refuses without recording an unservable turn.
+
+Outside the explicitly focused item/response surface, `y/e/n/b` are ordinary
+input and Enter does not implicitly answer the FIFO head. Respond and Edit
+require an empty composer, pin their target, and return to Input; `/team` and
+`/clear` take precedence over that target. Esc closes the surface and restores
+the frozen input; Ctrl+D/Ctrl+C retain attached detach semantics. Only
+unmodified lowercase Press events invoke surface actions; reported Repeat,
+Release and modified action letters cannot mutate the item.
+
+On an architecture-update Item surface, `[a] Acknowledge` records receipt and
+`[d] Discuss` seeds an explicit `/team reply <item-id>` composition. Ack confirms
+only after its durable append; a repeated/raced Ack reports already recorded
+without another append. Its hint disappears after acknowledgement. It does not
+resolve a pending answer or select model context.
+
+Action results carry their originating action and item/node target. Each
+pending marker survives closing/reopening the reader until its own outcome;
+unrelated completions cannot clear it. Item-turn outcomes show the recorded turn
+and pull-only disclosure. Applied node actions without a turn, settled no-ops
+and refusals remain distinct. Stale/refused reply composition retains its text
+and explicit target; an idempotent Ack consumes its command rather than
+restoring it as unsent reply text.
+
+Reply-kind metadata is additive. Missing journal `kind` means Answer and
+Answer omits the field; Defer uses `{"type":"defer","minutes":30}`. Served
+turns keep structural `kind:"reply"` and add `replyKind:"defer"` with
+`deferMinutes`. The sender's explicit thread read marks the responder alias
+with `[defer <N>m — reported expectation]`; incoming valid intervals are
+1–65,535 minutes, not local timer values. Future or malformed kinds/intervals
+retain the body and render `[reply kind not recognised]`, never a peer-chosen
+badge or a fabricated interval. Old readers retain the ordinary Busy body.
 
 The answering host records received items (including raw
 `x-rustain-in-reply-to` links), reply turns, and the existing draft-resolution
@@ -296,8 +470,19 @@ can observe it through the shared journal.
 Dispatch history follows the 19.18c `PQ2` rule. A pinned peer survives a rename
 and a move. An unpinned peer survives either a rename or a move, but not both.
 An unpinned alias re-pointed at another host, or an alias reused for a different
-peer, receives this host's capabilities for the old host's items; pin the peer
-to remove both cases.
+peer, receives this host's capabilities for the old host's items. Pin before
+dispatch to avoid those cases for new pinned rows; a later pin-add does not
+revoke historical endpoint-bearing correlation for that alias.
+
+The pulled thread's `you` label requires this host's matching task **and
+content hash**. Its dispatch correlation uses the same PQ2 alias/origin rule:
+an unpinned rename at the same origin retains `you`; the same alias retains
+`you` after a move, including pin-add plus move. Historical same-identity rows
+without an endpoint retain exact task/hash correlation. Changed/missing hashes,
+model-rail rows without a human-text hash, and task/hash claims from an unrelated
+origin under a different alias remain `another sender`. This is correlation of
+this host's sent bytes, not proof of host/personhood continuity. Reply-observation
+deduplication is unchanged; no rename-transparent observation-dedup claim.
 
 An older build treats capability-bearing items as legacy and can rewrite
 `a2a-pending.json` without the capability hash. There is no capability

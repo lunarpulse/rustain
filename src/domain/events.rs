@@ -17,6 +17,23 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         chunk: StreamChunk,
     },
+    /// Host-attributed inbound turn chunks; never operator commit-buffer input.
+    PeerProviderChunk {
+        node: std::sync::Arc<crate::domain::models::AgentId>,
+        conversation_id: ConversationId,
+        chunk: StreamChunk,
+    },
+    /// Collector EOF/error cleanup, including turns without a terminal chunk.
+    PeerTurnClosed {
+        node: std::sync::Arc<crate::domain::models::AgentId>,
+        conversation_id: ConversationId,
+    },
+    PeerSystemNotice {
+        node: std::sync::Arc<crate::domain::models::AgentId>,
+        conversation_id: Option<ConversationId>,
+        level: NoticeLevel,
+        message: String,
+    },
     /// Tool execution result
     ToolResult(ToolResultEvent),
     /// Terminal resize
@@ -556,6 +573,8 @@ pub enum DomainKey {
     Right,
     Home,
     End,
+    PageUp,
+    PageDown,
     Tab,
     ShiftTab,
     CtrlB,

@@ -10,6 +10,7 @@ use super::driver::{A2aDelegationRuntime, MessageCarriers, OwnTask, TaskClient, 
 use super::endpoint::resolve_jsonrpc_endpoint;
 use super::error::{A2aError, anchor_error};
 use super::item_capability::ItemCapability;
+use crate::domain::services::transparency::MAX_PEER_ID_BYTES;
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -53,9 +54,17 @@ impl std::error::Error for SendError {}
 
 fn outbound_message(
     text: &str,
+    message_type: Option<crate::domain::models::SemanticMessageType>,
     carriers: MessageCarriers<'_>,
 ) -> (serde_json::Value, Option<OwnTask>) {
-    build_message(&serde_json::json!({ "message": text }), carriers)
+    let input = match message_type {
+        Some(kind) => serde_json::json!({
+            "message": text,
+            "message_type": crate::domain::models::semantic_message_type_metadata(kind).token,
+        }),
+        None => serde_json::json!({ "message": text }),
+    };
+    build_message(&input, carriers)
 }
 
 /// Story 19.18c `A10` — the capability this host presents for `id` on
@@ -125,6 +134,7 @@ pub async fn deliver_to_recipients<F>(
     runtime: &A2aDelegationRuntime,
     recipients: &[String],
     text: &str,
+    message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<&str>,
     cancel: CancellationToken,
     mut on_settle: F,
@@ -135,7 +145,12 @@ pub async fn deliver_to_recipients<F>(
 
     let pending = FuturesUnordered::new();
     for (index, peer) in recipients.iter().enumerate() {
-        pending.push(async move { (index, deliver_text(runtime, peer, text, reply_to).await) });
+        pending.push(async move {
+            (
+                index,
+                deliver_text(runtime, peer, text, message_type, reply_to).await,
+            )
+        });
     }
     tokio::pin!(pending);
     loop {
@@ -196,6 +211,7 @@ pub async fn deliver_text(
     runtime: &A2aDelegationRuntime,
     peer_id: &str,
     text: &str,
+    message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<&str>,
 ) -> RecipientOutcome {
     use super::lifecycle::A2aTaskTransport;
@@ -267,6 +283,7 @@ pub async fn deliver_text(
     };
     let (message, own_task) = outbound_message(
         text,
+        message_type,
         MessageCarriers {
             reply_to,
             item_key: item_key.as_deref(),
@@ -828,6 +845,7 @@ pub struct ServedTurn {
     pub content: Option<String>,
     /// Hash of the body this host received, when it received one.
     pub content_hash: Option<crate::domain::models::ContentHash>,
+    pub kind: crate::domain::models::ReplyKind,
     pub authorship: crate::domain::models::ReplyAuthorship,
     pub retracted_at_ms: Option<i64>,
 }
@@ -976,8 +994,7 @@ fn transport_failure(error: &A2aError) -> RecipientOutcome {
 /// over `MAX_PEER_ID_BYTES`, or a kind this build cannot name — ⛔ never
 /// rendered as if it were a partial thread.
 pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
-    use crate::domain::models::{MAX_REPLY_BYTES, ReplyAuthorship};
-    use crate::domain::services::transparency::MAX_PEER_ID_BYTES;
+    use crate::domain::models::{MAX_REPLY_BYTES, ReplyAuthorship, ReplyKind};
 
     let bounded = |value: Option<&serde_json::Value>| {
         value
@@ -1015,6 +1032,22 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
                 .get("authorship")
                 .and_then(serde_json::Value::as_str)
                 .map_or(ReplyAuthorship::Unknown, ReplyAuthorship::from_wire),
+            kind: match turn.get("replyKind") {
+                None => ReplyKind::Answer,
+                Some(serde_json::Value::String(kind)) => match kind.as_str() {
+                    "answer" => ReplyKind::Answer,
+                    "defer" => match turn.get("deferMinutes").and_then(serde_json::Value::as_u64) {
+                        Some(minutes) if (1..=u64::from(u16::MAX)).contains(&minutes) => {
+                            ReplyKind::Defer {
+                                minutes: minutes as u16,
+                            }
+                        }
+                        _ => ReplyKind::Unknown,
+                    },
+                    _ => ReplyKind::Unknown,
+                },
+                Some(_) => ReplyKind::Unknown,
+            },
             retracted_at_ms: turn
                 .get("retractedAtMs")
                 .and_then(serde_json::Value::as_i64),
@@ -1027,12 +1060,13 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
         .unwrap_or(0);
     // A hostile host can serve more than it promised: keep the root and the
     // newest turns under the shared bound, and count the rest as omitted.
-    if turns.len() > super::MAX_THREAD_TURNS {
+    if turns.len() > crate::domain::services::recipient_thread_bounds::MAX_THREAD_TURNS {
         let root_turn = turns
             .iter()
             .position(|turn| turn.turn_id == root)
             .map(|index| turns.remove(index));
-        let keep = super::MAX_THREAD_TURNS - usize::from(root_turn.is_some());
+        let keep = crate::domain::services::recipient_thread_bounds::MAX_THREAD_TURNS
+            - usize::from(root_turn.is_some());
         let cut = turns.len() - keep;
         omitted_before = omitted_before.saturating_add(cut);
         turns.drain(..cut);
@@ -1109,7 +1143,14 @@ mod tests {
     async fn configured_peer_without_cached_card_refuses_without_on_demand_fetch() {
         let known = peer("known");
         let client = Arc::new(client::A2aClientAdapter::new(&known, None).expect("client"));
-        let outcome = deliver_text(&runtime(vec![(known, client)]), "known", "hello", None).await;
+        let outcome = deliver_text(
+            &runtime(vec![(known, client)]),
+            "known",
+            "hello",
+            None,
+            None,
+        )
+        .await;
         let RecipientOutcome::Unreachable {
             cause: Some(SendCause::Ratified(text)),
         } = outcome
@@ -1140,7 +1181,7 @@ mod tests {
             .with_peer_bindings(vec![(spec, client)].into());
 
         assert_eq!(
-            deliver_text(&runtime, "questions", "hello", None).await,
+            deliver_text(&runtime, "questions", "hello", None, None).await,
             RecipientOutcome::NoUsableAnswer
         );
         let methods: Vec<_> = fixture
@@ -1172,7 +1213,7 @@ mod tests {
     #[test]
     fn outbound_message_preserves_exact_unicode_text_in_one_text_part() {
         let text = "  Καλημέρα 🌕\nsecond line  ";
-        let (message, _) = outbound_message(text, super::MessageCarriers::default());
+        let (message, _) = outbound_message(text, None, super::MessageCarriers::default());
         let parts = message["message"]["parts"]
             .as_array()
             .expect("message parts");
@@ -1245,8 +1286,8 @@ mod tests {
     /// more than `MAX_THREAD_TURNS` turns keep the root and the newest.
     #[test]
     fn a_served_thread_is_bounded_before_it_is_believed() {
-        use crate::adapters::a2a::MAX_THREAD_TURNS;
         use crate::domain::models::MAX_REPLY_BYTES;
+        use crate::domain::services::recipient_thread_bounds::MAX_THREAD_TURNS;
         use crate::domain::services::transparency::MAX_PEER_ID_BYTES;
 
         let turn = |id: &str, kind: &str, content: &str| serde_json::json!({ "turnId": id, "kind": kind, "content": content, "ordinal": 0 });
@@ -1315,6 +1356,88 @@ mod tests {
             Some(serde_json::json!(1)),
         ] {
             assert!(!thread(flag.clone()), "{flag:?}");
+        }
+    }
+
+    #[test]
+    fn additive_reply_kind_is_bounded_without_poisoning_a_thread() {
+        use crate::domain::models::ReplyKind;
+
+        let parse = |kind: Option<serde_json::Value>, minutes: Option<serde_json::Value>| {
+            let mut turn = serde_json::json!({
+                "turnId": "rr_defer",
+                "kind": "reply",
+                "content": "Busy — defer 30m",
+            });
+            if let Some(kind) = kind {
+                turn["replyKind"] = kind;
+            }
+            if let Some(minutes) = minutes {
+                turn["deferMinutes"] = minutes;
+            }
+            parse_thread(&serde_json::json!({
+                "root": "ri_q",
+                "turns": [
+                    {"turnId":"ri_q","kind":"item","content":"question"},
+                    turn
+                ]
+            }))
+            .expect("bad additive values cannot erase thread")
+        };
+        assert_eq!(
+            parse(None, None).turns[1].kind,
+            ReplyKind::Answer,
+            "old readers' structural reply remains an answer"
+        );
+        assert_eq!(
+            parse(Some(serde_json::json!("defer")), None).turns[1].kind,
+            ReplyKind::Unknown,
+            "a missing interval is unknown"
+        );
+        for kind in [
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!(1),
+            serde_json::json!([]),
+            serde_json::json!("future"),
+            serde_json::json!({"type":"defer","minutes":30}),
+        ] {
+            assert_eq!(
+                parse(Some(kind.clone()), Some(serde_json::json!(30))).turns[1].kind,
+                ReplyKind::Unknown,
+                "{kind}"
+            );
+        }
+        for minutes in [
+            None,
+            Some(serde_json::json!(null)),
+            Some(serde_json::json!(false)),
+            Some(serde_json::json!("30")),
+            Some(serde_json::json!([])),
+            Some(serde_json::json!({})),
+            Some(serde_json::json!(0)),
+            Some(serde_json::json!(-1)),
+            Some(serde_json::json!(65536)),
+            Some(serde_json::json!(1.0)),
+        ] {
+            let thread = parse(Some(serde_json::json!("defer")), minutes.clone());
+            assert_eq!(thread.turns[1].kind, ReplyKind::Unknown, "{minutes:?}");
+            assert_eq!(
+                thread.turns[1].content.as_deref(),
+                Some("Busy — defer 30m"),
+                "invalid additive intervals must not withhold a valid reply body"
+            );
+        }
+        for minutes in [1, u16::MAX] {
+            assert_eq!(
+                parse(
+                    Some(serde_json::json!("defer")),
+                    Some(serde_json::json!(minutes)),
+                )
+                .turns[1]
+                    .kind,
+                ReplyKind::Defer { minutes }
+            );
         }
     }
 }

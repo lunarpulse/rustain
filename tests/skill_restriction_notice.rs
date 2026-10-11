@@ -315,6 +315,8 @@ async fn run_turn_front_door(
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let mut streaming = StreamingState::default();
     let mut state = rustain::adapters::tui::state::TuiState::new(120, 24);

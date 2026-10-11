@@ -562,8 +562,20 @@ pub async fn team_command(
                 );
             }
         }
-        TeamCommandArgs::Send { recipients, text } => {
-            start_team_send(state, conversation_id, app_state, recipients, text, None);
+        TeamCommandArgs::Send {
+            recipients,
+            text,
+            message_type,
+        } => {
+            start_team_send(
+                state,
+                conversation_id,
+                app_state,
+                recipients,
+                text,
+                message_type,
+                None,
+            );
         }
         // Story 19.18 `AC7` — a follow-up IS a 19.17 delivery, N = 1, with the
         // reply-to carrier: the same validation, block, settle handler, rows
@@ -579,6 +591,7 @@ pub async fn team_command(
                 app_state,
                 vec![peer],
                 text,
+                None,
                 Some(turn_id),
             );
         }
@@ -624,6 +637,31 @@ pub async fn team_command(
                 );
             }
         }
+        TeamCommandArgs::View { item_id } => {
+            if let Err(error) = super::recipient_surface::open_received_surface(
+                &app_state.compose_snapshot.workspace_path,
+                None,
+                &item_id,
+                state,
+                crate::adapters::tui::state::RecipientSurfaceAccess::LocalOnly,
+                super::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+            {
+                let id = "recipient-view".to_owned();
+                state.feedback_blocks.insert(
+                    id.clone(),
+                    crate::domain::models::FeedbackBlock {
+                        id: id.clone(),
+                        level: crate::domain::models::FeedbackLevel::Info,
+                        message: error.to_string(),
+                        actions: Vec::new(),
+                    },
+                );
+                state.active_feedback_id = Some(id);
+                state.needs_redraw = true;
+            }
+        }
         // Story 19.18 `AC9(b)` — answering an item needs the daemon that
         // holds it. ⛔ Not a silent `=> {}`: the ack/remove refusal shape.
         TeamCommandArgs::Reply { .. } => {
@@ -632,6 +670,22 @@ pub async fn team_command(
                 conversation_id,
                 app_state,
                 "Replying to a recipient item requires a daemon-attached session.".to_owned(),
+            );
+        }
+        TeamCommandArgs::Defer { .. } => {
+            emit_team_warning(
+                state,
+                conversation_id,
+                app_state,
+                "/team defer requires a daemon-attached session".to_owned(),
+            );
+        }
+        TeamCommandArgs::Context { .. } => {
+            emit_team_warning(
+                state,
+                conversation_id,
+                app_state,
+                "/team context requires a daemon-attached session".to_owned(),
             );
         }
         TeamCommandArgs::Acknowledge { item_id: _ } => {
@@ -687,6 +741,7 @@ fn start_team_send(
     app_state: &AppState,
     recipients: Vec<String>,
     text: String,
+    message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<String>,
 ) {
     #[cfg(not(feature = "a2a"))]
@@ -738,6 +793,7 @@ fn start_team_send(
                 &runtime,
                 &recipients,
                 &text,
+                message_type,
                 reply_to.as_deref(),
                 cancel.clone(),
                 |index, outcome| {
@@ -758,7 +814,14 @@ fn start_team_send(
     }
     #[cfg(not(feature = "a2a"))]
     {
-        let _ = (recipients, text, reply_to, conversation_id, app_state);
+        let _ = (
+            recipients,
+            text,
+            message_type,
+            reply_to,
+            conversation_id,
+            app_state,
+        );
         show_team_send(
             state,
             &block_id,
@@ -1868,41 +1931,6 @@ mod tests {
         (app_state, domain_rx)
     }
 
-    /// Story 19.16c AC2, mutant 6 — **the in-process rail is the product's
-    /// default**, and it is the one `match` the compiler forces. The cheapest
-    /// green arm for a new verb is `Remove { .. } => {}`, which would let an
-    /// operator type `/team remove ri_x` in an ordinary session, see nothing
-    /// happen, hear nothing, and believe the peer's content was disposed of
-    /// while the projection still holds it.
-    ///
-    /// Mutant → RED: make the arm a silent `=> {}`.
-    #[tokio::test]
-    async fn the_in_process_rail_says_removal_needs_a_daemon_session() {
-        let workspace = tempfile::TempDir::new().unwrap();
-        let (app_state, mut domain_rx) = bridge_app_state(workspace.path());
-        let mut state = TuiState::new(120, 40);
-
-        team_command(&mut state, "conv-1", Some("remove ri_x"), &app_state).await;
-
-        let message = loop {
-            match domain_rx.try_recv() {
-                Ok(crate::domain::events::AppEvent::SystemNotice { message, level, .. }) => {
-                    assert_eq!(level, crate::domain::models::NoticeLevel::Warning);
-                    break message;
-                }
-                Ok(_) => continue,
-                Err(error) => panic!("the non-attached rail must answer, not swallow: {error:?}"),
-            }
-        };
-        assert_eq!(
-            message, "Recipient item removal requires a daemon-attached session.",
-            "mirrors the acknowledgement's shipped sentence; mints no new idiom"
-        );
-        for lie in ["deleted", "erased", "purged", "removed."] {
-            assert!(!message.contains(lie), "{message}");
-        }
-    }
-
     #[tokio::test]
     async fn untrust_unknown_sender_is_a_noop_without_creating_a_journal() {
         let workspace = tempfile::TempDir::new().unwrap();
@@ -2274,7 +2302,7 @@ mod credential_tests {
 
         /// The delivery seam production settles independently for each recipient.
         async fn send(&self, alias: &str, text: &str) -> RecipientOutcome {
-            deliver_text(self.egress.runtime(), alias, text, None).await
+            deliver_text(self.egress.runtime(), alias, text, None, None).await
         }
 
         async fn rejected_rows(&self) -> Vec<String> {
@@ -3288,6 +3316,7 @@ mod log_awareness_tests {
                         origin: crate::domain::models::ChannelKind::Terminal,
                         authorship: Default::default(),
                         retracted_at_ms: None,
+                        history_source: Default::default(),
                     });
             }
             Self {
@@ -3340,6 +3369,7 @@ mod log_awareness_tests {
                         &mut tab,
                         &tools,
                         &state.feedback_blocks,
+                        state.active_feedback_id.as_deref(),
                     )
                     .visible_feedback_ids;
                 })

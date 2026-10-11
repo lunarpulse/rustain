@@ -47,7 +47,8 @@ use rustain::adapters::a2a::server::{ServeConfig, serve};
 use rustain::adapters::a2a::transparency::TransparencySink;
 use rustain::adapters::daemon::protocol::{
     AttachMode, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION, PeerDraftAction,
-    read_frame, write_frame,
+    ProtocolError, RecipientAction, RecipientActionOutcome, RecipientActionTarget, read_frame,
+    write_frame,
 };
 use rustain::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
 use rustain::adapters::daemon::server::AttachServer;
@@ -191,6 +192,7 @@ fn build_runtime(
         64,
     );
     Arc::new(DaemonTurnRuntime {
+        recipient_context: Arc::new(Default::default()),
         provider,
         app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
         security,
@@ -806,8 +808,8 @@ fn board_item_ids(board: &str) -> Vec<String> {
         .collect()
 }
 
-/// The next operator frame that answers an act — every forwarded turn
-/// `Event` in between is skipped.
+/// Wait for an operator action outcome, ignoring asynchronous transcript,
+/// row-control, and approval notifications on the same socket.
 async fn next_answer(operator: &mut tokio::net::UnixStream) -> DaemonFrame {
     loop {
         match tokio::time::timeout(SETTLE, read_frame::<_, DaemonFrame>(operator))
@@ -816,25 +818,10 @@ async fn next_answer(operator: &mut tokio::net::UnixStream) -> DaemonFrame {
             .expect("readable frame")
             .expect("open socket")
         {
-            DaemonFrame::Event(_) | DaemonFrame::ApprovalRequest { .. } => {}
+            DaemonFrame::Event(_)
+            | DaemonFrame::PeerRowOperation(_)
+            | DaemonFrame::ApprovalRequest { .. } => {}
             frame => return frame,
-        }
-    }
-}
-
-/// Whether an answer arrives within a short window — for acts that are
-/// silent by design (the shipped idempotent resolution).
-async fn maybe_answer(operator: &mut tokio::net::UnixStream) -> Option<DaemonFrame> {
-    loop {
-        match tokio::time::timeout(
-            Duration::from_millis(750),
-            read_frame::<_, DaemonFrame>(operator),
-        )
-        .await
-        {
-            Ok(Ok(Some(DaemonFrame::Event(_)))) => {}
-            Ok(Ok(Some(frame))) => return Some(frame),
-            _ => return None,
         }
     }
 }
@@ -860,7 +847,7 @@ async fn resolve(
     operator: &mut tokio::net::UnixStream,
     node: &str,
     action: rustain::adapters::daemon::protocol::PeerDraftAction,
-) {
+) -> DaemonFrame {
     write_frame(
         operator,
         &ClientFrame::ResolvePeerDraft {
@@ -870,6 +857,7 @@ async fn resolve(
     )
     .await
     .expect("resolution frame");
+    next_answer(operator).await
 }
 
 fn replies(rows: &[(u64, RoomEvent)]) -> Vec<(u64, ReplyRow)> {
@@ -881,6 +869,7 @@ fn replies(rows: &[(u64, RoomEvent)]) -> Vec<(u64, ReplyRow)> {
                 content,
                 authorship,
                 via_node,
+                ..
             } => Some((
                 *seq,
                 ReplyRow {
@@ -985,10 +974,19 @@ fn served_ids(thread: &serde_json::Value) -> Vec<String> {
 }
 
 fn frame_turn(frame: &DaemonFrame) -> String {
-    let DaemonFrame::RecipientItemReplyRecorded { turn_id, .. } = frame else {
-        panic!("expected RecipientItemReplyRecorded, got {frame:?}");
+    let DaemonFrame::RecipientActionResult {
+        action: RecipientAction::Reply,
+        target: RecipientActionTarget::Item { item_id },
+        outcome: RecipientActionOutcome::Applied {
+            reply: Some(receipt),
+        },
+    } = frame
+    else {
+        panic!("expected an applied item reply result, got {frame:?}");
     };
-    turn_id.clone()
+    assert_eq!(item_id, &receipt.item_id);
+    assert_eq!(receipt.kind, rustain::domain::models::ReplyKind::Answer);
+    receipt.turn_id.clone()
 }
 
 /// Send one question to `b` and return `(item id from the board, task)`.
@@ -1249,11 +1247,9 @@ async fn the_reply_round_trip_through_every_front_door() {
     attach_shutdown.cancel();
 }
 
-/// `K02` failure case + positive control. The AttachServer's journal refuses
-/// `RecipientItemReplied`: the first answering frame is `Error` and no turn
-/// exists (`M25`: confirming before the append would say "recorded"). An
-/// acknowledged item with no pending card takes one direct turn, `via_node:
-/// None`.
+/// `K02` failure case + positive control. A failed durable reply append returns
+/// a correlated refusal and no turn exists. An acknowledged item with no
+/// pending card takes one direct turn, `via_node: None`.
 #[tokio::test]
 async fn a_failed_reply_is_never_confirmed_and_a_cardless_item_takes_a_direct_turn() {
     let mut options = HostOptions::new(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndAuto);
@@ -1270,7 +1266,19 @@ async fn a_failed_reply_is_never_confirmed_and_a_cardless_item_takes_a_direct_tu
     let mut state = TuiState::new(120, 40);
     let (ri_q, _) = ask(&mut sender, &mut state, &b, "question").await;
     let frame = operator_reply(&mut operator, &ri_q, "answer").await;
-    assert!(matches!(frame, DaemonFrame::Error(_)), "{frame:?}");
+    assert!(
+        matches!(
+            &frame,
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Reply,
+                target: RecipientActionTarget::Item { item_id },
+                outcome: RecipientActionOutcome::Refused {
+                    error: ProtocolError::Internal(_),
+                },
+            } if item_id == &ri_q
+        ),
+        "{frame:?}"
+    );
     assert!(replies(&room_events(&b.journal).await).is_empty());
     attach_shutdown.cancel();
 
@@ -1287,6 +1295,14 @@ async fn a_failed_reply_is_never_confirmed_and_a_cardless_item_takes_a_direct_tu
     )
     .await
     .expect("ack");
+    assert!(matches!(
+        next_answer(&mut operator).await,
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Acknowledge,
+            target: RecipientActionTarget::Item { item_id },
+            outcome: RecipientActionOutcome::Applied { reply: None },
+        } if item_id == ri_a
+    ));
     let rr = frame_turn(&operator_reply(&mut operator, &ri_a, "answer").await);
     let turns = replies(&room_events(&c.journal).await);
     assert_eq!(turns.len(), 1);
@@ -1360,9 +1376,21 @@ async fn refused_replies_write_nothing() {
         ),
     ] {
         let frame = operator_reply(&mut operator, item, text).await;
-        let DaemonFrame::Error(error) = frame else {
-            panic!("{item}: expected a refusal, got {frame:?}");
+        let DaemonFrame::RecipientActionResult {
+            action,
+            target,
+            outcome: RecipientActionOutcome::Refused { error },
+        } = frame
+        else {
+            panic!("{item}: expected a correlated refusal, got {frame:?}");
         };
+        assert_eq!(action, RecipientAction::Reply);
+        assert_eq!(
+            target,
+            RecipientActionTarget::Item {
+                item_id: item.to_owned()
+            }
+        );
         assert!(error.to_string().contains(&expected), "{item}: {error}");
     }
     assert_eq!(room_events(&b.journal).await.len(), length, "zero rows");
@@ -1386,7 +1414,7 @@ async fn draft_resolutions_record_exactly_the_sending_turns() {
     let (ri_w, task_w) = ask(&mut sender, &mut state, &b, "question").await;
     let node_w = waiting_node(&b, &task_w).await;
     pending_card(&b, &node_w).await;
-    resolve(
+    let resolution = resolve(
         &mut operator,
         &node_w,
         PeerDraftAction::WriteOwn {
@@ -1394,6 +1422,16 @@ async fn draft_resolutions_record_exactly_the_sending_turns() {
         },
     )
     .await;
+    assert!(matches!(
+        &resolution,
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Response,
+            target: RecipientActionTarget::Node { node_id },
+            outcome: RecipientActionOutcome::Applied {
+                reply: Some(receipt),
+            },
+        } if node_id == &node_w && receipt.item_id.as_str() == ri_w.as_str()
+    ));
     let completed = poll_state(&b.endpoint, &task_w, "completed").await;
     let turns = replies(&room_events(&b.journal).await);
     assert_eq!(turns.len(), 1);
@@ -1412,12 +1450,30 @@ async fn draft_resolutions_record_exactly_the_sending_turns() {
     let (ri_a, task_a) = ask(&mut sender, &mut state, &d, "approve me").await;
     let node_a = waiting_node(&d, &task_a).await;
     pending_card(&d, &node_a).await;
-    resolve(&mut operator, &node_a, PeerDraftAction::Approve).await;
+    let approval = resolve(&mut operator, &node_a, PeerDraftAction::Approve).await;
+    assert!(matches!(
+        &approval,
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Response,
+            target: RecipientActionTarget::Node { node_id },
+            outcome: RecipientActionOutcome::Applied {
+                reply: Some(receipt),
+            },
+        } if node_id == &node_a && receipt.item_id.as_str() == ri_a.as_str()
+    ));
     poll_state(&d.endpoint, &task_a, "completed").await;
     let (_, task_r) = ask(&mut sender, &mut state, &d, "reject me").await;
     let node_r = waiting_node(&d, &task_r).await;
     pending_card(&d, &node_r).await;
-    resolve(&mut operator, &node_r, PeerDraftAction::Reject).await;
+    let rejection = resolve(&mut operator, &node_r, PeerDraftAction::Reject).await;
+    assert!(matches!(
+        rejection,
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Response,
+            target: RecipientActionTarget::Node { node_id },
+            outcome: RecipientActionOutcome::Applied { reply: None },
+        } if node_id == node_r
+    ));
     let deadline = tokio::time::Instant::now() + SETTLE;
     while resolved(&room_events(&d.journal).await).len() < 2 {
         assert!(tokio::time::Instant::now() < deadline);
@@ -1458,7 +1514,7 @@ async fn a_refused_turn_leaves_the_card_pending_and_writes_nothing() {
     let (_, task) = ask(&mut sender, &mut state, &b, "question").await;
     let node = waiting_node(&b, &task).await;
     pending_card(&b, &node).await;
-    resolve(
+    let result = resolve(
         &mut operator,
         &node,
         PeerDraftAction::WriteOwn {
@@ -1467,8 +1523,14 @@ async fn a_refused_turn_leaves_the_card_pending_and_writes_nothing() {
     )
     .await;
     assert!(matches!(
-        next_answer(&mut operator).await,
-        DaemonFrame::Error(_)
+        result,
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Response,
+            target: RecipientActionTarget::Node { node_id: result_node },
+            outcome: RecipientActionOutcome::Refused {
+                error: ProtocolError::Internal(_),
+            },
+        } if result_node == node
     ));
     let rows = room_events(&b.journal).await;
     assert!(replies(&rows).is_empty());
@@ -1503,6 +1565,7 @@ async fn not_yours_is_byte_identical_to_never_existed() {
     b.journal
         .room
         .record_event(RoomEvent::RecipientItemReceived {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             address: foreign,
             task: "their-task".to_owned(),
             alias: None,
@@ -1796,7 +1859,17 @@ async fn a_reply_turn_passes_the_disclosure_scrub() {
     let (ri_q, task) = ask(&mut sender, &mut state, &b, "where is it?").await;
     let node = waiting_node(&b, &task).await;
     pending_card(&b, &node).await;
-    resolve(&mut operator, &node, PeerDraftAction::Approve).await;
+    let resolution = resolve(&mut operator, &node, PeerDraftAction::Approve).await;
+    assert!(matches!(
+        &resolution,
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Response,
+            target: RecipientActionTarget::Node { node_id },
+            outcome: RecipientActionOutcome::Applied {
+                reply: Some(receipt),
+            },
+        } if node_id == &node && receipt.item_id.as_str() == ri_q.as_str()
+    ));
     let completed = poll_state(&b.endpoint, &task, "completed").await;
     assert!(
         completed["result"]["status"]["message"]["parts"][0]["text"]
@@ -1828,8 +1901,8 @@ async fn a_reply_turn_passes_the_disclosure_scrub() {
 /// `M35` → RED: oldest-first (the newest turn is absent).
 #[tokio::test]
 async fn the_thread_read_is_bounded_and_the_newest_turns_win() {
-    use rustain::adapters::a2a::MAX_THREAD_TURNS;
     use rustain::domain::models::MAX_REPLY_BYTES;
+    use rustain::domain::services::recipient_thread_bounds::MAX_THREAD_TURNS;
 
     let mut b = Host::serve(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndAuto).await;
     let (mut operator, attach_shutdown) = attach_operator(&mut b).await;
@@ -1857,7 +1930,16 @@ async fn the_thread_read_is_bounded_and_the_newest_turns_win() {
     assert!(block.contains(&turns[2]));
     let recorded = replies(&room_events(&b.journal).await).len();
     let refused = operator_reply(&mut operator, &ri_q, &"x".repeat(MAX_REPLY_BYTES + 1)).await;
-    assert!(matches!(refused, DaemonFrame::Error(_)));
+    assert!(matches!(
+        &refused,
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Reply,
+            target: RecipientActionTarget::Item { item_id },
+            outcome: RecipientActionOutcome::Refused {
+                error: ProtocolError::Malformed(message),
+            },
+        } if item_id == &ri_q && message.contains("reply is longer than")
+    ));
     assert_eq!(replies(&room_events(&b.journal).await).len(), recorded);
 
     let (ri_c, _) = ask(&mut sender, &mut state, &b, "count me").await;
@@ -1910,7 +1992,19 @@ async fn one_act_records_one_turn_across_retries_and_restarts() {
 
     // (2) The turn lands, `PeerDraftResolved` fails.
     let frame = operator_reply(&mut operator, &ri_q, "the answer").await;
-    assert!(matches!(frame, DaemonFrame::Error(_)), "{frame:?}");
+    assert!(
+        matches!(
+            &frame,
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Reply,
+                target: RecipientActionTarget::Item { item_id },
+                outcome: RecipientActionOutcome::Refused {
+                    error: ProtocolError::Internal(_),
+                },
+            } if item_id == &ri_q
+        ),
+        "{frame:?}"
+    );
     assert_eq!(replies(&room_events(&b.journal).await).len(), 1);
     failing.store(false, std::sync::atomic::Ordering::SeqCst);
     for action in [
@@ -1922,13 +2016,19 @@ async fn one_act_records_one_turn_across_retries_and_restarts() {
         },
         PeerDraftAction::Reject,
     ] {
-        resolve(&mut operator, &node, action).await;
+        let result = resolve(&mut operator, &node, action).await;
         assert!(matches!(
-            next_answer(&mut operator).await,
-            DaemonFrame::Error(_)
+            result,
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Response,
+                target: RecipientActionTarget::Node { node_id },
+                outcome: RecipientActionOutcome::Refused {
+                    error: ProtocolError::Internal(_),
+                },
+            } if node_id == node
         ));
     }
-    resolve(
+    let retry = resolve(
         &mut operator,
         &node,
         PeerDraftAction::WriteOwn {
@@ -1936,6 +2036,16 @@ async fn one_act_records_one_turn_across_retries_and_restarts() {
         },
     )
     .await;
+    assert!(matches!(
+        &retry,
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Response,
+            target: RecipientActionTarget::Node { node_id },
+            outcome: RecipientActionOutcome::Applied {
+                reply: Some(receipt),
+            },
+        } if node_id == &node && receipt.item_id.as_str() == ri_q.as_str()
+    ));
     poll_state(&b.endpoint, &task, "completed").await;
     let rows = room_events(&b.journal).await;
     assert_eq!(replies(&rows).len(), 1, "no second turn");
@@ -1943,7 +2053,7 @@ async fn one_act_records_one_turn_across_retries_and_restarts() {
     attach_shutdown.cancel();
     drop(operator);
 
-    // (3) + (4) Restart with a pending card.
+    // Restart keeps the received item, not a live controller for its old task.
     let (ri_p, task_p) = ask(&mut sender, &mut state, &b, "after restart").await;
     let node_p = waiting_node(&b, &task_p).await;
     pending_card(&b, &node_p).await;
@@ -1957,17 +2067,7 @@ async fn one_act_records_one_turn_across_retries_and_restarts() {
         .collect();
     assert_eq!(for_p.len(), 1);
     assert_eq!(for_p[0].1.turn, rr);
-    assert_eq!(
-        for_p[0].1.via_node.as_deref(),
-        Some(node_p.as_str()),
-        "`M41`"
-    );
-    assert_eq!(
-        persisted_card(&b, &node_p).await.as_deref(),
-        Some("found the card"),
-        "the persisted card cleared"
-    );
-    resolve(
+    let retry = resolve(
         &mut operator,
         &node_p,
         PeerDraftAction::WriteOwn {
@@ -1975,7 +2075,14 @@ async fn one_act_records_one_turn_across_retries_and_restarts() {
         },
     )
     .await;
-    let _ = maybe_answer(&mut operator).await;
+    assert!(matches!(
+        retry,
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Response,
+            target: RecipientActionTarget::Node { node_id },
+            outcome: RecipientActionOutcome::Idempotent,
+        } if node_id == node_p
+    ));
     let rows = room_events(&b.journal).await;
     assert_eq!(
         replies(&rows)
@@ -1990,7 +2097,8 @@ async fn one_act_records_one_turn_across_retries_and_restarts() {
             .into_iter()
             .filter(|(_, node, _)| node == &node_p)
             .count(),
-        1
+        0,
+        "a direct human reply must not resurrect or resolve the pre-restart task"
     );
     attach_shutdown.cancel();
 }

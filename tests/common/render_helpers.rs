@@ -126,6 +126,8 @@ pub fn make_conversation(messages: Vec<ChatMessage>, turns: Vec<Turn>) -> Conver
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -144,6 +146,7 @@ pub fn make_msg(id: &str, role: MessageRole) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 

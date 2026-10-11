@@ -116,6 +116,8 @@ impl TabState {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
         let session_id = conversation.session_id.clone().unwrap_or_default();
         let session_meta = SessionMeta::from_conversation(&conversation);

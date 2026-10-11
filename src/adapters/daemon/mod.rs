@@ -37,6 +37,8 @@ mod procargs;
 #[cfg(unix)]
 pub mod protocol;
 #[cfg(unix)]
+pub mod recipient_context;
+#[cfg(unix)]
 pub(crate) mod response_modes;
 #[cfg(unix)]
 pub mod runtime;

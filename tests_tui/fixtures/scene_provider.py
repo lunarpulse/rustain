@@ -119,6 +119,15 @@ and ``"kind":"title"`` (the product's title call); any other path logs
 ``"kind":"unknown"`` + 404. A scene-turn row carries ``turn`` and no ``kind``, which
 is how a consumer selects the rows that are user turns.
 
+Story 19.19 scenes may opt into ``request_observations: {"needles": {"name":
+"fixture bytes"}}``: 1–32 names (<=64 UTF-8 bytes) and nonempty needles (<=4096
+bytes). Model-turn rows on either wire then include ``request_content_sha256``
+(complete sorted-key compact decoded JSON), ``composed_user_sha256`` (unclipped
+final user text), and ``needle_present`` booleans under ``request_observations``.
+Presence checks every decoded string value, including prior messages/system,
+not clipped ``last_user`` or escaped JSON. No registered needle text, raw system
+body or header value is logged; response selection and old scenes are unchanged.
+
 ⛔ No header values, no request bodies beyond ``last_user`` and the skill/tool
 names, no timestamps claimed as product-minted (the stub's clock is the shell's,
 not the binary's).
@@ -205,6 +214,32 @@ class Scene:
                     )
             self.turns[key] = body["turns"]
             self.wires[key] = wire
+        self.request_observations: dict[str, str] | None = None
+        if "request_observations" in doc:
+            observations = doc["request_observations"]
+            if not isinstance(observations, dict) or set(observations) != {"needles"}:
+                raise SceneError(f"{path}: 'request_observations' must contain only a 'needles' object")
+            needles = observations["needles"]
+            if not isinstance(needles, dict) or not needles or len(needles) > 32:
+                raise SceneError(f"{path}: request_observations.needles must be a non-empty object with at most 32 entries")
+            validated: dict[str, str] = {}
+            for name, needle in needles.items():
+                if not isinstance(name, str) or not name or not isinstance(needle, str) or not needle:
+                    raise SceneError(
+                        f"{path}: request observation names and needles must be non-empty UTF-8 strings"
+                    )
+                try:
+                    name_size = len(name.encode("utf-8"))
+                    needle_size = len(needle.encode("utf-8"))
+                except UnicodeEncodeError as exc:
+                    raise SceneError(f"{path}: request observation names and needles must be valid UTF-8") from exc
+                if name_size > 64 or needle_size > 4096:
+                    raise SceneError(
+                        f"{path}: request observation names must be at most 64 UTF-8 bytes "
+                        "and needles at most 4096 UTF-8 bytes"
+                    )
+                validated[name] = needle
+            self.request_observations = validated
 
         self._cursor: dict[str, int] = {key: 0 for key in self.turns}
         self._lock = threading.Lock()
@@ -589,6 +624,36 @@ def _last_user(body: dict) -> tuple[str, int]:
     return "", 0
 
 
+
+def _request_strings(value: object):
+    """Yield decoded string values anywhere in a parsed provider request."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _request_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _request_strings(child)
+
+
+def _request_observation(body: dict, composed_user: str, needles: dict[str, str] | None) -> dict | None:
+    """Return bounded, secret-free observations for an opted-in model turn."""
+    if needles is None:
+        return None
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    present = {name: False for name in needles}
+    for value in _request_strings(body):
+        for name, needle in needles.items():
+            if not present[name] and needle in value:
+                present[name] = True
+    return {
+        "request_content_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "composed_user_sha256": hashlib.sha256(composed_user.encode("utf-8")).hexdigest(),
+        "needle_present": present,
+    }
+
+
 SKILL_BLOCK = re.compile(
     r'^<skill name="([^"]+)" '
     r'source="(?:WorkspaceAgents|WorkspaceRustain|WorkspaceClaude|GlobalAgents)">\n'
@@ -827,24 +892,26 @@ class SceneHandler(BaseHTTPRequestHandler):
         else:
             number, turn, reason = self.scene.take_turn(persona, haystack)
 
-        self.log.write(
-            {
-                "method": "POST",
-                "path": self.path,
-                "persona": persona,
-                "auth": scheme,
-                "stream": bool(body.get("stream")),
-                "model": body.get("model", ""),
-                "turn": number,
-                "last_user": _clip(haystack, LAST_USER_MAX),
-                # Story 19.10 A7/review — names only; see both helpers.
-                "skills": _skill_names(body),
-                "tool_names": _tool_names(body),
-                "tools": len(body.get("tools") or []),
-                "tool_results": tool_results,
-                "desync": turn is None,
-            }
-        )
+        row = {
+            "method": "POST",
+            "path": self.path,
+            "persona": persona,
+            "auth": scheme,
+            "stream": bool(body.get("stream")),
+            "model": body.get("model", ""),
+            "turn": number,
+            "last_user": _clip(haystack, LAST_USER_MAX),
+            # Story 19.10 A7/review — names only; see both helpers.
+            "skills": _skill_names(body),
+            "tool_names": _tool_names(body),
+            "tools": len(body.get("tools") or []),
+            "tool_results": tool_results,
+            "desync": turn is None,
+        }
+        observation = _request_observation(body, haystack, self.scene.request_observations)
+        if observation is not None:
+            row["request_observations"] = observation
+        self.log.write(row)
 
         if turn is None:
             self.state.mark_failure()
@@ -937,23 +1004,24 @@ class SceneHandler(BaseHTTPRequestHandler):
             number, turn, reason = self.scene.take_turn(persona, haystack)
 
         model = str(body.get("model", ""))
-        self.log.write(
-            {
-                "method": "POST",
-                "path": self.path,
-                "persona": persona,
-                "auth": scheme,
-                "wire": WIRE_OPENAI,
-                "stream": bool(body.get("stream")),
-                "model": model,
-                "turn": number,
-                "last_user": _clip(haystack, LAST_USER_MAX),
-                "tools": len(body.get("tools") or []),
-                "tool_results": 0,
-                "desync": turn is None,
-            }
-        )
-
+        row = {
+            "method": "POST",
+            "path": self.path,
+            "persona": persona,
+            "auth": scheme,
+            "wire": WIRE_OPENAI,
+            "stream": bool(body.get("stream")),
+            "model": model,
+            "turn": number,
+            "last_user": _clip(haystack, LAST_USER_MAX),
+            "tools": len(body.get("tools") or []),
+            "tool_results": 0,
+            "desync": turn is None,
+        }
+        observation = _request_observation(body, haystack, self.scene.request_observations)
+        if observation is not None:
+            row["request_observations"] = observation
+        self.log.write(row)
         if turn is None:
             # There is no error frame in the OpenAI stream contract, so a desync
             # is a hard 400: `stream_completion` short-circuits on

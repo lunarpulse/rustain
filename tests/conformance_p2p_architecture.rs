@@ -300,9 +300,6 @@ fn p2p_ci_lane_names_the_current_targets() {
 //
 // * Story 19.13 retired the event-loop line-count/source-text test: it did
 //   not exercise behavior and failed on unrelated autocomplete dispatch;
-// * the operator copy stays honest — `conformance_p2p_ingress.rs`'s wording
-//   ceiling, whose `owned_modules` Story 18.4b extended to every module it
-//   added;
 // * the transport types stay out of the domain's authority and provenance
 //   models — `conformance_p2p_transport.rs::nfr74_…`.
 

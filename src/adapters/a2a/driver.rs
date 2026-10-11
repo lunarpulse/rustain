@@ -336,12 +336,13 @@ pub struct A2aDelegationRuntime {
     item_capability: ItemCapabilityKeyState,
 }
 
-/// Story 19.18c `PQ2` — one own dispatch row: whom it went to and, for an
-/// unpinned send, the digest of the roster origin it went to.
+/// One own task dispatch: peer/origin correlation and the optional human-text
+/// hash. Model-rail rows grant task capability but never an own-content label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnDispatch {
     peer: String,
     endpoint: Option<String>,
+    content_hash: Option<ContentHash>,
 }
 
 /// Story 19.18 — what the asker already knows about its threads.
@@ -349,8 +350,6 @@ struct OwnDispatch {
 struct ThreadLedger {
     /// `(peer identity, turn id)` of every `PeerReplyObserved` row.
     observed: std::collections::HashSet<(String, String)>,
-    /// `(peer identity, task, content hash)` of every text dispatch row.
-    dispatched: std::collections::HashSet<(String, String, ContentHash)>,
     /// Story 19.18c `A11` — task → every `DispatchAct::Task` row that sent
     /// it, the model rail's included (it carries no content hash).
     own_tasks: std::collections::HashMap<String, Vec<OwnDispatch>>,
@@ -391,16 +390,12 @@ impl ThreadLedger {
                         ..
                     },
                 ) => {
-                    if let Some(hash) = content_hash {
-                        ledger
-                            .dispatched
-                            .insert((peer.as_str().to_owned(), task.clone(), *hash));
-                    }
                     ledger.record_own(
                         task.clone(),
                         OwnDispatch {
                             peer: peer.as_str().to_owned(),
                             endpoint: endpoint.clone(),
+                            content_hash: *content_hash,
                         },
                     );
                 }
@@ -427,8 +422,8 @@ impl ThreadLedger {
 }
 
 /// Story 19.18c `PQ2` (B widened) — whether one dispatch row is this host's
-/// own send to alias `current`'s present binding. Pure; the sole production
-/// caller is the capability resolver ([`A2aDelegationRuntime::own_task_capability`]).
+/// own send to alias `current`'s present binding. Shared by the capability
+/// resolver and hash-checked own-content labeling.
 ///
 /// - A row with **no** `endpoint` (a pinned send, or a pre-19.18c row that
 ///   granted nothing): own iff its peer is the alias's current **pin** — a
@@ -439,7 +434,8 @@ impl ThreadLedger {
 ///
 /// ⚠ Disclosed: an unpinned alias re-pointed at another host, or reused for
 /// another peer, receives this host's capabilities for the old host's items;
-/// a rename AND a move together orphan them. Pinning removes both.
+/// a rename AND a move together orphan them. A later pin-add does not revoke
+/// correlation of historical endpoint-bearing rows for the same alias.
 pub(crate) fn dispatch_row_is_own(
     row_peer: &str,
     row_endpoint: Option<&str>,
@@ -776,14 +772,12 @@ impl A2aDelegationRuntime {
         // ledger was seeded is a `you` source and an own task too. Before
         // seeding, the seed reads this row from the journal.
         if let Some(ledger) = self.thread_ledger.lock().await.as_mut() {
-            ledger
-                .dispatched
-                .insert((peer.as_str().to_owned(), task.clone(), hash));
             ledger.record_own(
                 task,
                 OwnDispatch {
                     peer: peer.as_str().to_owned(),
                     endpoint,
+                    content_hash: Some(hash),
                 },
             );
         }
@@ -791,10 +785,10 @@ impl A2aDelegationRuntime {
     }
 
     /// Story 19.18 `AC6(b)`/`A13` — settle one served thread against the
-    /// asker's ledger. Returns, per turn, whether an item turn may render
-    /// `you`: its task AND its content hash must match a `(peer, task, hash)`
-    /// this host dispatched to THIS peer (`Q2`; a task match alone is
-    /// forgeable, `M42`). Every reply turn not yet observed is journaled
+    /// asker's ledger. An item is `you` only when task AND content hash match
+    /// this host's dispatch, with exact legacy peer or existing peer/origin
+    /// correlation. A task-only match is forgeable. Every unobserved reply
+    /// turn is journaled
     /// once as `PeerReplyObserved` (FR95), including across an asker restart
     /// — the ledger is seeded from the journal (`M23`). At most
     /// `MAX_THREAD_TURNS` rows per read (`P12`).
@@ -804,7 +798,14 @@ impl A2aDelegationRuntime {
         turns: &[ObservedTurn<'_>],
     ) -> Vec<bool> {
         let peer = spec.resolved_identity();
-        let endpoint = self.dispatch_endpoint(spec);
+        let origin_digest = self
+            .peer_binding(&spec.id)
+            .map(|(_, client)| client.origin_digest());
+        let endpoint = if spec.pinned_identity().is_some() {
+            None
+        } else {
+            origin_digest.as_deref()
+        };
         let Some(mut guard) = self.seeded_ledger().await else {
             return vec![false; turns.len()];
         };
@@ -817,11 +818,20 @@ impl A2aDelegationRuntime {
             match turn {
                 ObservedTurn::Item { task, content_hash } => {
                     mine.push(match (task, content_hash) {
-                        (Some(task), Some(hash)) => ledger.dispatched.contains(&(
-                            peer.as_str().to_owned(),
-                            (*task).to_owned(),
-                            *hash,
-                        )),
+                        (Some(task), Some(hash)) => {
+                            ledger.own_tasks.get(*task).is_some_and(|rows| {
+                                rows.iter().any(|row| {
+                                    row.content_hash == Some(*hash)
+                                        && (row.peer == peer.as_str()
+                                            || dispatch_row_is_own(
+                                                &row.peer,
+                                                row.endpoint.as_deref(),
+                                                spec,
+                                                origin_digest.as_deref(),
+                                            ))
+                                })
+                            })
+                        }
                         _ => false,
                     })
                 }
@@ -833,13 +843,16 @@ impl A2aDelegationRuntime {
                 } => {
                     mine.push(false);
                     let key = (peer.as_str().to_owned(), (*turn).to_owned());
-                    if ledger.observed.contains(&key) || journaled >= super::MAX_THREAD_TURNS {
+                    if ledger.observed.contains(&key)
+                        || journaled
+                            >= crate::domain::services::recipient_thread_bounds::MAX_THREAD_TURNS
+                    {
                         continue;
                     }
                     let appended = self
                         .emit_room(RoomEvent::PeerReplyObserved {
                             peer: peer.clone(),
-                            endpoint: endpoint.clone(),
+                            endpoint: endpoint.map(str::to_owned),
                             turn: (*turn).to_owned(),
                             answers: answers.map(str::to_owned),
                             content: content.map(str::to_owned),
@@ -849,9 +862,10 @@ impl A2aDelegationRuntime {
                     if appended.is_ok() {
                         journaled += 1;
                         if let Some(item) = answers {
-                            ledger
-                                .answers
-                                .insert(key.clone(), ((*item).to_owned(), endpoint.clone()));
+                            ledger.answers.insert(
+                                key.clone(),
+                                ((*item).to_owned(), endpoint.map(str::to_owned)),
+                            );
                         }
                         ledger.observed.insert(key);
                     }
@@ -1086,6 +1100,7 @@ impl A2aDelegationRuntime {
                 OwnDispatch {
                     peer: peer.as_str().to_owned(),
                     endpoint,
+                    content_hash: None,
                 },
             );
         }

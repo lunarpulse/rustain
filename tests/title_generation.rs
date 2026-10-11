@@ -118,6 +118,8 @@ fn make_conversation() -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -136,6 +138,7 @@ fn add_user_message(conv: &mut Conversation, content: &str) {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 }
 
@@ -380,6 +383,7 @@ fn test_no_title_generation_for_subsequent_turns() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 
     // Add another user message + assistant response (messages.len() will be 4)
@@ -443,6 +447,8 @@ fn test_title_guard_skips_when_title_exists() {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
 
     let trigger_title_generation = true;
@@ -466,6 +472,8 @@ fn test_title_guard_allows_when_title_empty() {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
 
     let trigger_title_generation = true;

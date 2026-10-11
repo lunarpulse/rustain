@@ -161,6 +161,7 @@ fn build_runtime(
         64,
     );
     Arc::new(DaemonTurnRuntime {
+        recipient_context: Arc::new(Default::default()),
         provider,
         app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
         security,

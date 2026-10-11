@@ -15,6 +15,9 @@ pub enum InputAction {
     Consumed,
     /// Event not handled by this focus mode.
     Ignored,
+    RecipientThreadPage {
+        earlier: bool,
+    },
     /// Enter pressed with this text (buffer already cleared by handle_input).
     SubmitMessage(String),
     /// User wants to exit.
@@ -478,9 +481,92 @@ fn feedback_action_to_input_action(action: crate::domain::models::FeedbackAction
     }
 }
 
+pub(crate) fn recipient_higher_confirmation_active(state: &TuiState) -> bool {
+    state.pending_plan_card.is_some()
+        || state.pending_delegation_card.is_some()
+        || state.pending_consolidation_card.is_some()
+        || state.pending_forget_card.is_some()
+        || state.task_panel_state.pending_deviation.is_some()
+        || state.task_panel_state.cancel_plan_confirm.is_some()
+        || state.task_panel_state.skip_cascade_pending.is_some()
+        || state.pending_permission.is_some()
+        || state.pending_feedback_input.is_some()
+        || state.pending_skill_trust.is_some()
+        || state.pending_plan_approval.is_some()
+        || state.pending_spawn_gate.is_some()
+        || matches!(state.focus, FocusState::Overlay(_))
+}
+
+/// Preserve raw key ownership before conversion discards modifiers and kind.
+pub(crate) fn recipient_surface_ignores_raw_key(
+    state: &TuiState,
+    event: &crossterm::event::Event,
+) -> bool {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+    if recipient_higher_confirmation_active(state) {
+        return false;
+    }
+    if state.recipient_surface.is_none() || state.focus != FocusState::Chat {
+        return false;
+    }
+    let Event::Key(key) = event else { return false };
+    key.kind != KeyEventKind::Press
+        || (!key.modifiers.is_empty()
+            && !(key.modifiers == KeyModifiers::CONTROL
+                && matches!(key.code, KeyCode::Char('c' | 'q'))))
+}
+
 /// Handle a domain input event by updating TUI state.
 /// Returns an InputAction telling the event loop what to do.
 pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
+    if state.recipient_surface.is_some()
+        && state.focus == FocusState::Chat
+        && !recipient_higher_confirmation_active(state)
+        && !matches!(event, DomainInputEvent::Resize(_, _))
+    {
+        match event {
+            DomainInputEvent::KeyPress('p')
+                if state
+                    .recipient_surface
+                    .as_ref()
+                    .is_some_and(|surface| surface.omitted_before > 0) =>
+            {
+                return InputAction::RecipientThreadPage { earlier: true };
+            }
+            DomainInputEvent::KeyPress('l')
+                if state
+                    .recipient_surface
+                    .as_ref()
+                    .is_some_and(|surface| surface.omitted_after > 0) =>
+            {
+                return InputAction::RecipientThreadPage { earlier: false };
+            }
+            DomainInputEvent::SpecialKey(DomainKey::Esc) => {
+                if let Some(surface) = state.recipient_surface.take() {
+                    state.focus = surface.prior_focus;
+                }
+            }
+            DomainInputEvent::SpecialKey(DomainKey::PageUp | DomainKey::PageDown) => {
+                if let Some(surface) = state.recipient_surface.as_mut() {
+                    surface.scroll_offset =
+                        if matches!(event, DomainInputEvent::SpecialKey(DomainKey::PageUp)) {
+                            surface
+                                .scroll_offset
+                                .saturating_sub(surface.viewport_rows.saturating_sub(1).max(1))
+                        } else {
+                            surface
+                                .scroll_offset
+                                .saturating_add(surface.viewport_rows.saturating_sub(1).max(1))
+                        };
+                }
+            }
+            DomainInputEvent::SpecialKey(DomainKey::CtrlC) => return InputAction::CancelOrQuit,
+            DomainInputEvent::SpecialKey(DomainKey::CtrlQ) => return InputAction::Quit,
+            _ => {}
+        }
+        state.needs_redraw = true;
+        return InputAction::Consumed;
+    }
     // Cancel pending chord leader on any event that isn't a character key or Ctrl+K.
     if !matches!(
         event,
@@ -3794,6 +3880,8 @@ pub fn convert_crossterm_event(
                 KeyCode::Left => Some(DomainInputEvent::SpecialKey(DomainKey::Left)),
                 KeyCode::Right => Some(DomainInputEvent::SpecialKey(DomainKey::Right)),
                 KeyCode::Home => Some(DomainInputEvent::SpecialKey(DomainKey::Home)),
+                KeyCode::PageUp => Some(DomainInputEvent::SpecialKey(DomainKey::PageUp)),
+                KeyCode::PageDown => Some(DomainInputEvent::SpecialKey(DomainKey::PageDown)),
                 KeyCode::End => Some(DomainInputEvent::SpecialKey(DomainKey::End)),
                 KeyCode::Tab => Some(DomainInputEvent::SpecialKey(DomainKey::Tab)),
                 KeyCode::BackTab => Some(DomainInputEvent::SpecialKey(DomainKey::ShiftTab)),
@@ -4145,6 +4233,115 @@ mod tests {
             handle_input(&mut state, &DomainInputEvent::KeyPress('q')),
             InputAction::Quit
         );
+    }
+    #[test]
+    fn story19_19_review_consolidation_keys_belong_to_confirmation() {
+        use crate::adapters::tui::state::{
+            RecipientSurface, RecipientSurfaceAccess, RecipientSurfaceTarget,
+        };
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        state.recipient_surface = Some(RecipientSurface {
+            target: RecipientSurfaceTarget::Item(
+                crate::domain::models::ItemAddress::from_a2a_ingress(
+                    crate::domain::models::PeerId::from_public_key(&[91; 32]).unwrap(),
+                    crate::domain::models::ItemId::from_replay("review-opened"),
+                ),
+            ),
+            access: RecipientSurfaceAccess::ReadOnly,
+            can_toggle_target: false,
+            root_id: Some("review-root".into()),
+            first_non_pinned_ordinal: Some(3),
+            last_non_pinned_ordinal: Some(7),
+            omitted_before: 3,
+            omitted_after: 0,
+            node_id: None,
+            item_state: Some("received"),
+            context_available: false,
+            context_selected: false,
+            prior_focus: FocusState::Sidebar {
+                panel: crate::domain::models::visual::PanelType::History,
+                selected: 2,
+            },
+            scroll_offset: 11,
+            viewport_rows: 20,
+            content: "reader body".into(),
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
+            cached_width: 0,
+            cached_lines: Vec::new(),
+            cached_header: Vec::new(),
+            cached_footer: Vec::new(),
+            cached_action_mask: 0,
+            results: Vec::new(),
+        });
+        state.pending_consolidation_card =
+            Some(crate::adapters::tui::state::PendingConsolidationCard {
+                conversation_id: "review-conversation".to_string(),
+                proposals: Vec::new(),
+            });
+        assert!(state.pending_forget_card.is_none());
+        for (key, expected) in [
+            ('y', InputAction::ConsolidateAcceptAll),
+            ('n', InputAction::ConsolidateDeclineAll),
+        ] {
+            let surface = state.recipient_surface.as_ref().unwrap();
+            let target = surface.target.clone();
+            let scroll = surface.scroll_offset;
+            let prior_focus = surface.prior_focus.clone();
+            let modified = crossterm::event::Event::Key(KeyEvent {
+                code: KeyCode::Char(key),
+                modifiers: KeyModifiers::ALT,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            });
+            assert!(!recipient_surface_ignores_raw_key(&state, &modified));
+            let event = crossterm::event::Event::Key(KeyEvent {
+                code: KeyCode::Char(key),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            });
+            assert_eq!(
+                convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default())
+                    .map(|input| handle_input(&mut state, &input)),
+                Some(expected),
+                "confirmation must own {key}"
+            );
+            let surface = state.recipient_surface.as_ref().unwrap();
+            match (&surface.target, &target) {
+                (RecipientSurfaceTarget::Item(actual), RecipientSurfaceTarget::Item(expected)) => {
+                    assert_eq!(actual, expected);
+                }
+                _ => panic!("confirmation changed the pinned reader target"),
+            }
+            assert_eq!(surface.scroll_offset, scroll);
+            assert_eq!(surface.prior_focus, prior_focus);
+        }
+        let _ = crate::adapters::tui::handlers::forget_command::handle_forget_command(
+            &mut state,
+            &"review".to_owned(),
+            "selected memory",
+            Some(Ok(vec![(
+                7,
+                crate::domain::models::MemoryEntry {
+                    timestamp: chrono::DateTime::parse_from_rfc3339("2026-10-09T00:00:00Z")
+                        .unwrap()
+                        .with_timezone(&chrono::Local),
+                    summary: "selected memory".to_owned(),
+                    context: None,
+                },
+            )])),
+        );
+        for (key, expected) in [
+            ('y', InputAction::ForgetAcceptAll),
+            ('n', InputAction::ForgetDeclineAll),
+        ] {
+            assert_eq!(
+                handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
+                expected,
+                "native forget confirmation must retain precedence over consolidation and reader"
+            );
+        }
     }
 
     /// AC2 expectation: the row either yields Quit or is a documented Skip

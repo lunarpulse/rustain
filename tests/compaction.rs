@@ -23,6 +23,8 @@ fn make_conversation_with_messages() -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
 
     // Add 3 user messages and 2 assistant messages (≥ 2 turns of history)
@@ -40,6 +42,7 @@ fn make_conversation_with_messages() -> Conversation {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
     conv.messages.push(ChatMessage {
         id: "m2".to_string(),
@@ -55,6 +58,7 @@ fn make_conversation_with_messages() -> Conversation {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
     conv.messages.push(ChatMessage {
         id: "m3".to_string(),
@@ -70,6 +74,7 @@ fn make_conversation_with_messages() -> Conversation {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
     conv.messages.push(ChatMessage {
         id: "m4".to_string(),
@@ -85,6 +90,7 @@ fn make_conversation_with_messages() -> Conversation {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
     conv.messages.push(ChatMessage {
         id: "m5".to_string(),
@@ -100,6 +106,7 @@ fn make_conversation_with_messages() -> Conversation {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 
     conv
@@ -174,6 +181,8 @@ fn test_first_kept_message_id_less_than_two_turns() {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
 
     // Only 1 user message
@@ -191,6 +200,7 @@ fn test_first_kept_message_id_less_than_two_turns() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 
     assert_eq!(compaction::first_kept_message_id(&conv), None);

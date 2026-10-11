@@ -67,6 +67,7 @@ fn make_msg(role: MessageRole, content: &str) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 
@@ -84,6 +85,8 @@ fn make_conv(messages: Vec<ChatMessage>) -> Conversation {
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -443,6 +446,7 @@ fn ac7_reject_appends_synthetic_message() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     };
     assert!(msg.synthetic);
     assert_eq!(msg.role, MessageRole::User);
@@ -602,6 +606,7 @@ fn ac10_export_renders_plan() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     };
 
     let mut plans = HashMap::new();
@@ -672,6 +677,7 @@ fn ac10_export_renders_multiple_plans_per_message() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     };
 
     let mut plans = HashMap::new();
@@ -738,6 +744,7 @@ fn ac10_search_indexes_plan() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     };
 
     let mut plans = HashMap::new();

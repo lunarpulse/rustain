@@ -29,7 +29,9 @@ use crate::domain::errors::AdapterCompositionError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     AppConfig, AssemblyBudget, ChannelKind, ChatMessage, CompletionOptions, ContextBudget,
-    Conversation, Message, MessageRole, SkillActivationSet, TurnOrigin, generate_message_id,
+    ContextBundle, ContextSource, Conversation, ItemAddress, Message, MessageRole,
+    ProvenancedEntry, Relevance, RetrievalMethod, SkillActivationSet, TurnOrigin,
+    generate_message_id,
 };
 use crate::domain::ports::{
     ContextAssemblerPort, ContextPort, MemoryPort, PersonaPort, SecurityPort, StoragePort,
@@ -146,6 +148,7 @@ impl DaemonCore {
 /// The live, connection-holding turn-driving bundle (built lazily). Mirrors the
 /// agent-side dependencies `LocalTurnDriver` holds, minus the TUI view-state.
 pub struct DaemonTurnRuntime {
+    pub recipient_context: Arc<super::recipient_context::RecipientContextState>,
     pub provider: Arc<dyn StreamingProvider>,
     pub app_config: Arc<ArcSwap<AppConfig>>,
     pub security: Arc<dyn SecurityPort>,
@@ -175,6 +178,119 @@ pub struct DaemonTurnRuntime {
     pub mcp_task_runtimes: Vec<Arc<crate::adapters::mcp::task_driver::McpTaskRuntime>>,
 }
 
+/// Temporarily presents only local-lineage history to the synchronous assembler.
+/// Removed elements remain owned here and are merged back by one linear pass on Drop.
+struct FilteredConversation<'a> {
+    conversation: &'a mut Conversation,
+    hidden_messages: Vec<(usize, ChatMessage)>,
+    hidden_turns: Vec<(usize, crate::domain::models::Turn)>,
+}
+
+impl<'a> FilteredConversation<'a> {
+    fn new(conversation: &'a mut Conversation) -> Self {
+        let hidden_messages = extract_hidden(&mut conversation.messages, |message| {
+            message.is_peer_display()
+        });
+        // Exact mirror ids retain known legacy lineage even when old Turns
+        // did not persist it. This is a join, never an id-prefix classifier.
+        let peer_ids: std::collections::HashSet<&str> = hidden_messages
+            .iter()
+            .map(|(_, message)| message.id.as_str())
+            .collect();
+        let hidden_turns = extract_hidden(&mut conversation.turns, |turn| {
+            turn.history_source == crate::domain::models::HistorySource::PeerDisplay
+                || peer_ids.contains(turn.id.0.as_str())
+        });
+        drop(peer_ids);
+        Self {
+            conversation,
+            hidden_messages,
+            hidden_turns,
+        }
+    }
+}
+
+impl Drop for FilteredConversation<'_> {
+    fn drop(&mut self) {
+        restore_hidden(
+            &mut self.conversation.messages,
+            std::mem::take(&mut self.hidden_messages),
+        );
+        restore_hidden(
+            &mut self.conversation.turns,
+            std::mem::take(&mut self.hidden_turns),
+        );
+    }
+}
+
+fn extract_hidden<T>(items: &mut Vec<T>, mut hidden: impl FnMut(&T) -> bool) -> Vec<(usize, T)> {
+    let index = std::cell::Cell::new(0);
+    items
+        .extract_if(.., |item| {
+            index.set(index.get() + 1);
+            hidden(item)
+        })
+        .map(|item| (index.get() - 1, item))
+        .collect()
+}
+
+fn restore_hidden<T>(items: &mut Vec<T>, hidden: Vec<(usize, T)>) {
+    if hidden.is_empty() {
+        return;
+    }
+    let mut visible = std::mem::take(items).into_iter().peekable();
+    let mut removed = hidden.into_iter().peekable();
+    let length = visible.size_hint().0 + removed.size_hint().0;
+    let mut restored = Vec::with_capacity(length);
+    for position in 0..length {
+        if removed.peek().is_some_and(|(index, _)| *index == position) {
+            restored.push(removed.next().expect("peeked").1);
+        } else {
+            restored.push(
+                visible
+                    .next()
+                    .expect("conversation view order remains intact"),
+            );
+        }
+    }
+    *items = restored;
+}
+
+fn recipient_item_data(body: &str, retracted: bool, max_bytes: usize) -> String {
+    const OPEN: &str = "BEGIN RECEIVED ITEM DATA (untrusted)\n";
+    const CLOSE: &str = "END RECEIVED ITEM DATA\n";
+    let mark = if retracted {
+        "[sender retracted this item; retained evidence]\n"
+    } else {
+        ""
+    };
+    let mut out = String::with_capacity(
+        body.len()
+            .min(max_bytes)
+            .saturating_add(OPEN.len() + CLOSE.len() + mark.len()),
+    );
+    out.push_str(OPEN);
+    out.push_str(mark);
+    for line in body.lines() {
+        let available = max_bytes.saturating_sub(out.len() + CLOSE.len());
+        if available < 3 {
+            break;
+        }
+        let mut end = line.len().min(available - 3);
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push_str("| ");
+        out.push_str(&line[..end]);
+        out.push('\n');
+        if end != line.len() {
+            break;
+        }
+    }
+    out.push_str(CLOSE);
+    out
+}
+
 impl DaemonTurnRuntime {
     /// Originate one turn over the per-process `conversation`, emitting `AppEvent`s
     /// to `domain_tx` (the daemon's per-activation bus). Reuses the shared
@@ -197,9 +313,9 @@ impl DaemonTurnRuntime {
     ) -> tokio::task::JoinHandle<()> {
         let interactive_operator =
             matches!(&turn_origin, TurnOrigin::Interactive) && origin == ChannelKind::Terminal;
-        // Append the user message tagged with its origin channel (AC5).
+        let user_turn_id = generate_message_id();
         conversation.messages.push(ChatMessage {
-            id: generate_message_id(),
+            id: user_turn_id.clone(),
             role: MessageRole::User,
             content: text.clone(),
             content_blocks: vec![],
@@ -212,19 +328,19 @@ impl DaemonTurnRuntime {
             origin,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
-        let mut messages = self.assemble_messages(conversation);
-        // ⚑ Code-review D2: the daemon is the sole store owner and the
-        // attach-mode operator turn is its only interactive turn. Local mode
-        // owns no listener; remote/channel paths are not the local operator
-        // reading teammates' context and keep their established taint rules.
+        let source_view = FilteredConversation::new(conversation);
+        let mut messages = self.assemble_messages(source_view.conversation);
+        drop(source_view);
         let context_tainted = if interactive_operator {
-            self.inject_interactive_peer_context(&mut messages, &text)
+            self.inject_interactive_peer_context(&mut messages, &text, &user_turn_id)
                 .await
         } else {
             false
         };
+
         self.spawn_turn(
             messages,
             conversation,
@@ -294,24 +410,83 @@ impl DaemonTurnRuntime {
     /// toggle hazard exists here. The same `ContextBundle::has_peer_origin`
     /// derivation feeds `run_turn`; peer-supplied taint remains structurally
     /// impossible (FR151 / 17.1b Vex rule).
-    async fn inject_interactive_peer_context(&self, messages: &mut [Message], text: &str) -> bool {
-        const CONTEXT_INJECTION_BUDGET_TOKENS: usize = 4096;
-
+    async fn inject_interactive_peer_context(
+        &self,
+        messages: &mut [Message],
+        text: &str,
+        turn_id: &str,
+    ) -> bool {
+        const SHARED_CONTEXT_BUDGET: usize = 4096;
         let context = self.context.load_full();
-        let bundle = match context
-            .assemble(text, ContextBudget::new(CONTEXT_INJECTION_BUDGET_TOKENS))
+        let mut bundle = match context
+            .assemble(text, ContextBudget::new(SHARED_CONTEXT_BUDGET))
             .await
         {
             Ok(bundle) => bundle,
             Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "daemon interactive context assemble failed — turn proceeds without peer context"
-                );
-                return false;
+                tracing::warn!(error = %error, "daemon interactive context assemble failed — selected items continue without local bundle");
+                ContextBundle::empty()
             }
         };
-        if let Some(prefix) = bundle.to_prefix() {
+
+        let mut prefix = bundle.to_prefix().unwrap_or_default();
+        let selected = self.recipient_context.selected().await;
+        let current =
+            super::recipient_context::resolve_current_items(&self.workspace, &selected).await;
+        for (item_id, item) in current {
+            let Some(item) = item else {
+                self.recipient_context.mark_unavailable(&item_id).await;
+                continue;
+            };
+            let source = ContextSource::RecipientItem {
+                principal: item.address.principal().clone(),
+                item: item.address.item().clone(),
+            };
+            let attribution = source.attribution();
+            let separator_bytes = usize::from(!prefix.is_empty());
+            let remaining_bytes = SHARED_CONTEXT_BUDGET
+                .saturating_mul(4)
+                .saturating_sub(prefix.len() + separator_bytes + attribution.len() + 1);
+            let empty_frame = recipient_item_data("", item.retracted, usize::MAX);
+            if remaining_bytes <= empty_frame.len() {
+                self.recipient_context
+                    .record_use(
+                        &item_id,
+                        super::recipient_context::RecipientContextInclusion::Skipped,
+                        0,
+                        turn_id,
+                    )
+                    .await;
+                continue;
+            }
+            let framed_bytes =
+                empty_frame.len() + item.body.lines().map(|line| line.len() + 3).sum::<usize>();
+            let inclusion = if framed_bytes <= remaining_bytes {
+                super::recipient_context::RecipientContextInclusion::Full
+            } else {
+                super::recipient_context::RecipientContextInclusion::Partial
+            };
+            let data = recipient_item_data(&item.body, item.retracted, remaining_bytes);
+            let cost = (separator_bytes + attribution.len() + 1 + data.len()) / 4;
+            let entry = ProvenancedEntry {
+                source,
+                content: Arc::<str>::from(data),
+                timestamp: 0,
+                retrieval_method: RetrievalMethod::Structural,
+                relevance: Relevance::Unscored,
+            };
+            if !prefix.is_empty() {
+                prefix.push('\n');
+            }
+            prefix.push_str(&attribution);
+            prefix.push(' ');
+            prefix.push_str(&entry.content);
+            bundle.entries.push(entry);
+            self.recipient_context
+                .record_use(&item_id, inclusion, cost, turn_id)
+                .await;
+        }
+        if !prefix.is_empty() {
             if let Some(target) = messages
                 .iter_mut()
                 .rev()
@@ -431,6 +606,9 @@ mod tests {
             ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 16);
         let sessions = crate::infrastructure::paths::sessions_dir(&workspace);
         Arc::new(DaemonTurnRuntime {
+            recipient_context: Arc::new(
+                crate::adapters::daemon::recipient_context::RecipientContextState::default(),
+            ),
             provider: Arc::new(NoOpProvider),
             app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
             security,
@@ -523,5 +701,62 @@ mod tests {
         let a = core.ensure_runtime().await.unwrap();
         let b = core.ensure_runtime().await.unwrap();
         assert!(Arc::ptr_eq(&a, &b), "OnceCell yields one shared runtime");
+    }
+
+    #[test]
+    fn filtered_assembler_view_restores_message_and_turn_order_during_unwind() {
+        use crate::domain::models::{HistorySource, Turn};
+        let local = ChatMessage {
+            id: "local".into(),
+            ..Default::default()
+        };
+        let mut peer = ChatMessage {
+            id: "peer".into(),
+            ..Default::default()
+        };
+        peer.history_source = HistorySource::PeerDisplay;
+        let local_turn = Turn::new(String::new(), 0);
+        let mut peer_turn = Turn::new(String::new(), 0);
+        let tail_turn = Turn::new(String::new(), 0);
+        peer_turn.history_source = HistorySource::PeerDisplay;
+        let mut conversation = Conversation {
+            messages: vec![
+                local.clone(),
+                peer.clone(),
+                ChatMessage {
+                    id: "tail".into(),
+                    ..Default::default()
+                },
+            ],
+            turns: vec![local_turn, peer_turn, tail_turn],
+            ..Default::default()
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let view = FilteredConversation::new(&mut conversation);
+            assert_eq!(view.conversation.messages.len(), 2);
+            assert_eq!(view.conversation.turns.len(), 2);
+            panic!("assembler unwind");
+        }));
+        assert!(result.is_err());
+        assert_eq!(
+            conversation
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["local", "peer", "tail"],
+        );
+        assert_eq!(
+            conversation
+                .turns
+                .iter()
+                .map(|turn| turn.history_source)
+                .collect::<Vec<_>>(),
+            [
+                HistorySource::Local,
+                HistorySource::PeerDisplay,
+                HistorySource::Local
+            ],
+        );
     }
 }

@@ -60,6 +60,19 @@ pub struct ImageReference {
     pub original_size: usize,
 }
 
+/// Host-owned lineage distinguishing ordinary local history from peer-display evidence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistorySource {
+    #[default]
+    Local,
+    PeerDisplay,
+}
+
+fn is_local_history_source(source: &HistorySource) -> bool {
+    *source == HistorySource::Local
+}
+
 /// Authorship provenance for a persisted conversation row.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -95,6 +108,9 @@ pub struct ChatMessage {
     /// Unix timestamp in seconds.
     pub created_at: i64,
     pub token_count: Option<u32>,
+    /// Host-owned distinction for peer-display history; Local remains legacy-compatible.
+    #[serde(default, skip_serializing_if = "is_local_history_source")]
+    pub history_source: HistorySource,
     /// Why this message's generation stopped. `None` for user messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
@@ -120,6 +136,13 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retracted_at_ms: Option<i64>,
 }
+impl ChatMessage {
+    /// Explicit or structurally retained legacy peer-display lineage.
+    pub fn is_peer_display(&self) -> bool {
+        self.history_source == HistorySource::PeerDisplay
+            || self.content_blocks.contains(&ContentBlockType::PeerText)
+    }
+}
 
 /// `skip_serializing_if` predicate: the `Terminal` default is omitted from JSON so
 /// pre-12.2b terminal-only session files round-trip byte-identically.
@@ -130,6 +153,60 @@ fn is_terminal_origin(origin: &super::channel_kind::ChannelKind) -> bool {
 /// Generate a unique message ID using nanoid.
 pub fn generate_message_id() -> String {
     nanoid::nanoid!()
+}
+
+/// Host-owned state for a persisted peer response row. Peer body text is never
+/// authoritative for the target, type, controller stage, or action capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PeerRowStage {
+    AwaitingOperator,
+    Drafting,
+    Ready,
+    Settled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerRowControl {
+    pub node_id: String,
+    pub item_address: Option<super::ItemAddress>,
+    pub message_type: super::SemanticMessageType,
+    pub sender_label: String,
+    pub stage: PeerRowStage,
+    /// Recomputed from the live controller when producing an attach snapshot.
+    pub node_resolvable: bool,
+}
+
+/// One committed mutation; revisions are host-owned and strictly increasing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "operation",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PeerRowOperation {
+    Upsert {
+        revision: u64,
+        message: ChatMessage,
+        control: Option<PeerRowControl>,
+    },
+    Remove {
+        revision: u64,
+        row_id: String,
+    },
+}
+
+impl PeerRowOperation {
+    pub const fn revision(&self) -> u64 {
+        match self {
+            Self::Upsert { revision, .. } | Self::Remove { revision, .. } => *revision,
+        }
+    }
+}
+
+fn peer_row_revision_is_zero(revision: &u64) -> bool {
+    *revision == 0
 }
 
 /// Persistable conversation data.
@@ -156,6 +233,10 @@ pub struct Conversation {
     pub plans: std::collections::HashMap<String, super::plan::Plan>,
     pub fork_source: Option<ForkSource>,
     pub compaction: Option<CompactionState>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub peer_row_controls: std::collections::BTreeMap<String, PeerRowControl>,
+    #[serde(default, skip_serializing_if = "peer_row_revision_is_zero")]
+    pub peer_row_revision: u64,
     // v0.5+: pub active_agent: Option<AgentDefinition>,
     // v1.0+: pub enabled_mcp_servers: Vec<String>,
     // v1.0+: pub external_context_paths: Vec<String>,
@@ -183,6 +264,12 @@ impl Conversation {
             .filter(|m| !m.content_blocks.is_empty())
             .map(|m| (m.id.clone(), m.content_blocks.clone()))
             .collect();
+        let old_sources: std::collections::HashSet<String> = self
+            .messages
+            .iter()
+            .filter(|m| m.is_peer_display())
+            .map(|m| m.id.clone())
+            .collect();
 
         // Build a map of existing assistant message indices by id for in-place replacement
         let msg_indices: std::collections::HashMap<String, usize> = self
@@ -197,7 +284,10 @@ impl Conversation {
         let mut processed_turn_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        for turn in &self.turns {
+        for turn in &mut self.turns {
+            if old_sources.contains(&turn.id.0) {
+                turn.history_source = HistorySource::PeerDisplay;
+            }
             if turn.role != MessageRole::Assistant {
                 continue;
             }
@@ -283,6 +373,7 @@ impl Conversation {
                 content_blocks: old_blocks.remove(&turn.id.0).unwrap_or_default(),
                 tool_calls,
                 created_at,
+                history_source: turn.history_source,
                 token_count: self.usage.as_ref().map(|u| u.output_tokens),
                 stop_reason: turn.stop_reason.clone(),
                 synthetic: false,
@@ -395,6 +486,10 @@ pub struct PersistedConversation {
     /// Defaults to `false` for forward compat (old files trigger recovery prompt — safe default).
     #[serde(default)]
     pub clean_exit: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub peer_row_controls: std::collections::BTreeMap<String, PeerRowControl>,
+    #[serde(default, skip_serializing_if = "peer_row_revision_is_zero")]
+    pub peer_row_revision: u64,
 }
 
 impl PersistedConversation {
@@ -416,6 +511,8 @@ impl PersistedConversation {
             usage: conv.usage.clone(),
             plans: conv.plans.clone(),
             compaction: conv.compaction.clone(),
+            peer_row_controls: conv.peer_row_controls.clone(),
+            peer_row_revision: conv.peer_row_revision,
             clean_exit,
         }
     }
@@ -434,6 +531,8 @@ impl PersistedConversation {
             plans: self.plans,
             fork_source: self.fork_source,
             compaction: self.compaction,
+            peer_row_controls: self.peer_row_controls,
+            peer_row_revision: self.peer_row_revision,
         };
 
         // Legacy-deserialization fallback: if `turns` is empty but `messages` is populated
@@ -475,6 +574,7 @@ mod tests {
             tool_calls: vec![],
             created_at: 1700000000,
             token_count: None,
+            history_source: HistorySource::Local,
             stop_reason: None,
             synthetic: false,
             images,
@@ -535,6 +635,9 @@ mod tests {
         let msg: ChatMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.id, "legacy-msg");
         assert!(msg.images.is_empty());
+        assert_eq!(msg.history_source, HistorySource::Local);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("historySource"));
     }
 
     // camelCase field names for ImageReference
@@ -638,6 +741,8 @@ mod tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
         let plan = Plan {
             id: "p1".to_string(),
@@ -669,6 +774,48 @@ mod tests {
         let back: PersistedConversation = serde_json::from_str(&json).unwrap();
         let restored = back.to_conversation();
         assert_eq!(restored.plans.get("p1"), Some(&plan));
+    }
+
+    #[test]
+    fn legacy_peer_text_remains_tainted_after_mirror_rebuild_and_persisted_restore() {
+        let mut conversation = Conversation {
+            id: "lineage".into(),
+            title: "lineage".into(),
+            messages: vec![ChatMessage {
+                id: "assistant-turn".into(),
+                content: "peer-authored".into(),
+                content_blocks: vec![ContentBlockType::PeerText],
+                ..Default::default()
+            }],
+            turns: vec![],
+            created_at: 0,
+            updated_at: 0,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            plans: Default::default(),
+            fork_source: None,
+            compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
+        };
+        let persisted = PersistedConversation::from_conversation(&conversation);
+        let restored = persisted.to_conversation();
+        assert_eq!(restored.turns[0].history_source, HistorySource::PeerDisplay);
+        conversation.turns = restored.turns;
+        conversation.rebuild_messages_mirror();
+        assert_eq!(conversation.messages[0].content, "peer-authored");
+        assert_eq!(
+            conversation.messages[0].history_source,
+            HistorySource::PeerDisplay
+        );
+
+        let ordinary = ChatMessage {
+            content: "ordinary".into(),
+            authorship: MessageAuthorship::AgentComposed,
+            ..Default::default()
+        };
+        assert!(!ordinary.is_peer_display());
     }
 
     #[test]

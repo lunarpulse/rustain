@@ -72,6 +72,7 @@ fn test_e2e_image_in_api_request() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
     // Build API messages
@@ -211,6 +212,7 @@ fn test_e2e_image_reference_stored() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
     // Message exists
@@ -247,6 +249,7 @@ fn test_e2e_copy_key_in_chat_focus() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
     // Press 'c' - action depends on implementation
@@ -289,6 +292,7 @@ fn test_e2e_copy_assistant_message() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
     // Verify message content available for copy

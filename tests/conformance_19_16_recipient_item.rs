@@ -1,6 +1,7 @@
+use rustain::adapters::policy::recipient_item::{JournalRecipientItemProjection, ThreadTurn};
 use rustain::domain::models::{
-    AgentId, ContentHash, DispatchAct, ItemAddress, ItemId, ItemPrincipal, PeerId, ReplyAuthorship,
-    ReplyTurnId, RoomEvent, TurnAddress,
+    AgentId, ContentHash, DispatchAct, ItemAddress, ItemId, ItemPrincipal, JournalEntry, PeerId,
+    ReplyAuthorship, ReplyKind, ReplyTurnId, RoomEvent, TurnAddress,
 };
 
 fn peer(seed: u8) -> PeerId {
@@ -12,6 +13,7 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
     let address = ItemAddress::from_a2a_ingress(peer(7), ItemId::from_replay("item-1"));
     let events = [
         RoomEvent::RecipientItemReceived {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             address: address.clone(),
             task: "sender-message-1".to_owned(),
             alias: None,
@@ -64,6 +66,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
     let content_hash = ContentHash::from_bytes([0x18; 32]);
 
     let received = RoomEvent::RecipientItemReceived {
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address: address.clone(),
         task: "follow-up-task".to_owned(),
         alias: Some("peer eighteen".to_owned()),
@@ -138,6 +141,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         answers: address.item().clone(),
         content: "durable answer".to_owned(),
         authorship: ReplyAuthorship::AgentComposed,
+        kind: ReplyKind::Answer,
         via_node: Some(AgentId::parse("reply-node").expect("valid reply node")),
     };
     let mut legacy_replied = serde_json::to_value(&replied).expect("serialize reply turn");
@@ -222,6 +226,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
     let address = ItemAddress::from_a2a_ingress(peer(21), ItemId::from_replay("ri_capable"));
     let hash = "ab".repeat(32);
     let received = RoomEvent::RecipientItemReceived {
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address: address.clone(),
         task: "rustain-1-00000000000000aa".to_owned(),
         alias: None,
@@ -239,6 +244,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
     );
 
     let legacy = RoomEvent::RecipientItemReceived {
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address: address.clone(),
         task: "sender-task".to_owned(),
         alias: None,
@@ -365,6 +371,7 @@ fn recipient_item_fold_replays_acknowledgement_and_is_idempotent() {
 
     let address = ItemAddress::from_a2a_ingress(peer(10), ItemId::from_replay("ri_replay"));
     let received = RoomEvent::RecipientItemReceived {
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address: address.clone(),
         task: "sender-task".to_owned(),
         alias: None,
@@ -418,6 +425,7 @@ fn replacing_from_the_journal_discards_an_in_memory_divergence() {
 
     let address = ItemAddress::from_a2a_ingress(peer(11), ItemId::from_replay("ri_refold"));
     let received = RoomEvent::RecipientItemReceived {
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address: address.clone(),
         task: "sender-task".to_owned(),
         alias: None,
@@ -458,6 +466,7 @@ fn find_by_task_binds_the_newest_item_when_a_message_id_is_resent() {
     let second =
         ItemAddress::from_a2a_ingress(principal_peer.clone(), ItemId::from_replay("ri_second"));
     let received = |address: ItemAddress| RoomEvent::RecipientItemReceived {
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address,
         task: "resent-message-id".to_owned(),
         alias: None,
@@ -479,6 +488,207 @@ fn find_by_task_binds_the_newest_item_when_a_message_id_is_resent() {
             .map(|item| item.address),
         Some(second),
         "a restarted task belongs to the newest execution's durable item"
+    );
+}
+
+#[test]
+fn received_semantic_type_survives_replay_without_trusting_body_claims() {
+    use rustain::adapters::policy::recipient_item::JournalRecipientItemProjection;
+    use rustain::domain::models::{RecipientItemState, SemanticMessageType};
+
+    let principal_peer = peer(19);
+    let legacy_address = ItemAddress::from_a2a_ingress(
+        principal_peer.clone(),
+        ItemId::from_replay("ri_untyped_legacy"),
+    );
+    let typed_address =
+        ItemAddress::from_a2a_ingress(principal_peer.clone(), ItemId::from_replay("ri_typed"));
+    let legacy_json = serde_json::json!({
+        "event": "recipient_item_received",
+        "address": legacy_address,
+        "task": "legacy-task",
+        "alias": null,
+        "content": "consultation: this is only a body claim"
+    });
+    let legacy: RoomEvent =
+        serde_json::from_value(legacy_json.clone()).expect("pre-type journal line replays");
+    assert_eq!(
+        serde_json::to_value(&legacy).expect("legacy serialization"),
+        legacy_json,
+        "default type must not change a pre-type record's serialized fields"
+    );
+    let typed: RoomEvent = serde_json::from_value(serde_json::json!({
+        "event": "recipient_item_received",
+        "address": typed_address,
+        "task": "typed-task",
+        "alias": null,
+        "message_type": "consultation",
+        "content": "bug_report: this contradicts the trusted type"
+    }))
+    .expect("typed journal line replays");
+    let persisted = serde_json::to_vec(&vec![entry(1, legacy), entry(2, typed)])
+        .expect("persist journal records");
+    let replayed: Vec<rustain::domain::models::JournalEntry> =
+        serde_json::from_slice(&persisted).expect("reload journal records");
+    let projection = JournalRecipientItemProjection::from_entries(&replayed);
+    let principal = ItemPrincipal::A2aPseudonym(principal_peer);
+    let legacy = projection
+        .find_by_task(&principal, "legacy-task")
+        .expect("legacy item survives projection");
+    let typed = projection
+        .find_by_task(&principal, "typed-task")
+        .expect("typed item survives projection");
+    assert_eq!(legacy.message_type, SemanticMessageType::Unknown);
+    assert_eq!(typed.message_type, SemanticMessageType::Consultation);
+    assert!(matches!(
+        typed.state,
+        RecipientItemState::Received { content }
+            if content == "bug_report: this contradicts the trusted type"
+    ));
+}
+
+#[test]
+fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
+    let principal = peer(41);
+    let address = ItemAddress::from_a2a_ingress(principal.clone(), ItemId::from_replay("ri_root"));
+    let root = RoomEvent::RecipientItemReceived {
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        address: address.clone(),
+        task: "task".to_owned(),
+        alias: None,
+        content: "question".to_owned(),
+        in_reply_to: None,
+        capability_hash: None,
+        reply_capability_matched: false,
+    };
+    let raw_reply = |id: &str| {
+        serde_json::to_value(RoomEvent::RecipientItemReplied {
+            address: TurnAddress::answering(&address, ReplyTurnId::from_replay(id)),
+            answers: address.item().clone(),
+            content: format!("body {id}"),
+            authorship: ReplyAuthorship::HumanWritten,
+            kind: ReplyKind::Answer,
+            via_node: None,
+        })
+        .expect("reply serializes")
+    };
+
+    let mut entries = vec![entry(1, root)];
+    let cases = [
+        (None, ReplyKind::Answer),
+        (
+            Some(serde_json::json!({"type":"defer","minutes":1})),
+            ReplyKind::Defer { minutes: 1 },
+        ),
+        (
+            Some(serde_json::json!({"type":"defer","minutes":65535})),
+            ReplyKind::Defer { minutes: u16::MAX },
+        ),
+        (
+            Some(serde_json::json!({"type":"future"})),
+            ReplyKind::Unknown,
+        ),
+        (
+            Some(serde_json::json!({"type":"defer"})),
+            ReplyKind::Unknown,
+        ),
+        (
+            Some(serde_json::json!({"type":"defer","minutes":null})),
+            ReplyKind::Unknown,
+        ),
+        (
+            Some(serde_json::json!({"type":"defer","minutes":"30"})),
+            ReplyKind::Unknown,
+        ),
+        (
+            Some(serde_json::json!({"type":"defer","minutes":0})),
+            ReplyKind::Unknown,
+        ),
+        (
+            Some(serde_json::json!({"type":"defer","minutes":-1})),
+            ReplyKind::Unknown,
+        ),
+        (
+            Some(serde_json::json!({"type":"defer","minutes":65536})),
+            ReplyKind::Unknown,
+        ),
+        (Some(serde_json::json!(null)), ReplyKind::Unknown),
+        (Some(serde_json::json!("defer")), ReplyKind::Unknown),
+    ];
+    let mut expected = Vec::new();
+    for (index, (kind, expected_kind)) in cases.into_iter().enumerate() {
+        let id = format!("rr_{index}");
+        let mut encoded = raw_reply(&id);
+        let object = encoded.as_object_mut().expect("event object");
+        if let Some(kind) = kind {
+            object.insert("kind".to_owned(), kind);
+        } else {
+            object.remove("kind");
+        }
+        let event: RoomEvent = serde_json::from_value(encoded).expect("kind cannot poison event");
+        entries.push(entry(index as u64 + 2, event));
+        expected.push(expected_kind);
+    }
+    let bytes = entries
+        .iter()
+        .map(|entry| serde_json::to_string(entry).expect("journal row encodes"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let replayed: Vec<JournalEntry> = bytes
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("journal row replays"))
+        .collect();
+    let projection = JournalRecipientItemProjection::from_entries(&replayed);
+    let (_, turns) = projection
+        .thread(
+            &rustain::domain::models::ItemScope::exact(ItemPrincipal::A2aPseudonym(principal)),
+            "ri_root",
+        )
+        .expect("complete thread remains");
+    let actual: Vec<_> = turns
+        .iter()
+        .filter_map(|turn| match turn {
+            ThreadTurn::Reply(reply) => Some(reply.kind),
+            ThreadTurn::Item(_) => None,
+        })
+        .collect();
+    assert_eq!(actual, expected);
+
+    let answer = serde_json::to_value(ReplyKind::Answer).expect("answer kind serializes");
+    assert_eq!(answer, serde_json::json!({"type":"answer"}));
+    assert_eq!(
+        serde_json::to_value(ReplyKind::Defer { minutes: 30 }).expect("defer serializes"),
+        serde_json::json!({"type":"defer","minutes":30})
+    );
+    let answer_event = serde_json::to_value(RoomEvent::RecipientItemReplied {
+        address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_default")),
+        answers: address.item().clone(),
+        content: "answer".to_owned(),
+        authorship: ReplyAuthorship::HumanWritten,
+        kind: ReplyKind::Answer,
+        via_node: None,
+    })
+    .expect("event serializes");
+    assert!(answer_event.get("kind").is_none(), "Answer remains omitted");
+
+    let deferred_event = serde_json::to_value(RoomEvent::RecipientItemReplied {
+        address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_defer")),
+        answers: address.item().clone(),
+        content: "Busy — defer 30m".to_owned(),
+        authorship: ReplyAuthorship::HumanWritten,
+        kind: ReplyKind::Defer { minutes: 30 },
+        via_node: None,
+    })
+    .expect("defer event serializes");
+    assert_eq!(
+        deferred_event["kind"],
+        serde_json::json!({"type":"defer","minutes":30})
+    );
+
+    assert_eq!(
+        serde_json::from_str::<ReplyKind>(r#"{"type":"defer","minutes":30,"minutes":31}"#)
+            .expect("duplicate field degrades safely"),
+        ReplyKind::Unknown
     );
 }
 

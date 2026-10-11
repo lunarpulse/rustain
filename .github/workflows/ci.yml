@@ -163,6 +163,7 @@ jobs:
             --test conformance_19_18d0_a2a_typed_policy_principal \
             --test conformance_19_18d_a2a_peer_binding \
             --test conformance_19_18e_a2a_task_continuity \
+            --test conformance_19_19_a2a_consultation \
             --test conformance_a2a_architecture \
             --test conformance_18_3c_response_modes \
             --test conformance_18_3a_c_artifacts \
@@ -362,6 +363,44 @@ jobs:
         run: pip install -e "./tests_tui[dev]"
 
       - name: Run non-API Python TUI tests
-        run: pytest tests_tui/ -m "not requires_api" -n auto --timeout=120 -v
+        run: pytest tests_tui/ -m "not requires_api and not a2a_binary" -n auto --timeout=120 -v
         env:
           RUST_LOG: debug
+
+  tui-act2:
+    name: Story 19.19 Executing Act 2
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build A2A release capture binary
+        run: cargo build --release --features a2a
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install native TUI capture dependencies
+        run: pip install -e "./tests_tui[dev]"
+      - name: Execute both named Act 2 viewports without reruns
+        env:
+          RUSTAIN_TUI_BINARY: ${{ github.workspace }}/target/release/rustain
+          RUSTAIN_CAPTURE_EVIDENCE_DIR: ${{ github.workspace }}/tests_tui/journeys/j10/receipts/evidence/${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          pytest tests_tui/test_story_19_19_act2_consultation.py::test_act2_consultation_adr_fanout \
+            -p no:rerunfailures -n 0 --timeout=420 --junitxml=act2-results.xml -v
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("act2-results.xml").findall(".//testcase")
+          expected = {"test_act2_consultation_adr_fanout[80]", "test_act2_consultation_adr_fanout[130]"}
+          assert {case.attrib["name"] for case in cases} == expected and len(cases) == 2, cases
+          assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required Act 2 case skipped/failed/errored"
+          PY
+      - name: Retain actual capture receipts, evidence, and named-case results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: story-19-19-act2
+          path: |
+            act2-results.xml
+            tests_tui/journeys/j10/receipts/evidence/${{ github.run_id }}-${{ github.run_attempt }}/**

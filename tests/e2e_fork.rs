@@ -44,6 +44,7 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 
@@ -73,6 +74,8 @@ fn make_conversation_5_messages() -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -263,6 +266,8 @@ fn test_e2e_fork_tab_manager_create_tab_with_conversation() {
             checkpoint_id: CheckpointId(0),
         }),
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let forked_id = forked_conv.id.clone();
 
@@ -719,6 +724,8 @@ async fn test_e2e_fork_empty_conversation_returns_error() {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let source_id = conv.id.clone();
     storage.save_conversation(&conv).await.unwrap();

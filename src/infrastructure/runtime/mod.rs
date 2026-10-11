@@ -7,6 +7,8 @@ pub mod attach_loop;
 pub mod event_bus;
 pub mod event_loop;
 pub mod peer_bridge;
+pub(crate) mod recipient_surface;
+pub mod recipient_view;
 pub mod room_bridge;
 pub mod transparency_bridge;
 pub mod turn;

@@ -2064,6 +2064,8 @@ impl StoragePort for FileSystemStorage {
                 checkpoint_id: checkpoint,
             }),
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
 
         // Collect unique image refs from the truncated range so we can hand a
@@ -2866,6 +2868,7 @@ mod tests {
                     origin: crate::domain::models::ChannelKind::Terminal,
                     authorship: Default::default(),
                     retracted_at_ms: None,
+                    history_source: Default::default(),
                 },
                 ChatMessage {
                     id: "msg-test-002".to_string(),
@@ -2881,6 +2884,7 @@ mod tests {
                     origin: crate::domain::models::ChannelKind::Terminal,
                     authorship: Default::default(),
                     retracted_at_ms: None,
+                    history_source: Default::default(),
                 },
             ],
             created_at: 1700000000,
@@ -2898,6 +2902,8 @@ mod tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         }
     }
 
@@ -4017,6 +4023,7 @@ mod tests {
                     origin: crate::domain::models::ChannelKind::Terminal,
                     authorship: Default::default(),
                     retracted_at_ms: None,
+                    history_source: Default::default(),
                 },
                 ChatMessage {
                     id: "msg-2".to_string(),
@@ -4032,6 +4039,7 @@ mod tests {
                     origin: crate::domain::models::ChannelKind::Terminal,
                     authorship: Default::default(),
                     retracted_at_ms: None,
+                    history_source: Default::default(),
                 },
                 ChatMessage {
                     id: "msg-3".to_string(),
@@ -4047,6 +4055,7 @@ mod tests {
                     origin: crate::domain::models::ChannelKind::Terminal,
                     authorship: Default::default(),
                     retracted_at_ms: None,
+                    history_source: Default::default(),
                 },
             ],
             created_at: 1700000000,
@@ -4058,6 +4067,8 @@ mod tests {
             plans,
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
 
         storage.save_conversation(&source).await.unwrap();
@@ -4147,6 +4158,7 @@ mod tests {
                     origin: crate::domain::models::ChannelKind::Terminal,
                     authorship: Default::default(),
                     retracted_at_ms: None,
+                    history_source: Default::default(),
                 },
                 ChatMessage {
                     id: "msg-2".to_string(),
@@ -4162,6 +4174,7 @@ mod tests {
                     origin: crate::domain::models::ChannelKind::Terminal,
                     authorship: Default::default(),
                     retracted_at_ms: None,
+                    history_source: Default::default(),
                 },
                 ChatMessage {
                     id: "msg-3".to_string(),
@@ -4177,6 +4190,7 @@ mod tests {
                     origin: crate::domain::models::ChannelKind::Terminal,
                     authorship: Default::default(),
                     retracted_at_ms: None,
+                    history_source: Default::default(),
                 },
             ],
             created_at: 1700000000,
@@ -4188,6 +4202,8 @@ mod tests {
             plans,
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
 
         storage.save_conversation(&conv).await.unwrap();

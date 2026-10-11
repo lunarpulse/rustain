@@ -36,6 +36,7 @@ fn user(id: &str, content: &str) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 
@@ -54,6 +55,7 @@ fn assistant(id: &str, content: &str, tool_calls: Vec<ToolCallInfo>) -> ChatMess
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 
@@ -72,6 +74,7 @@ fn assistant_thinking(id: &str, content: &str, thinking: &str) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 

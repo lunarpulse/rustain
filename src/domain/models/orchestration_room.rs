@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::models::NodeOrigin;
+use crate::domain::models::SemanticMessageType;
 use crate::domain::models::agent_id::AgentId;
 use crate::domain::models::approval::ApprovalOutcome;
 use crate::domain::models::artifact::{
@@ -18,7 +19,9 @@ use crate::domain::models::node_state::NodeState;
 use crate::domain::models::peer_frame::FrameRefusal;
 use crate::domain::models::peer_identity::PeerId;
 use crate::domain::models::policy_principal::PrincipalKind;
-use crate::domain::models::recipient_item::{ItemAddress, ItemId, ReplyAuthorship, TurnAddress};
+use crate::domain::models::recipient_item::{
+    ItemAddress, ItemId, ReplyAuthorship, ReplyKind, TurnAddress,
+};
 use crate::domain::models::room_role::RoomRole;
 use crate::domain::models::team_policy::{InteractionPolicySnapshot, NotificationUrgency};
 use crate::domain::models::ticket_addressee::TicketAddressee;
@@ -910,6 +913,9 @@ pub enum RoomEvent {
         /// Optional display attribution, not identity.
         #[serde(default)]
         alias: Option<String>,
+        /// Verified semantic type carried at ingress, independent of body text.
+        #[serde(default, skip_serializing_if = "SemanticMessageType::is_unknown")]
+        message_type: SemanticMessageType,
         content: String,
         /// Story 19.18 `A5` — the item or reply-turn id this follow-up
         /// answers, carried by `x-rustain-in-reply-to` and stored raw
@@ -1014,6 +1020,10 @@ pub enum RoomEvent {
         /// Carried from the act that authored the turn (`A14`).
         #[serde(default)]
         authorship: ReplyAuthorship,
+        /// Whether the turn is an answer, a reported defer, or an unknown
+        /// future kind. Older journal rows default to Answer.
+        #[serde(default, skip_serializing_if = "ReplyKind::is_answer")]
+        kind: ReplyKind,
         /// The peer-response node whose card this turn resolved (`Q1`): the
         /// journal — not the draft controller — enforces one turn per node.
         #[serde(default, skip_serializing_if = "Option::is_none")]

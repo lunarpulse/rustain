@@ -48,6 +48,12 @@ pub struct RawEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RawEventKind {
     Provider(StreamChunk),
+    /// Same permitted live display, with host-owned peer-history lineage.
+    PeerProvider(StreamChunk),
+    PeerSystemNotice {
+        level: NoticeLevel,
+        message: String,
+    },
     ModeChanged(PermissionMode),
     SystemNotice {
         level: NoticeLevel,
@@ -164,6 +170,37 @@ impl RawEvent {
                 conversation_id: Some(conversation_id.clone()),
                 timestamp_ms: now,
                 kind: RawEventKind::Provider(chunk.clone()),
+            },
+            AppEvent::PeerProviderChunk {
+                conversation_id,
+                chunk,
+                ..
+            } => RawEvent {
+                conversation_id: Some(conversation_id.clone()),
+                timestamp_ms: now,
+                kind: RawEventKind::PeerProvider(chunk.clone()),
+            },
+            AppEvent::PeerTurnClosed {
+                conversation_id, ..
+            } => RawEvent {
+                conversation_id: Some(conversation_id.clone()),
+                timestamp_ms: now,
+                kind: RawEventKind::PeerProvider(StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::Cancelled,
+                }),
+            },
+            AppEvent::PeerSystemNotice {
+                conversation_id,
+                level,
+                message,
+                ..
+            } => RawEvent {
+                conversation_id: conversation_id.clone(),
+                timestamp_ms: now,
+                kind: RawEventKind::PeerSystemNotice {
+                    level: *level,
+                    message: message.clone(),
+                },
             },
             AppEvent::SetPermissionMode(mode) => RawEvent {
                 conversation_id: None,

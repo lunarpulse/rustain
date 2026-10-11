@@ -46,12 +46,6 @@ pub const REPLY_CAPABILITY_METADATA_KEY: &str = "x-rustain-reply-capability";
 /// Side-effect free; one operator act on one item, ⛔ never a poll.
 #[cfg(feature = "a2a")]
 pub const ITEMS_THREAD_METHOD: &str = "x-rustain-items/thread";
-/// Story 19.18 `AC4(d)`/`P12` — most turns one thread read carries, root
-/// included: the served side's cap and the asker's distrust bound, one
-/// number. A thread is a conversation an operator reads in chat; past this
-/// the newest turns win and the cut is stated.
-#[cfg(feature = "a2a")]
-pub const MAX_THREAD_TURNS: usize = 50;
 
 pub mod config;
 

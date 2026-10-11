@@ -30,6 +30,14 @@ pub enum SemanticMessageType {
 }
 
 impl SemanticMessageType {
+    /// Whether this value carries no recognised semantic message type.
+    #[must_use]
+    pub const fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+impl SemanticMessageType {
     const KNOWN: [Self; 8] = [
         Self::Consultation,
         Self::StoryAssignment,

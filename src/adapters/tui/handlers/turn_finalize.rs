@@ -67,6 +67,7 @@ pub fn finalize_streaming_turn(
             origin: ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
     }
 

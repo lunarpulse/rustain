@@ -30,6 +30,8 @@ fn make_conversation() -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -89,6 +91,7 @@ fn test_e2e_message_to_streaming_response() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 
     // Start streaming (typing indicator phase)

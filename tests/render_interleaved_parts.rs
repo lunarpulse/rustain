@@ -33,6 +33,8 @@ fn make_conversation(messages: Vec<ChatMessage>, turns: Vec<Turn>) -> Conversati
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -68,6 +70,7 @@ fn make_msg(id: &str, role: MessageRole) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 
@@ -233,6 +236,7 @@ fn user_message_renders_without_gutter() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     };
     let conv = make_conversation(vec![um], vec![]);
     let clock = MockClock::at_wall_ms(1_700_000_000_000);

@@ -29,6 +29,8 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -89,6 +91,7 @@ fn test_chat_pane_shows_user_message() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -140,6 +143,7 @@ fn test_chat_pane_shows_assistant_message() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -276,6 +280,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }]);
     let streaming = StreamingState {
         is_streaming: true,
@@ -340,6 +345,7 @@ fn test_chat_pane_error_displays_in_red() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -453,7 +459,7 @@ fn test_feedback_block_visible_with_auto_scroll() {
             role: MessageRole::User,
             content: format!(
                 "User message {
-        }",
+                }",
                 i
             ),
             content_blocks: vec![],
@@ -465,6 +471,7 @@ fn test_feedback_block_visible_with_auto_scroll() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         })
         .collect();
     let conversation = make_conversation(messages);
@@ -553,6 +560,7 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -737,6 +745,7 @@ fn bare_message(id: &str, role: MessageRole, content: &str) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 

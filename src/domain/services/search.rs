@@ -157,6 +157,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         }
     }
 
@@ -174,6 +175,8 @@ mod tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         }
     }
 
@@ -331,6 +334,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         };
 
         let mut plans = std::collections::HashMap::new();

@@ -746,6 +746,8 @@ pub async fn run_ask_core(
             plans: Default::default(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         }
     };
 
@@ -770,6 +772,7 @@ pub async fn run_ask_core(
         origin: crate::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 
     let messages = message_builder::build_api_messages(&conversation);
@@ -1105,6 +1108,7 @@ pub async fn run_ask_core(
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
         conversation.updated_at = now_unix();
         conversation.last_response_at = Some(now_unix());

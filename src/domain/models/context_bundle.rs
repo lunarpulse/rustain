@@ -120,9 +120,15 @@ pub enum ContextSource {
     /// verified or authenticated. Every entry carrying this source is tainted
     /// by construction — see [`ContextBundle::has_peer_origin`].
     ///
-    /// The identity is a [`crate::domain::models::PeerId`] and ⛔ never a
+    /// The identity is a [`crate::domain::models::PeerId`] and never a
     /// transport identifier (NFR74).
     Peer(crate::domain::models::PeerId),
+    ///
+    /// Explicitly adopted received item body; unlike `Peer`, this is not a signed handle.
+    RecipientItem {
+        principal: crate::domain::models::ItemPrincipal,
+        item: crate::domain::models::ItemId,
+    },
 }
 
 impl ContextSource {
@@ -136,6 +142,9 @@ impl ContextSource {
             ContextSource::Recall(provider) => format!("[recall: {provider}]"),
             ContextSource::Group(n) => format!("[group: {n}]"),
             ContextSource::Peer(peer) => format!("[peer: {}]", peer.as_str()),
+            ContextSource::RecipientItem { principal, item } => {
+                format!("[recipient-item: {principal:?}/{}]", item.as_str())
+            }
         }
     }
 
@@ -161,6 +170,7 @@ impl ContextSource {
             ContextSource::Recall(_) => 2,
             ContextSource::Group(_) => 3,
             ContextSource::Peer(_) => 4,
+            ContextSource::RecipientItem { .. } => 5,
         }
     }
 
@@ -187,7 +197,10 @@ impl ContextSource {
     /// `ContextSource::Peer(..)` already implies. 17.2a's landmine list says the
     /// same of `ProvenanceTag` — reuse, do not redefine.
     pub fn is_peer_origin(&self) -> bool {
-        matches!(self, ContextSource::Peer(_))
+        matches!(
+            self,
+            ContextSource::Peer(_) | ContextSource::RecipientItem { .. }
+        )
     }
 }
 
@@ -372,6 +385,18 @@ mod tests {
         // ⚑ The dedup class is a SECURITY property: a peer entry must never
         // collide with (and so never evict) a local memory row.
         assert_ne!(ContextSource::Peer(peer).dedup_class(), 0);
+        let item_source = ContextSource::RecipientItem {
+            principal: crate::domain::models::ItemPrincipal::Unknown,
+            item: crate::domain::models::ItemId::from_replay("ri_context_source"),
+        };
+        assert!(item_source.is_peer_origin());
+        assert_ne!(
+            item_source.dedup_class(),
+            ContextSource::Peer(
+                crate::domain::models::PeerId::from_public_key(&[9u8; 32]).unwrap()
+            )
+            .dedup_class()
+        );
     }
 
     #[test]

@@ -229,12 +229,20 @@ pub struct Turn {
     /// becomes the sole role discriminator — it is not a legacy holdover.
     #[serde(default, skip_serializing_if = "is_default_role")]
     pub role: MessageRole,
+    /// Host-owned lineage for peer-display history; absent fields mean local history.
+    #[serde(default, skip_serializing_if = "is_local_history_source")]
+    pub history_source: super::conversation::HistorySource,
+
     /// Stop reason from the model (set on TurnComplete).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<super::stream::StopReason>,
     /// Turn-local counter; not persisted.
     #[serde(skip)]
     next_part_id: u64,
+}
+
+fn is_local_history_source(source: &super::conversation::HistorySource) -> bool {
+    *source == super::conversation::HistorySource::Local
 }
 
 fn is_default_role(r: &MessageRole) -> bool {
@@ -250,6 +258,7 @@ impl Turn {
             started_at,
             model,
             role: MessageRole::Assistant,
+            history_source: super::conversation::HistorySource::Local,
             stop_reason: None,
             next_part_id: 0,
         }
@@ -325,6 +334,11 @@ pub fn tool_call_id_for(turn_id: &TurnId, pid: PartId) -> String {
 /// - `started_at` is `msg.created_at * 1000` (seconds → millis).
 pub fn migrate_chat_message_to_turn(msg: &ChatMessage) -> Turn {
     let mut turn = Turn::new(String::new(), msg.created_at.saturating_mul(1000));
+    turn.history_source = if msg.is_peer_display() {
+        super::conversation::HistorySource::PeerDisplay
+    } else {
+        msg.history_source
+    };
 
     // Prose part (only if content is non-empty)
     if !msg.content.is_empty() {
@@ -472,6 +486,36 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn legacy_peer_text_migration_and_turn_restore_retain_lineage() {
+        use crate::domain::models::{ChatMessage, ContentBlockType, HistorySource};
+
+        let peer = ChatMessage {
+            id: "ordinary-id".into(),
+            content: "peer body".into(),
+            content_blocks: vec![ContentBlockType::PeerText],
+            ..Default::default()
+        };
+        assert!(peer.is_peer_display());
+        let migrated = migrate_chat_message_to_turn(&peer);
+        assert_eq!(migrated.history_source, HistorySource::PeerDisplay);
+        let restored: Turn =
+            serde_json::from_str(&serde_json::to_string(&migrated).unwrap()).unwrap();
+        assert_eq!(restored.history_source, HistorySource::PeerDisplay);
+
+        let local = ChatMessage {
+            id: "peer-response-prefix-is-not-authority".into(),
+            content: "[peer response] ordinary local text".into(),
+            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            ..Default::default()
+        };
+        assert!(!local.is_peer_display());
+        assert_eq!(
+            migrate_chat_message_to_turn(&local).history_source,
+            HistorySource::Local
+        );
+    }
+
+    #[test]
     fn migrate_text_only_message_yields_one_prose_part() {
         let msg = ChatMessage {
             id: "msg-1".into(),
@@ -487,6 +531,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         };
         let turn = migrate_chat_message_to_turn(&msg);
         assert_eq!(turn.parts.len(), 1);
@@ -522,6 +567,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         };
         let turn = migrate_chat_message_to_turn(&msg);
         assert_eq!(turn.parts.len(), 3);
@@ -560,6 +606,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         };
         let turn = migrate_chat_message_to_turn(&msg);
         assert!(matches!(
@@ -595,6 +642,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         };
         let turn = migrate_chat_message_to_turn(&msg);
         // No prose part because content is empty, but invocation part exists

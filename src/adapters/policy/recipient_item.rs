@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::domain::models::{
     AgentId, ItemAddress, ItemPrincipal, ItemScope, JournalEntry, JournalRecord,
-    RecipientItemState, RecipientItemView, ReplyTurnView, RoomEvent, TurnAddress,
+    RecipientItemState, RecipientItemView, ReplyKind, ReplyTurnView, RoomEvent, TurnAddress,
 };
 
 // The single-writer ratchet's counter is **per thread**, deliberately.
@@ -63,6 +63,18 @@ impl RecipientItemSnapshot {
             .max()
             .map_or(0, |max| max + 1)
     }
+
+    pub(crate) fn find_by_id(&self, id: &str) -> Option<&RecipientItemView> {
+        let mut matches = self
+            .items
+            .values()
+            .filter(|item| item.address.item().as_str() == id);
+        let found = matches.next();
+        if matches.next().is_some() {
+            return None;
+        }
+        found
+    }
 }
 
 /// One turn of a served thread (Story 19.18 `AC4(b)`): an item (the root or
@@ -91,6 +103,37 @@ impl ThreadTurn {
     }
 }
 
+/// Borrowed member of a single folded recipient thread.
+#[derive(Clone, Copy)]
+pub(crate) enum ThreadTurnRef<'a> {
+    Item(&'a RecipientItemView),
+    Reply(&'a ReplyTurnView),
+}
+
+impl ThreadTurnRef<'_> {
+    #[must_use]
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            Self::Item(item) => item.address.item().as_str(),
+            Self::Reply(turn) => turn.address.turn().as_str(),
+        }
+    }
+
+    fn to_owned(self) -> ThreadTurn {
+        match self {
+            Self::Item(item) => ThreadTurn::Item(item.clone()),
+            Self::Reply(turn) => ThreadTurn::Reply(turn.clone()),
+        }
+    }
+
+    fn journal_order(self) -> u64 {
+        match self {
+            Self::Item(item) => item.journal_order,
+            Self::Reply(turn) => turn.journal_order,
+        }
+    }
+}
+
 /// Story 19.18c `A8` — what the served checks need of an id's nearest item:
 /// its capability class. ⛔ No content, so a lookup never clones a body.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,31 +143,9 @@ pub struct NearestItem {
 }
 
 #[derive(Clone, Copy)]
-enum ThreadMemberRef<'a> {
-    Item(&'a RecipientItemView),
-    Reply(&'a ReplyTurnView),
-}
-
-impl<'a> ThreadMemberRef<'a> {
-    fn journal_order(self) -> u64 {
-        match self {
-            Self::Item(item) => item.journal_order,
-            Self::Reply(turn) => turn.journal_order,
-        }
-    }
-
-    fn to_thread_turn(self) -> ThreadTurn {
-        match self {
-            Self::Item(item) => ThreadTurn::Item(item.clone()),
-            Self::Reply(turn) => ThreadTurn::Reply(turn.clone()),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
 struct ThreadIndexNode<'a> {
     parent: Option<&'a str>,
-    member: ThreadMemberRef<'a>,
+    member: ThreadTurnRef<'a>,
 }
 
 #[derive(Clone, Copy)]
@@ -311,16 +332,7 @@ impl JournalRecipientItemProjection {
 
     #[must_use]
     pub fn find_by_id(&self, id: &str) -> Option<RecipientItemView> {
-        let snapshot = self.snapshot.load();
-        let mut matches = snapshot
-            .items
-            .values()
-            .filter(|item| item.address.item().as_str() == id);
-        let found = matches.next().cloned();
-        if matches.next().is_some() {
-            return None;
-        }
-        found
+        self.snapshot.load().find_by_id(id).cloned()
     }
 
     /// The item a restart's reconcile re-binds a task to, or `None`.
@@ -510,7 +522,22 @@ impl JournalRecipientItemProjection {
     /// edges (minted by this host's operator) always count.
     #[must_use]
     pub fn thread(&self, scope: &ItemScope, id: &str) -> Option<(String, Vec<ThreadTurn>)> {
-        let snapshot = self.snapshot.load();
+        let snapshot = self.snapshot.load_full();
+        let (root, turns) = Self::thread_in_snapshot(&snapshot, scope, id)?;
+        Some((
+            root,
+            turns.into_iter().map(ThreadTurnRef::to_owned).collect(),
+        ))
+    }
+
+    /// Borrowed thread view for bounded local readers. The caller retains the
+    /// snapshot Arc for the returned references' lifetime; no turn bodies are
+    /// cloned while applying page bounds.
+    pub(crate) fn thread_in_snapshot<'a>(
+        snapshot: &'a RecipientItemSnapshot,
+        scope: &ItemScope,
+        id: &str,
+    ) -> Option<(String, Vec<ThreadTurnRef<'a>>)> {
         let items: HashMap<&str, &RecipientItemView> = snapshot
             .items
             .values()
@@ -523,7 +550,6 @@ impl JournalRecipientItemProjection {
             .filter(|turn| scope.contains(turn.address.principal()))
             .map(|turn| (turn.address.turn().as_str(), turn.answers.as_str()))
             .collect();
-        // The capability class of a reference's nearest item (`A8`).
         let nearest_class = |reference: &str| {
             items
                 .get(reference)
@@ -534,7 +560,6 @@ impl JournalRecipientItemProjection {
         for (&item_id, &item) in &items {
             let parent = item.in_reply_to.as_deref().filter(|reference| {
                 match (item.capability_hash.is_some(), nearest_class(reference)) {
-                    // An unresolvable reference ends the walk either way.
                     (_, None) => true,
                     (false, Some(false)) => true,
                     (true, Some(true)) => item.reply_capability_matched,
@@ -545,7 +570,7 @@ impl JournalRecipientItemProjection {
                 item_id,
                 ThreadIndexNode {
                     parent,
-                    member: ThreadMemberRef::Item(item),
+                    member: ThreadTurnRef::Item(item),
                 },
             );
         }
@@ -558,29 +583,22 @@ impl JournalRecipientItemProjection {
                 turn.address.turn().as_str(),
                 ThreadIndexNode {
                     parent: Some(turn.answers.as_str()),
-                    member: ThreadMemberRef::Reply(turn),
+                    member: ThreadTurnRef::Reply(turn),
                 },
             );
         }
         if !index.contains_key(id) {
             return None;
         }
-
         let roots = resolve_thread_roots(&index);
         let root = roots.get(id).copied()?;
-        let mut members: Vec<ThreadMemberRef<'_>> = index
+        let mut members: Vec<ThreadTurnRef<'_>> = index
             .iter()
             .filter(|(member, _)| roots.get(*member) == Some(&root))
             .map(|(_, node)| node.member)
             .collect();
         members.sort_by_key(|member| member.journal_order());
-        Some((
-            root.to_owned(),
-            members
-                .into_iter()
-                .map(ThreadMemberRef::to_thread_turn)
-                .collect(),
-        ))
+        Some((root.to_owned(), members))
     }
 
     #[must_use]
@@ -688,6 +706,7 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
             address,
             task,
             alias,
+            message_type,
             content,
             in_reply_to,
             capability_hash,
@@ -699,6 +718,7 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
                     address: address.clone(),
                     task: task.clone(),
                     alias: alias.clone(),
+                    message_type: *message_type,
                     state: RecipientItemState::Received {
                         content: content.clone(),
                     },
@@ -772,6 +792,7 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
             answers,
             content,
             authorship,
+            kind,
             via_node,
         } => {
             snapshot
@@ -782,6 +803,7 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
                     answers: answers.clone(),
                     content: content.clone(),
                     authorship: *authorship,
+                    kind: *kind,
                     via_node: via_node.clone(),
                     journal_order: order,
                 });
@@ -820,6 +842,7 @@ mod tests {
             address: address.clone(),
             task: "sender-task".to_owned(),
             alias: None,
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
             content: "content".to_owned(),
             in_reply_to: None,
             capability_hash: None,
@@ -835,6 +858,123 @@ mod tests {
 
     fn entry(seq: u64, event: RoomEvent) -> JournalEntry {
         JournalEntry::new(seq, JournalRecord::Room(event), seq as i64)
+    }
+
+    #[test]
+    fn journal_reply_kind_future_and_malformed_events_do_not_poison_fold() {
+        let address = ItemAddress::from_a2a_ingress(
+            PeerId::from_public_key(&[24; 32]).unwrap(),
+            ItemId::from_replay("ri_kind_replay"),
+        );
+        let received = RoomEvent::RecipientItemReceived {
+            address: address.clone(),
+            task: "sender-task".to_owned(),
+            alias: None,
+            message_type: crate::domain::models::SemanticMessageType::Consultation,
+            content: "question".to_owned(),
+            in_reply_to: None,
+            capability_hash: None,
+            reply_capability_matched: false,
+        };
+        let reply = |turn: &str, kind: ReplyKind| RoomEvent::RecipientItemReplied {
+            address: TurnAddress::answering(
+                &address,
+                crate::domain::models::ReplyTurnId::from_replay(turn),
+            ),
+            answers: address.item().clone(),
+            content: "Busy — defer 30m".to_owned(),
+            kind,
+            authorship: crate::domain::models::ReplyAuthorship::HumanWritten,
+            via_node: None,
+        };
+        let mut entries = vec![entry(1, received)];
+        for (seq, turn, malformed) in [(2, "rr_future", false), (3, "rr_malformed", true)] {
+            let mut value =
+                serde_json::to_value(entry(seq, reply(turn, ReplyKind::Defer { minutes: 30 })))
+                    .unwrap();
+            let mut stack = vec![&mut value];
+            while let Some(node) = stack.pop() {
+                match node {
+                    serde_json::Value::Object(fields) => {
+                        if fields.get("type").and_then(serde_json::Value::as_str) == Some("defer") {
+                            fields.insert(
+                                "type".to_owned(),
+                                serde_json::Value::from(if malformed { "defer" } else { "future" }),
+                            );
+                            if malformed {
+                                fields.insert(
+                                    "minutes".to_owned(),
+                                    serde_json::Value::from("thirty"),
+                                );
+                            }
+                        }
+                        stack.extend(fields.values_mut());
+                    }
+                    serde_json::Value::Array(values) => stack.extend(values.iter_mut()),
+                    _ => {}
+                }
+            }
+            let bytes = serde_json::to_vec(&value).unwrap();
+            entries.push(
+                serde_json::from_slice(&bytes)
+                    .expect("bad reply metadata remains a valid journal entry"),
+            );
+        }
+        for (seq, turn, minutes) in [(4, "rr_min", 1), (5, "rr_max", u16::MAX)] {
+            let value = serde_json::to_value(entry(seq, reply(turn, ReplyKind::Defer { minutes })))
+                .unwrap();
+            let bytes = serde_json::to_vec(&value).unwrap();
+            entries.push(
+                serde_json::from_slice(&bytes).expect("valid interval remains a journal entry"),
+            );
+        }
+        let legacy = serde_json::to_value(entry(6, reply("rr_legacy", ReplyKind::Answer))).unwrap();
+        let mut legacy = legacy;
+        if let Some(reply) = legacy.pointer_mut("/record/payload") {
+            reply.as_object_mut().unwrap().remove("kind");
+        }
+        let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+        entries.push(
+            serde_json::from_slice(&legacy_bytes).expect("legacy answer line remains loadable"),
+        );
+        entries.push(entry(
+            7,
+            RoomEvent::RecipientItemAcknowledged {
+                address: address.clone(),
+                alias: None,
+            },
+        ));
+        let projection = JournalRecipientItemProjection::from_entries(&entries);
+        let item = projection
+            .get(&address)
+            .expect("later item state still folds");
+        assert!(matches!(
+            item.state,
+            RecipientItemState::Acknowledged { .. }
+        ));
+        let (_, turns) = projection
+            .thread(
+                &ItemScope::exact(address.principal().clone()),
+                address.item().as_str(),
+            )
+            .expect("whole thread remains readable after malformed metadata");
+        let reply_kinds: Vec<_> = turns
+            .iter()
+            .filter_map(|turn| match turn {
+                ThreadTurn::Reply(reply) => Some(reply.kind),
+                ThreadTurn::Item(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            reply_kinds,
+            [
+                ReplyKind::Unknown,
+                ReplyKind::Unknown,
+                ReplyKind::Defer { minutes: 1 },
+                ReplyKind::Defer { minutes: u16::MAX },
+                ReplyKind::Answer,
+            ]
+        );
     }
 
     /// Story 19.16c AC3(b) — **the fold refuses independently of any front
@@ -860,6 +1000,7 @@ mod tests {
                 RoomEvent::RecipientItemReceived {
                     address: address.clone(),
                     task: "sender-task".to_owned(),
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                     alias: Some("arrival-alias".to_owned()),
                     content: "peer content".to_owned(),
                     in_reply_to: None,
@@ -922,6 +1063,7 @@ mod tests {
         let received = |address: &ItemAddress| RoomEvent::RecipientItemReceived {
             address: address.clone(),
             task: "sender-task".to_owned(),
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
             alias: None,
             content: "peer content".to_owned(),
             in_reply_to: None,
@@ -958,6 +1100,7 @@ mod tests {
         let item =
             |peer: &PeerId, id: &str, reply_to: Option<&str>| RoomEvent::RecipientItemReceived {
                 address: ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay(id)),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
                 task: format!("task-{id}"),
                 alias: None,
                 content: format!("content {id}"),
@@ -973,6 +1116,7 @@ mod tests {
             answers: ItemId::from_replay(answered),
             content: format!("reply {turn}"),
             authorship: ReplyAuthorship::HumanWritten,
+            kind: ReplyKind::Answer,
             via_node: None,
         };
         let events = vec![
@@ -1112,6 +1256,7 @@ mod tests {
             address: ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay(id)),
             task: id.to_owned(),
             alias: None,
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
             content: id.to_owned(),
             in_reply_to: Some(reply_to.to_owned()),
             capability_hash: None,

@@ -6,8 +6,12 @@
 //! provenance narrowing; Story 19.18d adds the operator-bound pin
 //! ([`ItemPrincipal::A2aBound`]), a third provenance kept apart from both.
 
+use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
+use serde::{Deserializer, Serializer};
 use std::collections::HashSet;
+use std::fmt;
 
 use super::{AgentId, PeerId};
 
@@ -312,6 +316,7 @@ pub struct RecipientItemView {
     pub address: ItemAddress,
     pub task: String,
     pub alias: Option<String>,
+    pub message_type: super::SemanticMessageType,
     /// The content lives **inside** [`RecipientItemState`]
     /// (`DF-19-16C-ITEM-VIEW-FIELD-COUNT`'s fix): a removal replaces the
     /// variant and the content goes with it — unrepresentable, not asserted.
@@ -593,6 +598,251 @@ impl ReplyAuthorship {
     }
 }
 
+/// Semantic kind of a durable reply turn. The journal field is additive:
+/// older records decode as `Answer`, while unfamiliar or malformed values
+/// conservatively become `Unknown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ReplyKind {
+    #[default]
+    Answer,
+    Defer {
+        minutes: u16,
+    },
+    Unknown,
+}
+
+impl ReplyKind {
+    #[must_use]
+    pub const fn is_answer(&self) -> bool {
+        matches!(self, Self::Answer)
+    }
+
+    /// Wire token used by the additive served-thread fields.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Answer => "answer",
+            Self::Defer { .. } => "defer",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl Serialize for ReplyKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct(
+            "ReplyKind",
+            if matches!(self, Self::Defer { .. }) {
+                2
+            } else {
+                1
+            },
+        )?;
+        state.serialize_field("type", self.wire_name())?;
+        if let Self::Defer { minutes } = self {
+            state.serialize_field("minutes", minutes)?;
+        }
+        state.end()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Tag {
+    Answer,
+    Defer,
+    Other,
+}
+
+#[derive(Clone, Copy)]
+enum LooseValue {
+    Tag(Tag),
+    Unsigned(u64),
+    Other,
+}
+
+impl<'de> Deserialize<'de> for LooseValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct LooseVisitor;
+
+        impl<'de> Visitor<'de> for LooseVisitor {
+            type Value = LooseValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a reply-kind field value")
+            }
+
+            fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E> {
+                Ok(LooseValue::Tag(match value {
+                    "answer" => Tag::Answer,
+                    "defer" => Tag::Defer,
+                    _ => Tag::Other,
+                }))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(LooseValue::Tag(match value {
+                    "answer" => Tag::Answer,
+                    "defer" => Tag::Defer,
+                    _ => Tag::Other,
+                }))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(LooseValue::Unsigned(value))
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(LooseValue::Other)
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(LooseValue::Other)
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(LooseValue::Other)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(LooseValue::Other)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(LooseValue::Other)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(LooseValue::Other)
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(LooseValue::Other)
+            }
+        }
+
+        deserializer.deserialize_any(LooseVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(field_identifier)]
+enum ReplyKindField {
+    #[serde(rename = "type")]
+    Type,
+    #[serde(rename = "minutes")]
+    Minutes,
+    #[serde(other)]
+    Other,
+}
+
+impl<'de> Deserialize<'de> for ReplyKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ReplyKindVisitor;
+
+        impl<'de> Visitor<'de> for ReplyKindVisitor {
+            type Value = ReplyKind;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a tagged reply-kind object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut tag = None;
+                let mut minutes = None;
+                let mut duplicate = false;
+                let mut problem = false;
+                while let Some(key) = map.next_key::<ReplyKindField>()? {
+                    match key {
+                        ReplyKindField::Type => {
+                            if tag.is_some() {
+                                duplicate = true;
+                            }
+                            tag = Some(map.next_value::<LooseValue>()?);
+                        }
+                        ReplyKindField::Minutes => {
+                            if minutes.is_some() {
+                                duplicate = true;
+                            }
+                            minutes = Some(map.next_value::<LooseValue>()?);
+                        }
+                        ReplyKindField::Other => {
+                            problem = true;
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+                if duplicate || problem {
+                    return Ok(ReplyKind::Unknown);
+                }
+                match (tag, minutes) {
+                    (Some(LooseValue::Tag(Tag::Answer)), None) => Ok(ReplyKind::Answer),
+                    (Some(LooseValue::Tag(Tag::Defer)), Some(LooseValue::Unsigned(value)))
+                        if (1..=u64::from(u16::MAX)).contains(&value) =>
+                    {
+                        Ok(ReplyKind::Defer {
+                            minutes: value as u16,
+                        })
+                    }
+                    _ => Ok(ReplyKind::Unknown),
+                }
+            }
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(ReplyKind::Unknown)
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+                Ok(ReplyKind::Unknown)
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(ReplyKind::Unknown)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(ReplyKind::Unknown)
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(ReplyKind::Unknown)
+            }
+
+            fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+                Ok(ReplyKind::Unknown)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(ReplyKind::Unknown)
+            }
+        }
+
+        deserializer.deserialize_any(ReplyKindVisitor)
+    }
+}
+
 /// One reply turn, reconstructed solely from its durable
 /// `RecipientItemReplied` record. ⛔ No act changes it after the append: the
 /// reply turn's act set is closed (`AD-1829`).
@@ -603,6 +853,7 @@ pub struct ReplyTurnView {
     pub answers: ItemId,
     pub content: String,
     pub authorship: ReplyAuthorship,
+    pub kind: ReplyKind,
     /// The peer-response node whose card this turn resolved, when it came
     /// through a draft resolution (`Q1`). At most one turn per node.
     pub via_node: Option<AgentId>,
@@ -611,12 +862,9 @@ pub struct ReplyTurnView {
     pub journal_order: u64,
 }
 
-/// Story 19.18 `AC2(b)` — the largest reply turn this host records.
-/// Derivation: never larger than an inbound item (`MAX_TASK_TEXT_BYTES`,
-/// 64 KiB, `a2a/admission.rs` — a compile-time assertion there holds the two
-/// together), so a thread's worst turn is bounded by the same number as its
-/// root. The asker enforces it again on read (`P12`).
-pub const MAX_REPLY_BYTES: usize = 64 * 1024;
+/// The largest reply turn this host records.
+pub const MAX_REPLY_BYTES: usize =
+    crate::domain::services::recipient_thread_bounds::MAX_REPLY_BYTES;
 
 /// The prefix every reply-turn id carries (Story 19.18 `AC2(d)`). One
 /// spelling: the minting below and Story 19.18c's sender-side resolver, which

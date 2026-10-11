@@ -8052,11 +8052,12 @@ mod tests {
                     answers,
                     content,
                     authorship,
+                    kind,
                     via_node,
                 } => {
                     lines.push(format!(
                         "journal RecipientItemReplied address={address:?} answers={answers:?} \
-                         content={content:?} authorship={authorship:?} via_node={via_node:?}"
+                         content={content:?} authorship={authorship:?} kind={kind:?} via_node={via_node:?}"
                     ));
                 }
                 RoomEvent::PeerReplyObserved {

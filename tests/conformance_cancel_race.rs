@@ -88,6 +88,8 @@ pub fn make_conv_with_plan(plan: Plan) -> Conversation {
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     conv.plans.insert(plan_id, plan);
     conv
@@ -108,6 +110,7 @@ pub fn add_assistant_msg(conv: &mut Conversation, text: &str) {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 }
 

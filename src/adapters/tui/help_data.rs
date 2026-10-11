@@ -252,13 +252,33 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
-                    key: "/team send <peer-id>[,<peer-id>…] <text…>",
-                    description: "Send one message to each addressed A2A peer (a2a feature)",
+                    key: "/team send [--type <type>] <peer-id>[,<peer-id>…] <text…>",
+                    description: "Send an optionally typed message to each addressed A2A peer (a2a feature)",
                     available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
+                    key: "/team view <item-id>",
+                    description: "Read this host's bounded received thread without a model turn; offline/read-only is supported",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/team context [<item-id>] | /team context off <item-id>",
+                    description: "Inspect cached daemon peer context; select/stop an item's body as writer (clears on /clear or restart)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/team ack <item-id>",
+                    description: "Record receipt only, not an answer (daemon-attached session)",
+                    available: true,
                 },
                 HelpBinding {
                     key: "/team reply <item-id> <text…>",
                     description: "Answer an item that arrived on this host (daemon-attached session)",
+                    available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
+                    key: "/team defer <item-id>",
+                    description: "Record Busy — defer 30m without resolving the answer (daemon-attached)",
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {

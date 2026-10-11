@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::adapters::policy::recipient_item::ThreadTurn;
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::domain::models::{
     A2aPeerSpec, AppConfig, CapabilityRegistry, ItemPrincipal, ItemScope, PeerId, PolicyPrincipal,
@@ -119,21 +120,7 @@ const RETRACT_NOTIFICATION_REFUSED: &str = "x-rustain-items/retract is not accep
      notification by this server's profile; send it with a string or number id so its result \
      can be returned";
 
-use super::MAX_THREAD_TURNS;
-
-/// Story 19.18 `AC4(d)` — the serialized-byte budget for one thread read.
-/// Derivation: the client reads at most 1 MiB (`client::MAX_CARD_BYTES`);
-/// 128 KiB of headroom covers the JSON-RPC envelope and the response's own
-/// keys. ⛔ Without a byte budget one oversized immutable turn would make
-/// every later read fail `BodyTooLarge` forever (`M27`).
-const MAX_THREAD_RESPONSE_BYTES: usize = 896 * 1024;
-
-/// Story 19.18 `P9` — a single turn whose serialized size exceeds this is
-/// served withheld, never dropped. Derivation: half the response budget, so
-/// the always-served root and the newest turn fit together; the worst legal
-/// turn — a 64 KiB body of control characters escaped at ~6× per byte
-/// (`\u0001`) — serializes to ~384 KiB plus its keys, below this bound.
-const MAX_THREAD_TURN_BYTES: usize = MAX_THREAD_RESPONSE_BYTES / 2;
+use crate::domain::services::recipient_thread_bounds::{MAX_THREAD_TURN_BYTES, MAX_THREAD_TURNS};
 
 pub use super::auth::BindDecision as ServerBindDecision;
 
@@ -1603,6 +1590,7 @@ async fn launch(
     };
     let received = RoomEvent::RecipientItemReceived {
         address: address.clone(),
+        message_type,
         task: task.id.clone(),
         // Story 19.18d `P2`/`F11` — the matched bound slot's alias (display
         // attribution only); `None` for loopback and unbound keys.
@@ -2120,36 +2108,24 @@ fn bounded_thread(
     // omitted prefix is visible as a gap. ⛔ `journal_order` never reaches
     // the wire (19.16b `AC1(f)`).
     let root_index = turns.iter().position(|turn| turn.id() == root);
-    let (root_json, mut spent) = match root_index {
-        Some(index) => {
+    let mut values = Vec::with_capacity(MAX_THREAD_TURNS);
+    let selected = crate::domain::services::recipient_thread_bounds::newest_indices(
+        turns.len(),
+        root_index,
+        |index| {
             let (value, bytes) = serialized(index, &turns[index]);
-            (Some(value), bytes)
-        }
-        None => (None, 0),
-    };
-    let others: Vec<usize> = (0..turns.len())
-        .filter(|index| Some(*index) != root_index)
-        .collect();
-    let mut newest = Vec::new();
-    for &index in others.iter().rev() {
-        if newest.len() + 1 >= MAX_THREAD_TURNS {
-            break;
-        }
-        let (value, bytes) = serialized(index, &turns[index]);
-        if spent.saturating_add(bytes) > MAX_THREAD_RESPONSE_BYTES {
-            break;
-        }
-        spent += bytes;
-        newest.push((index, value));
-    }
-    let omitted_before = others.len() - newest.len();
-    let mut served: Vec<(usize, serde_json::Value)> = newest;
-    if let (Some(index), Some(value)) = (root_index, root_json) {
-        served.push((index, value));
-    }
-    served.sort_by_key(|(index, _)| *index);
+            values.push((index, value));
+            bytes
+        },
+    );
+    let omitted_before = turns.len().saturating_sub(selected.len());
+    values.sort_by_key(|(index, _)| *index);
     (
-        served.into_iter().map(|(_, value)| value).collect(),
+        values
+            .into_iter()
+            .filter(|(index, _)| selected.binary_search(index).is_ok())
+            .map(|(_, value)| value)
+            .collect(),
         omitted_before,
     )
 }
@@ -2162,8 +2138,7 @@ fn thread_turn_json(
     ordinal: usize,
     turn: &crate::adapters::policy::recipient_item::ThreadTurn,
 ) -> serde_json::Value {
-    use crate::adapters::policy::recipient_item::ThreadTurn;
-    use crate::domain::models::RecipientItemState;
+    use crate::domain::models::{RecipientItemState, ReplyKind};
 
     match turn {
         ThreadTurn::Item(item) => {
@@ -2197,6 +2172,16 @@ fn thread_turn_json(
                 "authorship": reply.authorship.wire_name(),
                 "ordinal": ordinal,
             });
+            match reply.kind {
+                ReplyKind::Answer => {}
+                ReplyKind::Defer { minutes } => {
+                    value["replyKind"] = serde_json::Value::from("defer");
+                    value["deferMinutes"] = serde_json::Value::from(minutes);
+                }
+                ReplyKind::Unknown => {
+                    value["replyKind"] = serde_json::Value::from("unknown");
+                }
+            }
             if super::projection::withholds(
                 &reply.content,
                 state.workspace.as_path(),

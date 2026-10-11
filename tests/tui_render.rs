@@ -28,6 +28,8 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let streaming = StreamingState::default();
 

@@ -633,6 +633,8 @@ mod tests {
             plans: HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
         conv.plans.insert(plan_id.to_string(), plan);
         (conv, plan_id)

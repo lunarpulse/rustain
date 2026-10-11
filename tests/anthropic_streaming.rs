@@ -28,6 +28,8 @@ mod streaming_integration {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         }
     }
 
@@ -156,6 +158,7 @@ data: {\"type\":\"message_stop\"}\n\
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
         // Usage
@@ -299,6 +302,7 @@ data: {\"type\":\"message_stop\"}\n\
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
         let mut streaming = make_streaming();
         let (mut reducer, clock) = test_reducer_state(1000);
@@ -647,6 +651,7 @@ data: {\"type\":\"message_stop\"}\n\
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
         let mut streaming = make_streaming();
         let (mut reducer, clock) = test_reducer_state(1000);

@@ -40,6 +40,7 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }
 }
 
@@ -61,6 +62,8 @@ fn make_forked_conversation(id: &str, parent_id: &str) -> Conversation {
             checkpoint_id: CheckpointId(2),
         }),
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -78,6 +81,8 @@ fn make_plain_conversation(id: &str) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 

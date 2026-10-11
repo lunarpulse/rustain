@@ -625,7 +625,16 @@ impl From<(&[Message], &CompletionOptions, &str)> for OllamaChatRequest {
 
             // Build text content (text + images only; tool results are
             // emitted as separate role:"tool" messages per the OpenAI spec)
-            let mut content = msg.content.clone();
+            let mut content = match &msg.context_prefix {
+                Some(prefix) if !prefix.is_empty() => {
+                    let mut content = String::with_capacity(prefix.len() + 2 + msg.content.len());
+                    content.push_str(prefix);
+                    content.push_str("\n\n");
+                    content.push_str(&msg.content);
+                    content
+                }
+                _ => msg.content.clone(),
+            };
             for img in &msg.images {
                 if !content.is_empty() {
                     content.push('\n');
@@ -853,5 +862,54 @@ mod tests {
             }
             _ => panic!("Expected Usage chunk"),
         }
+    }
+    #[test]
+    fn story19_19_review_context_prefix_reaches_ollama_user_message_and_preserves_tool_order() {
+        let messages = [
+            Message {
+                role: MessageRole::Assistant,
+                content: String::new(),
+                images: vec![],
+                tool_results: vec![],
+                tool_uses: vec![crate::domain::models::ToolUseMessage {
+                    id: "call-1".into(),
+                    name: "lookup".into(),
+                    input: serde_json::json!({}),
+                }],
+                context_prefix: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: "ordinary prompt".into(),
+                images: vec![],
+                tool_results: vec![crate::domain::models::ToolResultMessage {
+                    tool_use_id: "call-1".into(),
+                    content: "result".into(),
+                    is_error: false,
+                }],
+                tool_uses: vec![],
+                context_prefix: Some("[selected-recipient-item]".into()),
+                reasoning_content: None,
+            },
+        ];
+        let options = CompletionOptions {
+            model: "model".into(),
+            max_tokens: 64,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: vec![],
+        };
+        let json =
+            serde_json::to_value(OllamaChatRequest::from((&messages[..], &options, "model")))
+                .unwrap();
+        let wire_messages = json["messages"].as_array().unwrap();
+        assert_eq!(wire_messages.len(), 3);
+        assert_eq!(wire_messages[0]["role"], "assistant");
+        assert_eq!(wire_messages[1]["role"], "tool");
+        assert_eq!(wire_messages[2]["role"], "user");
+        let text = wire_messages[2]["content"].as_str().unwrap();
+        assert!(text.contains("[selected-recipient-item]"));
+        assert!(text.ends_with("\n\nordinary prompt"));
     }
 }

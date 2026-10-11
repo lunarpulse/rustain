@@ -50,7 +50,7 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
     .await?;
 
     // Handshake.
-    match read_frame::<_, DaemonFrame>(&mut read_half).await? {
+    let mut peer_row_revision = match read_frame::<_, DaemonFrame>(&mut read_half).await? {
         Some(DaemonFrame::AttachAck {
             granted_mode,
             snapshot,
@@ -72,10 +72,11 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
                     println!("— attached (read-only; another client holds the writer). —")
                 }
             }
+            snapshot.peer_row_revision
         }
         Some(DaemonFrame::Error(e)) => anyhow::bail!("daemon rejected attach: {e}"),
         other => anyhow::bail!("unexpected first frame from daemon: {other:?}"),
-    }
+    };
 
     let mut reader = tokio::spawn(async move {
         loop {
@@ -88,6 +89,27 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
                             use std::io::Write;
                             let _ = std::io::stdout().flush();
                         }
+                    }
+                    DaemonFrame::PeerRowOperation(operation) => {
+                        if operation.revision() > peer_row_revision {
+                            // A line client cannot replace a prior terminal row:
+                            // emit the canonical addressed delta, not a new reply.
+                            use std::io::Write;
+                            let stdout = std::io::stdout();
+                            let mut output = stdout.lock();
+                            serde_json::to_writer(&mut output, operation.as_ref())?;
+                            writeln!(output)?;
+                            output.flush()?;
+                            peer_row_revision = operation.revision();
+                        }
+                    }
+                    result @ DaemonFrame::RecipientActionResult { .. } => {
+                        use std::io::Write;
+                        let stdout = std::io::stdout();
+                        let mut output = stdout.lock();
+                        serde_json::to_writer(&mut output, &result)?;
+                        writeln!(output)?;
+                        output.flush()?;
                     }
                     DaemonFrame::ApprovalRequest {
                         request_id, tool, ..

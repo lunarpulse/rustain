@@ -319,6 +319,7 @@ fn build_runtime(
         64,
     );
     Arc::new(DaemonTurnRuntime {
+        recipient_context: Arc::new(Default::default()),
         provider,
         app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
         security,
@@ -1446,7 +1447,7 @@ async fn a_turn_that_errors_reports_failed_without_disclosing_why() {
     const HOST_SECRET: &str = "401 Unauthorized from api.internal.example (key sk-abc)";
 
     let gate = std::sync::Arc::new(tokio::sync::Notify::new());
-    let h = harness_mode(
+    let mut h = harness_mode(
         A2aAdmissionPolicy::Allow,
         Arc::new(ScriptedProvider {
             chunks: vec![
@@ -1462,6 +1463,13 @@ async fn a_turn_that_errors_reports_failed_without_disclosing_why() {
         rustain::domain::models::ResponseMode::NotifyAndDraft,
     )
     .await;
+    let workspace = h._workspace.path().to_path_buf();
+    let domain_rx = std::mem::replace(&mut h._domain_rx, {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        rx
+    });
+    let (_operator, attach_shutdown) =
+        attach_operator(h.server.clone(), &workspace, domain_rx).await;
     let client = reqwest::Client::new();
     let endpoint = h.endpoint();
 
@@ -1485,6 +1493,7 @@ async fn a_turn_that_errors_reports_failed_without_disclosing_why() {
     // …and the node is Failed, not Completed (observed through the status
     // watch: terminal nodes are deregistered from the tree).
     assert_node_terminal(node_rx, NodeState::Failed).await;
+    attach_shutdown.cancel();
 
     h.stop().await;
 }
@@ -1798,12 +1807,19 @@ async fn post_insert_start_failure_is_terminal_and_opaque() {
 
 #[tokio::test]
 async fn cancel_reaches_the_running_turn_and_the_node_goes_terminal() {
-    let h = harness_mode(
+    let mut h = harness_mode(
         A2aAdmissionPolicy::Allow,
         Arc::new(HangingProvider),
         rustain::domain::models::ResponseMode::NotifyAndDraft,
     )
     .await;
+    let workspace = h._workspace.path().to_path_buf();
+    let domain_rx = std::mem::replace(&mut h._domain_rx, {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        rx
+    });
+    let (_operator, attach_shutdown) =
+        attach_operator(h.server.clone(), &workspace, domain_rx).await;
     let client = reqwest::Client::new();
     let endpoint = h.endpoint();
 
@@ -1843,6 +1859,7 @@ async fn cancel_reaches_the_running_turn_and_the_node_goes_terminal() {
     // Mutant (d): a wire-only cancel is a lie with a green test. The NODE must
     // be terminal too (observed through the watch — it is deregistered after).
     assert_node_terminal(node_rx, NodeState::Cancelled).await;
+    attach_shutdown.cancel();
 
     h.stop().await;
 }
@@ -2631,6 +2648,7 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
     rustain::domain::ports::RoomJournal::record_event(
         &NodeRoomJournal::new(journal.clone(), Some(domain_tx.clone())),
         rustain::domain::models::RoomEvent::RecipientItemReceived {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             address: durable_address,
             task: task_id.to_owned(),
             alias: None,
@@ -3498,6 +3516,7 @@ async fn ac4_a_restart_never_rebinds_an_orphaned_task_to_a_removed_item() {
     rustain::domain::ports::RoomJournal::record_event(
         &room,
         rustain::domain::models::RoomEvent::RecipientItemReceived {
+            message_type: rustain::domain::models::SemanticMessageType::Unknown,
             address: removed_address.clone(),
             task: task_id.to_owned(),
             alias: None,

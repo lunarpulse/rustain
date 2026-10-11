@@ -40,6 +40,7 @@ fn test_e2e_recovery_prompt_renders() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
     h.conversation.messages.push(ChatMessage {
         synthetic: false,
@@ -55,6 +56,7 @@ fn test_e2e_recovery_prompt_renders() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
     h.conversation.title = "Test Chat".to_string();
 
@@ -123,6 +125,7 @@ fn test_e2e_recovery_enter_continues() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
     h.state.feedback_blocks.insert(
         "recovery".to_string(),
@@ -176,6 +179,7 @@ fn test_e2e_recovery_n_starts_fresh() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
     h.conversation.title = "Old Title".to_string();
     h.state.active_feedback_id = Some("recovery".to_string());
@@ -276,6 +280,7 @@ fn test_e2e_context_rebuild_api_messages() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
     h.conversation.messages.push(ChatMessage {
         synthetic: false,
@@ -291,6 +296,7 @@ fn test_e2e_context_rebuild_api_messages() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 
     // Build context from prior messages (excluding the new user message)
@@ -314,6 +320,7 @@ fn test_e2e_context_rebuild_api_messages() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 
     // Build API messages and attach context_prefix to the new user message
@@ -385,6 +392,7 @@ fn test_e2e_context_rebuild_strips_xml_in_api() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
         ChatMessage {
             synthetic: false,
@@ -402,6 +410,7 @@ fn test_e2e_context_rebuild_strips_xml_in_api() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
     ];
 
@@ -453,6 +462,7 @@ fn test_e2e_context_rebuild_reversed_xml_tags_no_panic() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }];
 
     // Should not panic — this was a bug before Fix #3
@@ -482,6 +492,7 @@ fn test_e2e_context_rebuild_nested_xml_tags() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }];
 
     // Should not panic with nested tags
@@ -517,6 +528,7 @@ async fn test_e2e_crash_detection_full_cycle() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         }],
         turns: Vec::new(),
         created_at: 1700000000,
@@ -527,6 +539,8 @@ async fn test_e2e_crash_detection_full_cycle() {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
 
     // Step 1: Mark session in-flight (event loop start)
@@ -584,6 +598,8 @@ async fn test_e2e_recovery_n_saves_clean_exit() {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
 
     // Fix #8: should use save_conversation_with_exit(true)
@@ -694,6 +710,7 @@ fn test_e2e_recovered_conversation_renders() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
         ChatMessage {
             synthetic: false,
@@ -709,6 +726,7 @@ fn test_e2e_recovered_conversation_renders() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
         ChatMessage {
             synthetic: false,
@@ -724,6 +742,7 @@ fn test_e2e_recovered_conversation_renders() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
         ChatMessage {
             synthetic: false,
@@ -739,6 +758,7 @@ fn test_e2e_recovered_conversation_renders() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
     ];
     h.conversation.title = "Rust Discussion".to_string();

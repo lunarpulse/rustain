@@ -63,6 +63,8 @@ fn make_conv_with_plan(plan: Plan) -> Conversation {
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     conv.plans.insert(plan_id, plan);
     conv
@@ -160,6 +162,8 @@ fn ac9_most_recent_plan_fallback() {
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let mut p1 = make_plan(
         PlanStatus::Cancelled,
@@ -215,6 +219,8 @@ fn resolve_panel_plan_prefers_last_id() {
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let p1 = make_plan(
         PlanStatus::Completed,
@@ -246,6 +252,8 @@ fn resolve_panel_plan_fallback_executing() {
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let p2 = make_plan(
         PlanStatus::Executing,
@@ -272,6 +280,8 @@ fn resolve_panel_plan_returns_none_when_empty() {
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     let result = resolve_panel_plan(&conv, None);
     assert!(result.is_none());
@@ -585,6 +595,8 @@ fn pd2_running_detector_only_true_for_executing_plan_with_running_task() {
         plans: HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
     assert!(!any_plan_has_running_task(&empty));
     // Executing plan with Running task → true.

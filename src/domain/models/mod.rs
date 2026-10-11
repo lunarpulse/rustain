@@ -153,8 +153,9 @@ pub use config::{
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
 pub use conversation::{
-    ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference, MessageAuthorship,
-    generate_conversation_id, generate_message_id,
+    ChatMessage, Conversation, ConversationSummary, ForkSource, HistorySource, ImageReference,
+    MessageAuthorship, PeerRowControl, PeerRowOperation, PeerRowStage, generate_conversation_id,
+    generate_message_id,
 };
 #[allow(unused_imports)]
 pub use credential::{
@@ -236,8 +237,8 @@ pub use policy_principal::{PinnedVia, PolicyPrincipal, PrincipalKind};
 pub use recipient_item::{
     A2aIngressPrincipal, ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, ItemScope,
     MAX_REPLY_BYTES, REPLY_TURN_ID_PREFIX, RecipientItemAllocator, RecipientItemState,
-    RecipientItemView, ReplyAuthorship, ReplyTurnId, ReplyTurnView, RetractOutcome, TurnAddress,
-    claim_reply_turn_id, fresh_reply_turn_candidate,
+    RecipientItemView, ReplyAuthorship, ReplyKind, ReplyTurnId, ReplyTurnView, RetractOutcome,
+    TurnAddress, claim_reply_turn_id, fresh_reply_turn_candidate,
 };
 pub use redacted_url::RedactedUrl;
 #[allow(unused_imports)]

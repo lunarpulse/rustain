@@ -383,6 +383,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         }
     }
 
@@ -426,6 +427,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         }
     }
 

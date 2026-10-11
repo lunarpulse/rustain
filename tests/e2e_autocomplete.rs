@@ -266,6 +266,7 @@ fn test_e2e_new_command_creates_fresh_session() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
     let original_id = h.conversation.id.clone();

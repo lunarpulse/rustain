@@ -19,6 +19,7 @@ pub mod fork_confirm;
 pub mod inline_card;
 pub mod model_selector;
 pub mod orchestration_glyph;
+pub(crate) mod recipient_surface;
 pub mod result_row;
 pub mod rewind_confirm;
 pub mod room_panel;

@@ -710,6 +710,8 @@ async fn a_bound_sender_name_cannot_be_claimed_by_a_second_peer() {
     );
 
     // The collision: a different peer presenting the already-bound sender name.
+    // Keep the recipient valid for this transport peer so the sender-binding
+    // guard, not the earlier recipient-namespace guard, rejects the collision.
     let second_peer =
         PeerIdentity::from_public_key(signing_key(98).verifying_key().to_bytes().to_vec())
             .expect("second identity")
@@ -718,7 +720,11 @@ async fn a_bound_sender_name_cannot_be_claimed_by_a_second_peer() {
         AgentEnvelopeHeader {
             message_type: String::new(),
             sender: sender_name,
-            recipient: AgentId::parse("peer-ping-recipient").expect("recipient"),
+            recipient: AgentId::from_peer_path(&format!(
+                "{}/peer-ping-recipient",
+                second_peer.as_str()
+            ))
+            .expect("second peer's rooted recipient"),
             correlation_id: CorrelationId::new("forged"),
             kind: MessageKind::PeerMessage,
             sequence: 1,

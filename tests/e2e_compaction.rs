@@ -130,6 +130,8 @@ fn test_persisted_conversation_compaction_round_trip() {
             compacted_at: 2000,
             pre_compaction_tokens: 5000,
         }),
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     };
 
     let persisted = PersistedConversation::from_conversation(&conv);

@@ -269,6 +269,90 @@ pub struct PendingTeamRetract {
     pub prior_focus: crate::domain::models::FocusState,
 }
 
+/// Explicit native recipient focus target; arrivals never change this identity.
+#[derive(Debug, Clone)]
+pub enum RecipientSurfaceTarget {
+    Item(crate::domain::models::ItemAddress),
+    Node(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecipientSurfaceAccess {
+    Writer,
+    ReadOnly,
+    LocalOnly,
+}
+
+pub enum RecipientActionState {
+    Pending {
+        composed_input: Option<String>,
+        pinned_compose: Option<PinnedPeerCompose>,
+    },
+    Completed {
+        notice: String,
+    },
+}
+
+/// Journal/card data owned by an explicitly opened non-Input surface.
+pub struct RecipientSurface {
+    pub target: RecipientSurfaceTarget,
+    pub access: RecipientSurfaceAccess,
+    pub can_toggle_target: bool,
+    pub root_id: Option<String>,
+    pub first_non_pinned_ordinal: Option<usize>,
+    pub last_non_pinned_ordinal: Option<usize>,
+    pub omitted_before: usize,
+    pub omitted_after: usize,
+    pub node_id: Option<String>,
+    pub item_state: Option<&'static str>,
+    pub context_available: bool,
+    pub context_selected: bool,
+    pub prior_focus: FocusState,
+    pub scroll_offset: usize,
+    pub viewport_rows: usize,
+    pub content: String,
+    pub message_type: crate::domain::models::SemanticMessageType,
+    pub cached_width: u16,
+    pub cached_lines: Vec<ratatui::text::Line<'static>>,
+    pub cached_header: Vec<ratatui::text::Line<'static>>,
+    pub cached_footer: Vec<ratatui::text::Line<'static>>,
+    pub cached_action_mask: u16,
+    pub results: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerComposeAction {
+    Respond,
+    Edit,
+}
+
+/// A compose target is only installed by an explicit response-surface action.
+#[derive(Debug, Clone)]
+pub struct PinnedPeerCompose {
+    pub node_id: String,
+    pub action: PeerComposeAction,
+    pub label: String,
+}
+
+impl PinnedPeerCompose {
+    #[must_use]
+    pub fn new(node_id: String, action: PeerComposeAction) -> Self {
+        let label = match action {
+            PeerComposeAction::Respond => {
+                format!("reply to {node_id} — Enter sends to this response; Esc detaches")
+            }
+            PeerComposeAction::Edit => {
+                format!("edit reply to {node_id} — Enter sends the edited reply; Esc detaches")
+            }
+        };
+        Self {
+            node_id,
+            action,
+            label,
+        }
+    }
+}
+
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
 pub struct SkillTrustState {
     pub skill_name: String,
@@ -2402,6 +2486,16 @@ impl WaveViewState {
 pub struct TuiState {
     pub active_tab_id: TabId,
     pub focus: FocusState,
+    pub recipient_surface: Option<RecipientSurface>,
+    pub pinned_peer_compose: Option<PinnedPeerCompose>,
+    pub recipient_actions: BTreeMap<
+        (
+            crate::adapters::daemon::protocol::RecipientAction,
+            crate::adapters::daemon::protocol::RecipientActionTarget,
+        ),
+        RecipientActionState,
+    >,
+    pub recipient_context_ids: std::collections::BTreeSet<String>,
     pub needs_redraw: bool,
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -2980,6 +3074,10 @@ impl TuiState {
         Self {
             active_tab_id: 0,
             focus: FocusState::Input,
+            recipient_surface: None,
+            pinned_peer_compose: None,
+            recipient_actions: BTreeMap::new(),
+            recipient_context_ids: std::collections::BTreeSet::new(),
             needs_redraw: true,
             terminal_width: width,
             terminal_height: height,

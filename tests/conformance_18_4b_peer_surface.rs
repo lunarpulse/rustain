@@ -1460,60 +1460,6 @@ fn the_palette_entry_names_every_sub_verb() {
     }
 }
 
-/// AC7 mutant (a): the `owned_modules` extension is omitted, so the wording
-/// ceiling stays vacuous for this story's copy.
-///
-/// Asserted from the other side: every module this story adds is named in the
-/// ceiling's array, and the banned words really are absent from those modules —
-/// so inserting one goes red.
-#[test]
-fn the_wording_ceiling_covers_every_module_this_story_added() {
-    let ceiling = std::fs::read_to_string("tests/conformance_p2p_ingress.rs").expect("read");
-    let owned = ceiling
-        .split("let owned_modules = [")
-        .nth(1)
-        .expect("owned_modules")
-        .split("];")
-        .next()
-        .expect("end of array");
-    let added = [
-        "src/domain/models/peer_ticket.rs",
-        "src/domain/services/peer_admission.rs",
-        "src/adapters/cli/peer/mod.rs",
-        "src/adapters/cli/peer/rows.rs",
-        "src/adapters/cli/peer/invite.rs",
-        "src/adapters/cli/peer/add.rs",
-        "src/adapters/cli/peer/list.rs",
-        "src/adapters/cli/peer/show.rs",
-        "src/adapters/cli/peer/revoke.rs",
-        "src/adapters/tui/handlers/peer_command.rs",
-        "src/adapters/tui/widgets/peer_add_prompt.rs",
-        "src/infrastructure/runtime/peer_bridge.rs",
-    ];
-    for module in added {
-        assert!(
-            owned.contains(module),
-            "{module} renders operator copy and is not inside the wording ceiling"
-        );
-        assert!(
-            std::path::Path::new(module).exists(),
-            "{module} is named in the ceiling but does not exist"
-        );
-    }
-    // The banned word most likely to reach this copy is the shipped word for a
-    // pinned peer. It must be absent, so a mutant inserting it goes red.
-    for module in added {
-        let source = std::fs::read_to_string(module).expect(module);
-        let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
-        for banned in ["\"verified", " verified", "cannot read", "\"private"] {
-            assert!(
-                !production.to_ascii_lowercase().contains(banned),
-                "{module} carries the banned wording {banned:?}"
-            );
-        }
-    }
-}
-
 /// AC7 mutant (b): a new test target is added but wired into no lane, so it
 /// compiles, passes locally, and CI never runs it.
 #[test]

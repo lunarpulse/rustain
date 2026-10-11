@@ -217,6 +217,8 @@ impl TestHarness {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         };
 
         let (reducer, clock) = test_reducer_state(0);
@@ -441,6 +443,7 @@ impl TestHarness {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
         self.streaming.is_streaming = true;
@@ -995,6 +998,7 @@ fn test_e2e_api_messages_valid_after_tool_use() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     });
 
     // Validate API messages — this is the critical regression test

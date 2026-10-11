@@ -65,7 +65,8 @@ use rustain::adapters::a2a::egress::A2aEgress;
 use rustain::adapters::a2a::server::{ServeConfig, serve};
 use rustain::adapters::a2a::transparency::TransparencySink;
 use rustain::adapters::daemon::protocol::{
-    AttachMode, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION, read_frame, write_frame,
+    AttachMode, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION, RecipientAction,
+    RecipientActionOutcome, RecipientActionTarget, read_frame, write_frame,
 };
 use rustain::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
 use rustain::adapters::daemon::server::AttachServer;
@@ -262,6 +263,7 @@ fn build_runtime(
         64,
     );
     Arc::new(DaemonTurnRuntime {
+        recipient_context: Arc::new(Default::default()),
         provider,
         app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
         security,
@@ -897,8 +899,8 @@ fn board_item_ids(board: &str) -> Vec<String> {
         .collect()
 }
 
-/// The next operator frame that answers an act — every forwarded turn
-/// `Event` in between is skipped.
+/// The next operator frame that answers an act — asynchronous events and
+/// peer-row operations in between are skipped.
 async fn next_answer(operator: &mut tokio::net::UnixStream) -> DaemonFrame {
     loop {
         match tokio::time::timeout(SETTLE, read_frame::<_, DaemonFrame>(operator))
@@ -907,7 +909,9 @@ async fn next_answer(operator: &mut tokio::net::UnixStream) -> DaemonFrame {
             .expect("readable frame")
             .expect("open socket")
         {
-            DaemonFrame::Event(_) | DaemonFrame::ApprovalRequest { .. } => {}
+            DaemonFrame::Event(_)
+            | DaemonFrame::PeerRowOperation(_)
+            | DaemonFrame::ApprovalRequest { .. } => {}
             frame => return frame,
         }
     }
@@ -985,10 +989,18 @@ fn served_ids(thread: &serde_json::Value) -> Vec<String> {
 }
 
 fn frame_turn(frame: &DaemonFrame) -> String {
-    let DaemonFrame::RecipientItemReplyRecorded { turn_id, .. } = frame else {
-        panic!("expected RecipientItemReplyRecorded, got {frame:?}");
+    let DaemonFrame::RecipientActionResult {
+        action: RecipientAction::Reply,
+        target: RecipientActionTarget::Item { item_id },
+        outcome: RecipientActionOutcome::Applied {
+            reply: Some(receipt),
+        },
+    } = frame
+    else {
+        panic!("expected applied recipient reply result, got {frame:?}");
     };
-    turn_id.clone()
+    assert_eq!(&receipt.item_id, item_id);
+    receipt.turn_id.clone()
 }
 
 // ── Story 19.18c harness ────────────────────────────────────────────────────
@@ -1945,16 +1957,29 @@ async fn k06d_an_unpinned_peer_survives_a_rename_or_a_move_but_not_both() {
     let mut state = TuiState::new(120, 40);
     let mut a = new_sender(vec![credentialed(&b, "b", A_ENV)]).await;
     let first = send_item(&mut a, &mut state, "b", &b.host, "first").await;
-    // Served = the thread block carrying A's item's body. (After a rename the
-    // 19.18 `you` label — keyed on the resolved identity — reads `another
-    // sender`; that label is 19.18's and unchanged here.)
+    // Story 19.19 K08: capability access and the rendered own-content label
+    // must agree after a rename or same-alias move, retaining task/hash checks.
     let served = |alias: &str, block: &str| {
         assert!(
             block.starts_with(&format!("thread · {alias} · {}\n  ", first.id))
                 && block.contains(&format!("  {}\n      first", first.id)),
             "{block}"
         );
+        let label = block.lines().find_map(|line| {
+            line.strip_prefix("  ")
+                .and_then(|row| row.strip_suffix(first.id.as_str()))
+                .map(str::trim)
+        });
+        assert_eq!(
+            label,
+            Some("you"),
+            "own dispatched bytes lost their label: {block}"
+        );
     };
+    served(
+        "b",
+        &read_thread_block(&mut a, &mut state, "b", &first.id).await,
+    );
 
     // (i) rename `b` → `b2`, same URL.
     let Sender { journal, keys, .. } = a;
@@ -1964,10 +1989,50 @@ async fn k06d_an_unpinned_peer_survives_a_rename_or_a_move_but_not_both() {
         &read_thread_block(&mut a, &mut state, "b2", &first.id).await,
     );
 
+    // Story 19.19 K08: adding a pin keeps the historical endpoint-bearing
+    // row correlated; it does not retroactively replace its alias pseudonym.
+    let pin = rustain::domain::models::PinnedKey::new(
+        rustain::domain::models::PinnedKeyAlgorithm::EdDsa,
+        URL_SAFE_NO_PAD.encode(
+            IdentityKeyStore::new(b.host.keys.path())
+                .load_or_generate()
+                .unwrap()
+                .identity()
+                .public_key
+                .as_slice(),
+        ),
+        None,
+    );
+    let Sender { journal, keys, .. } = a;
+    let mut a = sender_over(
+        vec![credentialed(&b, "b", A_ENV).with_pinned_key(Some(pin.clone()))],
+        journal,
+        keys,
+    )
+    .await;
+    served(
+        "b",
+        &read_thread_block(&mut a, &mut state, "b", &first.id).await,
+    );
+
     // (ii) B moves to a new port; alias `b` at the new URL.
     let b = b.moved().await;
     let Sender { journal, keys, .. } = a;
     let mut a = sender_over(vec![credentialed(&b, "b", A_ENV)], journal, keys).await;
+    served(
+        "b",
+        &read_thread_block(&mut a, &mut state, "b", &first.id).await,
+    );
+
+    // The approved PQ2 alias arm also survives a move AND pin-add together.
+    // This labels this host's sent bytes, not continuity of host/personhood.
+    let Sender { journal, keys, .. } = a;
+    let mut a = sender_over(
+        vec![credentialed(&b, "b", A_ENV).with_pinned_key(Some(pin))],
+        journal,
+        keys,
+    )
+    .await;
     served(
         "b",
         &read_thread_block(&mut a, &mut state, "b", &first.id).await,
@@ -2141,6 +2206,7 @@ async fn k08_legacy_items_keep_their_gate_and_a_broken_hash_fails_closed() {
             .journal
             .room
             .record_event(RoomEvent::RecipientItemReceived {
+                message_type: rustain::domain::models::SemanticMessageType::Unknown,
                 address: rustain::domain::models::ItemAddress::from_a2a_ingress(
                     principal.clone(),
                     rustain::domain::models::ItemId::from_replay(id),
@@ -2899,7 +2965,7 @@ async fn k13_the_model_rail_polls_and_cancels_with_its_own_capability() {
     // (i) the poll run.
     let gate = Arc::new(Notify::new());
     let seen = Arc::new(Notify::new());
-    let b = {
+    let mut b = {
         let mut peer = tls_host(
             false,
             A2aAdmissionPolicy::Allow,
@@ -2929,7 +2995,8 @@ async fn k13_the_model_rail_polls_and_cancels_with_its_own_capability() {
             cert_path,
         }
     };
-    let (egress, _journal, keys) = model_rail(vec![credentialed(&b, "b", A_ENV)]).await;
+    let (_draft_operator, draft_shutdown) = attach_operator(&mut b.host).await;
+    let (egress, journal, keys) = model_rail(vec![credentialed(&b, "b", A_ENV)]).await;
     let running = invoke(&egress, "b");
     tokio::time::timeout(SETTLE, seen.notified())
         .await
@@ -2956,6 +3023,18 @@ async fn k13_the_model_rail_polls_and_cancels_with_its_own_capability() {
         Some(stored_hash(&wire(&key, &item.task))),
         "the model rail's item is capability-bearing"
     );
+    // Story 19.19 K08: the real model-tool dispatch grants item capability,
+    // but its absent human-text hash must never label the delegated body you.
+    let mut sender = sender_over(vec![credentialed(&b, "b", A_ENV)], journal, keys).await;
+    let mut state = TuiState::new(130, 30);
+    let block = read_thread_block(&mut sender, &mut state, "b", &item.id).await;
+    assert!(
+        block
+            .lines()
+            .any(|line| line.trim() == format!("another sender  {}", item.id)),
+        "model-rail content has no own human-text hash: {block}"
+    );
+    draft_shutdown.cancel();
 
     // (ii) the cancel run.
     let mut asked = tls_host(

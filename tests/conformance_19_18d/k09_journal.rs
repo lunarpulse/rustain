@@ -17,7 +17,7 @@ use std::path::Path;
 
 use rustain::domain::models::{
     AgentId, ItemAddress, ItemId, ItemPrincipal, JournalEntry, JournalRecord, OrchestrationRoomId,
-    PeerId, ReplyAuthorship, ReplyTurnId, RoomEvent, TurnAddress,
+    PeerId, ReplyAuthorship, ReplyKind, ReplyTurnId, RoomEvent, TurnAddress,
 };
 use rustain::domain::ports::RoomJournalReader;
 use rustain::infrastructure::subagent::WorkspaceJournalReader;
@@ -121,6 +121,7 @@ fn principal_of(event: &RoomEvent) -> &ItemPrincipal {
 
 fn received(address: ItemAddress) -> RoomEvent {
     RoomEvent::RecipientItemReceived {
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address,
         task: "sender-message-1".to_owned(),
         alias: Some("ops".to_owned()),
@@ -132,11 +133,16 @@ fn received(address: ItemAddress) -> RoomEvent {
 }
 
 fn replied(address: TurnAddress) -> RoomEvent {
+    replied_with_kind(address, ReplyKind::Answer)
+}
+
+fn replied_with_kind(address: TurnAddress, kind: ReplyKind) -> RoomEvent {
     RoomEvent::RecipientItemReplied {
         address,
         answers: item("ri_bound"),
         content: "done".to_owned(),
         authorship: ReplyAuthorship::default(),
+        kind,
         via_node: Some(AgentId::root()),
     }
 }
@@ -600,4 +606,109 @@ async fn k09_malformed_or_missing_bound_peer_reads_unknown_never_a_corrupt_recor
             "{label}: stray boundPeer ignored"
         );
     }
+}
+
+#[test]
+fn frozen_reader_ignores_additive_defer_reply_kind() {
+    let target = replied_with_kind(bound_turn_address(), ReplyKind::Defer { minutes: 30 });
+    let entries = old_reader::parse_entries(&bytes_around(&target))
+        .expect("frozen reader keeps a new defer row");
+    assert_eq!(entries.len(), 3);
+    assert!(matches!(
+        &entries[1].record,
+        old_reader::JournalRecord::Room(old_reader::RoomEvent::RecipientItemReplied {
+            address,
+            answers,
+            ..
+        }) if address.turn == ReplyTurnId::from_replay("rr_bound")
+            && answers == &item("ri_bound")
+    ));
+}
+
+#[tokio::test]
+async fn malformed_reply_kind_is_field_local_in_the_production_journal_reader() {
+    let root = serde_json::to_value(received(bound_item_address())).unwrap();
+    let reply = serde_json::to_value(replied_with_kind(
+        bound_turn_address(),
+        ReplyKind::Defer { minutes: 30 },
+    ))
+    .unwrap();
+    let mut cases = vec![
+        (
+            Some(json!({"type":"defer","minutes":1})),
+            ReplyKind::Defer { minutes: 1 },
+        ),
+        (
+            Some(json!({"type":"defer","minutes":65535})),
+            ReplyKind::Defer { minutes: u16::MAX },
+        ),
+        (None, ReplyKind::Answer),
+    ];
+    for malformed in [
+        json!(null),
+        json!(true),
+        json!([]),
+        json!("defer"),
+        json!({"type":"future","minutes":30}),
+        json!({"type":17,"minutes":30}),
+        json!({"type":"defer"}),
+        json!({"type":"defer","minutes":null}),
+        json!({"type":"defer","minutes":"30"}),
+        json!({"type":"defer","minutes":0}),
+        json!({"type":"defer","minutes":-1}),
+        json!({"type":"defer","minutes":65536}),
+    ] {
+        cases.push((Some(malformed), ReplyKind::Unknown));
+    }
+    for (kind, expected) in cases {
+        let mut payload = reply.clone();
+        if let Some(kind) = kind {
+            payload["kind"] = kind;
+        } else {
+            payload.as_object_mut().unwrap().remove("kind");
+        }
+        let loaded = load(&bytes_of(&[
+            raw_line(1, &root),
+            raw_line(2, &payload),
+            known_good(3),
+        ]))
+        .await;
+        assert_eq!(
+            loaded.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+            [1, 2, 3],
+            "a bad additive field cannot discard its row or following durable history"
+        );
+        let projection =
+            rustain::adapters::policy::JournalRecipientItemProjection::from_entries(&loaded);
+        let (_, turns) = projection
+            .thread(
+                &rustain::domain::models::ItemScope::exact(ItemPrincipal::A2aBound(pin())),
+                "ri_bound",
+            )
+            .unwrap();
+        assert!(
+            matches!(&turns[1],
+            rustain::adapters::policy::recipient_item::ThreadTurn::Reply(turn)
+                if turn.kind == expected && turn.content == "done"
+                    && turn.answers == item("ri_bound")),
+            "kind fallback must retain the real reply body and answered identity"
+        );
+    }
+    // JSON escapes change neither field identity nor the valid interval.
+    let escaped = reply
+        .to_string()
+        .replace("\"type\":\"defer\"", "\"ty\\u0070e\":\"defer\"");
+    let loaded = load(&bytes_of(&[
+        raw_line(1, &root),
+        raw_line(2, &escaped),
+        known_good(3),
+    ]))
+    .await;
+    assert!(matches!(
+        room_event(&loaded[1]),
+        RoomEvent::RecipientItemReplied {
+            kind: ReplyKind::Defer { minutes: 30 },
+            ..
+        }
+    ));
 }

@@ -28,6 +28,12 @@ use tokio_util::sync::CancellationToken;
 use crate::adapters::scheduler::cron::CronCompletion;
 #[cfg(not(feature = "cron"))]
 pub struct CronCompletion;
+use super::protocol::{
+    AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION,
+    ProposalToken, ProtocolError, RecipientAction, RecipientActionOutcome, RecipientActionTarget,
+    RecipientReplyReceipt, read_frame, write_frame,
+};
+use super::runtime::DaemonCore;
 use crate::adapters::rap::{
     ReplayWindow, VerifyError, verify_attach_proof, verify_envelope_reserved,
 };
@@ -35,21 +41,19 @@ use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     AgentId, AgentMessage, ChannelKind, ChannelTurnRequest, ChatMessage, ContentBlockType,
-    Conversation, MessageRole, NodeState, PeerId, PolicyPrincipal, StopReason, StreamChunk,
+    Conversation, InteractionPolicySnapshot, ItemAddress, MessageRole, NodeState, PeerId,
+    PeerRowControl, PeerRowOperation, PeerRowStage, PolicyPrincipal, StopReason, StreamChunk,
     ToolRisk, TurnOrigin, generate_message_id,
 };
+use crate::domain::ports::StoragePort;
 use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntimeEvent};
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
-
-use super::protocol::{
-    AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION,
-    ProposalToken, ProtocolError, read_frame, write_frame,
-};
-use super::runtime::DaemonCore;
 
 /// Per-connection bounded writer queue depth. A connection that cannot keep up is
 /// dropped (its queue fills) — the turn is never blocked (AC3).
 const CONN_QUEUE_DEPTH: usize = 1024;
+/// Maximum queued operator commands per attached writer.
+const OPERATOR_QUEUE_DEPTH: usize = 64;
 
 /// How long an attached-but-unresponsive writer has to answer an approval before
 /// the daemon falls back to the conservative unattended path (deny) (AC6 #2).
@@ -78,6 +82,7 @@ fn peer_transcript_message(
         content_blocks: vec![ContentBlockType::PeerText],
         created_at: crate::domain::models::session_meta::now_unix(),
         synthetic: false,
+        history_source: crate::domain::models::HistorySource::PeerDisplay,
         ..Default::default()
     }
 }
@@ -98,6 +103,7 @@ struct Conn {
     id: u64,
     tx: mpsc::Sender<DaemonFrame>,
     mode: AttachMode,
+    tier: ConnectionTier,
 }
 
 /// The set of live attachments. The writer slot is held by the first `ReadWrite`
@@ -120,15 +126,32 @@ impl ConnRegistry {
             .map(|c| c.tx.clone())
     }
 
-    /// Fan a frame out to every connection; queue-full / closed connections are
-    /// dropped (returned for removal) so a slow reader never stalls the turn.
-    fn fanout(&self, frame: &DaemonFrame) -> Vec<u64> {
+    /// Fan a committed peer-row operation only to trusted-local attachments.
+    /// Legacy `Event` fanout deliberately remains tier-agnostic.
+    fn fanout_peer_row(&self, frame: &DaemonFrame) -> Vec<u64> {
         let mut dead = Vec::new();
-        for c in &self.conns {
-            match c.tx.try_send(frame.clone()) {
+        for conn in self
+            .conns
+            .iter()
+            .filter(|conn| conn.tier == ConnectionTier::TrustedLocal)
+        {
+            match conn.tx.try_send(frame.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_))
-                | Err(mpsc::error::TrySendError::Closed(_)) => dead.push(c.id),
+                | Err(mpsc::error::TrySendError::Closed(_)) => dead.push(conn.id),
+            }
+        }
+        dead
+    }
+
+    /// Preserve the pre-existing tier-agnostic Event/transcript stream.
+    fn fanout(&self, frame: &DaemonFrame) -> Vec<u64> {
+        let mut dead = Vec::new();
+        for conn in &self.conns {
+            match conn.tx.try_send(frame.clone()) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_))
+                | Err(mpsc::error::TrySendError::Closed(_)) => dead.push(conn.id),
             }
         }
         dead
@@ -137,6 +160,339 @@ impl ConnRegistry {
     fn remove(&mut self, id: u64) {
         self.conns.retain(|c| c.id != id);
     }
+}
+
+enum PeerRowMutation {
+    Upsert {
+        message: ChatMessage,
+        control: Option<PeerRowControl>,
+    },
+    ReplaceContent {
+        row_id: String,
+        content: String,
+        control: Option<PeerRowControl>,
+    },
+    Remove {
+        row_id: String,
+    },
+}
+
+struct PeerRowUndo {
+    row_id: String,
+    message: Option<(usize, ChatMessage)>,
+    control: Option<PeerRowControl>,
+}
+
+#[derive(Default)]
+struct PeerAssistantBuffer {
+    text: String,
+    tools: Vec<crate::domain::models::ToolCallInfo>,
+}
+
+fn rollback_peer_rows(conversation: &mut Conversation, undo: Vec<PeerRowUndo>, revision: u64) {
+    for undo in undo.into_iter().rev() {
+        if let Some(index) = conversation
+            .messages
+            .iter()
+            .position(|message| message.id == undo.row_id)
+        {
+            conversation.messages.remove(index);
+        }
+        if let Some((index, message)) = undo.message {
+            conversation
+                .messages
+                .insert(index.min(conversation.messages.len()), message);
+        }
+        match undo.control {
+            Some(control) => {
+                conversation.peer_row_controls.insert(undo.row_id, control);
+            }
+            None => {
+                conversation.peer_row_controls.remove(&undo.row_id);
+            }
+        }
+    }
+    conversation.peer_row_revision = revision;
+}
+
+async fn commit_peer_rows(
+    row_serial: &Mutex<()>,
+    conversation: &Mutex<Conversation>,
+    registry: &Mutex<ConnRegistry>,
+    storage: &dyn StoragePort,
+    mutations: Vec<PeerRowMutation>,
+) -> Result<(), String> {
+    let _guard = row_serial.lock().await;
+    commit_peer_rows_serialized(conversation, registry, storage, mutations).await
+}
+
+async fn commit_peer_rows_serialized(
+    conversation: &Mutex<Conversation>,
+    registry: &Mutex<ConnRegistry>,
+    storage: &dyn StoragePort,
+    mutations: Vec<PeerRowMutation>,
+) -> Result<(), String> {
+    let mut conversation = conversation.lock().await;
+    let starting_revision = conversation.peer_row_revision;
+    let mut undo = Vec::with_capacity(mutations.len());
+    let mut operations = Vec::with_capacity(mutations.len());
+
+    for mutation in mutations {
+        let (row_id, requires_existing) = match &mutation {
+            PeerRowMutation::Upsert { message, .. } => (message.id.clone(), false),
+            PeerRowMutation::Remove { row_id } | PeerRowMutation::ReplaceContent { row_id, .. } => {
+                (row_id.clone(), true)
+            }
+        };
+        let old_index = conversation
+            .messages
+            .iter()
+            .position(|message| message.id == row_id);
+        if requires_existing && old_index.is_none() {
+            continue;
+        }
+        let Some(revision) = conversation.peer_row_revision.checked_add(1) else {
+            rollback_peer_rows(&mut conversation, undo, starting_revision);
+            return Err("peer row revision exhausted".to_owned());
+        };
+        conversation.peer_row_revision = revision;
+        let old_control = conversation.peer_row_controls.remove(&row_id);
+        let old_message = match mutation {
+            PeerRowMutation::Upsert {
+                mut message,
+                control,
+            } => {
+                message.history_source = crate::domain::models::HistorySource::PeerDisplay;
+                let old_message = if let Some(index) = old_index {
+                    Some((
+                        index,
+                        std::mem::replace(&mut conversation.messages[index], message.clone()),
+                    ))
+                } else {
+                    conversation.messages.push(message.clone());
+                    None
+                };
+                if let Some(control) = &control {
+                    conversation
+                        .peer_row_controls
+                        .insert(row_id.clone(), control.clone());
+                }
+                operations.push(PeerRowOperation::Upsert {
+                    revision,
+                    message,
+                    control,
+                });
+                old_message
+            }
+            PeerRowMutation::ReplaceContent {
+                content, control, ..
+            } => {
+                let index = old_index.expect("existing row checked before revision allocation");
+                let message = &mut conversation.messages[index];
+                let old_content = std::mem::take(&mut message.content);
+                let mut original = message.clone();
+                original.content = old_content;
+                message.content = content;
+                message.authorship = crate::domain::models::MessageAuthorship::HumanWritten;
+                message.retracted_at_ms = None;
+                message.history_source = crate::domain::models::HistorySource::PeerDisplay;
+                let replacement = message.clone();
+                if let Some(control) = &control {
+                    conversation
+                        .peer_row_controls
+                        .insert(row_id.clone(), control.clone());
+                }
+                operations.push(PeerRowOperation::Upsert {
+                    revision,
+                    message: replacement,
+                    control,
+                });
+                Some((index, original))
+            }
+            PeerRowMutation::Remove { row_id } => {
+                let old_message =
+                    old_index.map(|index| (index, conversation.messages.remove(index)));
+                operations.push(PeerRowOperation::Remove { revision, row_id });
+                old_message
+            }
+        };
+        undo.push(PeerRowUndo {
+            row_id,
+            message: old_message,
+            control: old_control,
+        });
+    }
+    if operations.is_empty() {
+        return Ok(());
+    }
+    if let Err(error) = storage.save_conversation(&conversation).await {
+        rollback_peer_rows(&mut conversation, undo, starting_revision);
+        return Err(error.to_string());
+    }
+    drop(conversation);
+
+    let mut registry = registry.lock().await;
+    for operation in operations {
+        let frame = DaemonFrame::PeerRowOperation(Arc::new(operation));
+        let dead = registry.fanout_peer_row(&frame);
+        for id in dead {
+            registry.remove(id);
+        }
+    }
+    Ok(())
+}
+async fn remove_pending_peer_row(
+    row_serial: &Mutex<()>,
+    conversation: &Mutex<Conversation>,
+    registry: &Mutex<ConnRegistry>,
+    storage: &dyn StoragePort,
+    node_id: &AgentId,
+) -> Result<(), String> {
+    let _guard = row_serial.lock().await;
+    remove_pending_peer_row_serialized(conversation, registry, storage, node_id).await
+}
+
+async fn remove_pending_peer_row_serialized(
+    conversation: &Mutex<Conversation>,
+    registry: &Mutex<ConnRegistry>,
+    storage: &dyn StoragePort,
+    node_id: &AgentId,
+) -> Result<(), String> {
+    let row_id = format!("peer-response-{}", node_id.as_str());
+    let pending = {
+        let conversation = conversation.lock().await;
+        conversation
+            .peer_row_controls
+            .get(&row_id)
+            .is_some_and(|control| {
+                control.node_id == node_id.as_str()
+                    && matches!(
+                        control.stage,
+                        PeerRowStage::AwaitingOperator
+                            | PeerRowStage::Drafting
+                            | PeerRowStage::Ready
+                    )
+            })
+    };
+    if !pending {
+        return Ok(());
+    }
+    commit_peer_rows_serialized(
+        conversation,
+        registry,
+        storage,
+        vec![PeerRowMutation::Remove { row_id }],
+    )
+    .await
+}
+
+async fn clear_conversation_rows(
+    pending_drafts: &super::response_modes::PendingDraftController,
+    row_serial: &Mutex<()>,
+    conversation: &Mutex<Conversation>,
+    registry: &Mutex<ConnRegistry>,
+    storage: &dyn StoragePort,
+) -> Result<(), String> {
+    let _guard = row_serial.lock().await;
+    let mut conversation = conversation.lock().await;
+    let starting_revision = conversation.peer_row_revision;
+    let mut revision = starting_revision;
+    let row_ids: std::collections::BTreeSet<String> = conversation
+        .messages
+        .iter()
+        .filter(|message| message.is_peer_display())
+        .map(|message| message.id.clone())
+        .chain(conversation.peer_row_controls.keys().cloned())
+        .collect();
+    let mut operations = Vec::with_capacity(row_ids.len());
+    for row_id in row_ids {
+        revision = revision
+            .checked_add(1)
+            .ok_or_else(|| "peer row revision exhausted".to_owned())?;
+        operations.push(PeerRowOperation::Remove { revision, row_id });
+    }
+
+    let messages = std::mem::take(&mut conversation.messages);
+    let controls = std::mem::take(&mut conversation.peer_row_controls);
+    conversation.peer_row_revision = revision;
+    if let Err(error) = storage.save_conversation(&conversation).await {
+        conversation.messages = messages;
+        conversation.peer_row_controls = controls;
+        conversation.peer_row_revision = starting_revision;
+        return Err(error.to_string());
+    }
+    drop(conversation);
+
+    for control in controls.values() {
+        pending_drafts.abandon(&control.node_id).await;
+    }
+    let mut registry = registry.lock().await;
+    for operation in operations {
+        let frame = DaemonFrame::PeerRowOperation(Arc::new(operation));
+        for id in registry.fanout_peer_row(&frame) {
+            registry.remove(id);
+        }
+    }
+    Ok(())
+}
+
+fn peer_row_control(
+    node_id: &AgentId,
+    item_address: Option<ItemAddress>,
+    provenance: &InteractionPolicySnapshot,
+    principal_label: &str,
+    stage: PeerRowStage,
+    node_resolvable: bool,
+) -> PeerRowControl {
+    PeerRowControl {
+        node_id: node_id.as_str().to_owned(),
+        item_address,
+        message_type: provenance.message_type,
+        sender_label: provenance
+            .sender_label
+            .clone()
+            .unwrap_or_else(|| principal_label.to_owned()),
+        stage,
+        node_resolvable,
+    }
+}
+
+async fn snapshot_peer_row_controls(
+    conversation: &Conversation,
+    pending_drafts: &super::response_modes::PendingDraftController,
+) -> std::collections::BTreeMap<String, PeerRowControl> {
+    if conversation.peer_row_controls.is_empty() {
+        return std::collections::BTreeMap::new();
+    }
+    let mut controls = std::collections::BTreeMap::new();
+    for message in &conversation.messages {
+        let Some(stored) = conversation.peer_row_controls.get(&message.id) else {
+            continue;
+        };
+        let mut control = stored.clone();
+        let phase = pending_drafts.phase(&control.node_id).await;
+        control.node_resolvable = match (control.stage, phase) {
+            (
+                PeerRowStage::AwaitingOperator | PeerRowStage::Ready,
+                Some(super::response_modes::DraftPhase::Ready),
+            )
+            | (PeerRowStage::Drafting, Some(super::response_modes::DraftPhase::Drafting)) => true,
+            (PeerRowStage::AwaitingOperator | PeerRowStage::Ready, None) => {
+                control.item_address.is_none()
+            }
+            _ => false,
+        };
+        controls.insert(message.id.clone(), control);
+    }
+    controls
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PeerDraftResolutionOutcome {
+    Applied {
+        reply: Option<RecipientReplyReceipt>,
+    },
+    Idempotent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,11 +508,11 @@ fn recipient_ack_gate(
     tier: ConnectionTier,
     acting: &AgentId,
 ) -> RecipientAckGate {
-    if mode != AttachMode::ReadWrite {
-        return RecipientAckGate::ReadOnly;
-    }
     if tier != ConnectionTier::TrustedLocal {
         return RecipientAckGate::UntrustedTier;
+    }
+    if mode != AttachMode::ReadWrite {
+        return RecipientAckGate::ReadOnly;
     }
     let role = crate::domain::services::room_role::local_room_role(acting);
     if crate::domain::services::room_role::room_edit_decision(
@@ -167,6 +523,27 @@ fn recipient_ack_gate(
         return RecipientAckGate::RoleDenied;
     }
     RecipientAckGate::Allow
+}
+
+fn recipient_command_gate(
+    mode: AttachMode,
+    tier: ConnectionTier,
+    noun: &str,
+    durable: bool,
+) -> Result<(), ProtocolError> {
+    match recipient_ack_gate(mode, tier, &AgentId::local_operator()) {
+        RecipientAckGate::Allow => Ok(()),
+        RecipientAckGate::ReadOnly => Err(ProtocolError::ReadOnly),
+        RecipientAckGate::UntrustedTier => Err(ProtocolError::PeerVerification(format!(
+            "recipient {noun} is same-host trusted-local only"
+        ))),
+        RecipientAckGate::RoleDenied => {
+            let lifetime = if durable { "durable " } else { "" };
+            Err(ProtocolError::PeerVerification(format!(
+                "room role does not permit {lifetime}recipient {noun}"
+            )))
+        }
+    }
 }
 
 /// The daemon attach server. Holds the lazily-built core, the per-process
@@ -182,19 +559,27 @@ const PEER_RESPONSE_ROW_PREFIX: &str = "peer-response-";
 pub struct AttachServer {
     core: Arc<DaemonCore>,
     conversation: Arc<Mutex<Conversation>>,
+    /// Serializes row mutation, durable save, publication, and attach snapshots.
+    peer_row_serial: Arc<Mutex<()>>,
     registry: Arc<Mutex<ConnRegistry>>,
     domain_tx: mpsc::UnboundedSender<AppEvent>,
     node_tree: crate::infrastructure::subagent::NodeTree,
     /// Tool actions denied while unattended, awaiting the user to resume (AC6 #5).
     blocked_waiting: Arc<AtomicUsize>,
     next_conn_id: AtomicU64,
+    /// Connection id of the most recently granted ReadWrite attachment.
+    last_writer_conn_id: AtomicU64,
     /// Guards single-spawn of the approval gate (started on first runtime build).
     approval_gate_started: Arc<std::sync::atomic::AtomicBool>,
     turn_serial: Arc<Mutex<()>>,
     turn_complete: Arc<Notify>,
+    /// A private fence for peer display persistence, separate from the public
+    /// assistant-turn completion signal.
+    peer_turn_closed: Arc<Notify>,
     /// Story 12.3 — current turn origin read by `commit_assistant_turn`.
     /// tokio::sync — locks=4 held.
     active_channel_origin: Arc<Mutex<ChannelKind>>,
+    peer_assistant_buffers: Mutex<std::collections::HashMap<Arc<AgentId>, PeerAssistantBuffer>>,
     /// Story 12.3 — response route for the current channel-originated turn.
     /// tokio::sync — locks=4 held.
     pending_channel_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
@@ -243,7 +628,7 @@ pub struct AttachServer {
     pending_drafts: Arc<super::response_modes::PendingDraftController>,
     /// Serializes card resolutions with direct replies so the node-to-turn
     /// check and append cannot race another operator connection.
-    peer_reply_serial: Mutex<()>,
+    peer_reply_serial: Arc<Mutex<()>>,
     pending_consent: Option<Arc<super::consent::PendingConsentManager>>,
     pending_consent_cards:
         Arc<Mutex<std::collections::HashMap<crate::domain::models::RequestId, DaemonFrame>>>,
@@ -623,11 +1008,14 @@ impl AttachServer {
             node_tree,
             blocked_waiting: Arc::new(AtomicUsize::new(0)),
             next_conn_id: AtomicU64::new(1),
+            last_writer_conn_id: AtomicU64::new(0),
             approval_gate_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             turn_serial: Arc::new(Mutex::new(())),
             turn_complete: Arc::new(Notify::new()),
+            peer_turn_closed: Arc::new(Notify::new()),
             retained_consolidations: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_channel_origin: Arc::new(Mutex::new(ChannelKind::Terminal)),
+            peer_assistant_buffers: Mutex::new(std::collections::HashMap::new()),
             pending_channel_response_tx: Arc::new(Mutex::new(None)),
             next_proposal_token: Arc::new(AtomicU64::new(1)),
             generating_consolidations: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -637,7 +1025,8 @@ impl AttachServer {
             peer_bus,
             delivery_policy,
             pending_drafts: Arc::new(super::response_modes::PendingDraftController::default()),
-            peer_reply_serial: Mutex::new(()),
+            peer_row_serial: Arc::new(Mutex::new(())),
+            peer_reply_serial: Arc::new(Mutex::new(())),
             pending_consent,
             pending_consent_cards: Arc::new(Mutex::new(std::collections::HashMap::new())),
             pending_peer_nodes: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -710,6 +1099,29 @@ impl AttachServer {
     pub fn channel_count(&self) -> usize {
         // best-effort, non-blocking read
         self.registry.try_lock().map(|r| r.conns.len()).unwrap_or(0)
+    }
+
+    async fn item_address_for_node(&self, node_id: &AgentId) -> Option<ItemAddress> {
+        #[cfg(feature = "a2a")]
+        {
+            let reader = self.room_journal_reader.as_ref()?;
+            let entries = match reader.load_entries().await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::warn!(%error, node = %node_id, "loading journal for peer-row target failed");
+                    return None;
+                }
+            };
+            let projection =
+                crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
+            crate::adapters::a2a::exec::recipient_item_for_node(&projection, node_id)
+                .map(|item| item.address)
+        }
+        #[cfg(not(feature = "a2a"))]
+        {
+            let _ = node_id;
+            None
+        }
     }
     pub async fn run(
         self: Arc<Self>,
@@ -787,15 +1199,26 @@ impl AttachServer {
         if queued.is_empty() {
             return Ok(());
         }
-        let mut conversation = self.conversation.lock().await;
-        for interaction in queued {
-            conversation.messages.push(peer_transcript_message(
-                &interaction.text,
-                &interaction.peer,
-                &interaction.provenance,
-            ));
-        }
-        self.core.storage.save_conversation(&conversation).await?;
+        let mutations = queued
+            .into_iter()
+            .map(|interaction| PeerRowMutation::Upsert {
+                message: peer_transcript_message(
+                    &interaction.text,
+                    &interaction.peer,
+                    &interaction.provenance,
+                ),
+                control: None,
+            })
+            .collect();
+        commit_peer_rows(
+            &self.peer_row_serial,
+            &self.conversation,
+            &self.registry,
+            self.core.storage.as_ref(),
+            mutations,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
         Ok(())
     }
 
@@ -811,22 +1234,172 @@ impl AttachServer {
                 item.provenance.notification_clause()
             ));
         }
-        let mut conversation = self.conversation.lock().await;
-        conversation.messages.push(ChatMessage {
+        let message = ChatMessage {
             id: generate_message_id(),
             role: MessageRole::System,
             content,
             created_at: crate::domain::models::session_meta::now_unix(),
             synthetic: true,
             ..Default::default()
-        });
-        self.core.storage.save_conversation(&conversation).await?;
+        };
+        commit_peer_rows(
+            &self.peer_row_serial,
+            &self.conversation,
+            &self.registry,
+            self.core.storage.as_ref(),
+            vec![PeerRowMutation::Upsert {
+                message,
+                control: None,
+            }],
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
         Ok(())
+    }
+
+    async fn collect_peer_chunk(&self, node: &Arc<AgentId>, chunk: &StreamChunk) {
+        use crate::domain::models::{ToolCallInfo, ToolResultInfo};
+        match chunk {
+            StreamChunk::TurnComplete { stop_reason } if *stop_reason != StopReason::ToolUse => {
+                self.finish_peer_buffer(node, stop_reason).await;
+                return;
+            }
+            StreamChunk::Error { content } => {
+                self.finish_peer_buffer(node, &StopReason::Cancelled).await;
+                if !content.is_empty() {
+                    let notice = ChatMessage {
+                        id: generate_message_id(),
+                        role: MessageRole::System,
+                        content: format!("Peer turn failed: {content}"),
+                        created_at: crate::domain::models::session_meta::now_unix(),
+                        synthetic: true,
+                        ..Default::default()
+                    };
+                    if let Err(error) = commit_peer_rows(
+                        &self.peer_row_serial,
+                        &self.conversation,
+                        &self.registry,
+                        self.core.storage.as_ref(),
+                        vec![PeerRowMutation::Upsert {
+                            message: notice,
+                            control: None,
+                        }],
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "persisting peer stream error notice failed");
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+        let mut buffers = self.peer_assistant_buffers.lock().await;
+        match chunk {
+            StreamChunk::Text { content, .. } => {
+                buffers
+                    .entry(node.clone())
+                    .or_default()
+                    .text
+                    .push_str(content);
+            }
+            StreamChunk::ToolUse { id, name, input } => {
+                buffers
+                    .entry(node.clone())
+                    .or_default()
+                    .tools
+                    .push(ToolCallInfo {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        result: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                        status: None,
+                    });
+            }
+            StreamChunk::ToolResult {
+                id,
+                content,
+                is_error,
+                diff,
+            } => {
+                let buffer = buffers.entry(node.clone()).or_default();
+                if let Some(tool) = buffer.tools.iter_mut().find(|tool| tool.id == *id) {
+                    tool.result = Some(ToolResultInfo {
+                        content: content.clone(),
+                        is_error: *is_error,
+                        diff: diff.clone(),
+                    });
+                } else {
+                    // Retain unexpected result evidence without inventing a call.
+                    buffer.text.push_str(content);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn finish_peer_buffer(&self, node: &Arc<AgentId>, stop_reason: &StopReason) {
+        let Some(mut buffer) = self.peer_assistant_buffers.lock().await.remove(node) else {
+            return;
+        };
+        if *stop_reason == StopReason::Cancelled {
+            // A cancelled peer turn is not an answer; tool evidence remains visible.
+            buffer.text.clear();
+        }
+        if buffer.text.is_empty() && buffer.tools.is_empty() {
+            return;
+        }
+        let message = ChatMessage {
+            id: generate_message_id(),
+            role: if *stop_reason == StopReason::Cancelled {
+                MessageRole::System
+            } else {
+                MessageRole::Assistant
+            },
+            content: buffer.text,
+            tool_calls: buffer.tools,
+            stop_reason: Some(stop_reason.clone()),
+            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            history_source: crate::domain::models::HistorySource::PeerDisplay,
+            created_at: crate::domain::models::session_meta::now_unix(),
+            ..Default::default()
+        };
+        if let Err(error) = commit_peer_rows(
+            &self.peer_row_serial,
+            &self.conversation,
+            &self.registry,
+            self.core.storage.as_ref(),
+            vec![PeerRowMutation::Upsert {
+                message,
+                control: None,
+            }],
+        )
+        .await
+        {
+            tracing::warn!(%error, "persisting peer turn display failed");
+        }
     }
 
     /// Fold an assistant turn into the conversation (persist on completion) and
     /// fan the projected event out to all attachments.
     async fn handle_bus_event(&self, event: &AppEvent, assistant_buf: &mut String) {
+        match event {
+            AppEvent::PeerProviderChunk { node, chunk, .. } => {
+                self.collect_peer_chunk(node, chunk).await;
+            }
+            AppEvent::PeerTurnClosed { node, .. } => {
+                self.finish_peer_buffer(node, &StopReason::Cancelled).await;
+                self.peer_turn_closed.notify_waiters();
+            }
+            AppEvent::PeerSystemNotice { node, level, .. }
+                if *level == crate::domain::models::NoticeLevel::Error =>
+            {
+                self.finish_peer_buffer(node, &StopReason::Cancelled).await;
+            }
+            _ => {}
+        }
         if let AppEvent::ProviderChunk { chunk, .. } = event {
             match chunk {
                 StreamChunk::Text { content, .. } => {
@@ -933,6 +1506,7 @@ impl AttachServer {
             origin,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
         let now = crate::domain::models::session_meta::now_unix();
         conv.updated_at = now;
@@ -964,6 +1538,7 @@ impl AttachServer {
             origin: ChannelKind::Cron,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
         let now = crate::domain::models::session_meta::now_unix();
         conv.updated_at = now;
@@ -1090,10 +1665,9 @@ impl AttachServer {
         };
         let (read_only_ok, tier) = attach;
 
-        // Register the connection atomically with mode selection: the first
-        // ReadWrite-capable client is the writer; later clients are read-only.
-        // Keeping grant+registration under one lock closes the two-attach writer
-        // TOCTOU.
+        // The row serial lock covers grant, snapshot and registration. A peer-row
+        // commit is therefore either in the snapshot or queued after it.
+        let row_guard = self.peer_row_serial.lock().await;
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
         let (tx, mut rx) = mpsc::channel::<DaemonFrame>(CONN_QUEUE_DEPTH);
         let granted_mode = {
@@ -1103,10 +1677,14 @@ impl AttachServer {
             } else {
                 AttachMode::ReadWrite
             };
+            if granted == AttachMode::ReadWrite {
+                self.last_writer_conn_id.store(conn_id, Ordering::SeqCst);
+            }
             reg.conns.push(Conn {
                 id: conn_id,
                 tx,
                 mode: granted,
+                tier,
             });
             granted
         };
@@ -1115,6 +1693,7 @@ impl AttachServer {
         let pending_consent_count = self.pending_consent_cards.lock().await.len();
         let snapshot = {
             let conv = self.conversation.lock().await;
+            let trusted_local = tier == ConnectionTier::TrustedLocal;
             AttachSnapshot {
                 conversation_id: conv.id.clone(),
                 transcript: conv.messages.clone(),
@@ -1122,8 +1701,25 @@ impl AttachServer {
                 channels: vec![ChannelKind::Terminal],
                 blocked_actions_waiting: self.blocked_waiting.load(Ordering::SeqCst),
                 pending_consent_cards: pending_consent_count,
+                peer_row_controls: if trusted_local {
+                    snapshot_peer_row_controls(&conv, &self.pending_drafts).await
+                } else {
+                    std::collections::BTreeMap::new()
+                },
+                peer_row_revision: if trusted_local {
+                    conv.peer_row_revision
+                } else {
+                    0
+                },
+                recipient_context_ids: if trusted_local {
+                    self.recipient_context_inventory().await.0
+                } else {
+                    Vec::new()
+                },
             }
         };
+        drop(row_guard);
+
         if write_frame(
             &mut write_half,
             &DaemonFrame::AttachAck {
@@ -1166,11 +1762,67 @@ impl AttachServer {
             self.emit_pending_consent_cards(conn_id).await;
         }
 
+        // Turns, History fences and context commands share a bounded writer-side FIFO.
+        // Approval replies and independent recipient actions remain reader-side.
+        let operator_turns =
+            if granted_mode == AttachMode::ReadWrite && tier == ConnectionTier::TrustedLocal {
+                let (tx, mut rx) = mpsc::channel::<ClientFrame>(OPERATOR_QUEUE_DEPTH);
+                let server = self.clone();
+                let worker = tokio::spawn(async move {
+                    while let Some(frame) = rx.recv().await {
+                        // A detached writer's queued work still runs while no other writer has
+                        // attached (AC4: the daemon owns what was submitted). Once a later
+                        // writer has been granted, the stale commands are discarded so they can
+                        // never act on the replacement writer's conversation.
+                        if server.last_writer_conn_id.load(Ordering::SeqCst) != conn_id {
+                            break;
+                        }
+                        server
+                            .handle_client_frame_tiered(frame, granted_mode, tier, conn_id)
+                            .await;
+                    }
+                });
+                Some((tx, worker))
+            } else {
+                None
+            };
+
         // Reader loop. Peer envelopes are verified against the SERVER-WIDE
         // replay window held on `self` (shared across connections).
         loop {
             match read_frame::<_, ClientFrame>(&mut read_half).await {
                 Ok(Some(frame)) => {
+                    if let Some((turns, _worker)) = &operator_turns
+                        && matches!(
+                            &frame,
+                            ClientFrame::UserMessage { .. }
+                                | ClientFrame::HistoryRequest { .. }
+                                | ClientFrame::InspectRecipientContext
+                                | ClientFrame::SetRecipientContext { .. }
+                        )
+                    {
+                        match turns.try_send(frame) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                if let Some(connection) = self
+                                    .registry
+                                    .lock()
+                                    .await
+                                    .conns
+                                    .iter()
+                                    .find(|connection| connection.id == conn_id)
+                                {
+                                    let _ = connection.tx.try_send(DaemonFrame::Error(
+                                        ProtocolError::Internal(
+                                            "operator command queue is full".to_owned(),
+                                        ),
+                                    ));
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
+                        continue;
+                    }
                     if self
                         .handle_client_frame_tiered(frame, granted_mode, tier, conn_id)
                         .await
@@ -1191,18 +1843,19 @@ impl AttachServer {
             let mut reg = self.registry.lock().await;
             reg.remove(conn_id);
         }
+        drop(operator_turns);
         writer.abort();
+        drop(writer);
     }
 
-    /// Resolve one peer-response card. Story 19.18 `AC3`: a resolution that
-    /// SENDS also records one reply turn answering the node's item, BEFORE
-    /// `PeerDraftResolved`; returns that turn's id (`None` when nothing was
-    /// recorded — a reject, a duplicate, or a node with no item).
+    /// Resolve one peer-response card. A fresh resolution is Applied even when
+    /// the deliberate choice records no reply turn; a settled retry is
+    /// Idempotent and can never masquerade as that successful no-turn result.
     async fn resolve_peer_draft(
         &self,
         node_id: &AgentId,
         resolution: super::response_modes::DraftResolution,
-    ) -> Result<Option<crate::domain::models::ReplyTurnId>, String> {
+    ) -> Result<PeerDraftResolutionOutcome, String> {
         let _guard = self.peer_reply_serial.lock().await;
         self.resolve_peer_draft_locked(node_id, resolution, None)
             .await
@@ -1213,32 +1866,60 @@ impl AttachServer {
         node_id: &AgentId,
         resolution: super::response_modes::DraftResolution,
         preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
-    ) -> Result<Option<crate::domain::models::ReplyTurnId>, String> {
-        // AC3 — resolutions are idempotent: a duplicate frame over an already
-        // settled draft is a no-op, never an error and never a second send.
-        match self.pending_drafts.state(node_id.as_str()).await {
-            Some(super::response_modes::DraftState::Sent { .. })
-            | Some(super::response_modes::DraftState::Rejected) => return Ok(None),
-            Some(super::response_modes::DraftState::Ready { .. }) => {}
-            Some(super::response_modes::DraftState::Drafting { .. }) => {
+    ) -> Result<PeerDraftResolutionOutcome, String> {
+        let _row_guard = self.peer_row_serial.lock().await;
+        match self.pending_drafts.phase(node_id.as_str()).await {
+            Some(super::response_modes::DraftPhase::Settled) => {
+                return Ok(PeerDraftResolutionOutcome::Idempotent);
+            }
+            Some(super::response_modes::DraftPhase::Ready) => {}
+            Some(super::response_modes::DraftPhase::Drafting) => {
                 return Err("peer draft is still being composed".to_owned());
             }
             None => {
-                // Restart/re-attach: rebuild controller state ONLY from a row
-                // that is still pending. A settled row (sent content, a
-                // rejected card) is terminal — reconstructing it into `Ready`
-                // would double-send and double-journal.
+                // Rebuild controller state only from a persisted pending row.
+                // Settled and previously answered rows are visible no-ops.
                 let persisted = {
                     let conversation = self.conversation.lock().await;
-                    conversation
+                    let row_id = format!("peer-response-{}", node_id.as_str());
+                    let message = conversation
                         .messages
                         .iter()
-                        .find(|message| message.id == format!("peer-response-{}", node_id.as_str()))
-                        .map(|message| message.content.clone())
+                        .find(|message| message.id == row_id);
+                    let control = conversation
+                        .peer_row_controls
+                        .get(&row_id)
+                        .filter(|control| control.node_id == node_id.as_str());
+                    if control.is_some_and(|control| {
+                        control.stage == PeerRowStage::Settled || control.item_address.is_some()
+                    }) {
+                        return Ok(PeerDraftResolutionOutcome::Idempotent);
+                    }
+                    message
+                        .zip(control)
+                        .map(|(message, control)| (message.content.clone(), control.stage))
                 }
                 .ok_or_else(|| "peer response row was not found".to_owned())?;
-                let generated = super::response_modes::pending_draft_content(&persisted)
-                    .ok_or_else(|| "peer response is already settled".to_owned())?;
+                let generated = match persisted {
+                    (content, PeerRowStage::AwaitingOperator)
+                        if content == super::response_modes::AWAITING_RESPONSE_PLACEHOLDER =>
+                    {
+                        String::new()
+                    }
+                    (content, PeerRowStage::Ready) => content
+                        .strip_prefix(super::response_modes::DRAFT_APPROVAL_PREFIX)
+                        .map(str::to_owned)
+                        .ok_or_else(|| "peer response is already settled".to_owned())?,
+                    (_, PeerRowStage::Drafting) => {
+                        return Err("peer draft is still being composed".to_owned());
+                    }
+                    (_, PeerRowStage::Settled) => {
+                        return Ok(PeerDraftResolutionOutcome::Idempotent);
+                    }
+                    (_, PeerRowStage::AwaitingOperator) => {
+                        return Err("peer response is already settled".to_owned());
+                    }
+                };
                 if !self.pending_drafts.begin(node_id.as_str()).await
                     || !self
                         .pending_drafts
@@ -1274,11 +1955,8 @@ impl AttachServer {
             .room_journal
             .as_ref()
             .ok_or_else(|| "room journal is unavailable".to_owned())?;
-        // Story 19.18 `AC3(a)` — the reply turn first, then
-        // `PeerDraftResolved`. The two appends cannot be atomic, so the order
-        // fixes the partial-failure meaning: a failed turn append restores the
-        // card and sends nothing; a turn that stands is a durable answer the
-        // operator chose, and a retry replays only the remaining steps.
+        // The reply turn precedes `PeerDraftResolved`, allowing retries after
+        // a partial journal failure to reuse the one real via_node turn.
         let recorded_turn = match self
             .reply_turn_for_resolution(node_id, &content, authorship, sent, preloaded)
             .await
@@ -1313,42 +1991,66 @@ impl AttachServer {
             return Err(error.to_string());
         }
 
-        {
-            let mut conversation = self.conversation.lock().await;
-            let row = conversation
+        let row_id = format!("peer-response-{}", node_id.as_str());
+        let (mut row, mut control) = {
+            let conversation = self.conversation.lock().await;
+            let Some(row) = conversation
                 .messages
-                .iter_mut()
-                .find(|message| message.id == format!("peer-response-{}", node_id.as_str()))
-                .ok_or_else(|| "peer draft row was not found".to_owned())?;
-            if sent {
-                row.content = content.clone();
-                row.authorship = match authorship {
-                    super::response_modes::DraftAuthorship::AgentComposed => {
-                        crate::domain::models::MessageAuthorship::AgentComposed
-                    }
-                    super::response_modes::DraftAuthorship::HumanWritten => {
-                        crate::domain::models::MessageAuthorship::HumanWritten
-                    }
-                };
-                row.synthetic = false;
-            } else {
-                row.content = format!("[draft rejected]\n{}", row.content);
-                row.synthetic = true;
-            }
-            if let Err(error) = self.core.storage.save_conversation(&conversation).await {
-                // The journal append stands (it is append-only); restore the
-                // draft so the operator can retry. The retried resolution
-                // appends a twin event — same node, same outcome — which the
-                // projection fold must treat idempotently.
+                .iter()
+                .find(|message| message.id == row_id)
+                .cloned()
+            else {
                 let restored = self
                     .pending_drafts
                     .restore_ready(node_id.as_str(), original)
                     .await;
                 if !restored {
-                    tracing::error!(node = %node_id, "failed to roll back draft after persistence failure");
+                    tracing::error!(node = %node_id, "failed to roll back draft after missing row");
                 }
-                return Err(error.to_string());
+                return Err("peer draft row was not found".to_owned());
+            };
+            (row, conversation.peer_row_controls.get(&row_id).cloned())
+        };
+        if sent {
+            row.content = content.clone();
+            row.authorship = match authorship {
+                super::response_modes::DraftAuthorship::AgentComposed => {
+                    crate::domain::models::MessageAuthorship::AgentComposed
+                }
+                super::response_modes::DraftAuthorship::HumanWritten => {
+                    crate::domain::models::MessageAuthorship::HumanWritten
+                }
+            };
+            row.synthetic = false;
+        } else {
+            row.content = format!("[draft rejected]\n{}", row.content);
+            row.synthetic = true;
+        }
+        if let Some(control) = &mut control {
+            control.stage = PeerRowStage::Settled;
+            control.node_resolvable = false;
+        }
+        if let Err(error) = commit_peer_rows_serialized(
+            &self.conversation,
+            &self.registry,
+            self.core.storage.as_ref(),
+            vec![PeerRowMutation::Upsert {
+                message: row,
+                control,
+            }],
+        )
+        .await
+        {
+            // Preserve the retryable live-controller behavior when the local
+            // card update itself cannot be persisted.
+            let restored = self
+                .pending_drafts
+                .restore_ready(node_id.as_str(), original)
+                .await;
+            if !restored {
+                tracing::error!(node = %node_id, "failed to roll back draft after persistence failure");
             }
+            return Err(error);
         }
 
         self.node_tree.set_state(node_id, NodeState::Running).await;
@@ -1366,7 +2068,9 @@ impl AttachServer {
                 .await;
         }
         self.node_tree.deregister(node_id).await;
-        Ok(recorded_turn)
+        Ok(PeerDraftResolutionOutcome::Applied {
+            reply: recorded_turn,
+        })
     }
 
     /// Story 19.18 `AC3(a)`/`Q1` — the reply-turn half of a card resolution.
@@ -1386,7 +2090,7 @@ impl AttachServer {
         authorship: super::response_modes::DraftAuthorship,
         sent: bool,
         preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
-    ) -> Result<Option<crate::domain::models::ReplyTurnId>, String> {
+    ) -> Result<Option<RecipientReplyReceipt>, String> {
         use crate::domain::models::{
             ReplyAuthorship, RoomEvent, TurnAddress, claim_reply_turn_id,
             fresh_reply_turn_candidate,
@@ -1414,7 +2118,11 @@ impl AttachServer {
         };
         if let Some(existing) = projection.reply_for_node(node_id) {
             if sent && existing.content == content {
-                return Ok(Some(existing.address.turn().clone()));
+                return Ok(Some(RecipientReplyReceipt {
+                    item_id: existing.answers.as_str().to_owned(),
+                    turn_id: existing.address.turn().as_str().to_owned(),
+                    kind: existing.kind,
+                }));
             }
             return Err(
                 "this card was already answered with a recorded reply; only that same answer can \
@@ -1445,6 +2153,7 @@ impl AttachServer {
                 address: TurnAddress::answering(&item.address, turn.clone()),
                 answers: item.address.item().clone(),
                 content: content.to_owned(),
+                kind: crate::domain::models::ReplyKind::Answer,
                 authorship: match authorship {
                     super::response_modes::DraftAuthorship::AgentComposed => {
                         ReplyAuthorship::AgentComposed
@@ -1457,7 +2166,11 @@ impl AttachServer {
             })
             .await
             .map_err(|error| error.to_string())?;
-        Ok(Some(turn))
+        Ok(Some(RecipientReplyReceipt {
+            item_id: item.address.item().as_str().to_owned(),
+            turn_id: turn.as_str().to_owned(),
+            kind: crate::domain::models::ReplyKind::Answer,
+        }))
     }
 
     /// Without the `a2a` feature no inbound A2A node exists, so no card
@@ -1470,7 +2183,7 @@ impl AttachServer {
         _authorship: super::response_modes::DraftAuthorship,
         _sent: bool,
         _preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
-    ) -> Result<Option<crate::domain::models::ReplyTurnId>, String> {
+    ) -> Result<Option<RecipientReplyReceipt>, String> {
         Ok(None)
     }
 
@@ -1585,13 +2298,20 @@ impl AttachServer {
             .room_journal_reader
             .as_ref()
             .ok_or_else(|| "room journal reader is unavailable".to_owned())?;
-        let mut conversation = self.conversation.lock().await;
-        let index = conversation
-            .messages
-            .iter()
-            .position(|message| message.id == message_id)
-            .ok_or_else(|| "auto response row was not found".to_owned())?;
-
+        let _row_guard = self.peer_row_serial.lock().await;
+        let (mut message, mut control) = {
+            let conversation = self.conversation.lock().await;
+            let message = conversation
+                .messages
+                .iter()
+                .find(|message| message.id == message_id)
+                .cloned()
+                .ok_or_else(|| "auto response row was not found".to_owned())?;
+            (
+                message,
+                conversation.peer_row_controls.get(message_id).cloned(),
+            )
+        };
         // AC5 — the daemon owns the message↔seq binding. The retract target is
         // the journal seq of this response's `PeerDisclosure`, derived from the
         // journal itself (operator-paced path, never per-message); the frame's
@@ -1625,173 +2345,226 @@ impl AttachServer {
         }
 
         let plan = super::response_modes::plan_auto_response_retraction(
-            &conversation.messages[index],
+            &message,
             derived_seq,
             true,
             self.clock.wall_now_ms(),
         )
         .map_err(|error| format!("retraction refused: {error:?}"))?;
+        message = plan.message;
 
         journal
             .record_event(plan.event)
             .await
             .map_err(|error| error.to_string())?;
-        let original = std::mem::replace(&mut conversation.messages[index], plan.message);
-        if let Err(error) = self.core.storage.save_conversation(&conversation).await {
-            // The event stands (append-only; the fold is idempotent on
-            // duplicates) — roll the in-memory row back so a retry is not
-            // refused as `AlreadyRetracted` while disk says otherwise.
-            conversation.messages[index] = original;
-            return Err(error.to_string());
+        if let Some(control) = &mut control {
+            control.stage = PeerRowStage::Settled;
+            control.node_resolvable = false;
         }
-        Ok(())
+        commit_peer_rows_serialized(
+            &self.conversation,
+            &self.registry,
+            self.core.storage.as_ref(),
+            vec![PeerRowMutation::Upsert { message, control }],
+        )
+        .await
     }
 
     /// Gate, load, fold, find, and check the legality table for ONE act on one
     /// recipient-owned item.
     ///
-    /// Sends its own refusal frame on every failure path: `None` means "the
-    /// client has already been told — return from the arm". The `act`
-    /// parameter is load-bearing, because legality is a function of
-    /// `(state, act)` and the two near-idempotent cells behave oppositely: a
-    /// second acknowledgement is silent, a second removal is refused aloud.
-    ///
-    /// There is exactly ONE write on this rail — the caller's `record_event`.
-    /// The fold below is a throwaway read of the journal, which IS the state
-    /// here, so AD-1803's durable-first ordering is satisfied by construction
-    /// and is not a claim this path can fail.
+    /// The legality helper for recipient-item edits. The shared lookup owns the
+    /// trusted-local gate and journal projection; the caller chooses how an
+    /// idempotent result or refusal is presented on its wire action.
     async fn resolve_item_for_edit(
         &self,
-        conn_id: u64,
         mode: AttachMode,
         tier: ConnectionTier,
         act: crate::adapters::policy::recipient_item::RecipientItemAct,
         item_id: &str,
-    ) -> Option<(
-        crate::domain::models::RecipientItemView,
-        Arc<dyn crate::domain::ports::RoomJournal>,
-    )> {
+    ) -> Result<
+        Option<(
+            crate::domain::models::RecipientItemView,
+            Arc<dyn crate::domain::ports::RoomJournal>,
+        )>,
+        ProtocolError,
+    > {
         use crate::adapters::policy::recipient_item::{ItemActOutcome, next_item_state};
 
         let (item, _projection, journal) = self
-            .find_recipient_item(conn_id, mode, tier, act.noun(), item_id)
+            .find_recipient_item(mode, tier, act.noun(), item_id)
             .await?;
         match next_item_state(&item.state, act) {
-            ItemActOutcome::Applied(_) => Some((item, journal)),
-            // Already there: the shipped silence, preserved exactly.
-            ItemActOutcome::Idempotent => None,
-            // Told, never swallowed — and deliberately NOT the not-found
-            // string, because a tombstone the operator cannot distinguish
-            // from a never-minted id is the collapse AD-1822 forbids.
-            // `Removed` is the only state any act is refused from today; a
-            // future terminal state must mint its own sentence here rather
-            // than inherit one that would be false.
+            ItemActOutcome::Applied(_) => Ok(Some((item, journal))),
+            ItemActOutcome::Idempotent => Ok(None),
             ItemActOutcome::Refused(_) => {
-                self.send_to(
-                    conn_id,
-                    DaemonFrame::Error(ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned())),
-                )
-                .await;
-                None
+                Err(ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned()))
             }
         }
     }
 
     /// The gate + load + find prefix every recipient-item act shares —
     /// acknowledge, remove (through [`Self::resolve_item_for_edit`]) and Story
-    /// 19.18's reply. Extracted, ⛔ never copied: one gate, one journal load,
-    /// one lookup by id, and the refusal strings byte-identical to the ones
-    /// ack/remove shipped with. `noun` names the act in the gate's refusals.
-    ///
-    /// Sends its own refusal frame on every failure path; `None` means the
-    /// client has been told. Returns the item, the one fold it was found in
-    /// (the reply reuses it for id minting and the card lookup — no second
-    /// load), and the journal to append to.
+    /// 19.18's reply. One gate, one journal load, one lookup by id.
     async fn find_recipient_item(
         &self,
-        conn_id: u64,
         mode: AttachMode,
         tier: ConnectionTier,
         noun: &str,
         item_id: &str,
-    ) -> Option<(
-        crate::domain::models::RecipientItemView,
-        crate::adapters::policy::JournalRecipientItemProjection,
-        Arc<dyn crate::domain::ports::RoomJournal>,
-    )> {
-        let acting = AgentId::local_operator();
-        match recipient_ack_gate(mode, tier, &acting) {
-            RecipientAckGate::Allow => {}
-            RecipientAckGate::ReadOnly => {
-                self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
-                    .await;
-                return None;
-            }
-            RecipientAckGate::UntrustedTier => {
-                self.send_to(
-                    conn_id,
-                    DaemonFrame::Error(ProtocolError::PeerVerification(format!(
-                        "recipient {noun} is same-host trusted-local only"
-                    ))),
-                )
-                .await;
-                return None;
-            }
-            RecipientAckGate::RoleDenied => {
-                self.send_to(
-                    conn_id,
-                    DaemonFrame::Error(ProtocolError::PeerVerification(format!(
-                        "room role does not permit durable recipient {noun}"
-                    ))),
-                )
-                .await;
-                return None;
-            }
-        }
-        let Some(reader) = &self.room_journal_reader else {
-            self.send_to(
-                conn_id,
-                DaemonFrame::Error(ProtocolError::Internal(
-                    "room journal reader is unavailable".to_owned(),
-                )),
-            )
-            .await;
-            return None;
-        };
-        let Some(journal) = &self.room_journal else {
-            self.send_to(
-                conn_id,
-                DaemonFrame::Error(ProtocolError::Internal(
-                    "room journal is unavailable".to_owned(),
-                )),
-            )
-            .await;
-            return None;
-        };
-        let entries = match reader.load_entries().await {
-            Ok(entries) => entries,
-            Err(error) => {
-                self.send_to(
-                    conn_id,
-                    DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
-                )
-                .await;
-                return None;
-            }
-        };
+    ) -> Result<
+        (
+            crate::domain::models::RecipientItemView,
+            crate::adapters::policy::JournalRecipientItemProjection,
+            Arc<dyn crate::domain::ports::RoomJournal>,
+        ),
+        ProtocolError,
+    > {
+        recipient_command_gate(mode, tier, noun, true)?;
+        let reader = self
+            .room_journal_reader
+            .as_ref()
+            .ok_or_else(|| ProtocolError::Internal("room journal reader is unavailable".into()))?;
+        let journal = self
+            .room_journal
+            .as_ref()
+            .ok_or_else(|| ProtocolError::Internal("room journal is unavailable".into()))?;
+        let entries = reader
+            .load_entries()
+            .await
+            .map_err(|error| ProtocolError::Internal(error.to_string()))?;
         let projection =
             crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
-        let Some(item) = projection.find_by_id(item_id) else {
-            self.send_to(
-                conn_id,
-                DaemonFrame::Error(ProtocolError::Malformed(
-                    RECIPIENT_ITEM_NOT_FOUND.to_owned(),
-                )),
-            )
-            .await;
-            return None;
+        let item = projection
+            .find_by_id(item_id)
+            .ok_or_else(|| ProtocolError::Malformed(RECIPIENT_ITEM_NOT_FOUND.to_owned()))?;
+        Ok((item, projection, Arc::clone(journal)))
+    }
+
+    async fn recipient_context_inventory(&self) -> (Vec<String>, String) {
+        use super::recipient_context::RecipientContextInclusion;
+        let entries = match self.core.built_runtime() {
+            Some(runtime) => runtime.recipient_context.inventory().await,
+            None => Vec::new(),
         };
-        Some((item, projection, Arc::clone(journal)))
+        if entries.is_empty() {
+            return (
+                Vec::new(),
+                "no recipient items selected as peer context for this daemon conversation"
+                    .to_owned(),
+            );
+        }
+        let mut ids = Vec::with_capacity(entries.len());
+        let mut text = String::from("recipient item context · this daemon conversation\n");
+        for entry in entries {
+            let id = entry.address.item().as_str();
+            ids.push(id.to_owned());
+            text.push_str(&format!(
+                "  item {id} · {} · peer-tainted\n",
+                crate::domain::services::transparency::item_principal_label(
+                    entry.address.principal()
+                ),
+            ));
+            let state = match entry.inclusion {
+                RecipientContextInclusion::Selected => "selected · not used yet",
+                RecipientContextInclusion::Full => "included",
+                RecipientContextInclusion::Partial => "included partially · budget-truncated",
+                RecipientContextInclusion::Skipped => "not included · budget-truncated",
+                RecipientContextInclusion::Unavailable => "unavailable",
+            };
+            if let Some(turn) = entry.last_use_turn_id {
+                text.push_str(&format!(
+                    "      last turn {turn} · {} estimated tokens · {state}\n",
+                    entry.estimated_tokens,
+                ));
+            } else {
+                text.push_str(&format!("      {state}\n"));
+            }
+        }
+        (ids, text)
+    }
+
+    async fn broadcast_recipient_context(&self) {
+        let (selected_item_ids, inventory) = self.recipient_context_inventory().await;
+        let frame = DaemonFrame::RecipientContextState {
+            selected_item_ids,
+            inventory,
+            show_inventory: false,
+        };
+        let mut registry = self.registry.lock().await;
+        let dead = registry.fanout_peer_row(&frame);
+        for id in dead {
+            registry.remove(id);
+        }
+    }
+
+    async fn set_recipient_context(
+        &self,
+        conn_id: u64,
+        mode: AttachMode,
+        tier: ConnectionTier,
+        item_id: String,
+        selected: bool,
+    ) {
+        let action = if selected {
+            RecipientAction::ContextSelect
+        } else {
+            RecipientAction::ContextRemove
+        };
+        let target = RecipientActionTarget::Item {
+            item_id: item_id.clone(),
+        };
+        let noun = if selected {
+            "context selection"
+        } else {
+            "context removal"
+        };
+        let outcome = match recipient_command_gate(mode, tier, noun, false) {
+            Err(error) => RecipientActionOutcome::Refused { error },
+            Ok(()) => {
+                #[cfg(not(feature = "a2a"))]
+                {
+                    RecipientActionOutcome::Refused {
+                        error: ProtocolError::Malformed(
+                            "`/team context` needs the `a2a` feature; this build was compiled without it.".to_owned(),
+                        ),
+                    }
+                }
+                #[cfg(feature = "a2a")]
+                {
+                    let _action_guard = self.peer_reply_serial.lock().await;
+                    let _row_guard = self.peer_row_serial.lock().await;
+                    let result = if selected {
+                        match self.core.ensure_runtime().await {
+                            Ok(runtime) => {
+                                runtime
+                                    .recipient_context
+                                    .select(&self.core.workspace, &item_id)
+                                    .await
+                            }
+                            Err(error) => Err(anyhow::anyhow!(error.to_string())),
+                        }
+                    } else {
+                        // Off neither initializes a provider nor resolves content.
+                        Ok(match self.core.built_runtime() {
+                            Some(runtime) => runtime.recipient_context.deselect(&item_id).await,
+                            None => false,
+                        })
+                    };
+                    match result {
+                        Ok(changed) => {
+                            self.broadcast_recipient_context().await;
+                            RecipientActionOutcome::ContextSelection { selected, changed }
+                        }
+                        Err(error) => RecipientActionOutcome::Refused {
+                            error: ProtocolError::Malformed(error.to_string()),
+                        },
+                    }
+                }
+            }
+        };
+        self.send_recipient_action_result(conn_id, action, target, outcome)
+            .await;
     }
 
     /// Story 19.18 `AC2` — the `/team reply` arm: record one reply turn
@@ -1812,79 +2585,104 @@ impl AttachServer {
         item_id: &str,
         text: String,
     ) {
-        let refuse = |message: String| DaemonFrame::Error(ProtocolError::Malformed(message));
+        let target = RecipientActionTarget::Item {
+            item_id: item_id.to_owned(),
+        };
         #[cfg(not(feature = "a2a"))]
         {
-            // A reply turn is served only over A2A, and the author-time scrub
-            // is the A2A disclosure predicate: a build without the feature
-            // records nothing it could never serve.
-            let _ = (mode, tier, item_id, text);
-            self.send_to(
+            let _ = (mode, tier, &text);
+            self.send_recipient_action_result(
                 conn_id,
-                refuse(
-                    "`/team reply` needs the `a2a` feature; this build was compiled without it."
-                        .to_owned(),
-                ),
+                RecipientAction::Reply,
+                target,
+                RecipientActionOutcome::Refused {
+                    error: ProtocolError::Malformed(
+                        "`/team reply` needs the `a2a` feature; this build was compiled without it."
+                            .to_owned(),
+                    ),
+                },
             )
             .await;
         }
         #[cfg(feature = "a2a")]
         {
             use crate::domain::models::{
-                MAX_REPLY_BYTES, RecipientItemState, ReplyAuthorship, RoomEvent, TurnAddress,
-                claim_reply_turn_id, fresh_reply_turn_candidate,
+                MAX_REPLY_BYTES, RecipientItemState, ReplyAuthorship, ReplyKind, RoomEvent,
+                TurnAddress, claim_reply_turn_id, fresh_reply_turn_candidate,
             };
 
             let _reply_guard = self.peer_reply_serial.lock().await;
-            let Some((item, projection, journal)) = self
-                .find_recipient_item(conn_id, mode, tier, "reply", item_id)
-                .await
-            else {
-                return;
-            };
+            let (item, projection, journal) =
+                match self.find_recipient_item(mode, tier, "reply", item_id).await {
+                    Ok(found) => found,
+                    Err(error) => {
+                        drop(_reply_guard);
+                        self.send_recipient_action_result(
+                            conn_id,
+                            RecipientAction::Reply,
+                            target,
+                            RecipientActionOutcome::Refused { error },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+            let refuse = |error| RecipientActionOutcome::Refused { error };
             if matches!(item.state, RecipientItemState::Removed { .. }) {
-                self.send_to(conn_id, refuse(RECIPIENT_ITEM_REMOVED.to_owned()))
-                    .await;
-                return;
-            }
-            if text.trim().is_empty() {
-                self.send_to(conn_id, refuse("reply text is empty".to_owned()))
-                    .await;
-                return;
-            }
-            if text.len() > MAX_REPLY_BYTES {
-                self.send_to(
+                drop(_reply_guard);
+                self.send_recipient_action_result(
                     conn_id,
-                    refuse(format!(
-                        "reply is longer than {MAX_REPLY_BYTES} bytes — shorten it"
-                    )),
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned())),
                 )
                 .await;
                 return;
             }
-            // `P13` — the served thread withholds a body that fails the
-            // disclosure predicate; a HUMAN reply that would fail it is
-            // refused here instead of being recorded and then served withheld.
+            if text.trim().is_empty() {
+                drop(_reply_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Malformed("reply text is empty".to_owned())),
+                )
+                .await;
+                return;
+            }
+            if text.len() > MAX_REPLY_BYTES {
+                drop(_reply_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Malformed(format!(
+                        "reply is longer than {MAX_REPLY_BYTES} bytes — shorten it"
+                    ))),
+                )
+                .await;
+                return;
+            }
             let fragments =
                 crate::domain::ports::InboundPeerRuntime::disclosure_forbidden_fragments(self)
                     .await;
             if crate::adapters::a2a::projection::withholds(&text, &self.core.workspace, &fragments)
             {
-                self.send_to(
+                drop(_reply_guard);
+                self.send_recipient_action_result(
                     conn_id,
-                    refuse(
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Malformed(
                         "this reply names a host path, which peers are never shown — rephrase it"
                             .to_owned(),
-                    ),
+                    )),
                 )
                 .await;
                 return;
             }
-            // (d′) `P4`/`Q1` — a persisted pending card for this item is
-            // answered through the card, so the host never holds two truths
-            // about one question.
             if let Some(node) = self.pending_card_for_item(&projection, &item).await {
-                match self
+                let outcome = match self
                     .resolve_peer_draft_locked(
                         &node,
                         super::response_modes::DraftResolution::WriteOwn(text),
@@ -1892,30 +2690,22 @@ impl AttachServer {
                     )
                     .await
                 {
-                    Ok(Some(turn)) => {
-                        self.send_to(
-                            conn_id,
-                            DaemonFrame::RecipientItemReplyRecorded {
-                                item_id: item_id.to_owned(),
-                                turn_id: turn.as_str().to_owned(),
-                            },
-                        )
-                        .await;
+                    Ok(PeerDraftResolutionOutcome::Applied { reply: Some(reply) }) => {
+                        RecipientActionOutcome::Applied { reply: Some(reply) }
                     }
-                    Ok(None) => {
-                        self.send_to(
-                            conn_id,
-                            DaemonFrame::Error(ProtocolError::Internal(
-                                "the pending card resolved without a reply turn".to_owned(),
-                            )),
-                        )
-                        .await;
+                    Ok(PeerDraftResolutionOutcome::Applied { reply: None }) => {
+                        refuse(ProtocolError::Internal(
+                            "recipient reply completed without a durable receipt".to_owned(),
+                        ))
                     }
-                    Err(error) => {
-                        self.send_to(conn_id, DaemonFrame::Error(ProtocolError::Internal(error)))
-                            .await;
+                    Ok(PeerDraftResolutionOutcome::Idempotent) => {
+                        RecipientActionOutcome::Idempotent
                     }
-                }
+                    Err(error) => refuse(ProtocolError::Internal(error)),
+                };
+                drop(_reply_guard);
+                self.send_recipient_action_result(conn_id, RecipientAction::Reply, target, outcome)
+                    .await;
                 return;
             }
             let turn = match claim_reply_turn_id(fresh_reply_turn_candidate(), |id| {
@@ -1923,9 +2713,143 @@ impl AttachServer {
             }) {
                 Ok(turn) => turn,
                 Err(error) => {
-                    self.send_to(
+                    drop(_reply_guard);
+                    self.send_recipient_action_result(
                         conn_id,
-                        DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
+                        RecipientAction::Reply,
+                        target,
+                        refuse(ProtocolError::Internal(error.to_string())),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let turn_id = turn.as_str().to_owned();
+            let orphan_rows = self
+                .orphan_response_mutations(&projection, &item, &text)
+                .await;
+            if let Err(error) = journal
+                .record_event(RoomEvent::RecipientItemReplied {
+                    address: TurnAddress::answering(&item.address, turn),
+                    answers: item.address.item().clone(),
+                    content: text,
+                    kind: ReplyKind::Answer,
+                    authorship: ReplyAuthorship::HumanWritten,
+                    via_node: None,
+                })
+                .await
+            {
+                drop(_reply_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Internal(error.to_string())),
+                )
+                .await;
+                return;
+            }
+            if let Err(error) = commit_peer_rows(
+                &self.peer_row_serial,
+                &self.conversation,
+                &self.registry,
+                self.core.storage.as_ref(),
+                orphan_rows,
+            )
+            .await
+            {
+                tracing::error!(error = %error, "durable recipient reply could not update its orphan card");
+            }
+            drop(_reply_guard);
+            self.send_recipient_action_result(
+                conn_id,
+                RecipientAction::Reply,
+                target,
+                RecipientActionOutcome::Applied {
+                    reply: Some(RecipientReplyReceipt {
+                        item_id: item_id.to_owned(),
+                        turn_id,
+                        kind: ReplyKind::Answer,
+                    }),
+                },
+            )
+            .await;
+        }
+    }
+
+    /// Record an independent local defer turn without touching the pending
+    /// peer-response card or its controller. The normal item gate and journal
+    /// projection remain the sole authority for addressing and state.
+    async fn defer_recipient_item(
+        &self,
+        conn_id: u64,
+        mode: AttachMode,
+        tier: ConnectionTier,
+        item_id: &str,
+    ) {
+        let target = RecipientActionTarget::Item {
+            item_id: item_id.to_owned(),
+        };
+        #[cfg(not(feature = "a2a"))]
+        {
+            let _ = (mode, tier);
+            self.send_recipient_action_result(
+                conn_id,
+                RecipientAction::Defer,
+                target,
+                RecipientActionOutcome::Refused {
+                    error: ProtocolError::Malformed(
+                        "`/team defer` needs the `a2a` feature; this build was compiled without it."
+                            .to_owned(),
+                    ),
+                },
+            )
+            .await;
+        }
+        #[cfg(feature = "a2a")]
+        {
+            use crate::domain::models::{RecipientItemState, ReplyKind};
+
+            let _reply_guard = self.peer_reply_serial.lock().await;
+            let (item, projection, journal) =
+                match self.find_recipient_item(mode, tier, "defer", item_id).await {
+                    Ok(found) => found,
+                    Err(error) => {
+                        drop(_reply_guard);
+                        self.send_recipient_action_result(
+                            conn_id,
+                            RecipientAction::Defer,
+                            target,
+                            RecipientActionOutcome::Refused { error },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+            let refuse = |error| RecipientActionOutcome::Refused { error };
+            if matches!(item.state, RecipientItemState::Removed { .. }) {
+                drop(_reply_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Defer,
+                    target,
+                    refuse(ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned())),
+                )
+                .await;
+                return;
+            }
+            let turn = match crate::domain::models::claim_reply_turn_id(
+                crate::domain::models::fresh_reply_turn_candidate(),
+                |id| projection.holds_reply_turn_id(id),
+            ) {
+                Ok(turn) => turn,
+                Err(error) => {
+                    drop(_reply_guard);
+                    self.send_recipient_action_result(
+                        conn_id,
+                        RecipientAction::Defer,
+                        target,
+                        refuse(ProtocolError::Internal(error.to_string())),
                     )
                     .await;
                     return;
@@ -1933,72 +2857,85 @@ impl AttachServer {
             };
             let turn_id = turn.as_str().to_owned();
             if let Err(error) = journal
-                .record_event(RoomEvent::RecipientItemReplied {
-                    address: TurnAddress::answering(&item.address, turn),
+                .record_event(crate::domain::models::RoomEvent::RecipientItemReplied {
+                    address: crate::domain::models::TurnAddress::answering(&item.address, turn),
                     answers: item.address.item().clone(),
-                    content: text,
-                    authorship: ReplyAuthorship::HumanWritten,
+                    content: "Busy — defer 30m".to_owned(),
+                    kind: ReplyKind::Defer { minutes: 30 },
+                    authorship: crate::domain::models::ReplyAuthorship::HumanWritten,
                     via_node: None,
                 })
                 .await
             {
-                self.send_to(
+                drop(_reply_guard);
+                self.send_recipient_action_result(
                     conn_id,
-                    DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
+                    RecipientAction::Defer,
+                    target,
+                    refuse(ProtocolError::Internal(error.to_string())),
                 )
                 .await;
                 return;
             }
-            self.send_to(
+            drop(_reply_guard);
+            self.send_recipient_action_result(
                 conn_id,
-                DaemonFrame::RecipientItemReplyRecorded {
-                    item_id: item_id.to_owned(),
-                    turn_id,
+                RecipientAction::Defer,
+                target,
+                RecipientActionOutcome::Applied {
+                    reply: Some(RecipientReplyReceipt {
+                        item_id: item_id.to_owned(),
+                        turn_id,
+                        kind: ReplyKind::Defer { minutes: 30 },
+                    }),
                 },
             )
             .await;
         }
     }
 
-    /// Story 19.18 `AC3(c)` (`Q1`) — the pending peer-response card for
-    /// `item`, found from the **persisted** conversation rows: a
-    /// `peer-response-<node>` row still in a pending shape, whose node id
-    /// joins through the journal fold to this item. ⛔ Never `pending_drafts`
-    /// alone: that map is empty after a restart until a resolve rebuilds it,
-    /// so a memory-only lookup would miss the card and leave it pending
-    /// beside a direct turn — two truths about one question (`M41`).
+    /// A card resolves only while its process-owned controller is live.
+    /// A restart orphan's item remains directly answerable; its display can
+    /// be replaced without reviving or resolving the failed A2A task.
     #[cfg(feature = "a2a")]
     async fn pending_card_for_item(
         &self,
         projection: &crate::adapters::policy::JournalRecipientItemProjection,
         item: &crate::domain::models::RecipientItemView,
     ) -> Option<AgentId> {
-        let nodes: Vec<(String, bool)> = {
+        let nodes: Vec<(String, Option<PeerRowStage>)> = {
             let conversation = self.conversation.lock().await;
             conversation
                 .messages
                 .iter()
                 .filter_map(|message| {
                     let node = message.id.strip_prefix(PEER_RESPONSE_ROW_PREFIX)?;
-                    let drafting = message.content == super::response_modes::DRAFTING_PLACEHOLDER;
-                    (drafting
-                        || super::response_modes::pending_draft_content(&message.content).is_some())
-                    .then(|| (node.to_owned(), drafting))
+                    let stage = match conversation.peer_row_controls.get(&message.id) {
+                        Some(control) if node == control.node_id.as_str() => Some(control.stage),
+                        Some(_) => return None,
+                        None => None,
+                    };
+                    Some((node.to_owned(), stage))
                 })
                 .collect()
         };
-        for (node, drafting) in nodes {
+        for (node, stage) in nodes {
             let Ok(node) = AgentId::parse(&node) else {
                 continue;
             };
-            if drafting
-                && !matches!(
-                    self.pending_drafts.state(node.as_str()).await,
-                    Some(super::response_modes::DraftState::Drafting { .. })
-                )
-            {
+            let phase = self.pending_drafts.phase(node.as_str()).await;
+            let eligible = match (stage, phase) {
+                (Some(PeerRowStage::Settled), _) => false,
+                (_, Some(super::response_modes::DraftPhase::Drafting)) => true,
+                (
+                    Some(PeerRowStage::AwaitingOperator | PeerRowStage::Ready) | None,
+                    Some(super::response_modes::DraftPhase::Ready),
+                ) => true,
+                _ => false,
+            };
+            if !eligible {
                 // A drafting placeholder left by a crashed process is not
-                // resolvable; its item must remain directly answerable.
+                // resolvable; its item remains directly answerable.
                 continue;
             }
             if crate::adapters::a2a::exec::recipient_item_for_node(projection, &node)
@@ -2008,6 +2945,45 @@ impl AttachServer {
             }
         }
         None
+    }
+
+    #[cfg(feature = "a2a")]
+    async fn orphan_response_mutations(
+        &self,
+        projection: &crate::adapters::policy::JournalRecipientItemProjection,
+        item: &crate::domain::models::RecipientItemView,
+        content: &str,
+    ) -> Vec<PeerRowMutation> {
+        let conversation = self.conversation.lock().await;
+        let mut mutations = Vec::new();
+        for message in &conversation.messages {
+            let Some(control) = conversation.peer_row_controls.get(&message.id) else {
+                continue;
+            };
+            if control.stage == PeerRowStage::Settled
+                || control.item_address.as_ref() != Some(&item.address)
+                || self.pending_drafts.phase(&control.node_id).await.is_some()
+            {
+                continue;
+            }
+            let Ok(node) = AgentId::parse(&control.node_id) else {
+                continue;
+            };
+            if !crate::adapters::a2a::exec::recipient_item_for_node(projection, &node)
+                .is_some_and(|joined| joined.address == item.address)
+            {
+                continue;
+            }
+            let mut settled = control.clone();
+            settled.stage = PeerRowStage::Settled;
+            settled.node_resolvable = false;
+            mutations.push(PeerRowMutation::ReplaceContent {
+                row_id: message.id.clone(),
+                content: content.to_owned(),
+                control: Some(settled),
+            });
+        }
+        mutations
     }
 
     /// Returns `true` if the connection should detach.
@@ -2247,50 +3223,60 @@ impl AttachServer {
                 }
             }
             ClientFrame::ResolvePeerDraft { node, action } => {
-                if mode != AttachMode::ReadWrite {
-                    self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
-                        .await;
-                    return false;
-                }
-                if tier != ConnectionTier::TrustedLocal {
-                    self.send_to(
-                        conn_id,
-                        DaemonFrame::Error(ProtocolError::PeerVerification(
+                let target = RecipientActionTarget::Node {
+                    node_id: node.clone(),
+                };
+                let outcome = if mode != AttachMode::ReadWrite {
+                    RecipientActionOutcome::Refused {
+                        error: ProtocolError::ReadOnly,
+                    }
+                } else if tier != ConnectionTier::TrustedLocal {
+                    RecipientActionOutcome::Refused {
+                        error: ProtocolError::PeerVerification(
                             "draft resolution is same-host trusted-local only".to_owned(),
-                        )),
-                    )
-                    .await;
-                    return false;
-                }
-                let node = match AgentId::parse(&node) {
-                    Ok(node) => node,
-                    Err(error) => {
-                        self.send_to(
-                            conn_id,
-                            DaemonFrame::Error(ProtocolError::Malformed(error.to_string())),
-                        )
-                        .await;
-                        return false;
+                        ),
+                    }
+                } else {
+                    match AgentId::parse(&node) {
+                        Err(error) => RecipientActionOutcome::Refused {
+                            error: ProtocolError::Malformed(error.to_string()),
+                        },
+                        Ok(node_id) => {
+                            let resolution = match action {
+                                super::protocol::PeerDraftAction::Approve => {
+                                    super::response_modes::DraftResolution::Approve
+                                }
+                                super::protocol::PeerDraftAction::Edit { content } => {
+                                    super::response_modes::DraftResolution::Edit(content)
+                                }
+                                super::protocol::PeerDraftAction::Reject => {
+                                    super::response_modes::DraftResolution::Reject
+                                }
+                                super::protocol::PeerDraftAction::WriteOwn { content } => {
+                                    super::response_modes::DraftResolution::WriteOwn(content)
+                                }
+                            };
+                            match self.resolve_peer_draft(&node_id, resolution).await {
+                                Ok(PeerDraftResolutionOutcome::Applied { reply }) => {
+                                    RecipientActionOutcome::Applied { reply }
+                                }
+                                Ok(PeerDraftResolutionOutcome::Idempotent) => {
+                                    RecipientActionOutcome::Idempotent
+                                }
+                                Err(error) => RecipientActionOutcome::Refused {
+                                    error: ProtocolError::Internal(error),
+                                },
+                            }
+                        }
                     }
                 };
-                let resolution = match action {
-                    super::protocol::PeerDraftAction::Approve => {
-                        super::response_modes::DraftResolution::Approve
-                    }
-                    super::protocol::PeerDraftAction::Edit { content } => {
-                        super::response_modes::DraftResolution::Edit(content)
-                    }
-                    super::protocol::PeerDraftAction::Reject => {
-                        super::response_modes::DraftResolution::Reject
-                    }
-                    super::protocol::PeerDraftAction::WriteOwn { content } => {
-                        super::response_modes::DraftResolution::WriteOwn(content)
-                    }
-                };
-                if let Err(error) = self.resolve_peer_draft(&node, resolution).await {
-                    self.send_to(conn_id, DaemonFrame::Error(ProtocolError::Internal(error)))
-                        .await;
-                }
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Response,
+                    target,
+                    outcome,
+                )
+                .await;
             }
             ClientFrame::RetractAutoResponse {
                 message_id,
@@ -2317,70 +3303,125 @@ impl AttachServer {
                 }
             }
             ClientFrame::AcknowledgeRecipientItem { item_id } => {
-                let Some((item, journal)) = self
-                    .resolve_item_for_edit(
-                        conn_id,
-                        mode,
-                        tier,
-                        crate::adapters::policy::recipient_item::RecipientItemAct::Acknowledge,
-                        &item_id,
-                    )
-                    .await
-                else {
-                    return false;
+                let _action_guard = self.peer_reply_serial.lock().await;
+                let target = RecipientActionTarget::Item {
+                    item_id: item_id.clone(),
                 };
-                if let Err(error) = journal
-                    .record_event(
-                        crate::domain::models::RoomEvent::RecipientItemAcknowledged {
-                            address: item.address,
-                            // AC2(c)/A7: attribution is the roster alias the
-                            // message ARRIVED on — the item's own alias,
-                            // which is `None` (a renderable unresolved
-                            // state) for the A2A pseudonym path. Never a
-                            // fabricated person-shaped string.
-                            alias: item.alias.clone(),
-                        },
-                    )
+                let outcome = match self
+                    .find_recipient_item(mode, tier, "acknowledgement", &item_id)
                     .await
                 {
-                    self.send_to(
-                        conn_id,
-                        DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
-                    )
-                    .await;
-                }
+                    Err(error) => RecipientActionOutcome::Refused { error },
+                    Ok((item, _, journal)) => {
+                        match crate::adapters::policy::recipient_item::next_item_state(
+                            &item.state,
+                            crate::adapters::policy::recipient_item::RecipientItemAct::Acknowledge,
+                        ) {
+                            crate::adapters::policy::recipient_item::ItemActOutcome::Applied(_) => {
+                                match journal
+                                    .record_event(
+                                        crate::domain::models::RoomEvent::RecipientItemAcknowledged {
+                                            address: item.address,
+                                            // Keep the actual arrival attribution; the unresolved
+                                            // pseudonym path deliberately has no roster alias.
+                                            alias: item.alias.clone(),
+                                        },
+                                    )
+                                    .await
+                                {
+                                    Ok(()) => RecipientActionOutcome::Applied { reply: None },
+                                    Err(error) => RecipientActionOutcome::Refused {
+                                        error: ProtocolError::Internal(error.to_string()),
+                                    },
+                                }
+                            }
+                            crate::adapters::policy::recipient_item::ItemActOutcome::Idempotent => {
+                                RecipientActionOutcome::Idempotent
+                            }
+                            crate::adapters::policy::recipient_item::ItemActOutcome::Refused(_) => {
+                                RecipientActionOutcome::Refused {
+                                    error: ProtocolError::Malformed(
+                                        RECIPIENT_ITEM_REMOVED.to_owned(),
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                };
+                drop(_action_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Acknowledge,
+                    target,
+                    outcome,
+                )
+                .await;
             }
             ClientFrame::RemoveRecipientItem { item_id } => {
-                let Some((item, journal)) = self
+                let _action_guard = self.peer_reply_serial.lock().await;
+                match self
                     .resolve_item_for_edit(
-                        conn_id,
                         mode,
                         tier,
                         crate::adapters::policy::recipient_item::RecipientItemAct::Remove,
                         &item_id,
                     )
                     .await
-                else {
-                    return false;
-                };
-                // The removal record carries the address and nothing else: a
-                // single fact with no outcome, and no attribution field the
-                // one local principal could fill honestly.
-                if let Err(error) = journal
-                    .record_event(crate::domain::models::RoomEvent::RecipientItemRemoved {
-                        address: item.address,
-                    })
-                    .await
                 {
-                    self.send_to(
-                        conn_id,
-                        DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
-                    )
-                    .await;
+                    Ok(Some((item, journal))) => {
+                        // The removal record carries only the address.
+                        if let Err(error) = journal
+                            .record_event(crate::domain::models::RoomEvent::RecipientItemRemoved {
+                                address: item.address,
+                            })
+                            .await
+                        {
+                            self.send_to(
+                                conn_id,
+                                DaemonFrame::Error(ProtocolError::Internal(error.to_string())),
+                            )
+                            .await;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.send_to(conn_id, DaemonFrame::Error(error)).await;
+                    }
                 }
             }
             ClientFrame::ReplyToRecipientItem { item_id, text } => {
                 self.reply_to_recipient_item(conn_id, mode, tier, &item_id, text)
+                    .await;
+            }
+            ClientFrame::DeferRecipientItem { item_id } => {
+                self.defer_recipient_item(conn_id, mode, tier, &item_id)
+                    .await;
+            }
+            ClientFrame::InspectRecipientContext => {
+                if tier != ConnectionTier::TrustedLocal {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::PeerVerification(
+                            "recipient context inventory is same-host trusted-local only"
+                                .to_owned(),
+                        )),
+                    )
+                    .await;
+                } else {
+                    let (selected_item_ids, inventory) = self.recipient_context_inventory().await;
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::RecipientContextState {
+                            selected_item_ids,
+                            inventory,
+                            show_inventory: true,
+                        },
+                    )
+                    .await;
+                }
+            }
+            ClientFrame::SetRecipientContext { item_id, selected } => {
+                self.set_recipient_context(conn_id, mode, tier, item_id, selected)
                     .await;
             }
             ClientFrame::PeerShare {
@@ -2578,6 +3619,7 @@ impl AttachServer {
                 // A2A door, a RAP recipient names a NODE, not a task — many
                 // envelopes share it, so an existing card is appended to,
                 // never an error and never a duplicate row id.
+                let row_guard = self.peer_row_serial.lock().await;
                 let fresh = self.pending_drafts.begin(recipient.as_str()).await;
                 if fresh
                     && !self
@@ -2585,17 +3627,16 @@ impl AttachServer {
                         .complete(recipient.as_str(), String::new())
                         .await
                 {
+                    self.pending_drafts.abandon(recipient.as_str()).await;
                     return Err("pending peer response could not be initialised".to_owned());
                 }
-                {
-                    let mut conversation = self.conversation.lock().await;
-                    conversation.messages.push(peer_transcript_message(
-                        &text,
-                        &peer_id,
-                        &response_policy.provenance,
-                    ));
-                    if fresh {
-                        conversation.messages.push(ChatMessage {
+                let mut mutations = vec![PeerRowMutation::Upsert {
+                    message: peer_transcript_message(&text, &peer_id, &response_policy.provenance),
+                    control: None,
+                }];
+                if fresh {
+                    mutations.push(PeerRowMutation::Upsert {
+                        message: ChatMessage {
                             id: response_row_id.clone(),
                             role: MessageRole::Assistant,
                             content: super::response_modes::AWAITING_RESPONSE_PLACEHOLDER
@@ -2603,14 +3644,29 @@ impl AttachServer {
                             created_at: crate::domain::models::session_meta::now_unix(),
                             synthetic: true,
                             ..Default::default()
-                        });
+                        },
+                        control: Some(peer_row_control(
+                            &recipient,
+                            None,
+                            &response_policy.provenance,
+                            peer_id.as_str(),
+                            PeerRowStage::AwaitingOperator,
+                            true,
+                        )),
+                    });
+                }
+                if let Err(error) = commit_peer_rows_serialized(
+                    &self.conversation,
+                    &self.registry,
+                    self.core.storage.as_ref(),
+                    mutations,
+                )
+                .await
+                {
+                    if fresh {
+                        self.pending_drafts.abandon(recipient.as_str()).await;
                     }
-                    if let Err(error) = self.core.storage.save_conversation(&conversation).await {
-                        if fresh {
-                            self.pending_drafts.abandon(recipient.as_str()).await;
-                        }
-                        return Err(error.to_string());
-                    }
+                    return Err(error);
                 }
                 self.node_tree
                     .set_state(&recipient, NodeState::Running)
@@ -2618,13 +3674,30 @@ impl AttachServer {
                 self.node_tree
                     .set_state(&recipient, NodeState::Waiting)
                     .await;
-                self.node_tree
+                if let Err(error) = self
+                    .node_tree
                     .stamp_wait_reason(
                         &recipient,
                         Some(crate::domain::models::WaitReason::AwaitingPeerResponse),
                     )
                     .await
-                    .map_err(|error| error.to_string())?;
+                {
+                    if fresh {
+                        self.pending_drafts.abandon(recipient.as_str()).await;
+                        if let Err(remove_error) = remove_pending_peer_row_serialized(
+                            &self.conversation,
+                            &self.registry,
+                            self.core.storage.as_ref(),
+                            &recipient,
+                        )
+                        .await
+                        {
+                            tracing::warn!(%remove_error, node = %recipient, "removing failed peer response placeholder failed");
+                        }
+                    }
+                    return Err(error.to_string());
+                }
+                drop(row_guard);
                 Ok(())
             }
             crate::domain::models::ResponseMode::NotifyAndAuto => {
@@ -2637,27 +3710,42 @@ impl AttachServer {
                 let response = super::response_modes::auto_response_template(
                     response_policy.auto_response.as_ref(),
                 );
-                {
-                    let mut conversation = self.conversation.lock().await;
-                    conversation.messages.push(peer_transcript_message(
-                        &text,
-                        &peer_id,
-                        &response_policy.provenance,
-                    ));
-                    conversation.messages.push(ChatMessage {
-                        id: generate_message_id(),
-                        role: MessageRole::Assistant,
-                        content: response.clone(),
-                        created_at: crate::domain::models::session_meta::now_unix(),
-                        authorship: crate::domain::models::MessageAuthorship::AgentComposed,
-                        ..Default::default()
-                    });
-                    self.core
-                        .storage
-                        .save_conversation(&conversation)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
+                let response_row_id = generate_message_id();
+                commit_peer_rows(
+                    &self.peer_row_serial,
+                    &self.conversation,
+                    &self.registry,
+                    self.core.storage.as_ref(),
+                    vec![
+                        PeerRowMutation::Upsert {
+                            message: peer_transcript_message(
+                                &text,
+                                &peer_id,
+                                &response_policy.provenance,
+                            ),
+                            control: None,
+                        },
+                        PeerRowMutation::Upsert {
+                            message: ChatMessage {
+                                id: response_row_id,
+                                role: MessageRole::Assistant,
+                                content: response.clone(),
+                                created_at: crate::domain::models::session_meta::now_unix(),
+                                authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+                                ..Default::default()
+                            },
+                            control: Some(peer_row_control(
+                                &recipient,
+                                None,
+                                &response_policy.provenance,
+                                peer_id.as_str(),
+                                PeerRowStage::Settled,
+                                false,
+                            )),
+                        },
+                    ],
+                )
+                .await?;
                 super::response_modes::auto_response_surface(
                     self.clock.as_ref(),
                     response_started_at_ms,
@@ -2690,40 +3778,64 @@ impl AttachServer {
                 // rides the existing card — no duplicate inference, no
                 // duplicate row id.
                 let reply_guard = self.peer_reply_serial.lock().await;
+                let row_guard = self.peer_row_serial.lock().await;
                 if !self.pending_drafts.begin(recipient.as_str()).await {
-                    let mut conversation = self.conversation.lock().await;
-                    conversation.messages.push(peer_transcript_message(
-                        &text,
-                        &peer_id,
-                        &response_policy.provenance,
-                    ));
-                    self.core
-                        .storage
-                        .save_conversation(&conversation)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    commit_peer_rows_serialized(
+                        &self.conversation,
+                        &self.registry,
+                        self.core.storage.as_ref(),
+                        vec![PeerRowMutation::Upsert {
+                            message: peer_transcript_message(
+                                &text,
+                                &peer_id,
+                                &response_policy.provenance,
+                            ),
+                            control: None,
+                        }],
+                    )
+                    .await?;
                     return Ok(());
                 }
+                let control = peer_row_control(
+                    &recipient,
+                    None,
+                    &response_policy.provenance,
+                    peer_id.as_str(),
+                    PeerRowStage::Drafting,
+                    true,
+                );
+                if let Err(error) = commit_peer_rows_serialized(
+                    &self.conversation,
+                    &self.registry,
+                    self.core.storage.as_ref(),
+                    vec![
+                        PeerRowMutation::Upsert {
+                            message: peer_transcript_message(
+                                &text,
+                                &peer_id,
+                                &response_policy.provenance,
+                            ),
+                            control: None,
+                        },
+                        PeerRowMutation::Upsert {
+                            message: ChatMessage {
+                                id: response_row_id.clone(),
+                                role: MessageRole::Assistant,
+                                content: super::response_modes::DRAFTING_PLACEHOLDER.to_owned(),
+                                created_at: crate::domain::models::session_meta::now_unix(),
+                                synthetic: true,
+                                ..Default::default()
+                            },
+                            control: Some(control),
+                        },
+                    ],
+                )
+                .await
                 {
-                    let mut conversation = self.conversation.lock().await;
-                    conversation.messages.push(peer_transcript_message(
-                        &text,
-                        &peer_id,
-                        &response_policy.provenance,
-                    ));
-                    conversation.messages.push(ChatMessage {
-                        id: response_row_id.clone(),
-                        role: MessageRole::Assistant,
-                        content: super::response_modes::DRAFTING_PLACEHOLDER.to_owned(),
-                        created_at: crate::domain::models::session_meta::now_unix(),
-                        synthetic: true,
-                        ..Default::default()
-                    });
-                    if let Err(error) = self.core.storage.save_conversation(&conversation).await {
-                        self.pending_drafts.abandon(recipient.as_str()).await;
-                        return Err(error.to_string());
-                    }
+                    self.pending_drafts.abandon(recipient.as_str()).await;
+                    return Err(error);
                 }
+                drop(row_guard);
                 drop(reply_guard);
                 let (ingested_tx, ingested_rx) = tokio::sync::oneshot::channel();
                 let server = self.clone();
@@ -2733,14 +3845,45 @@ impl AttachServer {
                     let rt = match server.core.ensure_runtime().await {
                         Ok(runtime) => runtime,
                         Err(error) => {
+                            server.pending_drafts.abandon(recipient.as_str()).await;
+                            if let Err(remove_error) = remove_pending_peer_row(
+                                &server.peer_row_serial,
+                                &server.conversation,
+                                &server.registry,
+                                server.core.storage.as_ref(),
+                                &recipient,
+                            )
+                            .await
+                            {
+                                tracing::warn!(%remove_error, node = %recipient, "removing failed peer response placeholder failed");
+                            }
+                            server
+                                .node_tree
+                                .set_state(&recipient, NodeState::Running)
+                                .await;
+                            server
+                                .node_tree
+                                .set_state(&recipient, NodeState::Failed)
+                                .await;
+                            server.node_tree.deregister(&recipient).await;
                             let _ = ingested_tx.send(Err(error.to_string()));
                             return;
                         }
                     };
                     server.ensure_approval_gate(rt.approval.clone());
 
+                    let conversation_id = server.conversation.lock().await.id.clone();
+                    let peer_turn_closed = server.peer_turn_closed.notified();
+                    tokio::pin!(peer_turn_closed);
+                    peer_turn_closed.as_mut().enable();
                     let (tap_tx, tap_rx) = mpsc::unbounded_channel::<AppEvent>();
-                    let collector = spawn_turn_collector(tap_rx, server.domain_tx.clone(), true);
+                    let collector = spawn_turn_collector(
+                        tap_rx,
+                        server.domain_tx.clone(),
+                        true,
+                        Arc::new(recipient.clone()),
+                        conversation_id,
+                    );
                     let handle = {
                         let mut conversation = server.conversation.lock().await;
                         rt.drive_preloaded_turn(
@@ -2757,48 +3900,92 @@ impl AttachServer {
 
                     let join_failed = handle.await.is_err();
                     let (answer, errored, completed) = collector.await.unwrap_or_default();
+                    peer_turn_closed.await;
+                    let _reply_guard = server.peer_reply_serial.lock().await;
+                    let _row_guard = server.peer_row_serial.lock().await;
                     let terminal = if join_failed
                         || errored
                         || !completed
                         || answer.trim().is_empty()
                     {
                         NodeState::Failed
-                    } else {
-                        server
-                            .pending_drafts
-                            .complete(recipient.as_str(), answer.clone())
-                            .await;
-                        let mut conversation = server.conversation.lock().await;
-                        if let Some(row) = conversation
-                            .messages
-                            .iter_mut()
-                            .find(|message| message.id == response_row_id)
-                        {
-                            row.content = format!(
-                                "{}{}",
-                                super::response_modes::DRAFT_APPROVAL_PREFIX,
-                                answer
-                            );
+                    } else if !server
+                        .pending_drafts
+                        .complete(recipient.as_str(), answer.clone())
+                        .await
+                    {
+                        let settled = {
+                            let conversation = server.conversation.lock().await;
+                            conversation
+                                .peer_row_controls
+                                .get(&response_row_id)
+                                .is_some_and(|control| control.stage == PeerRowStage::Settled)
+                        };
+                        if settled {
+                            return;
                         }
-                        match server.core.storage.save_conversation(&conversation).await {
-                            Ok(()) => NodeState::Waiting,
-                            Err(error) => {
-                                // An unparked card the operator could never
-                                // resolve after a restart is worse than an
-                                // honest failure (AC3).
-                                tracing::warn!(%error, "persisting completed peer draft failed");
+                        NodeState::Failed
+                    } else {
+                        let (row, control) = {
+                            let conversation = server.conversation.lock().await;
+                            (
+                                conversation
+                                    .messages
+                                    .iter()
+                                    .find(|message| message.id == response_row_id)
+                                    .cloned(),
+                                conversation
+                                    .peer_row_controls
+                                    .get(&response_row_id)
+                                    .cloned(),
+                            )
+                        };
+                        match (row, control) {
+                            (Some(mut row), Some(mut control))
+                                if control.stage == PeerRowStage::Drafting =>
+                            {
+                                row.content = format!(
+                                    "{}{}",
+                                    super::response_modes::DRAFT_APPROVAL_PREFIX,
+                                    answer
+                                );
+                                control.stage = PeerRowStage::Ready;
+                                control.node_resolvable = true;
+                                match commit_peer_rows_serialized(
+                                    &server.conversation,
+                                    &server.registry,
+                                    server.core.storage.as_ref(),
+                                    vec![PeerRowMutation::Upsert {
+                                        message: row,
+                                        control: Some(control),
+                                    }],
+                                )
+                                .await
+                                {
+                                    Ok(()) => NodeState::Waiting,
+                                    Err(error) => {
+                                        tracing::warn!(%error, "persisting completed peer draft failed");
+                                        server.pending_drafts.abandon(recipient.as_str()).await;
+                                        NodeState::Failed
+                                    }
+                                }
+                            }
+                            (_, Some(control)) if control.stage == PeerRowStage::Settled => return,
+                            _ => {
                                 server.pending_drafts.abandon(recipient.as_str()).await;
                                 NodeState::Failed
                             }
                         }
                     };
                     if terminal != NodeState::Waiting {
-                        let mut conversation = server.conversation.lock().await;
-                        conversation
-                            .messages
-                            .retain(|message| message.id != response_row_id);
-                        if let Err(error) =
-                            server.core.storage.save_conversation(&conversation).await
+                        server.pending_drafts.abandon(recipient.as_str()).await;
+                        if let Err(error) = remove_pending_peer_row_serialized(
+                            &server.conversation,
+                            &server.registry,
+                            server.core.storage.as_ref(),
+                            &recipient,
+                        )
+                        .await
                         {
                             tracing::warn!(%error, "removing failed peer response placeholder failed");
                         }
@@ -2822,6 +4009,18 @@ impl AttachServer {
                             .node_tree
                             .set_state(&recipient, NodeState::Failed)
                             .await;
+                        server.pending_drafts.abandon(recipient.as_str()).await;
+                        if let Err(remove_error) = remove_pending_peer_row_serialized(
+                            &server.conversation,
+                            &server.registry,
+                            server.core.storage.as_ref(),
+                            &recipient,
+                        )
+                        .await
+                        {
+                            tracing::warn!(%remove_error, node = %recipient, "removing failed peer response placeholder failed");
+                        }
+                        server.node_tree.deregister(&recipient).await;
                     }
                     *server.active_channel_origin.lock().await = ChannelKind::Terminal;
                 });
@@ -2836,10 +4035,28 @@ impl AttachServer {
     /// the turn. The turn emits to the daemon bus; the forwarder fans out + folds.
     async fn drive_user_turn(&self, text: String) {
         if text.trim() == "/clear" {
+            let _turn_guard = self.turn_serial.lock().await;
+            let _action_guard = self.peer_reply_serial.lock().await;
             if let Some(handler) = self.peer_delivery.read().await.clone() {
                 handler.clear_all_taint().await;
             }
-            self.conversation.lock().await.messages.clear();
+            if let Err(error) = clear_conversation_rows(
+                &self.pending_drafts,
+                &self.peer_row_serial,
+                &self.conversation,
+                &self.registry,
+                self.core.storage.as_ref(),
+            )
+            .await
+            {
+                tracing::warn!(%error, "clearing conversation rows failed");
+            } else {
+                let _row_guard = self.peer_row_serial.lock().await;
+                if let Some(runtime) = self.core.built_runtime() {
+                    runtime.recipient_context.clear().await;
+                }
+                self.broadcast_recipient_context().await;
+            }
             return;
         }
         let _ = self
@@ -2976,8 +4193,13 @@ impl AttachServer {
                         .await;
                 }
                 self.blocked_waiting.fetch_add(1, Ordering::SeqCst);
-                record_blocked_action(&self.conversation, &self.core.storage, "a2a/sender-consent")
-                    .await;
+                record_blocked_action(
+                    &self.conversation,
+                    &self.core.storage,
+                    "a2a/sender-consent",
+                    crate::domain::models::HistorySource::PeerDisplay,
+                )
+                .await;
                 crate::domain::ports::EventEmitter::emit(
                     &crate::infrastructure::runtime::event_bus::ChannelEmitter::new(
                         self.domain_tx.clone(),
@@ -3239,6 +4461,32 @@ impl AttachServer {
         }
     }
 
+    async fn send_recipient_action_result(
+        &self,
+        conn_id: u64,
+        action: RecipientAction,
+        target: RecipientActionTarget,
+        outcome: RecipientActionOutcome,
+    ) {
+        let tx = {
+            let registry = self.registry.lock().await;
+            registry
+                .conns
+                .iter()
+                .find(|connection| connection.id == conn_id)
+                .map(|connection| connection.tx.clone())
+        };
+        if let Some(tx) = tx {
+            let _ = tx
+                .send(DaemonFrame::RecipientActionResult {
+                    action,
+                    target,
+                    outcome,
+                })
+                .await;
+        }
+    }
+
     async fn send_to(&self, conn_id: u64, frame: DaemonFrame) -> bool {
         let tx = {
             let reg = self.registry.lock().await;
@@ -3279,8 +4527,16 @@ async fn run_approval_gate(
                 tool,
                 input_preview,
                 risk,
-                ..
+                source,
             }) => {
+                let history_source = if matches!(
+                    source,
+                    crate::domain::models::tool_call::ApprovalSource::RemotePeer { .. }
+                ) {
+                    crate::domain::models::HistorySource::PeerDisplay
+                } else {
+                    crate::domain::models::HistorySource::Local
+                };
                 let writer = { registry.lock().await.writer_tx() };
                 let frame = DaemonFrame::ApprovalRequest {
                     request_id: id.clone(),
@@ -3308,7 +4564,8 @@ async fn run_approval_gate(
                                 )
                                 .await;
                             blocked.fetch_add(1, Ordering::SeqCst);
-                            record_blocked_action(&conversation, &storage, &tool).await;
+                            record_blocked_action(&conversation, &storage, &tool, history_source)
+                                .await;
                             crate::domain::ports::EventEmitter::emit(
                                 &event_emitter,
                                 AppEvent::SystemNotice {
@@ -3368,7 +4625,8 @@ async fn run_approval_gate(
                                 )
                                 .await;
                             blocked.fetch_add(1, Ordering::SeqCst);
-                            record_blocked_action(&conversation, &storage, &tool).await;
+                            record_blocked_action(&conversation, &storage, &tool, history_source)
+                                .await;
                         }
                     }
                 }
@@ -3421,6 +4679,7 @@ async fn record_blocked_action(
     conversation: &Arc<Mutex<Conversation>>,
     storage: &Arc<dyn crate::domain::ports::StoragePort>,
     tool: &str,
+    history_source: crate::domain::models::HistorySource,
 ) {
     let mut conv = conversation.lock().await;
     conv.messages.push(ChatMessage {
@@ -3439,6 +4698,7 @@ async fn record_blocked_action(
         origin: ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source,
     });
     if let Err(e) = storage.save_conversation(&conv).await {
         tracing::warn!(error = %e, "daemon: persisting blocked-action record failed");
@@ -3455,6 +4715,7 @@ async fn record_blocked_action(
 struct InboundTurnContext {
     core: Arc<DaemonCore>,
     conversation: Arc<Mutex<Conversation>>,
+    peer_row_serial: Arc<Mutex<()>>,
     domain_tx: mpsc::UnboundedSender<AppEvent>,
     node_tree: crate::infrastructure::subagent::NodeTree,
     /// The daemon has ONE conversation; turns must not interleave on it.
@@ -3462,12 +4723,13 @@ struct InboundTurnContext {
     active_channel_origin: Arc<Mutex<ChannelKind>>,
     inbound_results: Arc<Mutex<std::collections::HashMap<AgentId, String>>>,
     pending_drafts: Arc<super::response_modes::PendingDraftController>,
+    peer_reply_serial: Arc<Mutex<()>>,
     registry: Arc<Mutex<ConnRegistry>>,
     blocked_waiting: Arc<AtomicUsize>,
     approval_gate_started: Arc<std::sync::atomic::AtomicBool>,
     pending_consent_cards:
         Arc<Mutex<std::collections::HashMap<crate::domain::models::RequestId, DaemonFrame>>>,
-    turn_complete: Arc<Notify>,
+    peer_turn_closed: Arc<Notify>,
 }
 
 /// Tee-collector shared by the A2A front door (`InboundTurnContext::run`) and
@@ -3486,12 +4748,14 @@ struct InboundTurnContext {
 /// notice and returns), and (3) the catch-all: a turn that never reached a
 /// final `TurnComplete` did not complete, whatever else it did or did not say.
 ///
-/// In managed (buffered) modes, provider text and terminal chunks stay local —
-/// nothing reaches the daemon bus until the operator resolves the draft (AC3).
+/// Managed response text stays local until the operator resolves the draft.
+/// Permitted tool display and terminal cleanup carry host-owned peer lineage.
 fn spawn_turn_collector(
     mut tap_rx: mpsc::UnboundedReceiver<AppEvent>,
     downstream: mpsc::UnboundedSender<AppEvent>,
     buffer_response: bool,
+    node: Arc<AgentId>,
+    conversation_id: String,
 ) -> tokio::task::JoinHandle<(String, bool, bool)> {
     tokio::spawn(async move {
         let mut answer = String::new();
@@ -3517,17 +4781,40 @@ fn spawn_turn_collector(
                 } => answer.push_str(content),
                 _ => {}
             }
-            let buffered_chunk = matches!(
-                &event,
+            match event {
                 AppEvent::ProviderChunk {
-                    chunk: StreamChunk::Text { .. } | StreamChunk::TurnComplete { .. },
-                    ..
+                    conversation_id,
+                    chunk,
+                } => {
+                    if !buffer_response || !matches!(chunk, StreamChunk::Text { .. }) {
+                        let _ = downstream.send(AppEvent::PeerProviderChunk {
+                            node: node.clone(),
+                            conversation_id,
+                            chunk,
+                        });
+                    }
                 }
-            );
-            if !buffer_response || !buffered_chunk {
-                let _ = downstream.send(event);
+                AppEvent::SystemNotice {
+                    conversation_id,
+                    level,
+                    message,
+                } => {
+                    let _ = downstream.send(AppEvent::PeerSystemNotice {
+                        node: node.clone(),
+                        conversation_id,
+                        level,
+                        message,
+                    });
+                }
+                other => {
+                    let _ = downstream.send(other);
+                }
             }
         }
+        let _ = downstream.send(AppEvent::PeerTurnClosed {
+            node,
+            conversation_id,
+        });
         (answer, errored, completed)
     })
 }
@@ -3544,6 +4831,21 @@ impl InboundTurnContext {
             self.domain_tx.clone(),
             self.pending_consent_cards.clone(),
         );
+    }
+
+    async fn cleanup_pending_response(&self, node_id: &AgentId) {
+        self.pending_drafts.abandon(node_id.as_str()).await;
+        if let Err(error) = remove_pending_peer_row(
+            &self.peer_row_serial,
+            &self.conversation,
+            &self.registry,
+            self.core.storage.as_ref(),
+            node_id,
+        )
+        .await
+        {
+            tracing::warn!(%error, node = %node_id, "removing failed peer response placeholder failed");
+        }
     }
 
     /// Drive one inbound peer task to a terminal node state.
@@ -3572,6 +4874,9 @@ impl InboundTurnContext {
             Ok(runtime) => runtime,
             Err(error) => {
                 tracing::error!(%error, node = %node_id, "A2A inbound turn: runtime unavailable");
+                if managed_response {
+                    self.cleanup_pending_response(&node_id).await;
+                }
                 self.node_tree.set_state(&node_id, NodeState::Running).await;
                 self.node_tree.set_state(&node_id, NodeState::Failed).await;
                 self.node_tree.deregister(&node_id).await;
@@ -3587,6 +4892,9 @@ impl InboundTurnContext {
         let _turn_guard = tokio::select! {
             guard = self.turn_serial.lock() => guard,
             () = cancel.cancelled() => {
+                if managed_response {
+                    self.cleanup_pending_response(&node_id).await;
+                }
                 self.node_tree.set_state(&node_id, NodeState::Running).await;
                 self.node_tree
                     .set_state(&node_id, NodeState::Cancelled)
@@ -3596,6 +4904,9 @@ impl InboundTurnContext {
             }
         };
         if cancel.is_cancelled() {
+            if managed_response {
+                self.cleanup_pending_response(&node_id).await;
+            }
             self.node_tree.set_state(&node_id, NodeState::Running).await;
             self.node_tree
                 .set_state(&node_id, NodeState::Cancelled)
@@ -3606,31 +4917,32 @@ impl InboundTurnContext {
         *self.active_channel_origin.lock().await = ChannelKind::Terminal;
 
         self.node_tree.set_state(&node_id, NodeState::Running).await;
-        // Register before driving: Notify is edge-triggered for a waiter
-        // created after completion, so this must exist before the provider can
-        // emit its terminal chunk.
-        let turn_complete = self.turn_complete.notified();
-        tokio::pin!(turn_complete);
-        turn_complete.as_mut().enable();
+        let peer_turn_closed = self.peer_turn_closed.notified();
+        tokio::pin!(peer_turn_closed);
+        peer_turn_closed.as_mut().enable();
 
         // Tee the turn's event stream (see `spawn_turn_collector`). Every
         // non-buffered event is forwarded on to the real `domain_tx`, so the
         // daemon bus, the forwarder, and every other consumer see exactly what
         // they saw before.
+        let conversation_id = self.conversation.lock().await.id.clone();
         let (tap_tx, tap_rx) = mpsc::unbounded_channel::<AppEvent>();
-        let collector = spawn_turn_collector(tap_rx, self.domain_tx.clone(), managed_response);
+        let peer_node = Arc::new(node_id.clone());
+        let collector = spawn_turn_collector(
+            tap_rx,
+            self.domain_tx.clone(),
+            managed_response,
+            peer_node.clone(),
+            conversation_id.clone(),
+        );
 
-        let (mut handle, conversation_id) = {
+        let mut handle = {
             let mut conversation = self.conversation.lock().await;
-            let conversation_id = conversation.id.clone();
-            (
-                runtime.drive_preloaded_turn(
-                    &mut conversation,
-                    &tap_tx,
-                    TurnOrigin::RemotePeer { principal },
-                    cancel.clone(),
-                ),
-                conversation_id,
+            runtime.drive_preloaded_turn(
+                &mut conversation,
+                &tap_tx,
+                TurnOrigin::RemotePeer { principal },
+                cancel.clone(),
             )
         };
         drop(tap_tx);
@@ -3648,10 +4960,20 @@ impl InboundTurnContext {
                 None
             }
         };
+        let collector_result = match collector.await {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(?error, node = %node_id, "A2A inbound turn collector failed");
+                (String::new(), true, false)
+            }
+        };
+        let (answer, errored, completed) = collector_result;
+        peer_turn_closed.await;
+        let _reply_guard = self.peer_reply_serial.lock().await;
+        let _row_guard = self.peer_row_serial.lock().await;
 
         let terminal = match joined {
             None => {
-                let (_, _, completed) = collector.await.unwrap_or_default();
                 if !completed {
                     // The abort drops `run_turn` before it can emit a terminal
                     // chunk. Drain its tee first, then enqueue a cancelled
@@ -3660,7 +4982,8 @@ impl InboundTurnContext {
                     // The reset must travel the daemon's own forwarder channel in stream order;
                     // InboundTurnContext holds no event_bus handle, and every other chunk of this
                     // turn tees through the same tx.
-                    let reset = AppEvent::ProviderChunk {
+                    let reset = AppEvent::PeerProviderChunk {
+                        node: peer_node.clone(),
                         conversation_id,
                         chunk: StreamChunk::TurnComplete {
                             stop_reason: StopReason::Cancelled,
@@ -3671,14 +4994,6 @@ impl InboundTurnContext {
                 NodeState::Cancelled
             }
             Some(join_failed) => {
-                let (answer, errored, completed) = match collector.await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        tracing::warn!(?error, node = %node_id, "A2A inbound turn collector failed");
-                        (String::new(), true, false)
-                    }
-                };
-
                 let terminal = if join_failed || errored || !completed {
                     // An unexpected join/runtime failure can leave streamed text
                     // without a terminal chunk too. Reset it through the same
@@ -3686,7 +5001,8 @@ impl InboundTurnContext {
                     if !completed {
                         // Same ordered-reset channel as the cancel path above; the forwarder
                         // consumes domain_tx.
-                        let reset = AppEvent::ProviderChunk {
+                        let reset = AppEvent::PeerProviderChunk {
+                            node: peer_node.clone(),
                             conversation_id,
                             chunk: StreamChunk::TurnComplete {
                                 stop_reason: StopReason::Cancelled,
@@ -3696,29 +5012,72 @@ impl InboundTurnContext {
                     }
                     NodeState::Failed
                 } else if managed_response && !answer.trim().is_empty() {
-                    let _ = self
+                    if !self
                         .pending_drafts
                         .complete(node_id.as_str(), answer.clone())
-                        .await;
-                    let mut conversation = self.conversation.lock().await;
-                    if let Some(row) = conversation
-                        .messages
-                        .iter_mut()
-                        .find(|message| message.id == response_row_id)
+                        .await
                     {
-                        row.content =
-                            format!("{}{}", super::response_modes::DRAFT_APPROVAL_PREFIX, answer);
-                    }
-                    match self.core.storage.save_conversation(&conversation).await {
-                        Ok(()) => NodeState::Waiting,
-                        Err(error) => {
-                            // Parking `Waiting` on a card that never reached
-                            // disk strands the operator after a restart — fail
-                            // honestly instead (AC3). The managed-failure
-                            // cleanup below removes the placeholder row.
-                            tracing::warn!(%error, "persisting completed peer draft failed");
-                            self.pending_drafts.abandon(node_id.as_str()).await;
-                            NodeState::Failed
+                        let settled = {
+                            let conversation = self.conversation.lock().await;
+                            conversation
+                                .peer_row_controls
+                                .get(&response_row_id)
+                                .is_some_and(|control| control.stage == PeerRowStage::Settled)
+                        };
+                        if settled {
+                            return;
+                        }
+                        NodeState::Failed
+                    } else {
+                        let (row, control) = {
+                            let conversation = self.conversation.lock().await;
+                            (
+                                conversation
+                                    .messages
+                                    .iter()
+                                    .find(|message| message.id == response_row_id)
+                                    .cloned(),
+                                conversation
+                                    .peer_row_controls
+                                    .get(&response_row_id)
+                                    .cloned(),
+                            )
+                        };
+                        match (row, control) {
+                            (Some(mut row), Some(mut control))
+                                if control.stage == PeerRowStage::Drafting =>
+                            {
+                                row.content = format!(
+                                    "{}{}",
+                                    super::response_modes::DRAFT_APPROVAL_PREFIX,
+                                    answer
+                                );
+                                control.stage = PeerRowStage::Ready;
+                                control.node_resolvable = true;
+                                match commit_peer_rows_serialized(
+                                    &self.conversation,
+                                    &self.registry,
+                                    self.core.storage.as_ref(),
+                                    vec![PeerRowMutation::Upsert {
+                                        message: row,
+                                        control: Some(control),
+                                    }],
+                                )
+                                .await
+                                {
+                                    Ok(()) => NodeState::Waiting,
+                                    Err(error) => {
+                                        tracing::warn!(%error, "persisting completed peer draft failed");
+                                        self.pending_drafts.abandon(node_id.as_str()).await;
+                                        NodeState::Failed
+                                    }
+                                }
+                            }
+                            (_, Some(control)) if control.stage == PeerRowStage::Settled => return,
+                            _ => {
+                                self.pending_drafts.abandon(node_id.as_str()).await;
+                                NodeState::Failed
+                            }
                         }
                     }
                 } else if managed_response {
@@ -3733,25 +5092,19 @@ impl InboundTurnContext {
                     NodeState::Completed
                 };
 
-                if !managed_response {
-                    let folded =
-                        tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete)
-                            .await;
-                    if folded.is_err() {
-                        tracing::warn!(
-                            "daemon inbound turn completed but assistant commit was not observed before timeout"
-                        );
-                    }
-                }
                 terminal
             }
         };
         if managed_response && !matches!(terminal, NodeState::Completed | NodeState::Waiting) {
-            let mut conversation = self.conversation.lock().await;
-            conversation
-                .messages
-                .retain(|message| message.id != response_row_id);
-            if let Err(error) = self.core.storage.save_conversation(&conversation).await {
+            self.pending_drafts.abandon(node_id.as_str()).await;
+            if let Err(error) = remove_pending_peer_row_serialized(
+                &self.conversation,
+                &self.registry,
+                self.core.storage.as_ref(),
+                &node_id,
+            )
+            .await
+            {
                 tracing::warn!(%error, "removing failed peer response placeholder failed");
             }
         }
@@ -3767,6 +5120,17 @@ impl InboundTurnContext {
             {
                 tracing::error!(%error, node = %node_id, "stamping peer draft wait failed");
                 self.node_tree.set_state(&node_id, NodeState::Failed).await;
+                self.pending_drafts.abandon(node_id.as_str()).await;
+                if let Err(remove_error) = remove_pending_peer_row_serialized(
+                    &self.conversation,
+                    &self.registry,
+                    self.core.storage.as_ref(),
+                    &node_id,
+                )
+                .await
+                {
+                    tracing::warn!(%remove_error, node = %node_id, "removing failed peer response placeholder failed");
+                }
                 self.node_tree.deregister(&node_id).await;
             }
             return;
@@ -4038,28 +5402,38 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 } else {
                     true
                 };
+            let item_address = self.item_address_for_node(&task.node_id).await;
             match task.response_policy.mode {
                 crate::domain::models::ResponseMode::NotifyAndWait => {
-                    if !self.pending_drafts.begin(task.node_id.as_str()).await
-                        || !self
-                            .pending_drafts
-                            .complete(task.node_id.as_str(), String::new())
-                            .await
-                    {
+                    let row_guard = self.peer_row_serial.lock().await;
+                    if !self.pending_drafts.begin(task.node_id.as_str()).await {
                         return Err(InboundPeerError::Register(
                             "pending peer response already exists for inbound node".to_owned(),
                         ));
                     }
+                    if !self
+                        .pending_drafts
+                        .complete(task.node_id.as_str(), String::new())
+                        .await
                     {
-                        let mut conversation = self.conversation.lock().await;
-                        if surface_now {
-                            conversation.messages.push(peer_transcript_message(
+                        self.pending_drafts.abandon(task.node_id.as_str()).await;
+                        return Err(InboundPeerError::Register(
+                            "pending peer response already exists for inbound node".to_owned(),
+                        ));
+                    }
+                    let mut mutations = Vec::with_capacity(2);
+                    if surface_now {
+                        mutations.push(PeerRowMutation::Upsert {
+                            message: peer_transcript_message(
                                 &task.text,
                                 task.principal.peer(),
                                 &task.response_policy.provenance,
-                            ));
-                        }
-                        conversation.messages.push(ChatMessage {
+                            ),
+                            control: None,
+                        });
+                    }
+                    mutations.push(PeerRowMutation::Upsert {
+                        message: ChatMessage {
                             id: format!("peer-response-{}", task.node_id.as_str()),
                             role: MessageRole::Assistant,
                             content: super::response_modes::AWAITING_RESPONSE_PLACEHOLDER
@@ -4067,12 +5441,26 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                             created_at: crate::domain::models::session_meta::now_unix(),
                             synthetic: true,
                             ..Default::default()
-                        });
-                        if let Err(error) = self.core.storage.save_conversation(&conversation).await
-                        {
-                            self.pending_drafts.abandon(task.node_id.as_str()).await;
-                            return Err(InboundPeerError::Unavailable(error.to_string()));
-                        }
+                        },
+                        control: Some(peer_row_control(
+                            &task.node_id,
+                            item_address.clone(),
+                            &task.response_policy.provenance,
+                            task.principal.peer().as_str(),
+                            PeerRowStage::AwaitingOperator,
+                            true,
+                        )),
+                    });
+                    if let Err(error) = commit_peer_rows_serialized(
+                        &self.conversation,
+                        &self.registry,
+                        self.core.storage.as_ref(),
+                        mutations,
+                    )
+                    .await
+                    {
+                        self.pending_drafts.abandon(task.node_id.as_str()).await;
+                        return Err(InboundPeerError::Unavailable(error));
                     }
                     self.node_tree
                         .set_state(&task.node_id, NodeState::Running)
@@ -4080,13 +5468,28 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     self.node_tree
                         .set_state(&task.node_id, NodeState::Waiting)
                         .await;
-                    self.node_tree
+                    if let Err(error) = self
+                        .node_tree
                         .stamp_wait_reason(
                             &task.node_id,
                             Some(crate::domain::models::WaitReason::AwaitingPeerResponse),
                         )
                         .await
-                        .map_err(|error| InboundPeerError::Register(error.to_string()))?;
+                    {
+                        self.pending_drafts.abandon(task.node_id.as_str()).await;
+                        if let Err(remove_error) = remove_pending_peer_row_serialized(
+                            &self.conversation,
+                            &self.registry,
+                            self.core.storage.as_ref(),
+                            &task.node_id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(%remove_error, node = %task.node_id, "removing failed peer response placeholder failed");
+                        }
+                        return Err(InboundPeerError::Register(error.to_string()));
+                    }
+                    drop(row_guard);
                     Ok(StartRouting::Settled)
                 }
                 crate::domain::models::ResponseMode::NotifyAndAuto => {
@@ -4097,29 +5500,50 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     let response = super::response_modes::auto_response_template(
                         task.response_policy.auto_response.as_ref(),
                     );
-                    {
-                        let mut conversation = self.conversation.lock().await;
-                        if surface_now {
-                            conversation.messages.push(peer_transcript_message(
+                    let mut mutations = Vec::with_capacity(2);
+                    if surface_now {
+                        mutations.push(PeerRowMutation::Upsert {
+                            message: peer_transcript_message(
                                 &task.text,
                                 task.principal.peer(),
                                 &task.response_policy.provenance,
-                            ));
-                        }
-                        conversation.messages.push(ChatMessage {
+                            ),
+                            control: None,
+                        });
+                    }
+                    mutations.push(PeerRowMutation::Upsert {
+                        message: ChatMessage {
                             id: format!("peer-response-{}", task.node_id.as_str()),
                             role: MessageRole::Assistant,
-                            content: response.clone(),
+                            content: match item_address.as_ref() {
+                                Some(address) => format!(
+                                    "{response}\nOpen: /team view {}",
+                                    address.item().as_str()
+                                ),
+                                None => response.clone(),
+                            },
                             created_at: crate::domain::models::session_meta::now_unix(),
                             authorship: crate::domain::models::MessageAuthorship::AgentComposed,
                             ..Default::default()
-                        });
-                        self.core
-                            .storage
-                            .save_conversation(&conversation)
-                            .await
-                            .map_err(|error| InboundPeerError::Unavailable(error.to_string()))?;
-                    }
+                        },
+                        control: Some(peer_row_control(
+                            &task.node_id,
+                            item_address.clone(),
+                            &task.response_policy.provenance,
+                            task.principal.peer().as_str(),
+                            PeerRowStage::Settled,
+                            false,
+                        )),
+                    });
+                    commit_peer_rows(
+                        &self.peer_row_serial,
+                        &self.conversation,
+                        &self.registry,
+                        self.core.storage.as_ref(),
+                        mutations,
+                    )
+                    .await
+                    .map_err(InboundPeerError::Unavailable)?;
                     super::response_modes::auto_response_surface(
                         self.clock.as_ref(),
                         response_started_at_ms,
@@ -4149,34 +5573,53 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     // NotifyAndDraft — and any future variant, failing closed:
                     // buffer daemon-side, disclose nothing until the operator
                     // resolves the draft (AC3).
+                    let row_guard = self.peer_row_serial.lock().await;
                     if !self.pending_drafts.begin(task.node_id.as_str()).await {
                         return Err(InboundPeerError::Register(
                             "pending draft already exists for inbound node".to_owned(),
                         ));
                     }
-                    {
-                        let mut conversation = self.conversation.lock().await;
-                        if surface_now {
-                            conversation.messages.push(peer_transcript_message(
+                    let mut mutations = Vec::with_capacity(2);
+                    if surface_now {
+                        mutations.push(PeerRowMutation::Upsert {
+                            message: peer_transcript_message(
                                 &task.text,
                                 task.principal.peer(),
                                 &task.response_policy.provenance,
-                            ));
-                        }
-                        conversation.messages.push(ChatMessage {
+                            ),
+                            control: None,
+                        });
+                    }
+                    mutations.push(PeerRowMutation::Upsert {
+                        message: ChatMessage {
                             id: format!("peer-response-{}", task.node_id.as_str()),
                             role: MessageRole::Assistant,
                             content: super::response_modes::DRAFTING_PLACEHOLDER.to_owned(),
                             created_at: crate::domain::models::session_meta::now_unix(),
                             synthetic: true,
                             ..Default::default()
-                        });
-                        if let Err(error) = self.core.storage.save_conversation(&conversation).await
-                        {
-                            self.pending_drafts.abandon(task.node_id.as_str()).await;
-                            return Err(InboundPeerError::Unavailable(error.to_string()));
-                        }
+                        },
+                        control: Some(peer_row_control(
+                            &task.node_id,
+                            item_address,
+                            &task.response_policy.provenance,
+                            task.principal.peer().as_str(),
+                            PeerRowStage::Drafting,
+                            true,
+                        )),
+                    });
+                    if let Err(error) = commit_peer_rows_serialized(
+                        &self.conversation,
+                        &self.registry,
+                        self.core.storage.as_ref(),
+                        mutations,
+                    )
+                    .await
+                    {
+                        self.pending_drafts.abandon(task.node_id.as_str()).await;
+                        return Err(InboundPeerError::Unavailable(error));
                     }
+                    drop(row_guard);
                     Ok(StartRouting::DriveDraftTurn)
                 }
             }
@@ -4194,6 +5637,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
         let context = InboundTurnContext {
             core: self.core.clone(),
             conversation: self.conversation.clone(),
+            peer_row_serial: self.peer_row_serial.clone(),
             domain_tx: self.domain_tx.clone(),
             node_tree: self.node_tree.clone(),
             registry: self.registry.clone(),
@@ -4201,10 +5645,11 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
             approval_gate_started: self.approval_gate_started.clone(),
             pending_consent_cards: self.pending_consent_cards.clone(),
             turn_serial: self.turn_serial.clone(),
-            turn_complete: self.turn_complete.clone(),
+            peer_turn_closed: self.peer_turn_closed.clone(),
             active_channel_origin: self.active_channel_origin.clone(),
             inbound_results: self.inbound_results.clone(),
             pending_drafts: self.pending_drafts.clone(),
+            peer_reply_serial: self.peer_reply_serial.clone(),
         };
         tokio::spawn(context.run(
             task.node_id.clone(),
@@ -4663,6 +6108,7 @@ mod tests {
             64,
         );
         Arc::new(DaemonTurnRuntime {
+            recipient_context: Arc::new(Default::default()),
             provider,
             app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
             security,
@@ -4922,7 +6368,7 @@ mod tests {
     #[tokio::test]
     async fn notify_and_draft_buffers_provider_output_until_resolution() {
         let tmp = tempfile::tempdir().unwrap();
-        let (core, _storage) = mock_core(
+        let (server, conversation, _journal, shutdown, handle) = spawn_inbound_forwarder(
             tmp.path(),
             vec![
                 StreamChunk::Text {
@@ -4933,10 +6379,24 @@ mod tests {
                     stop_reason: StopReason::EndTurn,
                 },
             ],
-        );
-        let conversation = Arc::new(Mutex::new(Conversation::default()));
-        let (domain_tx, mut domain_rx) = mpsc::unbounded_channel();
-        let server = AttachServer::new(core, conversation.clone(), domain_tx);
+        )
+        .await;
+        let mut client = UnixStream::connect(tmp.path().join("inbound-forwarder.sock"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            attach_with_proof(
+                &mut client,
+                false,
+                ConnectionTier::TrustedLocal,
+                &test_signer(90)
+            )
+            .await,
+            Some(DaemonFrame::AttachAck {
+                granted_mode: AttachMode::ReadWrite,
+                ..
+            })
+        ));
         let mut task = inbound_task(test_signer(91).identity().peer_id.clone(), "draft this");
         task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
         let node_id = task.node_id.clone();
@@ -4966,16 +6426,33 @@ mod tests {
             server.inbound_results.lock().await.get(&node_id).is_none(),
             "an unresolved draft must never enter the peer-disclosable result map"
         );
-        assert!(
-            !std::iter::from_fn(|| domain_rx.try_recv().ok()).any(|event| matches!(
-                event,
-                AppEvent::ProviderChunk {
-                    chunk: StreamChunk::Text { .. },
-                    ..
-                }
-            )),
-            "draft provider text must remain buffered"
-        );
+        write_frame(
+            &mut client,
+            &ClientFrame::DeferRecipientItem {
+                item_id: "ri_stream_probe".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        loop {
+            let frame = read_frame::<_, DaemonFrame>(&mut client).await.unwrap();
+            assert!(
+                !matches!(
+                    &frame,
+                    Some(DaemonFrame::Event(RawEvent {
+                        kind: RawEventKind::Provider(StreamChunk::Text { .. }),
+                        ..
+                    }))
+                ),
+                "draft provider text must remain buffered"
+            );
+            if matches!(frame, Some(DaemonFrame::RecipientActionResult {
+                target: super::super::protocol::RecipientActionTarget::Item { item_id }, ..
+            }) if item_id == "ri_stream_probe")
+            {
+                break;
+            }
+        }
         let draft_row = conversation
             .lock()
             .await
@@ -4990,6 +6467,9 @@ mod tests {
                 .starts_with("[y] Approve  [e] Edit  [n] Reject")
         );
         assert!(draft_row.content.ends_with("private draft"));
+        shutdown.cancel();
+        drop(client);
+        handle.await.unwrap();
     }
 
     #[tokio::test]
@@ -5263,6 +6743,7 @@ mod tests {
                 address: address.clone(),
                 task: "sender-task".to_owned(),
                 alias: None,
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
                 content: "review".to_owned(),
                 in_reply_to: None,
                 capability_hash: None,
@@ -5271,6 +6752,13 @@ mod tests {
             .await
             .unwrap();
         let server = journaled_server(core, conversation, domain_tx, journal.clone());
+        let (writer_tx, mut writer_rx) = mpsc::channel(4);
+        server.registry.lock().await.conns.push(Conn {
+            id: 1,
+            tx: writer_tx,
+            mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
+        });
 
         server
             .handle_client_frame_tiered(
@@ -5282,6 +6770,14 @@ mod tests {
                 1,
             )
             .await;
+        assert!(matches!(
+            writer_rx.try_recv().unwrap(),
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Acknowledge,
+                target: RecipientActionTarget::Item { item_id },
+                outcome: RecipientActionOutcome::Applied { reply: None },
+            } if item_id == "ri_ack_front_door"
+        ));
 
         let entries = crate::domain::ports::RoomJournalReader::load_entries(journal.as_ref())
             .await
@@ -5347,6 +6843,7 @@ mod tests {
                 .record_event(crate::domain::models::RoomEvent::RecipientItemReceived {
                     address: address.clone(),
                     task: format!("{item_id}-sender-task"),
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                     alias: alias.map(ToOwned::to_owned),
                     content: (*content).to_owned(),
                     in_reply_to: None,
@@ -5363,16 +6860,25 @@ mod tests {
             id: 1,
             tx: writer_tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
         (server, journal, addresses, writer_rx)
     }
 
     fn refusal_text(frame: Option<DaemonFrame>) -> String {
-        match frame {
-            Some(DaemonFrame::Error(ProtocolError::Malformed(message)))
-            | Some(DaemonFrame::Error(ProtocolError::PeerVerification(message))) => message,
-            Some(DaemonFrame::Error(ProtocolError::ReadOnly)) => "read-only".to_owned(),
+        let error = match frame {
+            Some(DaemonFrame::Error(error)) => error,
+            Some(DaemonFrame::RecipientActionResult {
+                outcome: RecipientActionOutcome::Refused { error },
+                ..
+            }) => error,
             other => panic!("expected a refusal frame, got {other:?}"),
+        };
+        match error {
+            ProtocolError::Malformed(message) | ProtocolError::PeerVerification(message) => message,
+            ProtocolError::ReadOnly => "read-only".to_owned(),
+            ProtocolError::Internal(message) => message,
+            other => panic!("unexpected refusal kind: {other:?}"),
         }
     }
 
@@ -5440,10 +6946,7 @@ mod tests {
             untouched.state,
             crate::domain::models::RecipientItemState::Received { content, .. } if content == "still here"
         ));
-        assert!(
-            frames.try_recv().is_err(),
-            "a legal removal is silent — no frame, exactly like the shipped acknowledge path"
-        );
+        assert!(frames.try_recv().is_err(), "a legal removal remains silent");
     }
 
     /// AC1(b)(c)(d)(g) + the distinctness ratchet — in ONE run, a **removed**
@@ -5611,27 +7114,107 @@ mod tests {
         assert_eq!(refusal_text(frames.try_recv().ok()), "read-only");
     }
 
-    /// Positive control for the shipped act: `Acknowledged` + acknowledge stays
-    /// **silent** — no write, no word — which is exactly what the replaced
-    /// `!=` guard did.
+    #[cfg(not(feature = "a2a"))]
     #[tokio::test]
-    async fn a_second_acknowledgement_remains_silently_idempotent() {
+    async fn defer_cannot_write_an_unservable_turn_without_the_a2a_feature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, journal, addresses, mut frames) = recipient_item_fixture(
+            tmp.path(),
+            &[("ri_historical_consultation", None, "historical question")],
+        )
+        .await;
+        let before = journal.events.lock().await.len();
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::DeferRecipientItem {
+                    item_id: addresses[0].item().as_str().to_owned(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+        assert!(matches!(
+            frames.try_recv().unwrap(),
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Defer,
+                target: RecipientActionTarget::Item { item_id },
+                outcome: RecipientActionOutcome::Refused {
+                    error: ProtocolError::Malformed(_),
+                },
+            } if item_id == addresses[0].item().as_str()
+        ));
+        assert_eq!(
+            journal.events.lock().await.len(),
+            before,
+            "a valid historical item cannot acquire an unservable defer turn"
+        );
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::AcknowledgeRecipientItem {
+                    item_id: addresses[0].item().as_str().to_owned(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+        assert!(
+            journal.events.lock().await.iter().any(|event| matches!(
+                event,
+                crate::domain::models::RoomEvent::RecipientItemAcknowledged { address, .. } if address == &addresses[0]
+            )),
+            "positive control: the historical item and writable journal remain usable"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_acknowledgements_append_once_and_report_applied_and_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let (server, journal, _addresses, mut frames) =
             recipient_item_fixture(tmp.path(), &[("ri_twice_acked", None, "peer content")]).await;
 
-        for _ in 0..2 {
-            server
-                .handle_client_frame_tiered(
-                    ClientFrame::AcknowledgeRecipientItem {
-                        item_id: "ri_twice_acked".to_owned(),
-                    },
-                    AttachMode::ReadWrite,
-                    ConnectionTier::TrustedLocal,
-                    1,
-                )
-                .await;
+        tokio::join!(
+            server.handle_client_frame_tiered(
+                ClientFrame::AcknowledgeRecipientItem {
+                    item_id: "ri_twice_acked".to_owned(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            ),
+            server.handle_client_frame_tiered(
+                ClientFrame::AcknowledgeRecipientItem {
+                    item_id: "ri_twice_acked".to_owned(),
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            ),
+        );
+
+        let mut outcomes = Vec::new();
+        for frame in [frames.try_recv().unwrap(), frames.try_recv().unwrap()] {
+            let DaemonFrame::RecipientActionResult {
+                action,
+                target,
+                outcome,
+            } = frame
+            else {
+                panic!("acknowledgement result is correlated: {frame:?}");
+            };
+            assert_eq!(action, RecipientAction::Acknowledge);
+            assert_eq!(
+                target,
+                RecipientActionTarget::Item {
+                    item_id: "ri_twice_acked".to_owned(),
+                }
+            );
+            outcomes.push(outcome);
         }
+        assert!(outcomes.contains(&RecipientActionOutcome::Applied { reply: None }));
+        assert!(outcomes.contains(&RecipientActionOutcome::Idempotent));
+        assert!(frames.try_recv().is_err(), "one result per action");
 
         let entries = crate::domain::ports::RoomJournalReader::load_entries(journal.as_ref())
             .await
@@ -5647,10 +7230,6 @@ mod tests {
                 ))
                 .count(),
             1
-        );
-        assert!(
-            frames.try_recv().is_err(),
-            "the item is still there and the operator's intent already holds"
         );
     }
 
@@ -6079,6 +7658,7 @@ mod tests {
             id: 1,
             tx: writer_tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
         let sender = PolicyPrincipal::rap(test_signer(100).identity().peer_id.clone());
 
@@ -6253,6 +7833,7 @@ mod tests {
             id: 1,
             tx: writer_tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
         let pseudo =
             crate::adapters::a2a::exec::SubmitterKey::from_api_key("d0-k02").policy_principal();
@@ -6498,17 +8079,27 @@ mod tests {
             let (core, _) = mock_core_with_provider(tmp.path(), provider);
             let runtime = core.ensure_runtime().await.unwrap();
             let mut approval_events = runtime.approval.subscribe();
-            let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+            let (domain_tx, domain_rx) = mpsc::unbounded_channel();
             let server = AttachServer::new(
                 core,
                 Arc::new(Mutex::new(Conversation::default())),
                 domain_tx,
             );
+            let listener = UnixListener::bind(tmp.path().join("approval-forwarder.sock")).unwrap();
+            let shutdown = CancellationToken::new();
+            let service = {
+                let server = server.clone();
+                let shutdown = shutdown.clone();
+                tokio::spawn(async move {
+                    server.run(listener, domain_rx, None, None, shutdown).await;
+                })
+            };
             let (writer_tx, _writer_rx) = mpsc::channel(16);
             server.registry.lock().await.conns.push(Conn {
                 id: 1,
                 tx: writer_tx,
                 mode: AttachMode::ReadWrite,
+                tier: ConnectionTier::TrustedLocal,
             });
             if rap_ingest {
                 let consumer = DaemonPeerConsumer {
@@ -6563,6 +8154,8 @@ mod tests {
                     .await
                     .unwrap();
             drop(guard);
+            shutdown.cancel();
+            service.await.unwrap();
         }
     }
 
@@ -6653,6 +8246,7 @@ mod tests {
             id: 1,
             tx: writer_tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
         let sender = PolicyPrincipal::rap(test_signer(200).identity().peer_id.clone());
 
@@ -6778,6 +8372,7 @@ mod tests {
             id: 9,
             tx: writer_tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
         server.emit_pending_consent_cards(9).await;
         let request_id = match writer_rx.recv().await.unwrap() {
@@ -6832,6 +8427,7 @@ mod tests {
             id: 10,
             tx: writer_tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
 
         let ticket = server
@@ -7057,6 +8653,7 @@ mod tests {
                 ),
                 task: "reply-task".to_owned(),
                 alias: None,
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
                 content: "question".to_owned(),
                 in_reply_to: None,
                 capability_hash: None,
@@ -7136,7 +8733,7 @@ mod tests {
 
     #[cfg(feature = "a2a")]
     #[tokio::test]
-    async fn concurrent_card_resolutions_record_only_one_answer() {
+    async fn concurrent_card_resolutions_report_applied_and_idempotent_once() {
         use crate::adapters::daemon::response_modes::{DRAFT_APPROVAL_PREFIX, DraftResolution};
         let tmp = tempfile::tempdir().unwrap();
         let card = format!("{DRAFT_APPROVAL_PREFIX}draft");
@@ -7147,8 +8744,22 @@ mod tests {
             server.resolve_peer_draft(&node, DraftResolution::Approve),
             server.resolve_peer_draft(&node, DraftResolution::WriteOwn("human answer".to_owned()))
         );
+        let outcomes = [first.unwrap(), second.unwrap()];
         assert_eq!(
-            usize::from(first.unwrap().is_some()) + usize::from(second.unwrap().is_some()),
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    PeerDraftResolutionOutcome::Applied { reply: Some(_) }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, PeerDraftResolutionOutcome::Idempotent))
+                .count(),
             1
         );
         assert_eq!(
@@ -7356,6 +8967,17 @@ mod tests {
             synthetic: true,
             ..Default::default()
         });
+        conversation.lock().await.peer_row_controls.insert(
+            "peer-response-reattached-wait-node".to_owned(),
+            PeerRowControl {
+                node_id: wait_node.as_str().to_owned(),
+                item_address: None,
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
+                sender_label: "peer".to_owned(),
+                stage: PeerRowStage::AwaitingOperator,
+                node_resolvable: true,
+            },
+        );
         assert_eq!(server.pending_drafts.state(wait_node.as_str()).await, None);
         server
             .resolve_peer_draft(
@@ -8216,6 +9838,7 @@ mod tests {
             id: 1,
             tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
 
         // Request approval — forwarded to writer.
@@ -8330,6 +9953,7 @@ mod tests {
             id: 1,
             tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
 
         // Request approval.
@@ -8598,6 +10222,7 @@ mod tests {
                 id: conn_id,
                 tx,
                 mode: AttachMode::ReadWrite,
+                tier: ConnectionTier::TrustedLocal,
             });
         }
         (server, rx, conn_id)
@@ -8870,6 +10495,7 @@ mod tests {
                 id: 100,
                 tx: ro_tx,
                 mode: AttachMode::ReadOnly,
+                tier: ConnectionTier::TrustedLocal,
             });
         }
 
@@ -9932,6 +11558,7 @@ mod tests {
             id: 1,
             tx: writer_tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
 
         const CALLERS: usize = 8;
@@ -10107,6 +11734,7 @@ mod tests {
             id: 1,
             tx,
             mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
         });
 
         let mut assistant_buf = String::new();
@@ -10265,6 +11893,397 @@ mod tests {
                 .disclosure_forbidden_fragments()
                 .await
                 .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn story19_19_review_clear_cannot_be_resurrected_by_running_turn() {
+        struct HeldCompletion(Arc<Notify>);
+        #[async_trait::async_trait]
+        impl StreamingProvider for HeldCompletion {
+            async fn stream_completion(
+                &self,
+                _messages: Vec<Message>,
+                _options: CompletionOptions,
+            ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+                use futures::StreamExt;
+                let release = self.0.clone();
+                Ok(futures::stream::iter([StreamChunk::Text {
+                    content: "pre-clear-answer".to_owned(),
+                    parent_tool_use_id: None,
+                }])
+                .chain(futures::stream::once(async move {
+                    release.notified().await;
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::EndTurn,
+                    }
+                }))
+                .boxed())
+            }
+            async fn abort(&self) -> Result<(), ProviderError> {
+                Ok(())
+            }
+            fn provider_id(&self) -> String {
+                "held-completion".to_owned()
+            }
+            fn list_models(&self) -> Vec<ModelDescriptor> {
+                vec![]
+            }
+            async fn health_check(&self) -> Result<(), ProviderError> {
+                Ok(())
+            }
+            async fn connectivity_probe(
+                &self,
+            ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+                Ok(crate::domain::ports::ProbeOutcome {
+                    latency: std::time::Duration::ZERO,
+                })
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let workspace = tempfile::tempdir().unwrap();
+            let release = Arc::new(Notify::new());
+            let (core, storage) = mock_core_with_provider(
+                workspace.path(),
+                Arc::new(HeldCompletion(release.clone())),
+            );
+            let conversation = Arc::new(Mutex::new(Conversation {
+                id: "review-clear".to_owned(),
+                ..Default::default()
+            }));
+            let (bus, domain_rx) = EventBus::new(64);
+            let socket = workspace.path().join("review-clear.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = AttachServer::new(core, conversation.clone(), bus.domain_tx);
+            let shutdown = CancellationToken::new();
+            let service = {
+                let server = server.clone();
+                let shutdown = shutdown.clone();
+                tokio::spawn(async move {
+                    server.run(listener, domain_rx, None, None, shutdown).await;
+                })
+            };
+            let mut client = UnixStream::connect(&socket).await.unwrap();
+            assert!(matches!(
+                attach_with_proof(
+                    &mut client,
+                    false,
+                    ConnectionTier::TrustedLocal,
+                    &test_signer(93)
+                )
+                .await,
+                Some(DaemonFrame::AttachAck {
+                    granted_mode: AttachMode::ReadWrite,
+                    ..
+                })
+            ));
+            write_frame(
+                &mut client,
+                &ClientFrame::UserMessage {
+                    text: "hold this ordinary turn".to_owned(),
+                    images: vec![],
+                },
+            )
+            .await
+            .unwrap();
+            loop {
+                if matches!(
+                    read_frame::<_, DaemonFrame>(&mut client).await.unwrap(),
+                    Some(DaemonFrame::Event(RawEvent {
+                        kind: RawEventKind::Provider(StreamChunk::Text { .. }),
+                        ..
+                    }))
+                ) {
+                    break;
+                }
+            }
+            write_frame(
+                &mut client,
+                &ClientFrame::UserMessage {
+                    text: "/clear".to_owned(),
+                    images: vec![],
+                },
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut client,
+                &ClientFrame::DeferRecipientItem {
+                    item_id: "ri_clear_reader_probe".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+            let mut reset_observed = false;
+            loop {
+                match read_frame::<_, DaemonFrame>(&mut client).await.unwrap() {
+                    Some(DaemonFrame::RecipientActionResult {
+                        action: super::super::protocol::RecipientAction::Defer,
+                        target: super::super::protocol::RecipientActionTarget::Item { item_id },
+                        ..
+                    }) if item_id == "ri_clear_reader_probe" => break,
+                    Some(DaemonFrame::RecipientContextState {
+                        show_inventory: false,
+                        ..
+                    }) => {
+                        reset_observed = true;
+                    }
+                    _ => {}
+                }
+            }
+            release.notify_one();
+            if !reset_observed {
+                loop {
+                    if matches!(
+                        read_frame::<_, DaemonFrame>(&mut client).await.unwrap(),
+                        Some(DaemonFrame::RecipientContextState {
+                            show_inventory: false,
+                            ..
+                        })
+                    ) {
+                        break;
+                    }
+                }
+            }
+            let turn_guard = server.turn_serial.lock().await;
+            let remaining = conversation.lock().await.messages.clone();
+            let persisted = storage
+                .load_conversation("review-clear")
+                .await
+                .unwrap()
+                .unwrap();
+            drop(turn_guard);
+            shutdown.cancel();
+            drop(client);
+            service.await.unwrap();
+            assert!(
+                remaining.is_empty() && persisted.messages.is_empty(),
+                "a completed pre-clear turn resurrected the reset conversation: {remaining:?}"
+            );
+        })
+        .await
+        .expect("real reset/turn socket scenario completed");
+    }
+    async fn review_managed_clear_waits_for_tool_display(rap_ingest: bool) {
+        use crate::adapters::rap::VerifiedPeerConsumer as _;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let workspace = tempfile::tempdir().unwrap();
+            let provider = Arc::new(ToolThenTextProvider { calls: AtomicUsize::new(0) });
+            let (core, storage) = mock_core_with_provider(workspace.path(), provider);
+            let conversation = Arc::new(Mutex::new(Conversation {
+                id: "managed-clear".to_owned(), ..Default::default()
+            }));
+            let (bus, mut domain_rx) = EventBus::new(64);
+            let (forward_tx, forward_rx) = mpsc::unbounded_channel();
+            let closed = Arc::new(Notify::new());
+            let observed_close = closed.notified();
+            tokio::pin!(observed_close);
+            observed_close.as_mut().enable();
+            let relay = {
+                let closed = closed.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = domain_rx.recv().await {
+                        let last = matches!(event, AppEvent::PeerTurnClosed { .. });
+                        if forward_tx.send(event).is_err() { break; }
+                        if last { closed.notify_waiters(); }
+                    }
+                })
+            };
+            let socket = workspace.path().join("managed-clear.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = AttachServer::new(core, conversation.clone(), bus.domain_tx);
+            let shutdown = CancellationToken::new();
+            let service = {
+                let server = server.clone();
+                let shutdown = shutdown.clone();
+                tokio::spawn(async move { server.run(listener, forward_rx, None, None, shutdown).await; })
+            };
+            let mut client = UnixStream::connect(&socket).await.unwrap();
+            assert!(matches!(attach_with_proof(&mut client, false, ConnectionTier::TrustedLocal, &test_signer(94)).await,
+                Some(DaemonFrame::AttachAck { granted_mode: AttachMode::ReadWrite, .. })));
+            write_frame(&mut client, &ClientFrame::DeferRecipientItem { item_id: "ri_initial_probe".to_owned() }).await.unwrap();
+            loop {
+                if matches!(read_frame::<_, DaemonFrame>(&mut client).await.unwrap(),
+                    Some(DaemonFrame::RecipientActionResult { target: super::super::protocol::RecipientActionTarget::Item { item_id }, .. }) if item_id == "ri_initial_probe") { break; }
+            }
+            // Gate the actual forwarder before any tool evidence can be folded.
+            let display_gate = server.peer_assistant_buffers.lock().await;
+            let peer = test_signer(95).identity().peer_id.clone();
+            if rap_ingest {
+                DaemonPeerConsumer { server: Arc::downgrade(&server) }.ingest_with_policy(
+                    &AgentId::new(), AgentMessage::new("request a tool"), &peer,
+                    crate::domain::ports::PeerResponsePolicy {
+                        mode: crate::domain::models::ResponseMode::NotifyAndDraft, ..Default::default()
+                    }).await.unwrap();
+            } else {
+                let mut task = inbound_task(peer, "request a tool");
+                task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
+                server.start(task, CancellationToken::new()).await.unwrap();
+            }
+            loop {
+                if let Some(DaemonFrame::ApprovalRequest { request_id, .. }) =
+                    read_frame::<_, DaemonFrame>(&mut client).await.unwrap() {
+                    write_frame(&mut client, &ClientFrame::ApprovalResponse {
+                        request_id, outcome: crate::domain::models::ApprovalOutcome::Once
+                    }).await.unwrap();
+                    break;
+                }
+            }
+            observed_close.await;
+            write_frame(&mut client, &ClientFrame::UserMessage { text: "/clear".to_owned(), images: vec![] }).await.unwrap();
+            let early_reset = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+                loop {
+                    let frame = read_frame::<_, DaemonFrame>(&mut client).await.unwrap();
+                    if matches!(frame, Some(DaemonFrame::RecipientContextState { show_inventory: false, .. }))
+                        && conversation.lock().await.messages.is_empty() { break; }
+                }
+            }).await.is_ok();
+            drop(display_gate);
+            if !early_reset {
+                loop {
+                    let frame = read_frame::<_, DaemonFrame>(&mut client).await.unwrap();
+                    if matches!(frame, Some(DaemonFrame::RecipientContextState { show_inventory: false, .. }))
+                        && conversation.lock().await.messages.is_empty() { break; }
+                }
+            }
+            let turn_guard = server.turn_serial.lock().await;
+            let remaining = conversation.lock().await.messages.clone();
+            let persisted = storage.load_conversation("managed-clear").await.unwrap().unwrap();
+            drop(turn_guard);
+            shutdown.cancel();
+            drop(client);
+            service.await.unwrap();
+            relay.abort();
+            let _ = relay.await;
+            assert!(!early_reset, "clear acknowledged before the queued managed tool display was drained");
+            assert!(remaining.is_empty() && persisted.messages.is_empty(),
+                "managed tool evidence resurrected the cleared conversation: {remaining:?}");
+        }).await.expect("managed tool/reset socket scenario completed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn story19_19_review_a2a_clear_waits_for_managed_tool_display() {
+        review_managed_clear_waits_for_tool_display(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn story19_19_review_rap_clear_waits_for_managed_tool_display() {
+        review_managed_clear_waits_for_tool_display(true).await;
+    }
+    #[tokio::test]
+    async fn clearing_conversation_removes_uncontrolled_peer_display_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_core, storage) = mock_core(tmp.path(), vec![]);
+        let peer_row = ChatMessage {
+            id: "peer-transcript".to_owned(),
+            content: "remote transcript".to_owned(),
+            history_source: crate::domain::models::HistorySource::PeerDisplay,
+            ..Default::default()
+        };
+        let local_row = ChatMessage {
+            id: "local".to_owned(),
+            content: "local text".to_owned(),
+            ..Default::default()
+        };
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "clear-peer-rows".to_owned(),
+            messages: vec![local_row, peer_row],
+            ..Default::default()
+        }));
+        let (writer_tx, mut writer_rx) = mpsc::channel(4);
+        let registry = Mutex::new(ConnRegistry {
+            conns: vec![Conn {
+                id: 1,
+                tx: writer_tx,
+                mode: AttachMode::ReadWrite,
+                tier: ConnectionTier::TrustedLocal,
+            }],
+        });
+
+        let pending_drafts =
+            crate::adapters::daemon::response_modes::PendingDraftController::default();
+        let row_serial = Mutex::new(());
+        clear_conversation_rows(
+            &pending_drafts,
+            &row_serial,
+            &conversation,
+            &registry,
+            storage.as_ref(),
+        )
+        .await
+        .unwrap();
+
+        let Some(DaemonFrame::PeerRowOperation(operation)) = writer_rx.recv().await else {
+            panic!("peer display removal must be published");
+        };
+        assert!(matches!(
+            operation.as_ref(),
+            PeerRowOperation::Remove { row_id, revision: 1 } if row_id == "peer-transcript"
+        ));
+        assert!(conversation.lock().await.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn peer_stream_error_is_persisted_as_a_separate_display_notice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "peer-stream-error".to_owned(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation.clone(), domain_tx);
+        let node = Arc::new(AgentId::new());
+
+        server
+            .collect_peer_chunk(
+                &node,
+                &StreamChunk::Error {
+                    content: "provider disconnected".to_owned(),
+                },
+            )
+            .await;
+
+        let rows = conversation.lock().await.messages.clone();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, MessageRole::System);
+        assert!(rows[0].is_peer_display());
+        assert_eq!(rows[0].content, "Peer turn failed: provider disconnected");
+        let persisted = storage
+            .load_conversation("peer-stream-error")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.messages.len(), rows.len());
+        assert_eq!(persisted.messages[0].id, rows[0].id);
+        assert_eq!(persisted.messages[0].content, rows[0].content);
+    }
+
+    #[tokio::test]
+    async fn peer_turn_completion_does_not_wake_operator_completion_waiters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core, conversation, domain_tx);
+        let node = Arc::new(AgentId::new());
+        let operator_complete = server.turn_complete.notified();
+        tokio::pin!(operator_complete);
+        operator_complete.as_mut().enable();
+
+        server
+            .collect_peer_chunk(
+                &node,
+                &StreamChunk::TurnComplete {
+                    stop_reason: StopReason::Cancelled,
+                },
+            )
+            .await;
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), operator_complete)
+                .await
+                .is_err()
         );
     }
 }

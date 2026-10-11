@@ -617,6 +617,7 @@ async fn ac2_user_originated_default_remains_silent() {
 }
 
 #[tokio::test]
+#[serial_test::serial(taint_gate_global_state)]
 async fn taint_approval_never_bypasses_a_hard_blocklist_denial() {
     let counter = Arc::new(AtomicU32::new(0));
     let tools: Arc<dyn ToolSetPort> = Arc::new(CountedToolSet {

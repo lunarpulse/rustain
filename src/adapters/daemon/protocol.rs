@@ -42,7 +42,7 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// Current wire protocol version. Bump on ANY breaking frame-shape change so an
 /// older client/daemon is rejected with [`ProtocolError::VersionMismatch`]
 /// rather than mis-parsing (forward-compat for 12.3/12.4).
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -111,6 +111,19 @@ pub struct AttachSnapshot {
     /// actionable card frames.
     #[serde(default)]
     pub pending_consent_cards: usize,
+    /// Trusted-local row targets only; absent for authenticated Peer tier.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub peer_row_controls:
+        std::collections::BTreeMap<String, crate::domain::models::PeerRowControl>,
+    #[serde(default, skip_serializing_if = "peer_row_revision_is_zero")]
+    pub peer_row_revision: u64,
+    /// Process-conversation selection shared by trusted-local attachments only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recipient_context_ids: Vec<String>,
+}
+
+fn peer_row_revision_is_zero(revision: &u64) -> bool {
+    *revision == 0
 }
 
 /// A protocol-level error reported to the peer (and surfaced to the user).
@@ -298,14 +311,19 @@ pub enum ClientFrame {
     AcknowledgeRecipientItem { item_id: String },
     /// Deliberately remove one recipient-owned durable item (FR165).
     /// Trusted-local + read-write; the daemon also enforces the room-content role.
-    /// A new variant is not a breaking frame-shape change: `PROTOCOL_VERSION`
-    /// stays where 19.16's sibling frame left it.
     RemoveRecipientItem { item_id: String },
     /// Story 19.18 `AC2(a)` — answer one recipient-owned item with a reply
     /// turn recorded on THIS host (`/team reply`). Trusted-local + read-write
     /// + room-content role, the ack/remove gate. ⛔ Nothing leaves the host:
     /// the asker reads the turn by pulling the thread.
     ReplyToRecipientItem { item_id: String, text: String },
+    /// Record a fixed local defer turn without resolving the pending real answer.
+    /// Trusted-local + read-write + room-content role; no reverse delivery.
+    DeferRecipientItem { item_id: String },
+    /// Read cached selection/last-use diagnostics without assembly or mutation.
+    InspectRecipientContext,
+    /// Select/off a daemon-owned received item reference, never a client body.
+    SetRecipientContext { item_id: String, selected: bool },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
 }
@@ -325,6 +343,57 @@ pub enum PeerShareOutcome {
     Refused { reason: String },
 }
 
+/// The operator action whose exact result is correlated to a recipient target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecipientAction {
+    Reply,
+    Defer,
+    Acknowledge,
+    Response,
+    ContextSelect,
+    ContextRemove,
+}
+
+/// The exact item or peer-response node named by an operator action.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RecipientActionTarget {
+    Item { item_id: String },
+    Node { node_id: String },
+}
+
+/// Authoritative result of one deliberate action; context is process-local.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecipientActionOutcome {
+    /// The action was durably applied. An answer turn, when one was recorded,
+    /// is identified by its receipt; a valid no-turn action has no receipt.
+    Applied {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply: Option<RecipientReplyReceipt>,
+    },
+    /// The requested state already held; no new durable record was appended.
+    Idempotent,
+    /// A process-conversation reference was selected/removed, or already held.
+    ContextSelection { selected: bool, changed: bool },
+    /// No action was applied.
+    Refused { error: ProtocolError },
+}
+
+/// Receipt for a reply turn durably appended by the action.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipientReplyReceipt {
+    pub item_id: String,
+    pub turn_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::domain::models::ReplyKind::is_answer"
+    )]
+    pub kind: crate::domain::models::ReplyKind,
+}
+
 /// Daemon → client frames.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -342,6 +411,11 @@ pub enum DaemonFrame {
     },
     /// A forwarded turn event (the reused [`ClientEvent`]/`RawEvent` projection).
     Event(ClientEvent),
+    /// Committed local transcript/control mutation, trusted-local observers only.
+    PeerRowOperation(
+        #[serde(with = "peer_row_operation_serde")]
+        std::sync::Arc<crate::domain::models::PeerRowOperation>,
+    ),
     /// A page of history in response to [`ClientFrame::HistoryRequest`].
     History {
         messages: Vec<ChatMessage>,
@@ -366,14 +440,42 @@ pub enum DaemonFrame {
     PeerAccepted { sequence: u64 },
     /// The outcome of a [`ClientFrame::PeerShare`] (Story 18.4a).
     PeerShareResult { outcome: PeerShareOutcome },
-    /// Story 19.18 `AC2(e)` — a `/team reply` turn is durable. Sent to the
-    /// issuing connection only AFTER the append succeeded (`M25`); ⛔ never
-    /// "sent" or "delivered" — nothing left this host.
-    RecipientItemReplyRecorded { item_id: String, turn_id: String },
+    /// Correlated result of a deliberate recipient action. Every request is answered
+    /// with its exact action and target, including refusals and idempotent no-ops.
+    RecipientActionResult {
+        action: RecipientAction,
+        target: RecipientActionTarget,
+        outcome: RecipientActionOutcome,
+    },
+    /// Cached context inventory and shared selection state; trusted-local only.
+    RecipientContextState {
+        selected_item_ids: Vec<String>,
+        inventory: String,
+        /// Inventory is foreground Info only in response to explicit inspection.
+        #[serde(default)]
+        show_inventory: bool,
+    },
     /// Acknowledge a clean [`ClientFrame::Detach`].
     Detached,
     /// A protocol-level error (e.g. version mismatch, read-only write attempt).
     Error(ProtocolError),
+}
+
+mod peer_row_operation_serde {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        operation: &std::sync::Arc<crate::domain::models::PeerRowOperation>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        operation.as_ref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<std::sync::Arc<crate::domain::models::PeerRowOperation>, D::Error> {
+        crate::domain::models::PeerRowOperation::deserialize(deserializer).map(std::sync::Arc::new)
+    }
 }
 
 /// Errors from the framing layer.
@@ -535,6 +637,9 @@ mod tests {
                 request_id: RequestId::new(),
                 outcome: ApprovalOutcome::Once,
             },
+            ClientFrame::DeferRecipientItem {
+                item_id: "ri-1".into(),
+            },
             ClientFrame::Detach,
         ]
     }
@@ -553,6 +658,9 @@ mod tests {
                     channels: vec![ChannelKind::Terminal],
                     blocked_actions_waiting: 2,
                     pending_consent_cards: 0,
+                    peer_row_controls: Default::default(),
+                    peer_row_revision: 0,
+                    recipient_context_ids: Vec::new(),
                 },
             },
             DaemonFrame::Event(RawEvent {
@@ -571,6 +679,30 @@ mod tests {
                     message: "note".into(),
                 },
             }),
+            DaemonFrame::PeerRowOperation(std::sync::Arc::new(
+                crate::domain::models::PeerRowOperation::Upsert {
+                    revision: 1,
+                    message: ChatMessage {
+                        id: "row-1".into(),
+                        content: "peer request".into(),
+                        ..Default::default()
+                    },
+                    control: Some(crate::domain::models::PeerRowControl {
+                        node_id: "node-1".into(),
+                        item_address: None,
+                        message_type: crate::domain::models::SemanticMessageType::Consultation,
+                        sender_label: "peer-1".into(),
+                        stage: crate::domain::models::PeerRowStage::AwaitingOperator,
+                        node_resolvable: true,
+                    }),
+                },
+            )),
+            DaemonFrame::PeerRowOperation(std::sync::Arc::new(
+                crate::domain::models::PeerRowOperation::Remove {
+                    revision: 2,
+                    row_id: "row-1".into(),
+                },
+            )),
             DaemonFrame::History {
                 messages: vec![],
                 has_more: true,
@@ -580,6 +712,55 @@ mod tests {
                 tool: "Write".into(),
                 input_preview: "config.toml".into(),
                 risk: ToolRisk::Standard,
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Reply,
+                target: RecipientActionTarget::Item {
+                    item_id: "ri-1".into(),
+                },
+                outcome: RecipientActionOutcome::Applied {
+                    reply: Some(RecipientReplyReceipt {
+                        item_id: "ri-1".into(),
+                        turn_id: "rr-answer".into(),
+                        kind: crate::domain::models::ReplyKind::Answer,
+                    }),
+                },
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Defer,
+                target: RecipientActionTarget::Item {
+                    item_id: "ri-1".into(),
+                },
+                outcome: RecipientActionOutcome::Applied {
+                    reply: Some(RecipientReplyReceipt {
+                        item_id: "ri-1".into(),
+                        turn_id: "rr-defer".into(),
+                        kind: crate::domain::models::ReplyKind::Defer { minutes: 30 },
+                    }),
+                },
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Acknowledge,
+                target: RecipientActionTarget::Item {
+                    item_id: "ri-1".into(),
+                },
+                outcome: RecipientActionOutcome::Idempotent,
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Response,
+                target: RecipientActionTarget::Node {
+                    node_id: "node-1".into(),
+                },
+                outcome: RecipientActionOutcome::Applied { reply: None },
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::Reply,
+                target: RecipientActionTarget::Item {
+                    item_id: "missing".into(),
+                },
+                outcome: RecipientActionOutcome::Refused {
+                    error: ProtocolError::Malformed("recipient item not found".into()),
+                },
             },
             DaemonFrame::Detached,
             DaemonFrame::Error(ProtocolError::VersionMismatch {

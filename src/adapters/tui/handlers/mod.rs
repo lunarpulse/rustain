@@ -39,6 +39,7 @@ pub mod model_switch;
 pub mod notice;
 pub mod peer_command;
 pub mod profile_switch;
+pub(crate) mod recipient_actions;
 pub mod render_error;
 pub mod room_command;
 pub mod scroll;

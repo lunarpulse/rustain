@@ -59,6 +59,7 @@ pub use plan_runtime::{PlanRuntime, PlanRuntimeState, TaskTurnOutcome, format_ta
 pub mod turn_grouping;
 pub mod turn_queue;
 
+pub mod recipient_thread_bounds;
 #[cfg(feature = "skills-validation")]
 pub mod skills_validation;
 pub mod team_policy;

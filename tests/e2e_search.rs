@@ -43,7 +43,7 @@ fn make_conversation(messages: Vec<&str>) -> Conversation {
                 synthetic: false,
                 id: format!(
                     "msg-{
-            }",
+                    }",
                     i
                 ),
                 role: if i % 2 == 0 {
@@ -61,6 +61,7 @@ fn make_conversation(messages: Vec<&str>) -> Conversation {
                 origin: rustain::domain::models::ChannelKind::Terminal,
                 authorship: Default::default(),
                 retracted_at_ms: None,
+                history_source: Default::default(),
             })
             .collect(),
         turns: Vec::new(),
@@ -72,6 +73,8 @@ fn make_conversation(messages: Vec<&str>) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 

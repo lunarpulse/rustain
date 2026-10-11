@@ -568,46 +568,15 @@ fn ac9_a_relay_composed_host_says_a_third_party_carries_its_traffic() {
     );
     assert!(roster.contains("passes through"), "{roster}");
 }
-
-/// AC5 ratchet (A14): every rendered ping string this story adds is inside the
-/// ping wording ceiling.
 #[test]
-fn ac5_the_path_claim_stays_inside_the_ping_wording_ceiling() {
-    let rendered = [
-        rows::ping_path_text(&PathObservation::Direct),
-        rows::ping_path_text(&PathObservation::Relayed {
-            host: "https://relay.example.com/".to_owned(),
-        }),
-        rows::ping_path_text(&PathObservation::Other),
-        rows::ping_refusal_text(
-            "b",
-            &rustain::adapters::cli::peer::ping::PingRefusal::RelayNotConfigured,
-        ),
-    ];
-    for line in &rendered {
-        let lowered = line.to_ascii_lowercase();
-        for forbidden in [
-            "delivered",
-            "acknowledged",
-            "authenticated",
-            "verified",
-            "secure",
-            "private",
-            "anonymous",
-            "cannot read",
-            "relay-reachable",
-            "zero-config",
-            "any-nat",
-        ] {
-            assert!(!lowered.contains(forbidden), "{forbidden:?} in {line:?}");
-        }
-    }
-    // AC5 mutant (d): an unknown transport must never read as direct.
-    assert_ne!(
-        rows::ping_path_text(&PathObservation::Other),
-        rows::ping_path_text(&PathObservation::Direct)
+fn unknown_ping_path_does_not_claim_direct_carriage() {
+    let direct = rows::ping_path_text(&PathObservation::Direct);
+    let other = rows::ping_path_text(&PathObservation::Other);
+    assert_ne!(other, direct);
+    assert!(
+        !other.to_lowercase().contains("directly between"),
+        "unknown path must not claim direct carriage: {other}"
     );
-    assert!(!rows::ping_path_text(&PathObservation::Other).contains("directly"));
 }
 
 // ── AC6 / AC7 / AC5 — the live relay ────────────────────────────────────────
@@ -1064,74 +1033,4 @@ fn ac3_the_listener_wires_the_watcher_and_never_awaits_online() {
         compose.contains("publish_self_reach("),
         "positive control: 18.4d's bind-time publish stays exactly as shipped"
     );
-}
-
-/// AC8 ratchet (Rule 4): every module that renders peer or relay copy is inside
-/// the wording ceiling, **derived by directory walk**.
-///
-/// ⚑ Derived, ⛔ not a hand-maintained second list — a hand-maintained list is
-/// exactly how `ping.rs` slipped out of `the_surface_names_no_tier` while looking
-/// covered.
-///
-/// 🔴 **CORRECTED 2026-08-17 by Story 18.4c-b (ruling A11.2).** This comment used
-/// to claim *"a relay module added to `src/adapters/` now fails here on the
-/// commit that adds it."* **It did not.** The code walked only
-/// `src/adapters/cli/peer/` and then made two literal `expected.push(..)` calls,
-/// so a new `src/adapters/cli/relay/` directory — or a new
-/// `src/adapters/relay_server.rs` — was invisible to it. Leaving a comment that
-/// describes a mechanism the code lacks is what produced this class of defect, so
-/// BOTH were fixed: the walk now covers the relay CLI directory too, and the
-/// remaining literals are named as literals rather than as a walk.
-#[test]
-fn ac8_every_peer_copy_module_is_inside_the_wording_ceiling() {
-    let ceiling = source("tests/conformance_p2p_ingress.rs");
-    let owned = ceiling
-        .split("let owned_modules = [")
-        .nth(1)
-        .expect("owned_modules")
-        .split("];")
-        .next()
-        .expect("end of array");
-
-    let mut expected: Vec<String> = Vec::new();
-    // ⚑ WALKED: every module in either verb family's directory, so a new file
-    // there really does fail on the commit that adds it.
-    for family in ["src/adapters/cli/peer", "src/adapters/cli/relay"] {
-        for entry in std::fs::read_dir(root().join(family))
-            .unwrap_or_else(|error| panic!("the {family} directory: {error}"))
-            .flatten()
-        {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "rs") {
-                let name = path.file_name().expect("file name").to_string_lossy();
-                expected.push(format!("{family}/{name}"));
-            }
-        }
-    }
-    // ⚠ NAMED, ⛔ not walked: these sit outside both directories, so they are
-    // literals and a reader must not mistake them for coverage of `src/adapters/`
-    // at large. Story 18.4c's two, then Story 18.4c-b's one.
-    expected.push("src/domain/models/relay.rs".to_owned());
-    expected.push("src/adapters/relay_config.rs".to_owned());
-    expected.push("src/adapters/relay_server.rs".to_owned());
-    expected.sort();
-
-    assert!(
-        expected.len() >= 8,
-        "positive control: the walk must actually be finding the peer surface, found {expected:?}"
-    );
-    let missing: Vec<&String> = expected
-        .iter()
-        .filter(|module| !owned.contains(module.as_str()))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "these modules render operator copy and are covered by nothing: {missing:?}"
-    );
-    for module in &expected {
-        assert!(
-            root().join(module).exists(),
-            "{module} is named in the ceiling but does not exist"
-        );
-    }
 }

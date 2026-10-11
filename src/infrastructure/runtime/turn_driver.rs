@@ -271,6 +271,7 @@ impl LocalTurnDriver {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         });
 
         // Build messages list for provider via the Story 11.0a Message-tier assembler

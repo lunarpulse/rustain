@@ -1294,6 +1294,7 @@ pub async fn run(
                                                         origin: crate::domain::models::ChannelKind::Terminal,
                                                         authorship: Default::default(),
                                                         retracted_at_ms: None,
+                                                        history_source: Default::default(),
                                                     }],
                                                     turns: vec![],
                                                     created_at: crate::domain::models::session_meta::now_unix(),
@@ -1304,6 +1305,8 @@ pub async fn run(
                                                     plans: std::collections::HashMap::new(),
                                                     fork_source: None,
                                                     compaction: None,
+                                                    peer_row_controls: Default::default(),
+                                                    peer_row_revision: 0,
                                                 };
                                                 tab_manager.create_tab();
                                                 tab_manager.active_tab_mut().read_only = true;
@@ -1327,6 +1330,9 @@ pub async fn run(
                                     }
                             }
 
+                            if crate::adapters::tui::app::recipient_surface_ignores_raw_key(&state, &event) {
+                                continue;
+                            }
                             let action = handle_input(&mut state, &domain_event);
 
                             // AC-10-4-10: Reject mutations on read-only tabs
@@ -1386,6 +1392,11 @@ pub async fn run(
                             }
 
                             match action {
+                                InputAction::RecipientThreadPage { earlier } => {
+                                    if let Err(error) = super::recipient_surface::navigate_received_surface(&workspace_path, None, &mut state, earlier).await {
+                                        tracing::warn!(%error, "received-thread page unavailable");
+                                    }
+                                }
                                 InputAction::SubmitMessage(text) => {
                                     // Resolve any file mentions from autocomplete selections
                                     let mut mention_images: Vec<ImageAttachment> = Vec::new();
@@ -1880,7 +1891,7 @@ pub async fn run(
                                             trusted: true,
                                         });
                                         if state.pending_skill_trust.is_none() {
-                                            state.focus = FocusState::Input;
+                                            restore_focus_after_modal(&mut state);
                                             state.skill_trust_inspect_mode = false;
                                         }
                                         state.needs_redraw = true;
@@ -1907,7 +1918,7 @@ pub async fn run(
                                             trusted: false,
                                         });
                                         if state.pending_skill_trust.is_none() {
-                                            state.focus = FocusState::Input;
+                                            restore_focus_after_modal(&mut state);
                                             state.skill_trust_inspect_mode = false;
                                         }
                                         state.needs_redraw = true;
@@ -2255,6 +2266,8 @@ pub async fn run(
                                             plans: std::collections::HashMap::new(),
                                             fork_source: None,
                                             compaction: None,
+                                            peer_row_controls: Default::default(),
+                                            peer_row_revision: 0,
                                         };
                                         skill_activator.on_new_conversation(&conversation.id).await;
                                         agent_activator.on_new_conversation(&conversation.id).await;
@@ -3569,6 +3582,7 @@ pub async fn run(
                                                 origin: crate::domain::models::ChannelKind::Terminal,
                                                 authorship: Default::default(),
                                                 retracted_at_ms: None,
+                                                history_source: Default::default(),
                                             });
                                         }
                                         // Abort the streaming task
@@ -6348,7 +6362,7 @@ pub async fn run(
                     }
                     AppEvent::PlanApprovalResolved { conversation_id: _conversation_id, outcome } => {
                         state.pending_plan_approval = None;
-                        state.focus = FocusState::Input;
+                        restore_focus_after_modal(&mut state);
                         state.needs_redraw = true;
 
                         match outcome {
@@ -6369,6 +6383,7 @@ pub async fn run(
                                     origin: crate::domain::models::ChannelKind::Terminal,
                                     authorship: Default::default(),
                                     retracted_at_ms: None,
+                                    history_source: Default::default(),
                                 };
                                 conversation.messages.push(synthetic_msg);
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
@@ -6395,6 +6410,7 @@ pub async fn run(
                                     origin: crate::domain::models::ChannelKind::Terminal,
                                     authorship: Default::default(),
                                     retracted_at_ms: None,
+                                    history_source: Default::default(),
                                 };
                                 conversation.messages.push(synthetic_msg);
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
@@ -6424,6 +6440,7 @@ pub async fn run(
                                     origin: crate::domain::models::ChannelKind::Terminal,
                                     authorship: Default::default(),
                                     retracted_at_ms: None,
+                                    history_source: Default::default(),
                                 };
                                 conversation.messages.push(synthetic_msg);
                             }
@@ -6472,6 +6489,7 @@ pub async fn run(
                                             origin: crate::domain::models::ChannelKind::Terminal,
                                             authorship: Default::default(),
                                             retracted_at_ms: None,
+                                            history_source: Default::default(),
                                         };
                                         conversation.messages.push(msg);
                                         turn_id.clone()
@@ -6492,6 +6510,7 @@ pub async fn run(
                                         origin: crate::domain::models::ChannelKind::Terminal,
                                         authorship: Default::default(),
                                         retracted_at_ms: None,
+                                        history_source: Default::default(),
                                     };
                                     conversation.messages.push(msg);
                                     id
@@ -6511,6 +6530,7 @@ pub async fn run(
                                     origin: crate::domain::models::ChannelKind::Terminal,
                                     authorship: Default::default(),
                                     retracted_at_ms: None,
+                                    history_source: Default::default(),
                                 };
                                 conversation.messages.push(msg);
                                 turn_id.clone()
@@ -6530,6 +6550,7 @@ pub async fn run(
                                     origin: crate::domain::models::ChannelKind::Terminal,
                                     authorship: Default::default(),
                                     retracted_at_ms: None,
+                                    history_source: Default::default(),
                                 };
                                 conversation.messages.push(msg);
                                 id
@@ -6584,9 +6605,7 @@ pub async fn run(
                                         plan.status = crate::domain::models::plan::PlanStatus::Executing;
                                         plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
                                     }
-                                    state.pending_plan_card = None;
-                                    state.focus = FocusState::Input;
-                                    state.needs_redraw = true;
+                                    restore_focus_after_modal(&mut state);
                                     let _ = domain_tx.send(AppEvent::PlanExecutionStarted {
                                         conversation_id: cid,
                                         plan_id,
@@ -6597,9 +6616,7 @@ pub async fn run(
                                         plan.status = crate::domain::models::plan::PlanStatus::Rejected;
                                         plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
                                     }
-                                    state.pending_plan_card = None;
-                                    state.focus = FocusState::Input;
-                                    state.needs_redraw = true;
+                                    restore_focus_after_modal(&mut state);
                                     let _ = domain_tx.send(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: NoticeLevel::Info,
@@ -6707,7 +6724,7 @@ pub async fn run(
                             tracing::warn!("MemoryConsolidationResolved for mismatched conversation");
                         } else {
                             state.pending_consolidation_card = None;
-                            state.focus = FocusState::Input;
+                            restore_focus_after_modal(&mut state);
                             if accepted.is_empty() {
                                 // Declined — AC3/AC4: nothing is written.
                                 let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -6781,7 +6798,7 @@ pub async fn run(
                         // lives in the handler to respect the AC-4 line budget.
                         if conversation.id == conversation_id {
                             state.pending_forget_card = None;
-                            state.focus = FocusState::Input;
+                            restore_focus_after_modal(&mut state);
                             let result = if keys.is_empty() {
                                 None
                             } else {
@@ -9015,15 +9032,23 @@ fn cycle_mode(current: PermissionMode) -> PermissionMode {
 // `crate::infrastructure::runtime::turn_driver::LocalTurnDriver::submit` per
 // Story 12.2a — call sites go through the `submit_turn!` macro in `run()`.
 
-/// Advance the permission queue: pop next pending request or restore Input focus.
+/// Advance the permission queue or restore the open reader/composer focus.
 fn advance_permission_queue(state: &mut TuiState) {
     if let Some(next) = state.permission_queue.pop() {
         state.pending_permission = Some(next);
         state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
     } else {
-        state.focus = FocusState::Input;
+        restore_focus_after_modal(state);
     }
     state.needs_redraw = true;
+}
+
+fn restore_focus_after_modal(state: &mut TuiState) {
+    state.focus = if state.recipient_surface.is_some() {
+        FocusState::Chat
+    } else {
+        FocusState::Input
+    };
 }
 
 /// After a confirmation card resolves, hand focus to a modal that deferred to
@@ -9054,7 +9079,7 @@ fn advance_skill_trust_queue(state: &mut TuiState) {
     } else {
         state.pending_skill_trust = None;
         state.skill_trust_inspect_mode = false;
-        state.focus = FocusState::Input;
+        restore_focus_after_modal(state);
     }
     state.needs_redraw = true;
 }
@@ -9087,6 +9112,7 @@ fn render(
     let mut visible_feedback_ids: Vec<String> = Vec::new(); // Story 19.16g
     state.restore_unflushed_log_visits();
 
+    let recipient_blocked = crate::adapters::tui::app::recipient_higher_confirmation_active(state);
     let permission_mode = security.current_mode();
 
     // Split borrows: tool_block_states needs &, feedback_blocks needs &
@@ -9724,6 +9750,13 @@ fn render(
                     render_lines_bottom(frame, app_layout.chat_pane, vec![line]);
                 }
 
+                if !recipient_blocked {
+                    if let Some(surface) = state.recipient_surface.as_mut() {
+                        crate::adapters::tui::widgets::recipient_surface::render_recipient_surface(
+                            frame, app_layout.chat_pane, surface, &state.recipient_actions, &[None; 6], true, theme,
+                        );
+                    }
+                }
                 // Story 10.5: render delegation suggestion card as a centered popup over chat pane
                 if let Some(ref card) = state.pending_delegation_card {
                     let card_width = 60u16.min(app_layout.chat_pane.width);
@@ -10990,6 +11023,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         }
     }
 
@@ -11008,6 +11042,7 @@ mod tests {
             origin: crate::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         }
     }
 
@@ -11025,6 +11060,8 @@ mod tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
             compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
         }
     }
 

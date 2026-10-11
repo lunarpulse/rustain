@@ -38,6 +38,8 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 
@@ -136,6 +138,7 @@ fn test_tool_block_in_full_layout() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
         ChatMessage {
             synthetic: false,
@@ -164,6 +167,7 @@ fn test_tool_block_in_full_layout() {
             origin: rustain::domain::models::ChannelKind::Terminal,
             authorship: Default::default(),
             retracted_at_ms: None,
+            history_source: Default::default(),
         },
     ]);
 
@@ -213,6 +217,7 @@ fn test_feedback_block_in_full_layout() {
         origin: rustain::domain::models::ChannelKind::Terminal,
         authorship: Default::default(),
         retracted_at_ms: None,
+        history_source: Default::default(),
     }]);
 
     let mut feedback_blocks = BTreeMap::new();
