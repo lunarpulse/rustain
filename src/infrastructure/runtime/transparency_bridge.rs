@@ -464,7 +464,7 @@ pub async fn team_command(
         // compile-forced over `TeamCommandArgs`, and a swallowed board would
         // leave the operator believing no recipient has acknowledged when in
         // fact nothing was ever asked.
-        TeamCommandArgs::Board { peer } => {
+        TeamCommandArgs::Board { selector } => {
             #[cfg(feature = "a2a")]
             {
                 let Some(runtime) = app_state.a2a_send.clone() else {
@@ -498,7 +498,7 @@ pub async fn team_command(
                     let message = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => return,
-                        message = team_board_message(&runtime, peer.as_deref()) => message,
+                        message = team_board_message(&runtime, &selector) => message,
                     };
                     let _ =
                         event_bus.emit_domain(crate::domain::events::AppEvent::TeamBoardReady {
@@ -509,7 +509,7 @@ pub async fn team_command(
             }
             #[cfg(not(feature = "a2a"))]
             {
-                let _ = peer;
+                let _ = selector;
                 handler::show_team_board(
                     state,
                     "· `/team board` needs the `a2a` feature; this build was compiled without \
@@ -566,6 +566,7 @@ pub async fn team_command(
             recipients,
             text,
             message_type,
+            subject,
         } => {
             start_team_send(
                 state,
@@ -575,6 +576,7 @@ pub async fn team_command(
                 text,
                 message_type,
                 None,
+                subject,
             );
         }
         // Story 19.18 `AC7` — a follow-up IS a 19.17 delivery, N = 1, with the
@@ -593,6 +595,7 @@ pub async fn team_command(
                 text,
                 None,
                 Some(turn_id),
+                None,
             );
         }
         // Story 19.18 `AC6` — rail 3 SERVES the thread read: the only rail
@@ -734,7 +737,11 @@ pub async fn team_command(
 
 /// The rail-3 addressed send (Story 19.17), shared by `/team send` and Story
 /// 19.18's `/team followup` (N = 1, `reply_to` set): ⛔ one send path, one
-/// block, one settle handler, one journal discipline (`A9`, `M21`).
+/// block, one settle handler, one journal discipline (`A9`, `M21`). Story
+/// 19.21: that one path is [`coordinate_send`], which journals the operator's
+/// send action before any recipient I/O and each recipient's typed settlement
+/// before its row settles; a follow-up records no action.
+#[allow(clippy::too_many_arguments)]
 fn start_team_send(
     state: &mut TuiState,
     conversation_id: &str,
@@ -743,6 +750,7 @@ fn start_team_send(
     text: String,
     message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<String>,
+    subject: Option<String>,
 ) {
     #[cfg(not(feature = "a2a"))]
     use crate::adapters::tui::handlers::team_command as handler;
@@ -752,6 +760,7 @@ fn start_team_send(
     let block_id = format!("team-send-{}", state.team_send_next_id);
     #[cfg(feature = "a2a")]
     {
+        use crate::adapters::a2a::send::{SendRequest, coordinate_send, validate_send_request};
         use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
         let Some(runtime) = app_state.a2a_send.clone() else {
             show_team_send(
@@ -761,19 +770,20 @@ fn start_team_send(
             );
             return;
         };
-        let known = runtime.known_peer_ids();
-        let unknown: Vec<_> = recipients
-            .iter()
-            .filter(|peer| !known.contains(peer))
-            .cloned()
-            .collect();
-        if !unknown.is_empty() {
-            let refusal = crate::adapters::a2a::send::SendError::UnknownPeer {
-                peer: unknown.join(", "),
-                known,
-            }
-            .to_string();
-            show_team_send(state, &block_id, refusal);
+        // Whole-action validation before any row is painted, journal write or
+        // I/O (19.17 `G4`): a refused action leaves no trace.
+        let refusal = validate_send_request(
+            &runtime,
+            &SendRequest {
+                recipients: &recipients,
+                text: &text,
+                message_type,
+                reply_to: reply_to.as_deref(),
+                subject: subject.as_deref(),
+            },
+        );
+        if let Err(refusal) = refusal {
+            show_team_send(state, &block_id, refusal.to_string());
             return;
         }
         let rows: Vec<_> = recipients
@@ -789,13 +799,17 @@ fn start_team_send(
         let conversation_id = conversation_id.to_owned();
         let cancel = app_state.session_cancel.child_token();
         tokio::spawn(async move {
-            crate::adapters::a2a::send::deliver_to_recipients(
+            let _ = coordinate_send(
                 &runtime,
-                &recipients,
-                &text,
-                message_type,
-                reply_to.as_deref(),
+                SendRequest {
+                    recipients: &recipients,
+                    text: &text,
+                    message_type,
+                    reply_to: reply_to.as_deref(),
+                    subject: subject.as_deref(),
+                },
                 cancel.clone(),
+                |_| {},
                 |index, outcome| {
                     if !cancel.is_cancelled() {
                         let _ = event_bus.emit_domain(
@@ -819,6 +833,7 @@ fn start_team_send(
             text,
             message_type,
             reply_to,
+            subject,
             conversation_id,
             app_state,
         );
@@ -908,25 +923,94 @@ pub fn team_thread_ready(
     }
 }
 
-/// The board's spawn body: every roster peer, or one named peer uncapped
-/// (Story 19.16f `AC9`).
+/// [`team_board_message`] for a wire request: the daemon's `TeamBoard` handler
+/// calls this so it never names a TUI type, and the two rails render one board
+/// through one function (`AC4(b)`).
 #[cfg(feature = "a2a")]
-async fn team_board_message(
+pub async fn team_board_message_for_request(
     runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
-    peer: Option<&str>,
+    request: crate::adapters::daemon::protocol::TeamBoardRequest,
 ) -> String {
-    use crate::adapters::a2a::board;
+    team_board_message_for_request_at(runtime, request, std::time::Instant::now()).await
+}
 
-    let now = std::time::Instant::now();
-    match peer {
-        None => match board::collect_board(runtime, now).await {
+/// [`team_board_message_for_request`] at an injected monotonic `now` — the
+/// 500 ms refresh floor's input, so a keystone proves the floor with a
+/// deterministic step instead of a sleep.
+#[cfg(feature = "a2a")]
+pub async fn team_board_message_for_request_at(
+    runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
+    request: crate::adapters::daemon::protocol::TeamBoardRequest,
+    now: std::time::Instant,
+) -> String {
+    team_board_message_at(
+        runtime,
+        &crate::adapters::tui::handlers::team_command::TeamBoardSelector::from(request),
+        now,
+    )
+    .await
+}
+
+/// The board's spawn body (Story 19.16f `AC9`; Story 19.21 `AC3`): the peer
+/// inventory — every roster peer, or one named peer uncapped — or one recorded
+/// send action's board, or the list of recorded actions. `pub`: the front-door
+/// keystones await exactly what the operator's spawn awaits.
+#[cfg(feature = "a2a")]
+pub async fn team_board_message(
+    runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
+    selector: &crate::adapters::tui::handlers::team_command::TeamBoardSelector,
+) -> String {
+    team_board_message_at(runtime, selector, std::time::Instant::now()).await
+}
+
+/// [`team_board_message`] at an injected monotonic `now`.
+#[cfg(feature = "a2a")]
+pub async fn team_board_message_at(
+    runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
+    selector: &crate::adapters::tui::handlers::team_command::TeamBoardSelector,
+    now: std::time::Instant,
+) -> String {
+    use crate::adapters::a2a::board::{self, ActionSelector};
+    use crate::adapters::tui::handlers::team_command::TeamBoardSelector;
+
+    // The injected `now` an action board's age is measured against.
+    let wall = runtime.wall_now_unix_secs();
+    match selector {
+        TeamBoardSelector::Inventory => match board::collect_board(runtime, now).await {
             Ok(view) => board::render_board(&view),
             Err(refusal) => board::render_refresh_refusal(refusal),
         },
-        Some(peer) => match board::collect_peer_board(runtime, peer, now).await {
-            Ok(view) => board::render_board(&view),
-            Err(refusal) => board::render_peer_board_refusal(&refusal),
+        TeamBoardSelector::Peer(peer) => {
+            match board::collect_peer_board(runtime, peer, now).await {
+                Ok(view) => board::render_board(&view),
+                Err(refusal) => board::render_peer_board_refusal(&refusal),
+            }
+        }
+        TeamBoardSelector::Last => {
+            action_board_message(runtime, &ActionSelector::Last, now, wall).await
+        }
+        TeamBoardSelector::Action(id) => {
+            action_board_message(runtime, &ActionSelector::Id(id.clone()), now, wall).await
+        }
+        TeamBoardSelector::Actions => match board::collect_action_list(runtime).await {
+            Ok(actions) => board::render_action_list(&actions, wall),
+            Err(refusal) => board::render_action_board_refusal(&refusal),
         },
+    }
+}
+
+#[cfg(feature = "a2a")]
+async fn action_board_message(
+    runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
+    selector: &crate::adapters::a2a::board::ActionSelector,
+    now: std::time::Instant,
+    wall: i64,
+) -> String {
+    use crate::adapters::a2a::board;
+
+    match board::collect_action_board(runtime, selector, now).await {
+        Ok(view) => board::render_action_board(&view, wall),
+        Err(refusal) => board::render_action_board_refusal(&refusal),
     }
 }
 
@@ -963,6 +1047,12 @@ fn retract_not_sent_sentence(
         }
         // The ratified anchor sentence, bare (`AD-1823`).
         RetractNotSent::AnchorRefused(error) => error.to_string(),
+        // Story 19.21 `A15` — a LOCAL fact: this host could not record the
+        // attempt, so nothing was sent. ⛔ Attributes nothing to the peer and
+        // ⛔ is neither the unknown-mark nor the unreachable-peer sentence.
+        RetractNotSent::JournalDispatch => {
+            crate::domain::models::team_send::TEAM_SEND_NOT_SENT_LABEL.to_owned()
+        }
         _ => format!("Could not reach {alias}'s host. Nothing was marked."),
     }
 }
@@ -1127,9 +1217,13 @@ pub async fn team_retract_dispatch(
         RetractOutcome::Landed { retracted_at_ms } => {
             if let Some(ms) = retracted_at_ms {
                 board = runtime
-                    .mark_board_item_retracted(&pending.peer, &pending.item_id, ms)
-                    .await
-                    .map(|view| render_board(&view));
+                    .mark_board_item_retracted(
+                        &pending.peer,
+                        &pending.item_id,
+                        ms,
+                        runtime.wall_now_unix_secs(),
+                    )
+                    .await;
             }
             format!(
                 "Retracted on {alias}'s host. Marked there — never deleted.\n\
@@ -1215,7 +1309,6 @@ pub(crate) async fn resolve_team_retract(state: &mut TuiState, accept: bool, app
 }
 
 /// Story 19.17: settle only the addressed action's row on its issuing tab.
-#[cfg(feature = "a2a")]
 pub fn team_send_settled(
     active_conversation_id: &str,
     state: &mut TuiState,
@@ -1223,7 +1316,7 @@ pub fn team_send_settled(
     conversation_id: &str,
     block_id: &str,
     index: usize,
-    outcome: crate::adapters::a2a::send::RecipientOutcome,
+    outcome: crate::domain::models::RecipientOutcome,
 ) {
     let redraw = if conversation_id == active_conversation_id {
         settle_team_send_row(
@@ -1252,8 +1345,7 @@ pub fn team_send_settled(
 /// Replace one row and re-render its block. Once every row has settled the
 /// block text is final, so its typed rows are dropped rather than carried
 /// (and cloned on every tab switch) for the rest of the session.
-#[cfg(feature = "a2a")]
-fn settle_team_send_row(
+pub(crate) fn settle_team_send_row(
     blocks: &mut std::collections::BTreeMap<
         String,
         Vec<crate::adapters::tui::handlers::team_command::TeamSendRow>,
@@ -1261,7 +1353,7 @@ fn settle_team_send_row(
     feedback_blocks: &mut std::collections::BTreeMap<String, crate::domain::models::FeedbackBlock>,
     block_id: &str,
     index: usize,
-    outcome: crate::adapters::a2a::send::RecipientOutcome,
+    outcome: crate::domain::models::RecipientOutcome,
 ) -> bool {
     use crate::adapters::tui::handlers::team_command::render_team_send_rows;
 
@@ -2101,11 +2193,10 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "a2a")]
     #[test]
     fn a_background_team_send_settlement_updates_only_its_issuing_tab() {
-        use crate::adapters::a2a::send::RecipientOutcome;
         use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
+        use crate::domain::models::RecipientOutcome;
         use crate::domain::models::{FeedbackBlock, FeedbackLevel};
 
         const BLOCK_ID: &str = "team-send-12";
@@ -2206,7 +2297,7 @@ mod credential_tests {
     use tracing_test::traced_test;
 
     use crate::adapters::a2a::egress::A2aEgress;
-    use crate::adapters::a2a::send::{RecipientOutcome, deliver_text};
+    use crate::adapters::a2a::send::deliver_text;
     use crate::adapters::a2a::test_fixtures::{
         PeerFixture, RpcAnswer, TestLeaf, Validity, leaf_issued_by, self_signed_leaf, test_ca,
         write_pem,
@@ -2214,7 +2305,8 @@ mod credential_tests {
     use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
     use crate::domain::events::AppEvent;
     use crate::domain::models::{
-        A2aPeerSource, A2aPeerSpec, CapabilityId, RedactedUrl, RejectReason, RoomEvent,
+        A2aPeerSource, A2aPeerSpec, CapabilityId, RecipientOutcome, RedactedUrl, RejectReason,
+        RoomEvent,
     };
     use crate::domain::ports::{CapabilityProvider, RoomJournal, RoomJournalError};
     use crate::infrastructure::subagent::NodeTree;

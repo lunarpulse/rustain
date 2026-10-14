@@ -86,7 +86,15 @@ pub(crate) fn recipient_surface_actions(
         }
         actions[1] = match surface.message_type {
             SemanticMessageType::Consultation => Some(RecipientSurfaceAction::Busy),
-            SemanticMessageType::ArchitectureUpdate if surface.item_state == Some("received") => {
+            // Story 19.21 `C5` — `UX-DR-TM-01:111` ratified `[✓] Confirm →
+            // [Acknowledge]` for a story assignment; the 2026-10-07 matrix's
+            // Act-2 scope was staging, not repeal. The shipped arm, extended:
+            // the same `/team ack` frame, the same correlated Applied/
+            // Idempotent result, and the daemon's transition gate rechecks it.
+            // A receipt, ⛔ not an acceptance and not a person acting.
+            SemanticMessageType::ArchitectureUpdate | SemanticMessageType::StoryAssignment
+                if surface.item_state == Some("received") =>
+            {
                 Some(RecipientSurfaceAction::Acknowledge)
             }
             _ => None,

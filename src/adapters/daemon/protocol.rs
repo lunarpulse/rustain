@@ -35,14 +35,14 @@ use crate::adapters::rap::AgentSigner;
 use crate::domain::models::tool_call::RequestId;
 use crate::domain::models::{
     AgentEnvelope, ApprovalOutcome, ChannelKind, ChatMessage, Ed25519Sig, ImageAttachment,
-    PeerIdentity, PermissionMode, ToolRisk,
+    PeerIdentity, PermissionMode, SemanticMessageType, SendActionId, ToolRisk,
 };
 use crate::infrastructure::runtime::event_bus::RawEvent;
 
 /// Current wire protocol version. Bump on ANY breaking frame-shape change so an
 /// older client/daemon is rejected with [`ProtocolError::VersionMismatch`]
 /// rather than mis-parsing (forward-compat for 12.3/12.4).
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -324,8 +324,132 @@ pub enum ClientFrame {
     InspectRecipientContext,
     /// Select/off a daemon-owned received item reference, never a client body.
     SetRecipientContext { item_id: String, selected: bool },
+    /// Story 19.21 `AC4(b)` — one operator `/team send`. `request` is a
+    /// client-minted key, unique per connection, echoed by every result and
+    /// refusal this command produces. TrustedLocal + ReadWrite only; the
+    /// daemon's one send coordinator runs it (never a connection's token).
+    TeamSend {
+        request: String,
+        recipients: Vec<String>,
+        text: String,
+        #[serde(default)]
+        message_type: Option<SemanticMessageType>,
+        #[serde(default)]
+        subject: Option<String>,
+    },
+    /// Story 19.21 `AC4(b)` — one `/team board` read. TrustedLocal; a
+    /// read-only attachment may ask. ⛔ Never pushed: it is an explicit read.
+    TeamBoard {
+        request: String,
+        selector: TeamBoardRequest,
+    },
+    /// Story 19.21 `AC4(b)` — `/team status` and `/team trust`, computed
+    /// daemon-side over the daemon's composed roster and consent projection.
+    /// TrustedLocal; a read-only attachment may ask.
+    TeamStatus { request: String },
+    /// Story 19.21 `AC4(d)` — `/team untrust <alias>`: revoke the standing
+    /// sender consent durably through the daemon's consent path.
+    /// TrustedLocal + ReadWrite only.
+    RevokeSenderConsent { request: String, alias: String },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
+}
+
+/// Which board a [`ClientFrame::TeamBoard`] asks for (Story 19.21 `AC3(a)`).
+/// The wire twin of the TUI's `TeamBoardSelector`; the two convert in the
+/// client and in the bridge, so the daemon never names a TUI type.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamBoardRequest {
+    Inventory,
+    Peer(String),
+    Last,
+    Action(String),
+    Actions,
+}
+
+/// Why a recipient's send did not complete, with its provenance (Story 19.21
+/// `AC1(d)`): a ratified local sentence versus text a peer influenced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamSendCauseKind {
+    Ratified,
+    PeerInfluenced,
+}
+
+/// A typed send-failure cause on the wire — never a pre-rendered row.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamSendCause {
+    pub kind: TeamSendCauseKind,
+    pub text: String,
+}
+
+/// The wire serialization shape for one feature-independent domain
+/// `RecipientOutcome`; the client re-renders it through the shared row renderer.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TeamSendOutcome {
+    Delivered,
+    Declined,
+    AwaitingApproval,
+    AcceptedWithoutItem,
+    AskedQuestion {
+        task_id: String,
+    },
+    Unreachable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<TeamSendCause>,
+    },
+    NoUsableAnswer,
+    NotSent,
+}
+
+impl From<&crate::domain::models::RecipientOutcome> for TeamSendOutcome {
+    fn from(outcome: &crate::domain::models::RecipientOutcome) -> Self {
+        use crate::domain::models::{RecipientOutcome as Outcome, SendCause};
+        match outcome {
+            Outcome::Delivered => Self::Delivered,
+            Outcome::Declined => Self::Declined,
+            Outcome::AwaitingApproval => Self::AwaitingApproval,
+            Outcome::AcceptedWithoutItem => Self::AcceptedWithoutItem,
+            Outcome::AskedQuestion { task_id } => Self::AskedQuestion {
+                task_id: task_id.clone(),
+            },
+            Outcome::Unreachable { cause } => Self::Unreachable {
+                cause: cause.as_ref().map(|cause| TeamSendCause {
+                    kind: match cause {
+                        SendCause::Ratified(_) => TeamSendCauseKind::Ratified,
+                        SendCause::PeerInfluenced(_) => TeamSendCauseKind::PeerInfluenced,
+                    },
+                    text: cause.as_str().to_owned(),
+                }),
+            },
+            Outcome::NoUsableAnswer => Self::NoUsableAnswer,
+            Outcome::NotSent => Self::NotSent,
+        }
+    }
+}
+
+impl From<TeamSendOutcome> for crate::domain::models::RecipientOutcome {
+    fn from(outcome: TeamSendOutcome) -> Self {
+        use crate::domain::models::SendCause;
+        match outcome {
+            TeamSendOutcome::Delivered => Self::Delivered,
+            TeamSendOutcome::Declined => Self::Declined,
+            TeamSendOutcome::AwaitingApproval => Self::AwaitingApproval,
+            TeamSendOutcome::AcceptedWithoutItem => Self::AcceptedWithoutItem,
+            TeamSendOutcome::AskedQuestion { task_id } => Self::AskedQuestion { task_id },
+            TeamSendOutcome::Unreachable { cause } => Self::Unreachable {
+                cause: cause.map(|cause| match cause.kind {
+                    TeamSendCauseKind::Ratified => SendCause::Ratified(cause.text),
+                    TeamSendCauseKind::PeerInfluenced => SendCause::PeerInfluenced(cause.text),
+                }),
+            },
+            TeamSendOutcome::NoUsableAnswer => Self::NoUsableAnswer,
+            TeamSendOutcome::NotSent => Self::NotSent,
+        }
+    }
 }
 
 /// The outcome of a [`ClientFrame::PeerShare`] (Story 18.4a).
@@ -353,14 +477,29 @@ pub enum RecipientAction {
     Response,
     ContextSelect,
     ContextRemove,
+    /// Story 19.21 `AC4(b)`: the operator `/team` commands whose request-keyed
+    /// refusals travel on this envelope ([`RecipientActionTarget::Request`]).
+    TeamSend,
+    TeamBoard,
+    TeamStatus,
+    RevokeSenderConsent,
 }
 
 /// The exact item or peer-response node named by an operator action.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RecipientActionTarget {
-    Item { item_id: String },
-    Node { node_id: String },
+    Item {
+        item_id: String,
+    },
+    Node {
+        node_id: String,
+    },
+    /// One client-minted `/team` request key (Story 19.21 `AC4(b)`), scoped by
+    /// the originating connection. Never an item or node id.
+    Request {
+        request: String,
+    },
 }
 
 /// Authoritative result of one deliberate action; context is process-local.
@@ -454,6 +593,36 @@ pub enum DaemonFrame {
         /// Inventory is foreground Info only in response to explicit inspection.
         #[serde(default)]
         show_inventory: bool,
+    },
+    /// Story 19.21 `AC4(b)` — the send action was durably recorded; `request`
+    /// binds the client's stable block to the sender-local action id.
+    /// Origin connection only. ⛔ Never sent when the record failed.
+    TeamSendStarted {
+        request: String,
+        action: SendActionId,
+    },
+    /// One recipient's durable typed settlement, to the originating connection
+    /// only. A request settles each index at most once.
+    TeamSendSettled {
+        request: String,
+        index: usize,
+        outcome: TeamSendOutcome,
+    },
+    /// One bounded ordered fragment of the complete rendered board.
+    TeamBoardChunk {
+        request: String,
+        sequence: u32,
+        view: String,
+    },
+    /// Explicit boundary for a complete request-correlated board response.
+    TeamBoardDone { request: String, chunks: u32 },
+    /// The rendered `/team status` / `/team trust` answer.
+    TeamStatusResult { request: String, message: String },
+    /// The durable answer to [`ClientFrame::RevokeSenderConsent`].
+    SenderConsentRevoked {
+        request: String,
+        alias: String,
+        message: String,
     },
     /// Acknowledge a clean [`ClientFrame::Detach`].
     Detached,
@@ -640,6 +809,40 @@ mod tests {
             ClientFrame::DeferRecipientItem {
                 item_id: "ri-1".into(),
             },
+            ClientFrame::TeamSend {
+                request: "send-1".into(),
+                recipients: vec!["alice".into()],
+                text: "hello from daemon".into(),
+                message_type: Some(SemanticMessageType::StoryAssignment),
+                subject: Some("sprint-7".into()),
+            },
+            ClientFrame::TeamBoard {
+                request: "board-inventory".into(),
+                selector: TeamBoardRequest::Inventory,
+            },
+            ClientFrame::TeamBoard {
+                request: "board-peer".into(),
+                selector: TeamBoardRequest::Peer("alice".into()),
+            },
+            ClientFrame::TeamBoard {
+                request: "board-last".into(),
+                selector: TeamBoardRequest::Last,
+            },
+            ClientFrame::TeamBoard {
+                request: "board-action".into(),
+                selector: TeamBoardRequest::Action("sa_action".into()),
+            },
+            ClientFrame::TeamBoard {
+                request: "board-actions".into(),
+                selector: TeamBoardRequest::Actions,
+            },
+            ClientFrame::TeamStatus {
+                request: "status-1".into(),
+            },
+            ClientFrame::RevokeSenderConsent {
+                request: "untrust-1".into(),
+                alias: "alice".into(),
+            },
             ClientFrame::Detach,
         ]
     }
@@ -760,6 +963,131 @@ mod tests {
                 },
                 outcome: RecipientActionOutcome::Refused {
                     error: ProtocolError::Malformed("recipient item not found".into()),
+                },
+            },
+            DaemonFrame::TeamSendStarted {
+                request: "send-1".into(),
+                action: SendActionId::from_replay("sa_action"),
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 0,
+                outcome: TeamSendOutcome::Delivered,
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 1,
+                outcome: TeamSendOutcome::Declined,
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 2,
+                outcome: TeamSendOutcome::AwaitingApproval,
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 3,
+                outcome: TeamSendOutcome::AcceptedWithoutItem,
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 4,
+                outcome: TeamSendOutcome::AskedQuestion {
+                    task_id: "task-1".into(),
+                },
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 5,
+                outcome: TeamSendOutcome::Unreachable {
+                    cause: Some(TeamSendCause {
+                        kind: TeamSendCauseKind::Ratified,
+                        text: "unavailable".into(),
+                    }),
+                },
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 6,
+                outcome: TeamSendOutcome::Unreachable {
+                    cause: Some(TeamSendCause {
+                        kind: TeamSendCauseKind::PeerInfluenced,
+                        text: "peer influenced".into(),
+                    }),
+                },
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 7,
+                outcome: TeamSendOutcome::Unreachable { cause: None },
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 8,
+                outcome: TeamSendOutcome::NoUsableAnswer,
+            },
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 9,
+                outcome: TeamSendOutcome::NotSent,
+            },
+            DaemonFrame::TeamBoardChunk {
+                request: "board-1".into(),
+                sequence: 0,
+                view: "Distribution ".into(),
+            },
+            DaemonFrame::TeamBoardChunk {
+                request: "board-1".into(),
+                sequence: 1,
+                view: "board".into(),
+            },
+            DaemonFrame::TeamBoardDone {
+                request: "board-1".into(),
+                chunks: 2,
+            },
+            DaemonFrame::TeamStatusResult {
+                request: "status-1".into(),
+                message: "Team status".into(),
+            },
+            DaemonFrame::SenderConsentRevoked {
+                request: "untrust-1".into(),
+                alias: "alice".into(),
+                message: "Revoked trust".into(),
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::TeamSend,
+                target: RecipientActionTarget::Request {
+                    request: "send-refused".into(),
+                },
+                outcome: RecipientActionOutcome::Refused {
+                    error: ProtocolError::ReadOnly,
+                },
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::TeamBoard,
+                target: RecipientActionTarget::Request {
+                    request: "board-refused".into(),
+                },
+                outcome: RecipientActionOutcome::Refused {
+                    error: ProtocolError::PeerVerification("trusted-local only".into()),
+                },
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::TeamStatus,
+                target: RecipientActionTarget::Request {
+                    request: "status-refused".into(),
+                },
+                outcome: RecipientActionOutcome::Refused {
+                    error: ProtocolError::Internal("unavailable".into()),
+                },
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::RevokeSenderConsent,
+                target: RecipientActionTarget::Request {
+                    request: "untrust-refused".into(),
+                },
+                outcome: RecipientActionOutcome::Refused {
+                    error: ProtocolError::Internal("append failed".into()),
                 },
             },
             DaemonFrame::Detached,

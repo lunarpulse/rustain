@@ -17,21 +17,24 @@
 //! turn **completes and persists even if the client detaches** (AC4).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use rand_core::{OsRng, RngCore};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
+
+#[cfg(feature = "a2a")]
+use crate::adapters::a2a::driver::A2aDelegationRuntime;
 
 #[cfg(feature = "cron")]
 use crate::adapters::scheduler::cron::CronCompletion;
 #[cfg(not(feature = "cron"))]
 pub struct CronCompletion;
 use super::protocol::{
-    AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION,
-    ProposalToken, ProtocolError, RecipientAction, RecipientActionOutcome, RecipientActionTarget,
-    RecipientReplyReceipt, read_frame, write_frame,
+    AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, MAX_FRAME_BYTES,
+    PROTOCOL_VERSION, ProposalToken, ProtocolError, RecipientAction, RecipientActionOutcome,
+    RecipientActionTarget, RecipientReplyReceipt, read_frame, write_frame,
 };
 use super::runtime::DaemonCore;
 use crate::adapters::rap::{
@@ -54,6 +57,10 @@ use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 const CONN_QUEUE_DEPTH: usize = 1024;
 /// Maximum queued operator commands per attached writer.
 const OPERATOR_QUEUE_DEPTH: usize = 64;
+/// Maximum daemon-owned `/team send` actions admitted concurrently.
+pub const MAX_IN_FLIGHT_TEAM_SENDS: usize = 8;
+/// Leave a small, bounded request key so even a refusal frame is serializable.
+const MAX_TEAM_BOARD_REQUEST_BYTES: usize = 128;
 
 /// How long an attached-but-unresponsive writer has to answer an approval before
 /// the daemon falls back to the conservative unattended path (deny) (AC6 #2).
@@ -97,11 +104,464 @@ struct RetainedConsolidation {
     /// the per-item-toggle fast-follow (AI-12.2d-2).
     proposals: Vec<super::protocol::ProposedFact>,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TeamFramePublishResult {
+    Published,
+    Overflow,
+    Closed,
+}
+
+fn try_publish_team_frame(
+    tx: &mpsc::Sender<DaemonFrame>,
+    terminal_tx: &watch::Sender<Option<ProtocolError>>,
+    frame: DaemonFrame,
+) -> TeamFramePublishResult {
+    match tx.try_send(frame) {
+        Ok(()) => TeamFramePublishResult::Published,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            let _ = terminal_tx.send(Some(ProtocolError::Internal(
+                "team result queue overflow; connection closed".to_owned(),
+            )));
+            TeamFramePublishResult::Overflow
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => TeamFramePublishResult::Closed,
+    }
+}
+
+fn publish_team_frame(
+    tx: &mpsc::Sender<DaemonFrame>,
+    terminal_tx: &watch::Sender<Option<ProtocolError>>,
+    frame: DaemonFrame,
+) -> bool {
+    try_publish_team_frame(tx, terminal_tx, frame) == TeamFramePublishResult::Published
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TeamSendFifoEventKind {
+    Enqueued,
+    Dequeued,
+    Discarded,
+    Handled,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamSendFifoEvent {
+    pub request: String,
+    pub connection_id: u64,
+    pub kind: TeamSendFifoEventKind,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TeamSendPublicationKind {
+    Started,
+    Settled { index: usize },
+    Refused { action: RecipientAction },
+    BoardResult,
+    StatusResult,
+    ConsentRevoked,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamSendPublication {
+    pub request: String,
+    pub kind: TeamSendPublicationKind,
+    pub published_to_conn: u64,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TeamSendTerminalEventKind {
+    Error(ProtocolError),
+    Closed,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamSendTerminalEvent {
+    pub connection_id: u64,
+    pub kind: TeamSendTerminalEventKind,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TeamSendCompletionKind {
+    Finished,
+    Cancelled,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamSendCompletion {
+    pub request: String,
+    pub kind: TeamSendCompletionKind,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+struct TeamSendTestHooksInner {
+    fifo_tx: mpsc::UnboundedSender<TeamSendFifoEvent>,
+    fifo_rx: Mutex<mpsc::UnboundedReceiver<TeamSendFifoEvent>>,
+    publication_tx: mpsc::UnboundedSender<TeamSendPublication>,
+    publication_rx: Mutex<mpsc::UnboundedReceiver<TeamSendPublication>>,
+    terminal_tx: mpsc::UnboundedSender<TeamSendTerminalEvent>,
+    terminal_rx: Mutex<mpsc::UnboundedReceiver<TeamSendTerminalEvent>>,
+    completion_tx: mpsc::UnboundedSender<TeamSendCompletion>,
+    completion_rx: Mutex<mpsc::UnboundedReceiver<TeamSendCompletion>>,
+    completed_count: AtomicUsize,
+    fifo_serial: Mutex<()>,
+    hold_before_dequeue: Option<usize>,
+    dequeue_count: AtomicUsize,
+    worker_gate_count: AtomicUsize,
+    worker_gate_notify: Notify,
+    overflow_count: AtomicUsize,
+    worker_release: Semaphore,
+    hold_first_writer: bool,
+    writer_claimed: AtomicBool,
+    writer_release: Semaphore,
+    hold_send_actions: bool,
+    send_action_count: AtomicUsize,
+    send_action_notify: Notify,
+    send_action_release: Semaphore,
+    outbound_queue_capacity: Option<usize>,
+    board_now: Option<Arc<dyn Fn() -> std::time::Instant + Send + Sync>>,
+}
+
+/// Immutable-before-construction test controls for attached team-send lifecycle
+/// observation. These hooks are absent from production builds.
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone)]
+pub struct TeamSendTestHooks {
+    inner: Arc<TeamSendTestHooksInner>,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+impl TeamSendTestHooks {
+    /// Create hooks before constructing the server. `hold_before_dequeue` is a
+    /// 1-based TeamSend command ordinal; capacity overrides each connection's
+    /// bounded output channel. A held first socket writer drains only after
+    /// `release_writer()`.
+    pub fn new(
+        hold_before_dequeue: Option<usize>,
+        outbound_queue_capacity: Option<usize>,
+        hold_first_writer: bool,
+    ) -> Self {
+        assert!(
+            outbound_queue_capacity.is_none_or(|capacity| capacity > 0),
+            "test outbound queue capacity must be non-zero"
+        );
+        assert!(
+            hold_before_dequeue.is_none_or(|ordinal| ordinal > 0),
+            "held TeamSend ordinal is 1-based"
+        );
+        let (fifo_tx, fifo_rx) = mpsc::unbounded_channel();
+        let (publication_tx, publication_rx) = mpsc::unbounded_channel();
+        let (terminal_tx, terminal_rx) = mpsc::unbounded_channel();
+        let (completion_tx, completion_rx) = mpsc::unbounded_channel();
+        Self {
+            inner: Arc::new(TeamSendTestHooksInner {
+                fifo_tx,
+                fifo_rx: Mutex::new(fifo_rx),
+                publication_tx,
+                publication_rx: Mutex::new(publication_rx),
+                terminal_tx,
+                terminal_rx: Mutex::new(terminal_rx),
+                completion_tx,
+                completion_rx: Mutex::new(completion_rx),
+                completed_count: AtomicUsize::new(0),
+                fifo_serial: Mutex::new(()),
+                hold_before_dequeue,
+                dequeue_count: AtomicUsize::new(0),
+                worker_gate_count: AtomicUsize::new(0),
+                worker_gate_notify: Notify::new(),
+                overflow_count: AtomicUsize::new(0),
+                worker_release: Semaphore::new(0),
+                hold_first_writer,
+                writer_claimed: AtomicBool::new(false),
+                writer_release: Semaphore::new(0),
+                hold_send_actions: false,
+                send_action_count: AtomicUsize::new(0),
+                send_action_notify: Notify::new(),
+                send_action_release: Semaphore::new(0),
+                outbound_queue_capacity,
+                board_now: None,
+            }),
+        }
+    }
+
+    /// Supply a monotonic clock for daemon TeamBoard reads. Configure this
+    /// before cloning the hooks or constructing the server.
+    pub fn with_board_now_source(
+        mut self,
+        source: Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
+    ) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("configure TeamSendTestHooks before cloning")
+            .board_now = Some(source);
+        self
+    }
+
+    /// Hold each admitted TeamSend task immediately before its coordinator.
+    /// Use `wait_for_send_action_count` and `release_send_actions` to saturate
+    /// the daemon's finite in-flight semaphore deterministically.
+    pub fn with_send_action_gate(mut self) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("configure TeamSendTestHooks before cloning")
+            .hold_send_actions = true;
+        self
+    }
+
+    /// Receive the next FIFO observation in order.
+    pub async fn next_fifo_event(&self) -> Option<TeamSendFifoEvent> {
+        self.inner.fifo_rx.lock().await.recv().await
+    }
+
+    /// Receive the next targeted publication observation in order.
+    pub async fn next_publication(&self) -> Option<TeamSendPublication> {
+        self.inner.publication_rx.lock().await.recv().await
+    }
+    /// Non-blocking read of the next publication after a lifecycle fence proves
+    /// no further old-request frame can be emitted.
+    pub async fn try_next_publication(
+        &self,
+    ) -> Result<TeamSendPublication, mpsc::error::TryRecvError> {
+        self.inner.publication_rx.lock().await.try_recv()
+    }
+
+    /// Receive the next explicit terminal-error/close observation in order.
+    pub async fn next_terminal_event(&self) -> Option<TeamSendTerminalEvent> {
+        self.inner.terminal_rx.lock().await.recv().await
+    }
+
+    /// Non-blocking read of the next terminal event; useful for proving that a
+    /// silent-drop path did not publish a terminal error.
+    pub async fn try_next_terminal_event(
+        &self,
+    ) -> Result<TeamSendTerminalEvent, mpsc::error::TryRecvError> {
+        self.inner.terminal_rx.lock().await.try_recv()
+    }
+
+    /// Receive the next daemon-owned send-task completion in order.
+    pub async fn next_completion(&self) -> Option<TeamSendCompletion> {
+        self.inner.completion_rx.lock().await.recv().await
+    }
+
+    /// Non-blocking read of the next daemon-owned send-task completion.
+    pub async fn try_next_completion(
+        &self,
+    ) -> Result<TeamSendCompletion, mpsc::error::TryRecvError> {
+        self.inner.completion_rx.lock().await.try_recv()
+    }
+
+    /// Number of daemon-owned TeamSend tasks that have completed.
+    pub fn completed_count(&self) -> usize {
+        self.inner.completed_count.load(Ordering::Acquire)
+    }
+
+    /// Release the selected command's worker gate.
+    pub fn release_worker(&self) {
+        self.inner.worker_release.add_permits(1);
+    }
+
+    /// Wait until the selected worker command has reached its pre-dispatch gate.
+    pub async fn wait_for_worker_gate_count(&self, count: usize) {
+        loop {
+            let notified = self.inner.worker_gate_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.inner.worker_gate_count.load(Ordering::Acquire) >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
+    /// Number of targeted output queue overflows observed by this server.
+    pub fn overflow_count(&self) -> usize {
+        self.inner.overflow_count.load(Ordering::Acquire)
+    }
+
+    /// Release the first attached socket writer held by this hook.
+    pub fn release_writer(&self) {
+        self.inner.writer_release.add_permits(1);
+    }
+
+    /// Wait until this many admitted send tasks have reached the coordinator
+    /// gate. The count is cumulative for this server.
+    pub async fn wait_for_send_action_count(&self, count: usize) {
+        loop {
+            let notified = self.inner.send_action_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.inner.send_action_count.load(Ordering::Acquire) >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Number of send tasks that reached the optional pre-coordinator gate.
+    pub fn send_action_count(&self) -> usize {
+        self.inner.send_action_count.load(Ordering::Acquire)
+    }
+
+    /// Release up to `count` admitted send tasks held before their coordinator.
+    pub fn release_send_actions(&self, count: usize) {
+        self.inner.send_action_release.add_permits(count);
+    }
+
+    fn record_fifo(&self, request: &str, connection_id: u64, kind: TeamSendFifoEventKind) {
+        let _ = self.inner.fifo_tx.send(TeamSendFifoEvent {
+            request: request.to_owned(),
+            connection_id,
+            kind,
+        });
+    }
+
+    fn record_terminal(&self, connection_id: u64, kind: TeamSendTerminalEventKind) {
+        let _ = self.inner.terminal_tx.send(TeamSendTerminalEvent {
+            connection_id,
+            kind,
+        });
+    }
+
+    fn record_completion(&self, request: String, kind: TeamSendCompletionKind) {
+        self.inner.completed_count.fetch_add(1, Ordering::AcqRel);
+        let _ = self
+            .inner
+            .completion_tx
+            .send(TeamSendCompletion { request, kind });
+    }
+
+    async fn before_team_send(&self) {
+        let ordinal = self.inner.dequeue_count.fetch_add(1, Ordering::AcqRel) + 1;
+        if self.inner.hold_before_dequeue == Some(ordinal) {
+            self.inner.worker_gate_count.fetch_add(1, Ordering::AcqRel);
+            self.inner.worker_gate_notify.notify_waiters();
+            if let Ok(permit) = self.inner.worker_release.acquire().await {
+                permit.forget();
+            }
+        }
+    }
+
+    async fn before_send_action(&self) {
+        if !self.inner.hold_send_actions {
+            return;
+        }
+        self.inner.send_action_count.fetch_add(1, Ordering::AcqRel);
+        self.inner.send_action_notify.notify_waiters();
+        if let Ok(permit) = self.inner.send_action_release.acquire().await {
+            permit.forget();
+        }
+    }
+
+    async fn before_writer_drain(&self) {
+        if self.inner.hold_first_writer
+            && !self.inner.writer_claimed.swap(true, Ordering::AcqRel)
+            && let Ok(permit) = self.inner.writer_release.acquire().await
+        {
+            permit.forget();
+        }
+    }
+
+    fn queue_capacity(&self) -> Option<usize> {
+        self.inner.outbound_queue_capacity
+    }
+
+    fn board_now(&self) -> Option<std::time::Instant> {
+        self.inner.board_now.as_ref().map(|source| source())
+    }
+
+    fn record_publication(&self, connection_id: u64, frame: &DaemonFrame) {
+        let (request, kind) = match frame {
+            DaemonFrame::TeamSendStarted { request, .. } => {
+                (request, TeamSendPublicationKind::Started)
+            }
+            DaemonFrame::TeamSendSettled { request, index, .. } => {
+                (request, TeamSendPublicationKind::Settled { index: *index })
+            }
+            DaemonFrame::RecipientActionResult {
+                action,
+                target: RecipientActionTarget::Request { request },
+                outcome: RecipientActionOutcome::Refused { .. },
+            } => (
+                request,
+                TeamSendPublicationKind::Refused { action: *action },
+            ),
+            DaemonFrame::TeamBoardDone { request, .. } => {
+                (request, TeamSendPublicationKind::BoardResult)
+            }
+            DaemonFrame::TeamStatusResult { request, .. } => {
+                (request, TeamSendPublicationKind::StatusResult)
+            }
+            DaemonFrame::SenderConsentRevoked { request, .. } => {
+                (request, TeamSendPublicationKind::ConsentRevoked)
+            }
+            DaemonFrame::TeamBoardChunk { .. }
+            | DaemonFrame::AttachChallenge { .. }
+            | DaemonFrame::AttachAck { .. }
+            | DaemonFrame::Event(_)
+            | DaemonFrame::PeerRowOperation(_)
+            | DaemonFrame::History { .. }
+            | DaemonFrame::ApprovalRequest { .. }
+            | DaemonFrame::ConsolidationProposed { .. }
+            | DaemonFrame::PeerAccepted { .. }
+            | DaemonFrame::PeerShareResult { .. }
+            | DaemonFrame::RecipientActionResult { .. }
+            | DaemonFrame::RecipientContextState { .. }
+            | DaemonFrame::Detached
+            | DaemonFrame::Error(_) => return,
+        };
+        let _ = self.inner.publication_tx.send(TeamSendPublication {
+            request: request.clone(),
+            kind,
+            published_to_conn: connection_id,
+        });
+    }
+}
+
+fn team_send_request_key(frame: &ClientFrame) -> Option<&str> {
+    if let ClientFrame::TeamSend { request, .. } = frame {
+        Some(request)
+    } else {
+        None
+    }
+}
+
+fn publish_team_frame_to_connection(
+    tx: &mpsc::Sender<DaemonFrame>,
+    terminal_tx: &watch::Sender<Option<ProtocolError>>,
+    frame: DaemonFrame,
+    connection_id: u64,
+    #[cfg(any(test, feature = "test-instrumentation"))] hooks: Option<&TeamSendTestHooks>,
+) -> bool {
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    let publication_frame = hooks.map(|_| frame.clone());
+    #[cfg(not(any(test, feature = "test-instrumentation")))]
+    let _ = connection_id;
+    let result = try_publish_team_frame(tx, terminal_tx, frame);
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if result == TeamFramePublishResult::Overflow
+        && let Some(hooks) = hooks
+    {
+        hooks.inner.overflow_count.fetch_add(1, Ordering::AcqRel);
+    }
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if let (Some(hooks), Some(frame)) = (hooks, publication_frame.as_ref()) {
+        hooks.record_publication(connection_id, frame);
+    }
+    match result {
+        TeamFramePublishResult::Published => true,
+        TeamFramePublishResult::Overflow | TeamFramePublishResult::Closed => false,
+    }
+}
 
 /// One attached connection's outbound handle + grant.
 struct Conn {
     id: u64,
     tx: mpsc::Sender<DaemonFrame>,
+    terminal_tx: watch::Sender<Option<ProtocolError>>,
     mode: AttachMode,
     tier: ConnectionTier,
 }
@@ -639,6 +1099,18 @@ pub struct AttachServer {
     /// Read half of the same journal — the retract path derives the disclosed
     /// `target_seq` from it instead of trusting the client's frame (AC5).
     room_journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>>,
+    #[cfg(feature = "a2a")]
+    a2a_runtime: Option<Arc<A2aDelegationRuntime>>,
+    team_peers: Vec<crate::domain::models::A2aPeerSpec>,
+    team_send_slots: Arc<Semaphore>,
+    team_send_shutdown: CancellationToken,
+    team_send_accepting: AtomicBool,
+    team_send_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    team_send_started_count: Arc<AtomicUsize>,
+    team_send_settled_count: Arc<AtomicUsize>,
+    team_send_saturation_refusals: Arc<AtomicUsize>,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    team_send_test_hooks: Option<TeamSendTestHooks>,
     /// Story 18.1b — the assistant answer produced by each inbound A2A peer
     /// node, captured at the moment its turn finished.
     ///
@@ -974,6 +1446,81 @@ impl AttachServer {
             urgency_router,
         )
     }
+    /// Journaled construction path for attached team commands. The runtime and
+    /// roster are installed before the server is returned to any caller.
+    pub(crate) fn new_with_node_tree_bus_policy_journal_urgency_and_team(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        node_tree: crate::infrastructure::subagent::NodeTree,
+        peer_bus: PeerBusSlot,
+        delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
+        room_journal: Arc<dyn crate::domain::ports::RoomJournal>,
+        room_journal_reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
+        consent_projection: Option<Arc<crate::adapters::policy::JournalConsentProjection>>,
+        urgency_router: Option<Arc<super::urgency::UrgencyRouter>>,
+        #[cfg(feature = "a2a")] runtime: Option<Arc<A2aDelegationRuntime>>,
+        peers: Vec<crate::domain::models::A2aPeerSpec>,
+        #[cfg(any(test, feature = "test-instrumentation"))] test_hooks: Option<TeamSendTestHooks>,
+    ) -> Arc<Self> {
+        let mut server = Self::new_with_node_tree_bus_policy_journal_and_urgency(
+            core,
+            conversation,
+            domain_tx,
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            room_journal,
+            room_journal_reader,
+            consent_projection,
+            urgency_router,
+        );
+        let server_mut = Arc::get_mut(&mut server).expect("new AttachServer has a unique Arc");
+        #[cfg(feature = "a2a")]
+        {
+            server_mut.a2a_runtime = runtime;
+        }
+        server_mut.team_peers = peers;
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        {
+            server_mut.team_send_test_hooks = test_hooks;
+        }
+        server
+    }
+    /// Public journaled constructor for external conformance harnesses that
+    /// provide the daemon's already-composed A2A runtime and peer roster.
+    pub fn new_with_node_tree_bus_policy_journal_and_team(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        node_tree: crate::infrastructure::subagent::NodeTree,
+        peer_bus: PeerBusSlot,
+        delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
+        room_journal: Arc<dyn crate::domain::ports::RoomJournal>,
+        room_journal_reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
+        consent_projection: Option<Arc<crate::adapters::policy::JournalConsentProjection>>,
+        #[cfg(feature = "a2a")] runtime: Option<Arc<A2aDelegationRuntime>>,
+        peers: Vec<crate::domain::models::A2aPeerSpec>,
+        #[cfg(any(test, feature = "test-instrumentation"))] test_hooks: Option<TeamSendTestHooks>,
+    ) -> Arc<Self> {
+        Self::new_with_node_tree_bus_policy_journal_urgency_and_team(
+            core,
+            conversation,
+            domain_tx,
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            room_journal,
+            room_journal_reader,
+            consent_projection,
+            None,
+            #[cfg(feature = "a2a")]
+            runtime,
+            peers,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            test_hooks,
+        )
+    }
 
     fn with_clock_and_node_tree(
         core: Arc<DaemonCore>,
@@ -1034,6 +1581,18 @@ impl AttachServer {
             operator_turn_active: std::sync::atomic::AtomicBool::new(false),
             room_journal,
             room_journal_reader,
+            #[cfg(feature = "a2a")]
+            a2a_runtime: None,
+            team_peers: Vec::new(),
+            team_send_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_TEAM_SENDS)),
+            team_send_shutdown: CancellationToken::new(),
+            team_send_tasks: Mutex::new(Vec::new()),
+            team_send_accepting: AtomicBool::new(true),
+            team_send_started_count: Arc::new(AtomicUsize::new(0)),
+            team_send_settled_count: Arc::new(AtomicUsize::new(0)),
+            team_send_saturation_refusals: Arc::new(AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            team_send_test_hooks: None,
             inbound_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
@@ -1047,6 +1606,15 @@ impl AttachServer {
         if let Some(manager) = &self.pending_consent {
             manager.set_effective_policy(policy).await;
         }
+    }
+    /// Deterministic seam for attached-send lifecycle conformance.
+    pub fn team_send_observations(&self) -> (usize, usize, usize, usize) {
+        (
+            MAX_IN_FLIGHT_TEAM_SENDS - self.team_send_slots.available_permits(),
+            self.team_send_started_count.load(Ordering::Acquire),
+            self.team_send_settled_count.load(Ordering::Acquire),
+            self.team_send_saturation_refusals.load(Ordering::Acquire),
+        )
     }
 
     pub fn node_tree(&self) -> crate::infrastructure::subagent::NodeTree {
@@ -1190,6 +1758,15 @@ impl AttachServer {
             }
         }
 
+        let tasks = {
+            let mut tasks = self.team_send_tasks.lock().await;
+            self.team_send_accepting.store(false, Ordering::Release);
+            self.team_send_shutdown.cancel();
+            std::mem::take(&mut *tasks)
+        };
+        for task in tasks {
+            let _ = task.await;
+        }
         forwarder.abort();
     }
     async fn surface_queued_interactions(
@@ -1669,7 +2246,16 @@ impl AttachServer {
         // commit is therefore either in the snapshot or queued after it.
         let row_guard = self.peer_row_serial.lock().await;
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, mut rx) = mpsc::channel::<DaemonFrame>(CONN_QUEUE_DEPTH);
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let outbound_queue_capacity = self
+            .team_send_test_hooks
+            .as_ref()
+            .and_then(TeamSendTestHooks::queue_capacity)
+            .unwrap_or(CONN_QUEUE_DEPTH);
+        #[cfg(not(any(test, feature = "test-instrumentation")))]
+        let outbound_queue_capacity = CONN_QUEUE_DEPTH;
+        let (tx, mut rx) = mpsc::channel::<DaemonFrame>(outbound_queue_capacity);
+        let (terminal_tx, mut terminal_rx) = watch::channel(None);
         let granted_mode = {
             let mut reg = self.registry.lock().await;
             let granted = if tier == ConnectionTier::Peer || read_only_ok || reg.has_writer() {
@@ -1683,6 +2269,7 @@ impl AttachServer {
             reg.conns.push(Conn {
                 id: conn_id,
                 tx,
+                terminal_tx: terminal_tx.clone(),
                 mode: granted,
                 tier,
             });
@@ -1745,12 +2332,48 @@ impl AttachServer {
                 );
             }
         }
+        let mut writer_terminal_rx = terminal_rx.clone();
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let writer_hooks = self.team_send_test_hooks.clone();
         let writer = tokio::spawn(async move {
-            while let Some(frame) = rx.recv().await {
-                if write_frame(&mut write_half, &frame).await.is_err() {
-                    break;
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            if let Some(hooks) = writer_hooks.as_ref() {
+                hooks.before_writer_drain().await;
+            }
+            let mut terminal_error_published = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    changed = writer_terminal_rx.changed() => {
+                        if changed.is_ok() {
+                            let error = { writer_terminal_rx.borrow().clone() };
+                            if let Some(error) = error {
+                                if write_frame(&mut write_half, &DaemonFrame::Error(error.clone()))
+                                    .await
+                                    .is_ok()
+                                {
+                                    #[cfg(any(test, feature = "test-instrumentation"))]
+                                    if let Some(hooks) = writer_hooks.as_ref() {
+                                        hooks.record_terminal(
+                                            conn_id,
+                                            TeamSendTerminalEventKind::Error(error),
+                                        );
+                                    }
+                                    terminal_error_published = true;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    frame = rx.recv() => {
+                        let Some(frame) = frame else { break };
+                        if write_frame(&mut write_half, &frame).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
+            terminal_error_published
         });
 
         // Story 12.2c AC7 — drain the 12.1c durable boundary queues to the freshly
@@ -1768,18 +2391,67 @@ impl AttachServer {
             if granted_mode == AttachMode::ReadWrite && tier == ConnectionTier::TrustedLocal {
                 let (tx, mut rx) = mpsc::channel::<ClientFrame>(OPERATOR_QUEUE_DEPTH);
                 let server = self.clone();
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                let worker_hooks = server.team_send_test_hooks.clone();
                 let worker = tokio::spawn(async move {
                     while let Some(frame) = rx.recv().await {
+                        #[cfg(any(test, feature = "test-instrumentation"))]
+                        let team_request = team_send_request_key(&frame).map(str::to_owned);
+                        #[cfg(any(test, feature = "test-instrumentation"))]
+                        if team_request.is_some()
+                            && let Some(hooks) = worker_hooks.as_ref()
+                        {
+                            hooks.before_team_send().await;
+                        }
                         // A detached writer's queued work still runs while no other writer has
                         // attached (AC4: the daemon owns what was submitted). Once a later
                         // writer has been granted, the stale commands are discarded so they can
                         // never act on the replacement writer's conversation.
                         if server.last_writer_conn_id.load(Ordering::SeqCst) != conn_id {
+                            #[cfg(any(test, feature = "test-instrumentation"))]
+                            {
+                                if let (Some(request), Some(hooks)) =
+                                    (team_request.as_deref(), worker_hooks.as_ref())
+                                {
+                                    let _order = hooks.inner.fifo_serial.lock().await;
+                                    hooks.record_fifo(
+                                        request,
+                                        conn_id,
+                                        TeamSendFifoEventKind::Discarded,
+                                    );
+                                }
+                                while let Some(queued) = rx.recv().await {
+                                    if let (Some(request), Some(hooks)) =
+                                        (team_send_request_key(&queued), worker_hooks.as_ref())
+                                    {
+                                        let _order = hooks.inner.fifo_serial.lock().await;
+                                        hooks.record_fifo(
+                                            request,
+                                            conn_id,
+                                            TeamSendFifoEventKind::Discarded,
+                                        );
+                                    }
+                                }
+                            }
                             break;
+                        }
+                        #[cfg(any(test, feature = "test-instrumentation"))]
+                        if let (Some(request), Some(hooks)) =
+                            (team_request.as_deref(), worker_hooks.as_ref())
+                        {
+                            let _order = hooks.inner.fifo_serial.lock().await;
+                            hooks.record_fifo(request, conn_id, TeamSendFifoEventKind::Dequeued);
                         }
                         server
                             .handle_client_frame_tiered(frame, granted_mode, tier, conn_id)
                             .await;
+                        #[cfg(any(test, feature = "test-instrumentation"))]
+                        if let (Some(request), Some(hooks)) =
+                            (team_request.as_deref(), worker_hooks.as_ref())
+                        {
+                            let _order = hooks.inner.fifo_serial.lock().await;
+                            hooks.record_fifo(request, conn_id, TeamSendFifoEventKind::Handled);
+                        }
                     }
                 });
                 Some((tx, worker))
@@ -1789,8 +2461,17 @@ impl AttachServer {
 
         // Reader loop. Peer envelopes are verified against the SERVER-WIDE
         // replay window held on `self` (shared across connections).
+        let mut terminal_shutdown = false;
         loop {
-            match read_frame::<_, ClientFrame>(&mut read_half).await {
+            let next_frame = tokio::select! {
+                biased;
+                _ = terminal_rx.changed() => {
+                    terminal_shutdown = terminal_rx.borrow().is_some();
+                    break;
+                }
+                frame = read_frame::<_, ClientFrame>(&mut read_half) => frame,
+            };
+            match next_frame {
                 Ok(Some(frame)) => {
                     if let Some((turns, _worker)) = &operator_turns
                         && matches!(
@@ -1799,25 +2480,38 @@ impl AttachServer {
                                 | ClientFrame::HistoryRequest { .. }
                                 | ClientFrame::InspectRecipientContext
                                 | ClientFrame::SetRecipientContext { .. }
+                                | ClientFrame::TeamSend { .. }
+                                | ClientFrame::RevokeSenderConsent { .. }
                         )
                     {
+                        #[cfg(any(test, feature = "test-instrumentation"))]
+                        let team_send_request = team_send_request_key(&frame).map(str::to_owned);
+                        #[cfg(any(test, feature = "test-instrumentation"))]
+                        let hooks = self.team_send_test_hooks.clone();
+                        #[cfg(any(test, feature = "test-instrumentation"))]
+                        let _fifo_order = match hooks.as_ref() {
+                            Some(hooks) => Some(hooks.inner.fifo_serial.lock().await),
+                            None => None,
+                        };
                         match turns.try_send(frame) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                if let Some(connection) = self
-                                    .registry
-                                    .lock()
-                                    .await
-                                    .conns
-                                    .iter()
-                                    .find(|connection| connection.id == conn_id)
+                            Ok(()) => {
+                                #[cfg(any(test, feature = "test-instrumentation"))]
+                                if let (Some(request), Some(hooks)) =
+                                    (team_send_request, hooks.as_ref())
                                 {
-                                    let _ = connection.tx.try_send(DaemonFrame::Error(
-                                        ProtocolError::Internal(
-                                            "operator command queue is full".to_owned(),
-                                        ),
-                                    ));
+                                    hooks.record_fifo(
+                                        &request,
+                                        conn_id,
+                                        TeamSendFifoEventKind::Enqueued,
+                                    );
                                 }
+                            }
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                terminal_shutdown = true;
+                                let _ = terminal_tx.send(Some(ProtocolError::Internal(
+                                    "operator command queue is full; connection closed".to_owned(),
+                                )));
+                                break;
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => break,
                         }
@@ -1844,8 +2538,20 @@ impl AttachServer {
             reg.remove(conn_id);
         }
         drop(operator_turns);
-        writer.abort();
-        drop(writer);
+        let terminal_error_published = if terminal_shutdown {
+            writer.await.unwrap_or(false)
+        } else {
+            writer.abort();
+            let _ = writer.await;
+            false
+        };
+        if terminal_error_published {
+            drop(read_half);
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            if let Some(hooks) = self.team_send_test_hooks.as_ref() {
+                hooks.record_terminal(conn_id, TeamSendTerminalEventKind::Closed);
+            }
+        }
     }
 
     /// Resolve one peer-response card. A fresh resolution is Applied even when
@@ -2986,6 +3692,675 @@ impl AttachServer {
         mutations
     }
 
+    async fn team_connection(
+        &self,
+        conn_id: u64,
+    ) -> Option<(
+        mpsc::Sender<DaemonFrame>,
+        watch::Sender<Option<ProtocolError>>,
+    )> {
+        self.registry
+            .lock()
+            .await
+            .conns
+            .iter()
+            .find(|conn| conn.id == conn_id)
+            .map(|conn| (conn.tx.clone(), conn.terminal_tx.clone()))
+    }
+
+    async fn send_team_frame(&self, conn_id: u64, frame: DaemonFrame) -> bool {
+        let Some((tx, terminal_tx)) = self.team_connection(conn_id).await else {
+            return false;
+        };
+        publish_team_frame_to_connection(
+            &tx,
+            &terminal_tx,
+            frame,
+            conn_id,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            self.team_send_test_hooks.as_ref(),
+        )
+    }
+    /// Send a complete board as bounded fragments. `send().await` applies
+    /// backpressure to this request only; it never fills the shared queue with
+    /// an uncapped list or blocks send/approval workers.
+    async fn send_team_board_view(
+        tx: mpsc::Sender<DaemonFrame>,
+        terminal_tx: watch::Sender<Option<ProtocolError>>,
+        _conn_id: u64,
+        request: String,
+        view: String,
+        #[cfg(any(test, feature = "test-instrumentation"))] hooks: Option<TeamSendTestHooks>,
+    ) -> bool {
+        let mut terminal_rx = terminal_tx.subscribe();
+        let frame_base = DaemonFrame::TeamBoardChunk {
+            request: request.clone(),
+            sequence: u32::MAX,
+            view: String::new(),
+        };
+        // A JSON string can expand a control byte to six ASCII bytes. Account
+        // for that worst case plus the exact escaped request/envelope overhead.
+        let base_len = match serde_json::to_vec(&frame_base) {
+            Ok(encoded) => encoded.len(),
+            Err(error) => {
+                tracing::warn!(%error, "daemon: could not encode board chunk envelope");
+                return false;
+            }
+        };
+        let Some(available) = (MAX_FRAME_BYTES as usize)
+            .checked_sub(base_len)
+            .map(|bytes| (bytes / 6).min(1024 * 1024))
+        else {
+            Self::refuse_team_board_stream(
+                &tx,
+                &mut terminal_rx,
+                request,
+                ProtocolError::Malformed(
+                    "team board request leaves no room for a response frame".into(),
+                ),
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                _conn_id,
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                hooks.as_ref(),
+            )
+            .await;
+            return false;
+        };
+        if available < 4 {
+            Self::refuse_team_board_stream(
+                &tx,
+                &mut terminal_rx,
+                request,
+                ProtocolError::Malformed(
+                    "team board request leaves no room for a response frame".into(),
+                ),
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                _conn_id,
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                hooks.as_ref(),
+            )
+            .await;
+            return false;
+        }
+
+        let mut chunk_count = 0u32;
+        let mut offset = 0;
+        while offset < view.len() {
+            offset = Self::next_board_chunk_end(&view, offset, available);
+            let Some(next) = chunk_count.checked_add(1) else {
+                Self::refuse_team_board_stream(
+                    &tx,
+                    &mut terminal_rx,
+                    request,
+                    ProtocolError::Malformed("team board requires too many frames".into()),
+                    #[cfg(any(test, feature = "test-instrumentation"))]
+                    _conn_id,
+                    #[cfg(any(test, feature = "test-instrumentation"))]
+                    hooks.as_ref(),
+                )
+                .await;
+                return false;
+            };
+            chunk_count = next;
+        }
+        let done = DaemonFrame::TeamBoardDone {
+            request: request.clone(),
+            chunks: chunk_count,
+        };
+        match serde_json::to_vec(&done) {
+            Ok(encoded) if encoded.len() <= MAX_FRAME_BYTES as usize => {}
+            _ => {
+                Self::refuse_team_board_stream(
+                    &tx,
+                    &mut terminal_rx,
+                    request,
+                    ProtocolError::Malformed(
+                        "team board completion frame exceeds the protocol limit".into(),
+                    ),
+                    #[cfg(any(test, feature = "test-instrumentation"))]
+                    _conn_id,
+                    #[cfg(any(test, feature = "test-instrumentation"))]
+                    hooks.as_ref(),
+                )
+                .await;
+                return false;
+            }
+        }
+
+        let mut offset = 0;
+        for sequence in 0..chunk_count {
+            let end = Self::next_board_chunk_end(&view, offset, available);
+            let chunk = DaemonFrame::TeamBoardChunk {
+                request: request.clone(),
+                sequence,
+                view: view[offset..end].to_owned(),
+            };
+            if !Self::send_team_frame_wait(
+                &tx,
+                &mut terminal_rx,
+                chunk,
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                _conn_id,
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                hooks.as_ref(),
+            )
+            .await
+            {
+                return false;
+            }
+            if sequence + 1 < chunk_count
+                && !Self::wait_for_team_output_drain(&tx, &mut terminal_rx).await
+            {
+                return false;
+            }
+            offset = end;
+        }
+        Self::send_team_frame_wait(
+            &tx,
+            &mut terminal_rx,
+            done,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            _conn_id,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            hooks.as_ref(),
+        )
+        .await
+    }
+
+    fn next_board_chunk_end(view: &str, start: usize, max_source_bytes: usize) -> usize {
+        let mut end = start.saturating_add(max_source_bytes).min(view.len());
+        while end > start && !view.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            view[start..]
+                .char_indices()
+                .nth(1)
+                .map_or(view.len(), |(offset, _)| start + offset)
+        } else {
+            end
+        }
+    }
+    async fn wait_for_team_output_drain(
+        tx: &mpsc::Sender<DaemonFrame>,
+        terminal_rx: &mut watch::Receiver<Option<ProtocolError>>,
+    ) -> bool {
+        let capacity = tx.max_capacity();
+        tokio::select! {
+            biased;
+            _ = terminal_rx.changed() => false,
+            permits = tx.reserve_many(capacity) => match permits {
+                Ok(permits) => {
+                    drop(permits);
+                    true
+                }
+                Err(_) => false,
+            },
+        }
+    }
+
+    async fn send_team_frame_wait(
+        tx: &mpsc::Sender<DaemonFrame>,
+        terminal_rx: &mut watch::Receiver<Option<ProtocolError>>,
+        frame: DaemonFrame,
+        #[cfg(any(test, feature = "test-instrumentation"))] connection_id: u64,
+        #[cfg(any(test, feature = "test-instrumentation"))] hooks: Option<&TeamSendTestHooks>,
+    ) -> bool {
+        if terminal_rx.borrow().is_some() {
+            return false;
+        }
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let publication_frame = hooks.map(|_| frame.clone());
+        let sent = tokio::select! {
+            biased;
+            _ = terminal_rx.changed() => false,
+            result = tx.send(frame) => result.is_ok(),
+        };
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        if sent && let (Some(hooks), Some(frame)) = (hooks, publication_frame.as_ref()) {
+            hooks.record_publication(connection_id, frame);
+        }
+        sent
+    }
+    async fn refuse_team_board_stream(
+        tx: &mpsc::Sender<DaemonFrame>,
+        terminal_rx: &mut watch::Receiver<Option<ProtocolError>>,
+        request: String,
+        error: ProtocolError,
+        #[cfg(any(test, feature = "test-instrumentation"))] conn_id: u64,
+        #[cfg(any(test, feature = "test-instrumentation"))] hooks: Option<&TeamSendTestHooks>,
+    ) {
+        let _ = Self::send_team_frame_wait(
+            tx,
+            terminal_rx,
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::TeamBoard,
+                target: RecipientActionTarget::Request { request },
+                outcome: RecipientActionOutcome::Refused { error },
+            },
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            conn_id,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            hooks,
+        )
+        .await;
+    }
+
+    async fn refuse_team_request(
+        &self,
+        conn_id: u64,
+        action: RecipientAction,
+        request: String,
+        error: ProtocolError,
+    ) {
+        let _ = self
+            .send_team_frame(
+                conn_id,
+                DaemonFrame::RecipientActionResult {
+                    action,
+                    target: RecipientActionTarget::Request { request },
+                    outcome: RecipientActionOutcome::Refused { error },
+                },
+            )
+            .await;
+    }
+
+    fn team_request_error(
+        tier: ConnectionTier,
+        mode: AttachMode,
+        write_required: bool,
+    ) -> Option<ProtocolError> {
+        if tier != ConnectionTier::TrustedLocal {
+            Some(ProtocolError::PeerVerification(
+                "team commands are trusted-local only".to_owned(),
+            ))
+        } else if write_required && mode != AttachMode::ReadWrite {
+            Some(ProtocolError::ReadOnly)
+        } else {
+            None
+        }
+    }
+
+    async fn handle_team_board(
+        &self,
+        conn_id: u64,
+        tier: ConnectionTier,
+        mode: AttachMode,
+        request: String,
+        selector: super::protocol::TeamBoardRequest,
+    ) {
+        let action = RecipientAction::TeamBoard;
+        if let Some(error) = Self::team_request_error(tier, mode, false) {
+            self.refuse_team_request(conn_id, action, request, error)
+                .await;
+            return;
+        }
+        if request.len() > MAX_TEAM_BOARD_REQUEST_BYTES {
+            self.refuse_team_request(
+                conn_id,
+                action,
+                request,
+                ProtocolError::Malformed(format!(
+                    "team board request key exceeds {MAX_TEAM_BOARD_REQUEST_BYTES} bytes"
+                )),
+            )
+            .await;
+            return;
+        }
+        #[cfg(feature = "a2a")]
+        if let Some(runtime) = &self.a2a_runtime {
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            let now = self
+                .team_send_test_hooks
+                .as_ref()
+                .and_then(TeamSendTestHooks::board_now)
+                .unwrap_or_else(std::time::Instant::now);
+            #[cfg(not(any(test, feature = "test-instrumentation")))]
+            let now = std::time::Instant::now();
+            let view =
+                crate::infrastructure::runtime::transparency_bridge::team_board_message_for_request_at(
+                    runtime, selector, now,
+                )
+                .await;
+            let Some((tx, terminal_tx)) = self.team_connection(conn_id).await else {
+                return;
+            };
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            let hooks = self.team_send_test_hooks.clone();
+            tokio::spawn(async move {
+                let _ = Self::send_team_board_view(
+                    tx,
+                    terminal_tx,
+                    conn_id,
+                    request,
+                    view,
+                    #[cfg(any(test, feature = "test-instrumentation"))]
+                    hooks,
+                )
+                .await;
+            });
+            return;
+        }
+        #[cfg(not(feature = "a2a"))]
+        let _ = selector;
+        self.refuse_team_request(
+            conn_id,
+            action,
+            request,
+            ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
+        )
+        .await;
+    }
+
+    async fn handle_team_status(
+        &self,
+        conn_id: u64,
+        tier: ConnectionTier,
+        mode: AttachMode,
+        request: String,
+    ) {
+        let action = RecipientAction::TeamStatus;
+        if let Some(error) = Self::team_request_error(tier, mode, false) {
+            self.refuse_team_request(conn_id, action, request, error)
+                .await;
+            return;
+        }
+        #[cfg(not(feature = "a2a"))]
+        {
+            self.refuse_team_request(
+                conn_id,
+                action,
+                request,
+                ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
+            )
+            .await;
+        }
+        #[cfg(feature = "a2a")]
+        {
+            let Some(manager) = &self.pending_consent else {
+                self.refuse_team_request(
+                    conn_id,
+                    action,
+                    request,
+                    ProtocolError::Internal("daemon consent projection is unavailable".to_owned()),
+                )
+                .await;
+                return;
+            };
+            match manager.render_team_status(&self.team_peers).await {
+                Ok(message) => {
+                    let _ = self
+                        .send_team_frame(
+                            conn_id,
+                            DaemonFrame::TeamStatusResult { request, message },
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    self.refuse_team_request(
+                        conn_id,
+                        action,
+                        request,
+                        ProtocolError::Internal(error),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+    async fn handle_team_revoke(
+        &self,
+        conn_id: u64,
+        tier: ConnectionTier,
+        mode: AttachMode,
+        request: String,
+        alias: String,
+    ) {
+        let action = RecipientAction::RevokeSenderConsent;
+        if let Some(error) = Self::team_request_error(tier, mode, true) {
+            self.refuse_team_request(conn_id, action, request, error)
+                .await;
+            return;
+        }
+        #[cfg(not(feature = "a2a"))]
+        {
+            let _ = alias;
+            self.refuse_team_request(
+                conn_id,
+                action,
+                request,
+                ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
+            )
+            .await;
+        }
+        #[cfg(feature = "a2a")]
+        {
+            let Some(manager) = &self.pending_consent else {
+                self.refuse_team_request(
+                    conn_id,
+                    action,
+                    request,
+                    ProtocolError::Internal("daemon consent projection is unavailable".to_owned()),
+                )
+                .await;
+                return;
+            };
+            match manager
+                .revoke_sender_consent(&alias, &self.team_peers)
+                .await
+            {
+                Ok(message) => {
+                    let _ = self
+                        .send_team_frame(
+                            conn_id,
+                            DaemonFrame::SenderConsentRevoked {
+                                request,
+                                alias,
+                                message,
+                            },
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    self.refuse_team_request(
+                        conn_id,
+                        action,
+                        request,
+                        ProtocolError::Internal(error),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    async fn handle_team_send(
+        &self,
+        conn_id: u64,
+        tier: ConnectionTier,
+        mode: AttachMode,
+        request: String,
+        recipients: Vec<String>,
+        text: String,
+        message_type: Option<crate::domain::models::SemanticMessageType>,
+        subject: Option<String>,
+    ) {
+        let action = RecipientAction::TeamSend;
+        if let Some(error) = Self::team_request_error(tier, mode, true) {
+            self.refuse_team_request(conn_id, action, request, error)
+                .await;
+            return;
+        }
+        #[cfg(feature = "a2a")]
+        {
+            let Some(runtime) = self.a2a_runtime.clone() else {
+                self.refuse_team_request(
+                    conn_id,
+                    action,
+                    request,
+                    ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
+                )
+                .await;
+                return;
+            };
+            let permit = match self.team_send_slots.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    self.team_send_saturation_refusals
+                        .fetch_add(1, Ordering::AcqRel);
+                    self.refuse_team_request(
+                        conn_id,
+                        action,
+                        request,
+                        ProtocolError::Internal(
+                            "daemon team-send limit reached; try again later".to_owned(),
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let send_request = crate::adapters::a2a::send::SendRequest {
+                recipients: &recipients,
+                text: &text,
+                message_type,
+                reply_to: None,
+                subject: subject.as_deref(),
+            };
+            if let Err(error) =
+                crate::adapters::a2a::send::validate_send_request(&runtime, &send_request)
+            {
+                drop(permit);
+                self.refuse_team_request(
+                    conn_id,
+                    action,
+                    request,
+                    ProtocolError::Malformed(error.to_string()),
+                )
+                .await;
+                return;
+            }
+            let Some((tx, terminal_tx)) = self.team_connection(conn_id).await else {
+                return;
+            };
+            let mut tasks = self.team_send_tasks.lock().await;
+            if !self.team_send_accepting.load(Ordering::Acquire) {
+                drop(tasks);
+                drop(permit);
+                self.refuse_team_request(
+                    conn_id,
+                    action,
+                    request,
+                    ProtocolError::Internal("daemon is shutting down".to_owned()),
+                )
+                .await;
+                return;
+            }
+            let cancel = self.team_send_shutdown.child_token();
+            let started_tx = tx.clone();
+            let started_terminal = terminal_tx.clone();
+            let settled_tx = tx;
+            let settled_terminal = terminal_tx;
+            let started_request = request.clone();
+            let settled_request = request;
+            let started_count = self.team_send_started_count.clone();
+            let settled_count = self.team_send_settled_count.clone();
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            let hooks = self.team_send_test_hooks.clone();
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            let started_hooks = hooks.clone();
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            let send_action_hooks = hooks.clone();
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            let settled_hooks = hooks.clone();
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            let completion_hooks = hooks;
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            let completion_request = settled_request.clone();
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            let cancel_for_completion = cancel.clone();
+            let started_conn_id = conn_id;
+            let settled_conn_id = conn_id;
+            let task = tokio::spawn(async move {
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                let send_permit = permit;
+                #[cfg(not(any(test, feature = "test-instrumentation")))]
+                let _send_permit = permit;
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                if let Some(hooks) = send_action_hooks {
+                    hooks.before_send_action().await;
+                }
+                let _ = crate::adapters::a2a::send::coordinate_send(
+                    &runtime,
+                    crate::adapters::a2a::send::SendRequest {
+                        recipients: &recipients,
+                        text: &text,
+                        message_type,
+                        reply_to: None,
+                        subject: subject.as_deref(),
+                    },
+                    cancel,
+                    |action| {
+                        started_count.fetch_add(1, Ordering::AcqRel);
+                        let _ = publish_team_frame_to_connection(
+                            &started_tx,
+                            &started_terminal,
+                            DaemonFrame::TeamSendStarted {
+                                request: started_request.clone(),
+                                action: action.clone(),
+                            },
+                            started_conn_id,
+                            #[cfg(any(test, feature = "test-instrumentation"))]
+                            started_hooks.as_ref(),
+                        );
+                    },
+                    |index, outcome| {
+                        settled_count.fetch_add(1, Ordering::AcqRel);
+                        let _ = publish_team_frame_to_connection(
+                            &settled_tx,
+                            &settled_terminal,
+                            DaemonFrame::TeamSendSettled {
+                                request: settled_request.clone(),
+                                index,
+                                outcome: super::protocol::TeamSendOutcome::from(&outcome),
+                            },
+                            settled_conn_id,
+                            #[cfg(any(test, feature = "test-instrumentation"))]
+                            settled_hooks.as_ref(),
+                        );
+                    },
+                )
+                .await;
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                {
+                    drop(send_permit);
+                    if let Some(hooks) = completion_hooks {
+                        let kind = if cancel_for_completion.is_cancelled() {
+                            TeamSendCompletionKind::Cancelled
+                        } else {
+                            TeamSendCompletionKind::Finished
+                        };
+                        hooks.record_completion(completion_request, kind);
+                    }
+                }
+                #[cfg(not(any(test, feature = "test-instrumentation")))]
+                drop(_send_permit);
+            });
+            tasks.retain(|task| !task.is_finished());
+            tasks.push(task);
+        }
+        #[cfg(not(feature = "a2a"))]
+        self.refuse_team_request(
+            conn_id,
+            action,
+            request,
+            ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
+        )
+        .await;
+        #[cfg(not(feature = "a2a"))]
+        let _ = (recipients, text, message_type, subject);
+    }
+
     /// Returns `true` if the connection should detach.
     async fn handle_client_frame(
         &self,
@@ -3598,6 +4973,36 @@ impl AttachServer {
                     )
                     .await;
                 }
+            }
+            ClientFrame::TeamSend {
+                request,
+                recipients,
+                text,
+                message_type,
+                subject,
+            } => {
+                self.handle_team_send(
+                    conn_id,
+                    tier,
+                    mode,
+                    request,
+                    recipients,
+                    text,
+                    message_type,
+                    subject,
+                )
+                .await;
+            }
+            ClientFrame::TeamBoard { request, selector } => {
+                self.handle_team_board(conn_id, tier, mode, request, selector)
+                    .await;
+            }
+            ClientFrame::TeamStatus { request } => {
+                self.handle_team_status(conn_id, tier, mode, request).await;
+            }
+            ClientFrame::RevokeSenderConsent { request, alias } => {
+                self.handle_team_revoke(conn_id, tier, mode, request, alias)
+                    .await;
             }
         }
         false
@@ -5869,6 +7274,683 @@ mod tests {
     use tokio::net::UnixStream;
 
     #[test]
+    fn team_request_gates_cover_trusted_and_peer_authority() {
+        for write_required in [false, true] {
+            assert_eq!(
+                AttachServer::team_request_error(
+                    ConnectionTier::TrustedLocal,
+                    AttachMode::ReadWrite,
+                    write_required,
+                ),
+                None
+            );
+            assert_eq!(
+                AttachServer::team_request_error(
+                    ConnectionTier::Peer,
+                    AttachMode::ReadOnly,
+                    write_required,
+                ),
+                Some(ProtocolError::PeerVerification(
+                    "team commands are trusted-local only".to_owned()
+                ))
+            );
+        }
+        assert_eq!(
+            AttachServer::team_request_error(
+                ConnectionTier::TrustedLocal,
+                AttachMode::ReadOnly,
+                true,
+            ),
+            Some(ProtocolError::ReadOnly)
+        );
+        assert_eq!(
+            AttachServer::team_request_error(
+                ConnectionTier::TrustedLocal,
+                AttachMode::ReadOnly,
+                false,
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn send_action_gate_holds_eight_admitted_tasks_until_released() {
+        let hooks = TeamSendTestHooks::new(None, None, false).with_send_action_gate();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for _ in 0..MAX_IN_FLIGHT_TEAM_SENDS {
+            let hooks = hooks.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                hooks.before_send_action().await;
+                tx.send(()).unwrap();
+            });
+        }
+        hooks
+            .wait_for_send_action_count(MAX_IN_FLIGHT_TEAM_SENDS)
+            .await;
+        assert_eq!(hooks.send_action_count(), MAX_IN_FLIGHT_TEAM_SENDS);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        hooks.release_send_actions(MAX_IN_FLIGHT_TEAM_SENDS);
+        for _ in 0..MAX_IN_FLIGHT_TEAM_SENDS {
+            rx.recv().await.expect("one released send task");
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_send_completion_observer_is_ordered_and_counts_exits() {
+        let hooks = TeamSendTestHooks::new(None, None, false);
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        drop(permit);
+        hooks.record_completion("finished".to_owned(), TeamSendCompletionKind::Finished);
+        hooks.record_completion("cancelled".to_owned(), TeamSendCompletionKind::Cancelled);
+
+        assert_eq!(hooks.completed_count(), 2);
+        assert_eq!(
+            hooks.next_completion().await,
+            Some(TeamSendCompletion {
+                request: "finished".to_owned(),
+                kind: TeamSendCompletionKind::Finished,
+            })
+        );
+        assert_eq!(
+            hooks.next_completion().await,
+            Some(TeamSendCompletion {
+                request: "cancelled".to_owned(),
+                kind: TeamSendCompletionKind::Cancelled,
+            })
+        );
+        assert!(matches!(
+            hooks.try_next_completion().await,
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn team_send_limit_and_targeted_overflow_are_nonblocking() {
+        let slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT_TEAM_SENDS));
+        let permits: Vec<_> = (0..MAX_IN_FLIGHT_TEAM_SENDS)
+            .map(|_| slots.clone().try_acquire_owned().expect("available slot"))
+            .collect();
+        assert!(slots.clone().try_acquire_owned().is_err());
+        drop(permits.into_iter().next());
+        assert!(slots.clone().try_acquire_owned().is_ok());
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let (terminal_tx, mut terminal_rx) = watch::channel(None);
+        tx.try_send(DaemonFrame::Detached).unwrap();
+        assert!(!publish_team_frame(
+            &tx,
+            &terminal_tx,
+            DaemonFrame::TeamStatusResult {
+                request: "request".into(),
+                message: "status".into(),
+            },
+        ));
+        terminal_rx.changed().await.unwrap();
+        assert_eq!(
+            *terminal_rx.borrow(),
+            Some(ProtocolError::Internal(
+                "team result queue overflow; connection closed".to_owned()
+            ))
+        );
+        assert!(matches!(rx.try_recv(), Ok(DaemonFrame::Detached)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn team_send_fifo_hooks_hold_and_report_commands_by_connection() {
+        let ticks = Arc::new(AtomicUsize::new(1));
+        let clock_ticks = ticks.clone();
+        let start = std::time::Instant::now();
+        let hooks = TeamSendTestHooks::new(Some(1), None, false).with_board_now_source(Arc::new(
+            move || {
+                start
+                    + std::time::Duration::from_nanos(
+                        clock_ticks.fetch_add(1, Ordering::AcqRel) as u64
+                    )
+            },
+        ));
+        assert!(hooks.board_now().unwrap() < hooks.board_now().unwrap());
+        hooks.record_fifo("request-2", 42, TeamSendFifoEventKind::Enqueued);
+        assert_eq!(
+            hooks.next_fifo_event().await,
+            Some(TeamSendFifoEvent {
+                request: "request-2".into(),
+                connection_id: 42,
+                kind: TeamSendFifoEventKind::Enqueued,
+            })
+        );
+
+        let worker_hooks = hooks.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, mut released_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = ready_tx.send(());
+            worker_hooks.before_team_send().await;
+            let _ = released_tx.send(());
+        });
+        ready_rx.await.expect("worker reached its gate");
+        assert!(released_rx.try_recv().is_err());
+        hooks.release_worker();
+        released_rx.await.expect("worker gate released");
+
+        hooks.record_fifo("request-2", 42, TeamSendFifoEventKind::Dequeued);
+        assert_eq!(
+            hooks.next_fifo_event().await,
+            Some(TeamSendFifoEvent {
+                request: "request-2".into(),
+                connection_id: 42,
+                kind: TeamSendFifoEventKind::Dequeued,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_team_send_is_observed_then_discarded_after_writer_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "team-fifo-hooks".into(),
+            ..Default::default()
+        }));
+        let (bus, _domain_rx) = EventBus::new(64);
+        let hooks = TeamSendTestHooks::new(Some(1), None, false);
+        let server = journaled_server_with_team_hooks(
+            core,
+            conversation,
+            bus.domain_tx.clone(),
+            Arc::new(RecordingJournal::default()),
+            hooks.clone(),
+        );
+
+        let (mut first_client, first_server) = UnixStream::pair().unwrap();
+        let first_server_owner = server.clone();
+        let first_connection =
+            tokio::spawn(async move { first_server_owner.handle_connection(first_server).await });
+        assert!(matches!(
+            attach_with_proof(
+                &mut first_client,
+                false,
+                ConnectionTier::TrustedLocal,
+                &test_signer(61),
+            )
+            .await,
+            Some(DaemonFrame::AttachAck {
+                granted_mode: AttachMode::ReadWrite,
+                ..
+            })
+        ));
+        for request in ["queued-1", "queued-2"] {
+            write_frame(
+                &mut first_client,
+                &ClientFrame::TeamSend {
+                    request: request.to_owned(),
+                    recipients: vec![],
+                    text: "held before dispatch".to_owned(),
+                    message_type: None,
+                    subject: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for request in ["queued-1", "queued-2"] {
+            assert_eq!(
+                hooks.next_fifo_event().await,
+                Some(TeamSendFifoEvent {
+                    request: request.to_owned(),
+                    connection_id: 1,
+                    kind: TeamSendFifoEventKind::Enqueued,
+                })
+            );
+        }
+        hooks.wait_for_worker_gate_count(1).await;
+        write_frame(&mut first_client, &ClientFrame::Detach)
+            .await
+            .unwrap();
+        first_connection.await.unwrap();
+
+        let (mut replacement_client, replacement_server) = UnixStream::pair().unwrap();
+        let replacement_owner = server.clone();
+        let replacement_connection = tokio::spawn(async move {
+            replacement_owner
+                .handle_connection(replacement_server)
+                .await
+        });
+        assert!(matches!(
+            attach_with_proof(
+                &mut replacement_client,
+                false,
+                ConnectionTier::TrustedLocal,
+                &test_signer(62),
+            )
+            .await,
+            Some(DaemonFrame::AttachAck {
+                granted_mode: AttachMode::ReadWrite,
+                ..
+            })
+        ));
+
+        hooks.release_worker();
+        for expected in ["queued-1", "queued-2"] {
+            assert_eq!(
+                hooks.next_fifo_event().await,
+                Some(TeamSendFifoEvent {
+                    request: expected.to_owned(),
+                    connection_id: 1,
+                    kind: TeamSendFifoEventKind::Discarded,
+                })
+            );
+        }
+        assert!(matches!(
+            hooks.try_next_publication().await,
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        write_frame(
+            &mut replacement_client,
+            &ClientFrame::TeamSend {
+                request: "current-writer".to_owned(),
+                recipients: vec![],
+                text: "handled by current writer".to_owned(),
+                message_type: None,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap();
+        for kind in [
+            TeamSendFifoEventKind::Enqueued,
+            TeamSendFifoEventKind::Dequeued,
+            TeamSendFifoEventKind::Handled,
+        ] {
+            assert_eq!(
+                hooks.next_fifo_event().await,
+                Some(TeamSendFifoEvent {
+                    request: "current-writer".to_owned(),
+                    connection_id: 2,
+                    kind,
+                })
+            );
+        }
+        assert!(matches!(
+            hooks.next_publication().await,
+            Some(TeamSendPublication {
+                request,
+                kind: TeamSendPublicationKind::Refused {
+                    action: RecipientAction::TeamSend,
+                },
+                published_to_conn: 2,
+            }) if request == "current-writer"
+        ));
+
+        write_frame(&mut replacement_client, &ClientFrame::Detach)
+            .await
+            .unwrap();
+        replacement_connection.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn socket_overflow_emits_terminal_error_then_eof_after_writer_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "team-overflow-hooks".into(),
+            ..Default::default()
+        }));
+        let (bus, _domain_rx) = EventBus::new(64);
+        let hooks = TeamSendTestHooks::new(None, Some(1), true);
+        let server = journaled_server_with_team_hooks(
+            core,
+            conversation,
+            bus.domain_tx.clone(),
+            Arc::new(RecordingJournal::default()),
+            hooks.clone(),
+        );
+        let (mut client, server_stream) = UnixStream::pair().unwrap();
+        let server_owner = server.clone();
+        let connection =
+            tokio::spawn(async move { server_owner.handle_connection(server_stream).await });
+        assert!(matches!(
+            attach_with_proof(
+                &mut client,
+                false,
+                ConnectionTier::TrustedLocal,
+                &test_signer(63),
+            )
+            .await,
+            Some(DaemonFrame::AttachAck {
+                granted_mode: AttachMode::ReadWrite,
+                ..
+            })
+        ));
+        for request in ["board-1", "board-2"] {
+            write_frame(
+                &mut client,
+                &ClientFrame::TeamBoard {
+                    request: request.to_owned(),
+                    selector: crate::adapters::daemon::protocol::TeamBoardRequest::Inventory,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                hooks.next_publication().await,
+                Some(TeamSendPublication {
+                    request: request.to_owned(),
+                    kind: TeamSendPublicationKind::Refused {
+                        action: RecipientAction::TeamBoard,
+                    },
+                    published_to_conn: 1,
+                })
+            );
+        }
+        assert_eq!(hooks.overflow_count(), 1);
+        let mut probe = [0u8; 1];
+        assert!(matches!(
+            client.try_read(&mut probe),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert!(matches!(
+            hooks.try_next_terminal_event().await,
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        hooks.release_writer();
+        assert!(matches!(
+            read_frame::<_, DaemonFrame>(&mut client).await.unwrap(),
+            Some(DaemonFrame::Error(ProtocolError::Internal(message)))
+                if message == "team result queue overflow; connection closed"
+        ));
+        assert_eq!(
+            hooks.next_terminal_event().await,
+            Some(TeamSendTerminalEvent {
+                connection_id: 1,
+                kind: TeamSendTerminalEventKind::Error(ProtocolError::Internal(
+                    "team result queue overflow; connection closed".to_owned()
+                )),
+            })
+        );
+        assert!(
+            read_frame::<_, DaemonFrame>(&mut client)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            hooks.next_terminal_event().await,
+            Some(TeamSendTerminalEvent {
+                connection_id: 1,
+                kind: TeamSendTerminalEventKind::Closed,
+            })
+        );
+        connection.await.unwrap();
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operator_fifo_overflow_drains_exact_error_then_closes_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "operator-fifo-overflow".into(),
+            ..Default::default()
+        }));
+        let (bus, _domain_rx) = EventBus::new(64);
+        let hooks = TeamSendTestHooks::new(Some(1), None, false);
+        let server = journaled_server_with_team_hooks(
+            core,
+            conversation,
+            bus.domain_tx.clone(),
+            Arc::new(RecordingJournal::default()),
+            hooks.clone(),
+        );
+        let (mut client, server_stream) = UnixStream::pair().unwrap();
+        let owner = server.clone();
+        let connection = tokio::spawn(async move { owner.handle_connection(server_stream).await });
+        assert!(matches!(
+            attach_with_proof(
+                &mut client,
+                false,
+                ConnectionTier::TrustedLocal,
+                &test_signer(71),
+            )
+            .await,
+            Some(DaemonFrame::AttachAck {
+                granted_mode: AttachMode::ReadWrite,
+                ..
+            })
+        ));
+
+        for index in 0..=(OPERATOR_QUEUE_DEPTH + 1) {
+            write_frame(
+                &mut client,
+                &ClientFrame::TeamSend {
+                    request: format!("queued-{index}"),
+                    recipients: vec!["peer".into()],
+                    text: "body".into(),
+                    message_type: None,
+                    subject: None,
+                },
+            )
+            .await
+            .unwrap();
+            if index == 0 {
+                hooks.wait_for_worker_gate_count(1).await;
+            }
+        }
+        assert!(matches!(
+            read_frame::<_, DaemonFrame>(&mut client).await.unwrap(),
+            Some(DaemonFrame::Error(ProtocolError::Internal(message)))
+                if message == "operator command queue is full; connection closed"
+        ));
+        assert!(
+            read_frame::<_, DaemonFrame>(&mut client)
+                .await
+                .unwrap()
+                .is_none(),
+            "the diagnostic must be drained before EOF"
+        );
+        hooks.release_worker();
+        connection.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn signed_socket_reassembles_board_larger_than_frame_cap_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "large-board-stream".into(),
+            ..Default::default()
+        }));
+        let (bus, _domain_rx) = EventBus::new(64);
+        let hooks = TeamSendTestHooks::new(None, Some(1), false);
+        let server = journaled_server_with_team_hooks(
+            core,
+            conversation,
+            bus.domain_tx.clone(),
+            Arc::new(RecordingJournal::default()),
+            hooks,
+        );
+        let (mut client, server_stream) = UnixStream::pair().unwrap();
+        let owner = server.clone();
+        let connection = tokio::spawn(async move { owner.handle_connection(server_stream).await });
+        assert!(matches!(
+            attach_with_proof(
+                &mut client,
+                false,
+                ConnectionTier::TrustedLocal,
+                &test_signer(72),
+            )
+            .await,
+            Some(DaemonFrame::AttachAck { .. })
+        ));
+        let conn_id = server.registry.lock().await.conns[0].id;
+        let expected = "row\n\\\u{0001}🧪".repeat(1_000_000);
+        assert!(expected.len() > MAX_FRAME_BYTES as usize);
+        let request_id = "\u{0001}".repeat(MAX_TEAM_BOARD_REQUEST_BYTES);
+        let (tx, terminal_tx) = server.team_connection(conn_id).await.unwrap();
+        let hooks = server.team_send_test_hooks.clone();
+        let source = expected.clone();
+        let response_request = request_id.clone();
+        let send = tokio::spawn(async move {
+            AttachServer::send_team_board_view(
+                tx,
+                terminal_tx,
+                conn_id,
+                response_request,
+                source,
+                hooks,
+            )
+            .await
+        });
+
+        let mut assembled = String::new();
+        let mut next_sequence = 0u32;
+        loop {
+            let frame = read_frame::<_, DaemonFrame>(&mut client)
+                .await
+                .unwrap()
+                .expect("board stream remains connected through its done frame");
+            assert!(serde_json::to_vec(&frame).unwrap().len() <= MAX_FRAME_BYTES as usize);
+            match frame {
+                DaemonFrame::TeamBoardChunk {
+                    request,
+                    sequence,
+                    view,
+                } => {
+                    assert_eq!(request, request_id);
+                    assert_eq!(sequence, next_sequence);
+                    next_sequence += 1;
+                    assembled.push_str(&view);
+                }
+                DaemonFrame::TeamBoardDone { request, chunks } => {
+                    assert_eq!(request, request_id);
+                    assert_eq!(chunks, next_sequence);
+                    break;
+                }
+                other => panic!("unexpected board stream frame: {other:?}"),
+            }
+        }
+        assert!(send.await.unwrap());
+        assert_eq!(assembled, expected);
+        write_frame(&mut client, &ClientFrame::Detach)
+            .await
+            .unwrap();
+        connection.await.unwrap();
+    }
+    #[tokio::test]
+    async fn targeted_queue_gate_and_publication_log_are_deterministic() {
+        let hooks = TeamSendTestHooks::new(None, Some(1), true);
+        let (tx, mut rx) = mpsc::channel(hooks.queue_capacity().unwrap());
+        let (terminal_tx, mut terminal_rx) = watch::channel(None);
+        assert!(publish_team_frame_to_connection(
+            &tx,
+            &terminal_tx,
+            DaemonFrame::TeamSendStarted {
+                request: "send-1".into(),
+                action: crate::domain::models::SendActionId::from_replay("sa_test"),
+            },
+            8,
+            Some(&hooks),
+        ));
+        assert_eq!(
+            hooks.next_publication().await,
+            Some(TeamSendPublication {
+                request: "send-1".into(),
+                kind: TeamSendPublicationKind::Started,
+                published_to_conn: 8,
+            })
+        );
+        let _ = rx.try_recv();
+        assert!(publish_team_frame_to_connection(
+            &tx,
+            &terminal_tx,
+            DaemonFrame::TeamSendSettled {
+                request: "send-1".into(),
+                index: 0,
+                outcome: crate::adapters::daemon::protocol::TeamSendOutcome::NotSent,
+            },
+            8,
+            Some(&hooks),
+        ));
+        assert_eq!(
+            hooks.next_publication().await,
+            Some(TeamSendPublication {
+                request: "send-1".into(),
+                kind: TeamSendPublicationKind::Settled { index: 0 },
+                published_to_conn: 8,
+            })
+        );
+        let _ = rx.try_recv();
+        let first = DaemonFrame::TeamBoardDone {
+            request: "board-1".into(),
+            chunks: 0,
+        };
+        assert!(publish_team_frame_to_connection(
+            &tx,
+            &terminal_tx,
+            first,
+            8,
+            Some(&hooks),
+        ));
+        assert_eq!(
+            hooks.next_publication().await,
+            Some(TeamSendPublication {
+                request: "board-1".into(),
+                kind: TeamSendPublicationKind::BoardResult,
+                published_to_conn: 8,
+            })
+        );
+        assert!(!publish_team_frame_to_connection(
+            &tx,
+            &terminal_tx,
+            DaemonFrame::TeamStatusResult {
+                request: "status-2".into(),
+                message: "status".into(),
+            },
+            8,
+            Some(&hooks),
+        ));
+        assert_eq!(
+            hooks.next_publication().await,
+            Some(TeamSendPublication {
+                request: "status-2".into(),
+                kind: TeamSendPublicationKind::StatusResult,
+                published_to_conn: 8,
+            })
+        );
+        terminal_rx.changed().await.unwrap();
+        assert_eq!(hooks.overflow_count(), 1);
+        assert_eq!(
+            *terminal_rx.borrow(),
+            Some(ProtocolError::Internal(
+                "team result queue overflow; connection closed".to_owned()
+            ))
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonFrame::TeamBoardDone { .. })
+        ));
+        assert!(rx.try_recv().is_err());
+
+        let writer_hooks = hooks.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, mut released_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = ready_tx.send(());
+            writer_hooks.before_writer_drain().await;
+            let _ = released_tx.send(());
+        });
+        ready_rx.await.expect("writer reached its gate");
+        assert!(released_rx.try_recv().is_err());
+        hooks.release_writer();
+        released_rx.await.expect("writer gate released");
+    }
+    #[test]
     fn recipient_acknowledgement_requires_all_three_authority_gates() {
         let operator = AgentId::local_operator();
         assert_eq!(
@@ -6696,6 +8778,39 @@ mod tests {
         )
     }
 
+    fn journaled_server_with_team_hooks(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        journal: Arc<RecordingJournal>,
+        hooks: TeamSendTestHooks,
+    ) -> Arc<AttachServer> {
+        let node_tree = crate::infrastructure::subagent::NodeTree::with_event_tx(
+            domain_tx.clone(),
+            Arc::new(|| 123_i64),
+        );
+        let delivery_policy: Arc<dyn crate::domain::ports::DeliveryPolicy> =
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy);
+        let peer_bus = peer_bus_slot_with_policy(&node_tree, delivery_policy.clone());
+        AttachServer::new_with_node_tree_bus_policy_journal_and_team(
+            core,
+            conversation,
+            domain_tx,
+            node_tree,
+            peer_bus,
+            delivery_policy,
+            journal.clone(),
+            journal.clone(),
+            Some(Arc::new(
+                crate::adapters::policy::JournalConsentProjection::default(),
+            )),
+            #[cfg(feature = "a2a")]
+            None,
+            Vec::new(),
+            Some(hooks),
+        )
+    }
+
     fn journaled_server_with_urgency(
         core: Arc<DaemonCore>,
         conversation: Arc<Mutex<Conversation>>,
@@ -6756,6 +8871,7 @@ mod tests {
         server.registry.lock().await.conns.push(Conn {
             id: 1,
             tx: writer_tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -6859,6 +8975,7 @@ mod tests {
         server.registry.lock().await.conns.push(Conn {
             id: 1,
             tx: writer_tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -7657,6 +9774,7 @@ mod tests {
         server.registry.lock().await.conns.push(Conn {
             id: 1,
             tx: writer_tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -7832,6 +9950,7 @@ mod tests {
         server.registry.lock().await.conns.push(Conn {
             id: 1,
             tx: writer_tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -8098,6 +10217,7 @@ mod tests {
             server.registry.lock().await.conns.push(Conn {
                 id: 1,
                 tx: writer_tx,
+                terminal_tx: watch::channel(None).0,
                 mode: AttachMode::ReadWrite,
                 tier: ConnectionTier::TrustedLocal,
             });
@@ -8245,6 +10365,7 @@ mod tests {
         server.registry.lock().await.conns.push(Conn {
             id: 1,
             tx: writer_tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -8371,6 +10492,7 @@ mod tests {
         server.registry.lock().await.conns.push(Conn {
             id: 9,
             tx: writer_tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -8426,6 +10548,7 @@ mod tests {
         server.registry.lock().await.conns.push(Conn {
             id: 10,
             tx: writer_tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -9580,10 +11703,10 @@ mod tests {
         shutdown.cancel();
         handle.abort();
     }
-    /// Story 19.15 AC2: the pre-semantic-header daemon protocol is rejected
-    /// before proof validation, with the named version-mismatch error.
+    /// Story 19.21: a previous daemon protocol version is rejected before proof
+    /// validation, with the named version-mismatch error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pre_semantic_header_protocol_is_rejected_before_proof() {
+    async fn previous_protocol_version_is_rejected_before_proof() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
         let (core, _storage) = mock_core(ws, vec![]);
@@ -9608,7 +11731,7 @@ mod tests {
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: 2,
+                protocol_version: 4,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -9621,7 +11744,7 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, 2);
+                assert_eq!(client, 4);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }
@@ -9837,6 +11960,7 @@ mod tests {
         registry.lock().await.conns.push(Conn {
             id: 1,
             tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -9952,6 +12076,7 @@ mod tests {
         registry.lock().await.conns.push(Conn {
             id: 1,
             tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -10221,6 +12346,7 @@ mod tests {
             reg.conns.push(Conn {
                 id: conn_id,
                 tx,
+                terminal_tx: watch::channel(None).0,
                 mode: AttachMode::ReadWrite,
                 tier: ConnectionTier::TrustedLocal,
             });
@@ -10494,6 +12620,7 @@ mod tests {
             reg.conns.push(Conn {
                 id: 100,
                 tx: ro_tx,
+                terminal_tx: watch::channel(None).0,
                 mode: AttachMode::ReadOnly,
                 tier: ConnectionTier::TrustedLocal,
             });
@@ -11557,6 +13684,7 @@ mod tests {
         server.registry.lock().await.conns.push(Conn {
             id: 1,
             tx: writer_tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -11733,6 +13861,7 @@ mod tests {
         server.registry.lock().await.conns.push(Conn {
             id: 1,
             tx,
+            terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
         });
@@ -12195,6 +14324,7 @@ mod tests {
             conns: vec![Conn {
                 id: 1,
                 tx: writer_tx,
+                terminal_tx: watch::channel(None).0,
                 mode: AttachMode::ReadWrite,
                 tier: ConnectionTier::TrustedLocal,
             }],

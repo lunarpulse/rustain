@@ -1996,6 +1996,7 @@ async fn ac3b2_an_unreachable_roster_peer_renders_warned_never_declined() {
             act: rustain::domain::models::DispatchAct::Task,
             content_hash: None,
             endpoint: None,
+            action: None,
         },
     )
     .await
@@ -2146,6 +2147,7 @@ async fn ac3_the_board_is_assembled_from_remote_reads_not_the_local_projection()
             act: rustain::domain::models::DispatchAct::Task,
             content_hash: None,
             endpoint: None,
+            action: None,
         },
     )
     .await
@@ -2268,6 +2270,7 @@ async fn ac3g_the_board_row_answers_for_the_dispatched_task_not_the_newest_bag()
             act: rustain::domain::models::DispatchAct::Task,
             content_hash: None,
             endpoint: None,
+            action: None,
         },
     )
     .await
@@ -2368,6 +2371,7 @@ async fn ac2c_the_board_carries_the_collapse_disclosure_from_a_loopback_peer() {
             act: rustain::domain::models::DispatchAct::Task,
             content_hash: None,
             endpoint: None,
+            action: None,
         },
     )
     .await

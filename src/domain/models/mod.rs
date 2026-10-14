@@ -87,6 +87,7 @@ pub mod tab;
 pub mod taint;
 pub mod task_handle;
 pub mod team_policy;
+pub mod team_send;
 pub mod ticket_addressee;
 pub mod tool_call;
 pub mod tool_descriptor;
@@ -201,10 +202,12 @@ pub use orchestration::{
 };
 #[allow(unused_imports)]
 pub use orchestration_room::{
-    ApplyOutcome, ApplyState, ApprovalView, Direction, DispatchAct, HostBinding, NodeView,
-    OperatorApplyFinding, OrchestrationRoom, OrchestrationRoomId, PeerAdmissionOutcome,
-    PeerFrameAttemptOutcome, RejectReason, RemoteRejectionView, ReviewVerdict, RoomEvent,
-    RoomIdError, TicketResolution, WaveId, WaveOutcome, WaveView,
+    ApplyOutcome, ApplyState, ApprovalView, Direction, DispatchAct, HostBinding,
+    MAX_SEND_ACTION_ID_LEN, NodeView, OperatorApplyFinding, OrchestrationRoom, OrchestrationRoomId,
+    PeerAdmissionOutcome, PeerFrameAttemptOutcome, RejectReason, RemoteRejectionView,
+    ReviewVerdict, RoomEvent, RoomIdError, SEND_ACTION_ID_PREFIX, SendActionId,
+    SendActionRecipient, SendActionRef, SendSettlement, SettlementCause, SettlementCauseKind,
+    TicketResolution, WaveId, WaveOutcome, WaveView,
 };
 #[allow(unused_imports)]
 pub use p2p_peer_spec::{P2pConfigState, P2pPeerSpec};
@@ -348,6 +351,7 @@ pub use team_policy::{
     SenderPolicy, SharingBreadth, TEAM_POLICY_FILE, TeamDefaults, TeamOverrides, TeamPolicy,
     TeamTransparency, TeamTypeOverride, TransparencyInvariant,
 };
+pub use team_send::{RecipientOutcome, SendCause};
 #[allow(unused_imports)]
 pub use tool_call::{
     ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,

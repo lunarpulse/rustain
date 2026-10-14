@@ -1112,23 +1112,46 @@ pub fn apply_client_event(
 /// What an attached session does with one submitted input line that may be a
 /// `/team` command.
 ///
-/// Extracted so the intercept table is reachable by a test: the match it holds
-/// is **not** compile-forced. A new `/team` verb with no arm here compiles,
-/// falls through to `driver.submit`, and becomes a model prompt — which is
-/// exactly what happened to `log`, `trust`, `status` and `send`.
+/// Extracted so the intercept table is reachable by a test. `TeamCommandArgs`
+/// is matched exhaustively: adding a parsed verb without an explicit attached
+/// behavior fails compilation rather than becoming a model prompt.
 #[derive(Debug)]
 enum AttachedTeamLine {
-    /// An intercepted verb: send this frame; never a model turn.
     Frame(ClientFrame),
-    /// A malformed `/team` line: flash the parser's usage error; never a model
-    /// turn.
     Refused(String),
-    /// Not intercepted here — the pre-existing fall-through to the model.
+    Unavailable(&'static str),
     PassThrough,
-    /// Story 19.16g — `/team log …`: a local read of this workspace's journal,
-    /// rendered in-chat; ⛔ never a model turn and never a daemon frame.
     LocalLog(crate::adapters::tui::handlers::team_command::TeamLogArgs),
     LocalView(String),
+}
+
+#[derive(Debug)]
+enum AttachedTeamRequest {
+    Send {
+        block_id: String,
+        action: Option<crate::domain::models::SendActionId>,
+    },
+    Board {
+        next_sequence: u32,
+        view: String,
+    },
+    Status,
+    Untrust,
+}
+
+#[derive(Default)]
+struct AttachedTeamRequests {
+    next_id: u64,
+    next_send_id: u64,
+    pending: std::collections::BTreeMap<String, AttachedTeamRequest>,
+    latest_board: Option<String>,
+}
+
+impl AttachedTeamRequests {
+    fn mint(&mut self) -> String {
+        self.next_id += 1;
+        format!("attached-team-{}", self.next_id)
+    }
 }
 
 /// Story 19.16g — what one composer key did on the attached client.
@@ -1147,16 +1170,33 @@ enum ComposerOutcome {
 
 /// Story 19.16g — composer routing for `Char`, `Backspace` and `Enter`,
 /// extracted from `run_attached` (its production caller) so the read-only
-/// exception is reachable by a test. A read-only client may now edit its
-/// composer and run the **local** `/team log`; every other submission — a
-/// model turn, a draft resolution, a daemon-mutating `/team` frame — stays
-/// behind the existing read-only refusal, with no frame sent.
+/// exception is reachable by a test. Read-only clients may edit their composer,
+/// run daemon-served team board/status reads, and see the explicit S7 Info
+/// refusal; model turns and writer-only team commands remain guarded.
 fn attached_composer_key(
     code: crossterm::event::KeyCode,
     read_only: bool,
     input: &mut String,
     state: &mut TuiState,
     frame_tx: &mpsc::UnboundedSender<ClientFrame>,
+) -> ComposerOutcome {
+    attached_composer_key_with_team_requests(
+        code,
+        read_only,
+        input,
+        state,
+        frame_tx,
+        &mut AttachedTeamRequests::default(),
+    )
+}
+
+fn attached_composer_key_with_team_requests(
+    code: crossterm::event::KeyCode,
+    read_only: bool,
+    input: &mut String,
+    state: &mut TuiState,
+    frame_tx: &mpsc::UnboundedSender<ClientFrame>,
+    team_requests: &mut AttachedTeamRequests,
 ) -> ComposerOutcome {
     use crossterm::event::KeyCode;
     let flash = |state: &mut TuiState, message: String| {
@@ -1183,52 +1223,91 @@ fn attached_composer_key(
                 flash(state, "read-only — can't send here".into());
             }
         }
-        KeyCode::Enter => match attached_team_line(input) {
-            AttachedTeamLine::LocalLog(args) => {
-                input.clear();
-                state.pinned_peer_compose = None;
-                return ComposerOutcome::LocalLog(args);
-            }
-            AttachedTeamLine::LocalView(item_id) => {
-                input.clear();
-                state.pinned_peer_compose = None;
-                return ComposerOutcome::LocalView(item_id);
-            }
-            AttachedTeamLine::Frame(ClientFrame::InspectRecipientContext) => {
-                state.pinned_peer_compose = None;
-                if queue_recipient_action(
-                    state,
-                    input,
-                    ClientFrame::InspectRecipientContext,
-                    frame_tx,
-                    true,
-                ) {
+        KeyCode::Enter => {
+            let request = team_requests.mint();
+            match attached_team_line_for_request(input, request) {
+                AttachedTeamLine::LocalLog(args) => {
+                    input.clear();
+                    state.pinned_peer_compose = None;
+                    return ComposerOutcome::LocalLog(args);
+                }
+                AttachedTeamLine::LocalView(item_id) => {
+                    input.clear();
+                    state.pinned_peer_compose = None;
+                    return ComposerOutcome::LocalView(item_id);
+                }
+                AttachedTeamLine::Unavailable(verb) => {
+                    input.clear();
+                    state.pinned_peer_compose = None;
+                    let id = format!("team-{verb}");
+                    crate::adapters::tui::handlers::team_command::show_team_send(
+                        state,
+                        &id,
+                        format!(
+                            "'/team {verb}' unavailable in this session.\n    Run it in a non-attached session."
+                        ),
+                    );
+                }
+                AttachedTeamLine::Frame(ClientFrame::InspectRecipientContext) => {
+                    state.pinned_peer_compose = None;
+                    if queue_recipient_action(
+                        state,
+                        input,
+                        ClientFrame::InspectRecipientContext,
+                        frame_tx,
+                        true,
+                    ) {
+                        return ComposerOutcome::FrameSent;
+                    }
+                }
+                AttachedTeamLine::Frame(frame @ ClientFrame::TeamBoard { .. })
+                | AttachedTeamLine::Frame(frame @ ClientFrame::TeamStatus { .. }) => {
+                    state.pinned_peer_compose = None;
+                    if enqueue_attached_team_frame(state, team_requests, frame, frame_tx) {
+                        input.clear();
+                        return ComposerOutcome::FrameSent;
+                    }
+                }
+                AttachedTeamLine::Frame(frame @ ClientFrame::TeamSend { .. })
+                | AttachedTeamLine::Frame(frame @ ClientFrame::RevokeSenderConsent { .. }) => {
+                    if read_only {
+                        flash(state, "read-only — can't send here".into());
+                    } else {
+                        state.pinned_peer_compose = None;
+                        if enqueue_attached_team_frame(state, team_requests, frame, frame_tx) {
+                            input.clear();
+                            return ComposerOutcome::FrameSent;
+                        }
+                    }
+                }
+                AttachedTeamLine::Frame(frame) if read_only => {
+                    flash(state, "read-only — can't send here".into());
+                    let _ = frame;
+                }
+                AttachedTeamLine::Frame(frame) => {
+                    state.pinned_peer_compose = None;
+                    if !queue_recipient_action(state, input, frame, frame_tx, true) {
+                        return ComposerOutcome::Handled;
+                    }
                     return ComposerOutcome::FrameSent;
                 }
-            }
-            // AC6 #3 — inert, never silent; the line stays editable.
-            _ if read_only => flash(state, "read-only — can't send here".into()),
-            AttachedTeamLine::Frame(frame) => {
-                state.pinned_peer_compose = None;
-                if !queue_recipient_action(state, input, frame, frame_tx, true) {
-                    return ComposerOutcome::Handled;
-                }
-                return ComposerOutcome::FrameSent;
-            }
-            // A malformed `/team` line must never become a model turn —
-            // consume it and show the parser's usage error.
-            AttachedTeamLine::Refused(error) => {
-                input.clear();
-                state.pinned_peer_compose = None;
-                flash(state, error);
-            }
-            AttachedTeamLine::PassThrough => {
-                if is_attached_command(input) {
+                AttachedTeamLine::Refused(error) => {
+                    input.clear();
                     state.pinned_peer_compose = None;
+                    flash(state, error);
                 }
-                return ComposerOutcome::Submit(std::mem::take(input));
+                AttachedTeamLine::PassThrough => {
+                    if read_only {
+                        flash(state, "read-only — can't send here".into());
+                    } else {
+                        if is_attached_command(input) {
+                            state.pinned_peer_compose = None;
+                        }
+                        return ComposerOutcome::Submit(std::mem::take(input));
+                    }
+                }
             }
-        },
+        }
         _ => {}
     }
     ComposerOutcome::Handled
@@ -1282,7 +1361,287 @@ fn after_attached_draw(state: &mut TuiState, drawn: bool, visible_feedback_ids: 
     }
 }
 
+fn enqueue_attached_team_frame(
+    state: &mut TuiState,
+    requests: &mut AttachedTeamRequests,
+    frame: ClientFrame,
+    frame_tx: &mpsc::UnboundedSender<ClientFrame>,
+) -> bool {
+    use crate::adapters::tui::handlers::team_command::{
+        TeamSendRow, render_team_send_rows, show_team_send,
+    };
+
+    let (request, pending) = match &frame {
+        ClientFrame::TeamSend {
+            request,
+            recipients,
+            ..
+        } => {
+            state.team_send_next_id += 1;
+            let block_id = format!("team-send-{}", state.team_send_next_id);
+            let rows: Vec<_> = recipients
+                .iter()
+                .map(|alias| TeamSendRow {
+                    alias: alias.clone(),
+                    outcome: None,
+                })
+                .collect();
+            show_team_send(state, &block_id, render_team_send_rows(&rows));
+            state.team_send_blocks.insert(block_id.clone(), rows);
+            (
+                request.clone(),
+                AttachedTeamRequest::Send {
+                    block_id,
+                    action: None,
+                },
+            )
+        }
+        ClientFrame::TeamBoard { request, .. } => {
+            requests
+                .pending
+                .retain(|_, pending| !matches!(pending, AttachedTeamRequest::Board { .. }));
+            requests.latest_board = Some(request.clone());
+            (
+                request.clone(),
+                AttachedTeamRequest::Board {
+                    next_sequence: 0,
+                    view: String::new(),
+                },
+            )
+        }
+        ClientFrame::TeamStatus { request } => (request.clone(), AttachedTeamRequest::Status),
+        ClientFrame::RevokeSenderConsent { request, .. } => {
+            (request.clone(), AttachedTeamRequest::Untrust)
+        }
+        _ => return false,
+    };
+    requests.pending.insert(request.clone(), pending);
+    if frame_tx.send(frame).is_ok() {
+        true
+    } else {
+        if let Some(pending) = requests.pending.remove(&request) {
+            paint_team_request_failure(state, pending, "could not enqueue command");
+        }
+        false
+    }
+}
+
+fn paint_team_request_failure(state: &mut TuiState, pending: AttachedTeamRequest, message: &str) {
+    use crate::adapters::tui::handlers::team_command::{
+        show_team_board, show_team_send, show_team_status,
+    };
+    let text = format!("[daemon error] {message}");
+    match pending {
+        AttachedTeamRequest::Send { block_id, .. } => {
+            state.team_send_blocks.remove(&block_id);
+            show_team_send(state, &block_id, text);
+        }
+        AttachedTeamRequest::Board { .. } => show_team_board(state, text),
+        AttachedTeamRequest::Status | AttachedTeamRequest::Untrust => show_team_status(state, text),
+    }
+}
+
+fn apply_attached_team_frame(
+    state: &mut TuiState,
+    requests: &mut AttachedTeamRequests,
+    frame: DaemonFrame,
+) -> bool {
+    use crate::adapters::tui::handlers::team_command::{
+        render_team_send_rows, show_team_board, show_team_send, show_team_status,
+    };
+    match frame {
+        DaemonFrame::TeamSendStarted { request, action } => {
+            let Some(AttachedTeamRequest::Send {
+                block_id,
+                action: bound,
+            }) = requests.pending.get_mut(&request)
+            else {
+                tracing::warn!(%request, "attach: unmatched team send start");
+                return true;
+            };
+            if bound.is_some() {
+                tracing::warn!(%request, "attach: duplicate team send start");
+                return true;
+            }
+            *bound = Some(action);
+            let message = state
+                .team_send_blocks
+                .get(block_id)
+                .map(|rows| render_team_send_rows(rows));
+            if let Some(message) = message {
+                show_team_send(state, block_id, message);
+            }
+            true
+        }
+        DaemonFrame::TeamSendSettled {
+            request,
+            index,
+            outcome,
+        } => {
+            let Some(AttachedTeamRequest::Send { block_id, .. }) = requests.pending.get(&request)
+            else {
+                tracing::warn!(%request, "attach: unmatched team send settlement");
+                return true;
+            };
+            let block_id = block_id.clone();
+            let settled = crate::infrastructure::runtime::transparency_bridge::settle_team_send_row(
+                &mut state.team_send_blocks,
+                &mut state.feedback_blocks,
+                &block_id,
+                index,
+                outcome.into(),
+            );
+            if !settled {
+                tracing::warn!(%request, index, "attach: mismatched team send settlement");
+                return true;
+            }
+            state.needs_redraw = true;
+            if !state.team_send_blocks.contains_key(&block_id) {
+                requests.pending.remove(&request);
+            }
+            true
+        }
+        DaemonFrame::TeamBoardChunk {
+            request,
+            sequence,
+            view,
+        } => {
+            let valid = matches!(
+                requests.pending.get(&request),
+                Some(AttachedTeamRequest::Board { next_sequence, .. })
+                    if *next_sequence == sequence
+            );
+            if requests.latest_board.as_deref() != Some(request.as_str()) || !valid {
+                requests.pending.remove(&request);
+                tracing::warn!(%request, sequence, "attach: stale or out-of-order team board chunk discarded");
+                return true;
+            }
+            let Some(next) = sequence.checked_add(1) else {
+                requests.pending.remove(&request);
+                tracing::warn!(%request, "attach: team board sequence overflow");
+                return true;
+            };
+            if let Some(AttachedTeamRequest::Board {
+                next_sequence,
+                view: assembled,
+            }) = requests.pending.get_mut(&request)
+            {
+                assembled.push_str(&view);
+                *next_sequence = next;
+            }
+            true
+        }
+        DaemonFrame::TeamBoardDone { request, chunks } => {
+            let Some(AttachedTeamRequest::Board {
+                next_sequence,
+                view,
+            }) = requests.pending.remove(&request)
+            else {
+                tracing::warn!(%request, "attach: unmatched team board completion");
+                return true;
+            };
+            if chunks != next_sequence {
+                tracing::warn!(%request, chunks, received = next_sequence, "attach: incomplete team board discarded");
+                return true;
+            }
+            if requests.latest_board.as_deref() == Some(request.as_str()) {
+                show_team_board(state, view);
+            } else {
+                tracing::debug!(%request, "attach: stale team board discarded");
+            }
+            true
+        }
+        DaemonFrame::TeamStatusResult { request, message } => {
+            if !matches!(
+                requests.pending.get(&request),
+                Some(AttachedTeamRequest::Status)
+            ) {
+                tracing::warn!(%request, "attach: mismatched team status result");
+                return true;
+            }
+            requests.pending.remove(&request);
+            show_team_status(state, message);
+            true
+        }
+        DaemonFrame::SenderConsentRevoked {
+            request, message, ..
+        } => {
+            if !matches!(
+                requests.pending.get(&request),
+                Some(AttachedTeamRequest::Untrust)
+            ) {
+                tracing::warn!(%request, "attach: mismatched sender-consent result");
+                return true;
+            }
+            requests.pending.remove(&request);
+            show_team_status(state, message);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn apply_attached_team_refusal(
+    state: &mut TuiState,
+    requests: &mut AttachedTeamRequests,
+    action: crate::adapters::daemon::protocol::RecipientAction,
+    request: String,
+    outcome: crate::adapters::daemon::protocol::RecipientActionOutcome,
+) -> bool {
+    use crate::adapters::daemon::protocol::{RecipientAction, RecipientActionOutcome};
+    let expected = match requests.pending.get(&request) {
+        Some(AttachedTeamRequest::Send { .. }) => RecipientAction::TeamSend,
+        Some(AttachedTeamRequest::Board { .. }) => RecipientAction::TeamBoard,
+        Some(AttachedTeamRequest::Status) => RecipientAction::TeamStatus,
+        Some(AttachedTeamRequest::Untrust) => RecipientAction::RevokeSenderConsent,
+        None => {
+            tracing::warn!(%request, "attach: unmatched team refusal");
+            return true;
+        }
+    };
+    if action != expected {
+        tracing::warn!(%request, ?action, "attach: mismatched team refusal kind");
+        return true;
+    }
+    if !matches!(&outcome, RecipientActionOutcome::Refused { .. }) {
+        tracing::warn!(%request, "attach: request result was not a refusal");
+        return true;
+    }
+    let Some(pending) = requests.pending.remove(&request) else {
+        return true;
+    };
+    let message = match outcome {
+        RecipientActionOutcome::Refused { error } => format!("[daemon error] {error}"),
+        other => {
+            tracing::warn!(%request, ?other, "attach: unexpected non-refusal team action result");
+            return true;
+        }
+    };
+    match pending {
+        AttachedTeamRequest::Send { block_id, .. } => {
+            state.team_send_blocks.remove(&block_id);
+            crate::adapters::tui::handlers::team_command::show_team_send(state, &block_id, message)
+        }
+        AttachedTeamRequest::Board { .. } => {
+            if requests.latest_board.as_deref() == Some(request.as_str()) {
+                crate::adapters::tui::handlers::team_command::show_team_board(state, message);
+            }
+        }
+        AttachedTeamRequest::Status | AttachedTeamRequest::Untrust => {
+            crate::adapters::tui::handlers::team_command::show_team_status(state, message)
+        }
+    }
+    true
+}
+fn append_attached_paste(input: &mut String, pasted: &str) {
+    input.push_str(pasted);
+}
+
 fn attached_team_line(text: &str) -> AttachedTeamLine {
+    attached_team_line_for_request(text, "test-request".to_owned())
+}
+
+fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLine {
     use crate::adapters::tui::handlers::team_command::{TeamCommandArgs, parse_team_command};
 
     if text.trim() == "/clear" {
@@ -1291,10 +1650,6 @@ fn attached_team_line(text: &str) -> AttachedTeamLine {
             images: Vec::new(),
         });
     }
-    // Story 19.17: accept the `/team` word only at an input boundary.
-    // Bare `/team` and whitespace-delimited verbs are local; `/teamwork`
-    // remains an ordinary model prompt. Leading pasted whitespace is ignored
-    // so an attached send or removal cannot evade the intercept table.
     let line = text.trim_start();
     let Some(arg) = line.strip_prefix("/team") else {
         return AttachedTeamLine::PassThrough;
@@ -1302,52 +1657,33 @@ fn attached_team_line(text: &str) -> AttachedTeamLine {
     if !arg.is_empty() && !arg.starts_with(char::is_whitespace) {
         return AttachedTeamLine::PassThrough;
     }
-    let arg = arg.trim_start();
-    match parse_team_command(Some(arg)) {
+    match parse_team_command(Some(arg.trim_start())) {
+        Ok(TeamCommandArgs::Log(args)) => AttachedTeamLine::LocalLog(args),
+        Ok(TeamCommandArgs::Board { selector }) => {
+            AttachedTeamLine::Frame(ClientFrame::TeamBoard {
+                request,
+                selector: (&selector).into(),
+            })
+        }
+        Ok(TeamCommandArgs::Send {
+            recipients,
+            text,
+            message_type,
+            subject,
+        }) => AttachedTeamLine::Frame(ClientFrame::TeamSend {
+            request,
+            recipients,
+            text,
+            message_type,
+            subject,
+        }),
         Ok(TeamCommandArgs::Acknowledge { item_id }) => {
             AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { item_id })
         }
-        // A destructive verb must not become a model prompt either: the
-        // daemon's own refusal reaches the operator as `[daemon error] …`.
         Ok(TeamCommandArgs::Remove { item_id }) => {
             AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { item_id })
         }
-        // Story 19.16b AC3(h)1 — ⛔ NOT a fall-through. The board reads every
-        // configured peer over this session's OWN A2A egress, and an attached
-        // session holds none: `AttachServer` is composed without an
-        // `A2aDelegationRuntime` (the daemon installs its egress on the
-        // capability composite, never on the attach server). Falling through
-        // would turn `/team board` into an LLM prompt — exactly what happened
-        // to `log`, `trust`, `status` and `send`. Refuse aloud instead, and
-        // say where the verb does work.
-        // ⚠ Sized for the 1.5 s single-line status flash `Refused` routes to
-        // (19.16b review): the actionable clause must survive a narrow
-        // terminal, so the explanation lives in the comment, not the flash.
-        Ok(TeamCommandArgs::Board { .. }) => AttachedTeamLine::Refused(
-            "'/team board' needs this session's own A2A egress — run it in a non-attached \
-             session."
-                .to_owned(),
-        ),
-        // Story 19.16f AC3(c) — the cross-host retract, the SECOND verb that
-        // refuses aloud here (`DF-19-16B-BOARD-ABSENT-ON-THE-ATTACHED-RAIL`,
-        // owner 19.21): it is a write over this session's own egress, which an
-        // attached session does not hold. ⛔ Falling through would type a
-        // destructive verb at the model. ⛔ Not the same-host `Ctrl+X` retract
-        // either — that retracts this host's auto-sent message, a different
-        // object, and its frame is untouched.
-        Ok(TeamCommandArgs::Retract { .. }) => AttachedTeamLine::Refused(
-            "'/team retract' needs this session's own A2A egress — run it in a non-attached \
-             session."
-                .to_owned(),
-        ),
-        // Story 19.17: the attached client has no per-session A2A send egress.
-        Ok(TeamCommandArgs::Send { .. }) => AttachedTeamLine::Refused(
-            "'/team send' needs this session's own A2A egress — run it in a non-attached \
-             session."
-                .to_owned(),
-        ),
-        // Story 19.18 `AC9(a)` — the recipient answers an item that arrived
-        // on THIS host: the one new verb rail 4 serves, as a daemon frame.
+        Ok(TeamCommandArgs::Retract { .. }) => AttachedTeamLine::Unavailable("retract"),
         Ok(TeamCommandArgs::Reply { item_id, text }) => {
             AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem { item_id, text })
         }
@@ -1365,24 +1701,14 @@ fn attached_team_line(text: &str) -> AttachedTeamLine {
             item_id,
             selected: !off,
         }),
-        // Story 19.18 `AC9(a)` — the asker's verbs read and write a PEER's
-        // host over this session's own egress, which an attached session does
-        // not hold. ⛔ Never a fall-through to the model (`M24`).
-        Ok(TeamCommandArgs::Thread { .. }) => AttachedTeamLine::Refused(
-            "'/team thread' needs this session's own A2A egress — run it in a non-attached \
-             session."
-                .to_owned(),
-        ),
-        Ok(TeamCommandArgs::Followup { .. }) => AttachedTeamLine::Refused(
-            "'/team followup' needs this session's own A2A egress — run it in a non-attached \
-             session."
-                .to_owned(),
-        ),
-        // Story 19.16g — a local read of this workspace's journal; the
-        // attached client is a Unix-socket client of the same filesystem.
-        Ok(TeamCommandArgs::Log(args)) => AttachedTeamLine::LocalLog(args),
-        // Other `/team` verbs keep their pre-existing fall-through.
-        Ok(_) => AttachedTeamLine::PassThrough,
+        Ok(TeamCommandArgs::Thread { .. }) => AttachedTeamLine::Unavailable("thread"),
+        Ok(TeamCommandArgs::Followup { .. }) => AttachedTeamLine::Unavailable("followup"),
+        Ok(TeamCommandArgs::Trust | TeamCommandArgs::Status) => {
+            AttachedTeamLine::Frame(ClientFrame::TeamStatus { request })
+        }
+        Ok(TeamCommandArgs::Untrust(alias)) => {
+            AttachedTeamLine::Frame(ClientFrame::RevokeSenderConsent { request, alias })
+        }
         Err(error) => AttachedTeamLine::Refused(error),
     }
 }
@@ -1453,6 +1779,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     // Consent cards are daemon-owned and re-emitted after attach. This FIFO is
     // only the current socket's rendering order, never the durable truth.
     let mut pending_consent_approvals = std::collections::VecDeque::<PendingConsentApproval>::new();
+    let mut attached_team_requests = AttachedTeamRequests::default();
 
     // ── Terminal ──
     let mut term = terminal::setup(false)?;
@@ -1805,12 +2132,13 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                 if state.recipient_surface.is_some() {
                                     continue;
                                 }
-                                let text = match attached_composer_key(
+                                let text = match attached_composer_key_with_team_requests(
                                     key.code,
                                     read_only,
                                     &mut input,
                                     &mut state,
                                     &frame_tx,
+                                    &mut attached_team_requests,
                                 ) {
                                     ComposerOutcome::Handled => continue,
                                     ComposerOutcome::FrameSent => {
@@ -1905,12 +2233,13 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                 }
                                 // Story 19.16g: read-only composers edit too;
                                 // only submission is refused.
-                                attached_composer_key(
+                                attached_composer_key_with_team_requests(
                                     key.code,
                                     read_only,
                                     &mut input,
                                     &mut state,
                                     &frame_tx,
+                                    &mut attached_team_requests,
                                 );
                             }
                             _ => {}
@@ -1923,7 +2252,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             && pending_consolidation_card.is_none()
                             && retract_confirm.is_none()
                         {
-                            input.push_str(&text);
+                            append_attached_paste(&mut input, &text);
                             state.needs_redraw = true;
                         }
                     }
@@ -2033,10 +2362,36 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                         state.needs_redraw = true;
                     }
                     Ok(Some(DaemonFrame::Detached)) => break Ok(()),
-                    Ok(Some(DaemonFrame::RecipientActionResult { action, target, outcome })) => {
-                        crate::adapters::tui::handlers::recipient_actions::apply_action_result(
-                            &mut state, &mut input, action, target, outcome,
+                    Ok(Some(frame @ DaemonFrame::TeamSendStarted { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamSendSettled { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamBoardChunk { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamBoardDone { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamStatusResult { .. }))
+                    | Ok(Some(frame @ DaemonFrame::SenderConsentRevoked { .. })) => {
+                        let _ = apply_attached_team_frame(
+                            &mut state, &mut attached_team_requests, frame,
                         );
+                    }
+                    Ok(Some(DaemonFrame::RecipientActionResult { action, target, outcome })) => {
+                        match target {
+                            crate::adapters::daemon::protocol::RecipientActionTarget::Request { request } => {
+                                let _ = apply_attached_team_refusal(
+                                    &mut state, &mut attached_team_requests, action, request, outcome,
+                                );
+                            }
+                            target if matches!(
+                                action,
+                                crate::adapters::daemon::protocol::RecipientAction::TeamSend
+                                    | crate::adapters::daemon::protocol::RecipientAction::TeamBoard
+                                    | crate::adapters::daemon::protocol::RecipientAction::TeamStatus
+                                    | crate::adapters::daemon::protocol::RecipientAction::RevokeSenderConsent
+                            ) => {
+                                tracing::warn!(?action, ?target, "attach: team refusal used a non-request target");
+                            }
+                            target => crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                                &mut state, &mut input, action, target, outcome,
+                            ),
+                        }
                     }
                     Ok(Some(DaemonFrame::RecipientContextState {
                         selected_item_ids, inventory, show_inventory,
@@ -2446,6 +2801,182 @@ mod tests {
             assert!(state.pinned_peer_compose.is_none());
             input.clear();
         }
+    }
+
+    #[tokio::test]
+    async fn story_assignment_surface_a_key_dispatches_ack_only_for_received_writer() {
+        use crate::adapters::daemon::protocol::ClientFrame;
+        use crate::adapters::tui::state::RecipientSurfaceAccess;
+        use crate::adapters::tui::widgets::recipient_surface::RecipientSurfaceAction;
+        use crate::domain::models::SemanticMessageType;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let address = append_received_test_item(
+            &journal,
+            "ri_story_assignment",
+            SemanticMessageType::StoryAssignment,
+            "A locally journaled story assignment.",
+        )
+        .await;
+        let row_id = "story-assignment-row".to_owned();
+        let conversation = Conversation {
+            messages: vec![peer_row(&row_id, "pending story assignment")],
+            peer_row_controls: [(
+                row_id,
+                crate::domain::models::PeerRowControl {
+                    node_id: "story-assignment-node".to_owned(),
+                    item_address: Some(address.clone()),
+                    message_type: SemanticMessageType::StoryAssignment,
+                    sender_label: "test sender".to_owned(),
+                    stage: crate::domain::models::PeerRowStage::AwaitingOperator,
+                    node_resolvable: true,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Conversation::default()
+        };
+        let mut state = TuiState::new(80, 24);
+        let mut input = String::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        crate::infrastructure::runtime::recipient_surface::open_received_surface(
+            workspace.path(),
+            Some(&conversation),
+            address.item().as_str(),
+            &mut state,
+            RecipientSurfaceAccess::Writer,
+            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+        )
+        .await
+        .unwrap();
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert!(actions.contains(&Some(RecipientSurfaceAction::Acknowledge)));
+        recipient_surface_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            workspace.path(),
+            &conversation,
+            &mut input,
+            &mut state,
+            Some(&tx),
+        )
+        .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "opening/viewing a received story assignment does not acknowledge it"
+        );
+
+        recipient_surface_key(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            workspace.path(),
+            &conversation,
+            &mut input,
+            &mut state,
+            Some(&tx),
+        )
+        .await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientFrame::AcknowledgeRecipientItem { item_id })
+                if item_id == address.item().as_str()
+        ));
+        assert!(
+            recipient_surface_actions(&state, &conversation, false)
+                .contains(&Some(RecipientSurfaceAction::Context)),
+            "after acknowledgement, the open surface still offers [c] Use as context"
+        );
+        recipient_surface_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            workspace.path(),
+            &conversation,
+            &mut input,
+            &mut state,
+            Some(&tx),
+        )
+        .await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientFrame::SetRecipientContext {
+                item_id,
+                selected: true
+            }) if item_id == address.item().as_str()
+        ));
+        crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+            &mut state,
+            &mut input,
+            crate::adapters::daemon::protocol::RecipientAction::ContextSelect,
+            crate::adapters::daemon::protocol::RecipientActionTarget::Item {
+                item_id: address.item().as_str().to_owned(),
+            },
+            crate::adapters::daemon::protocol::RecipientActionOutcome::ContextSelection {
+                selected: true,
+                changed: true,
+            },
+        );
+        recipient_surface_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            workspace.path(),
+            &conversation,
+            &mut input,
+            &mut state,
+            Some(&tx),
+        )
+        .await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientFrame::SetRecipientContext {
+                item_id,
+                selected: false
+            }) if item_id == address.item().as_str()
+        ));
+
+        crate::infrastructure::runtime::recipient_surface::open_received_surface(
+            workspace.path(),
+            Some(&conversation),
+            address.item().as_str(),
+            &mut state,
+            RecipientSurfaceAccess::ReadOnly,
+            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+        )
+        .await
+        .unwrap();
+        assert!(
+            state
+                .recipient_surface
+                .as_ref()
+                .is_some_and(|surface| surface.can_toggle_target),
+            "read-only item surface retains its [Tab] View item control"
+        );
+        assert!(
+            !recipient_surface_actions(&state, &conversation, true)
+                .contains(&Some(RecipientSurfaceAction::Acknowledge)),
+            "read-only item surfaces do not offer acknowledgement"
+        );
+
+        crate::infrastructure::runtime::recipient_surface::open_received_surface(
+            workspace.path(),
+            Some(&conversation),
+            address.item().as_str(),
+            &mut state,
+            RecipientSurfaceAccess::Writer,
+            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+        )
+        .await
+        .unwrap();
+        if let Some(surface) = state.recipient_surface.as_mut() {
+            surface.item_state = Some("removed");
+        }
+        assert!(
+            !recipient_surface_actions(&state, &conversation, false)
+                .contains(&Some(RecipientSurfaceAction::Acknowledge)),
+            "removed items do not offer acknowledgement"
+        );
     }
 
     #[test]
@@ -3446,10 +3977,8 @@ mod tests {
         assert!(block.id.contains("remote-task-7"), "{}", block.id);
     }
 
-    /// Story 19.16c AC3(h) — in an **attached** session a `/team` verb the
-    /// intercept table does not name falls through to `driver.submit` and
-    /// becomes a model prompt. `trust` and `status` still do; `log`, `board`,
-    /// `retract` and (Story 19.17) `send` have explicit local/refusal arms.
+    /// An intercepted `/team` verb is never submitted to the model. Every
+    /// parsed command has an explicit local presentation or daemon-frame route.
     ///
     /// Mutant → RED: delete the `Remove` arm. The line classifies as
     /// `PassThrough` and the operator's removal is typed at the model.
@@ -3487,89 +4016,409 @@ mod tests {
         ));
     }
 
-    /// Story 19.16b AC3(h)1 — `/team board` is REFUSED ALOUD on the attached
-    /// rail, ⛔ never a model prompt.
-    ///
-    /// The board reads every configured A2A peer over this session's own
-    /// egress and an attached session holds none, so there is no frame to
-    /// send; the one thing that must not happen is the former failure mode —
-    /// falling through to `driver.submit` and becoming an LLM turn. Story
-    /// 19.17 also intercepts `send`; `trust` and `status` still pass through.
-    ///
-    /// Mutant → RED: delete the `Board` arm — the line classifies as
-    /// `PassThrough` and the operator's board request is typed at the model.
     #[test]
-    fn an_attached_team_board_is_refused_aloud_and_never_becomes_a_model_prompt() {
-        let AttachedTeamLine::Refused(reason) = attached_team_line("/team board") else {
-            panic!("`/team board` must be consumed and explained, never submitted");
-        };
-        assert!(reason.contains("/team board"), "{reason}");
-        assert!(
-            reason.contains("non-attached"),
-            "the refusal must say where the verb DOES work: {reason}"
-        );
-        // Control: an unrelated verb keeps its pre-existing fall-through, so
-        // the arm above is a named refusal and not a blanket one.
-        assert!(matches!(
-            attached_team_line("/team status"),
-            AttachedTeamLine::PassThrough
-        ));
-    }
+    fn attached_team_classifier_covers_every_command_and_board_selector() {
+        use crate::adapters::daemon::protocol::TeamBoardRequest;
 
-    /// Story 19.16f AC3(c) — `/team retract` is REFUSED ALOUD on the attached
-    /// rail with the ratified sentence, ⛔ never a model prompt, and a pasted
-    /// leading space does not smuggle it past the table.
-    ///
-    /// Mutant `M03` → RED: delete the `Retract` arm — the line classifies as
-    /// `PassThrough` and a destructive verb is typed at the model.
-    #[test]
-    fn an_attached_team_retract_is_refused_aloud_and_never_becomes_a_model_prompt() {
-        for line in ["/team retract a ri_x", "  /team retract a ri_x"] {
-            let AttachedTeamLine::Refused(reason) = attached_team_line(line) else {
-                panic!("{line:?} must be consumed and explained, never submitted");
+        let cases = [
+            ("/team", "log"),
+            (" /team", "log"),
+            ("/team\tlog --json", "log"),
+            ("/team log --json", "log"),
+            ("/team board", "board"),
+            ("/team board peer-a", "board-peer"),
+            ("/team board --last", "board-last"),
+            ("/team board --action act-1", "board-action"),
+            ("/team board --actions", "board-actions"),
+            (
+                "/team send --type story_assignment --subject sprint-7 a,b hello",
+                "send",
+            ),
+            ("/team ack ri-a", "ack"),
+            ("/team remove ri-a", "remove"),
+            ("/team retract a ri-a", "retract"),
+            ("/team reply ri-a hello", "reply"),
+            ("/team defer ri-a", "defer"),
+            ("/team view ri-a", "view"),
+            ("/team context", "context"),
+            ("/team context ri-a", "context-select"),
+            ("/team context off ri-a", "context-off"),
+            ("/team thread a ri-a", "thread"),
+            ("/team followup a turn-1 hello", "followup"),
+            ("/team trust", "status"),
+            ("/team untrust a", "untrust"),
+            ("/team status", "status"),
+        ];
+        for (line, expected) in cases {
+            let classified = attached_team_line_for_request(line, "req-1".to_owned());
+            let actual = match classified {
+                AttachedTeamLine::LocalLog(_) => "log",
+                AttachedTeamLine::Frame(ClientFrame::TeamBoard {
+                    selector: TeamBoardRequest::Inventory,
+                    ..
+                }) => "board",
+                AttachedTeamLine::Frame(ClientFrame::TeamBoard {
+                    selector: TeamBoardRequest::Peer(_),
+                    ..
+                }) => "board-peer",
+                AttachedTeamLine::Frame(ClientFrame::TeamBoard {
+                    selector: TeamBoardRequest::Last,
+                    ..
+                }) => "board-last",
+                AttachedTeamLine::Frame(ClientFrame::TeamBoard {
+                    selector: TeamBoardRequest::Action(_),
+                    ..
+                }) => "board-action",
+                AttachedTeamLine::Frame(ClientFrame::TeamBoard {
+                    selector: TeamBoardRequest::Actions,
+                    ..
+                }) => "board-actions",
+                AttachedTeamLine::Frame(ClientFrame::TeamSend { .. }) => "send",
+                AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. }) => "ack",
+                AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { .. }) => "remove",
+                AttachedTeamLine::Unavailable("retract") => "retract",
+                AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem { .. }) => "reply",
+                AttachedTeamLine::Frame(ClientFrame::DeferRecipientItem { .. }) => "defer",
+                AttachedTeamLine::LocalView(_) => "view",
+                AttachedTeamLine::Frame(ClientFrame::InspectRecipientContext) => "context",
+                AttachedTeamLine::Frame(ClientFrame::SetRecipientContext {
+                    selected: true,
+                    ..
+                }) => "context-select",
+                AttachedTeamLine::Frame(ClientFrame::SetRecipientContext {
+                    selected: false,
+                    ..
+                }) => "context-off",
+                AttachedTeamLine::Unavailable("thread") => "thread",
+                AttachedTeamLine::Unavailable("followup") => "followup",
+                AttachedTeamLine::Frame(ClientFrame::TeamStatus { .. }) => "status",
+                AttachedTeamLine::Frame(ClientFrame::RevokeSenderConsent { .. }) => "untrust",
+                other => panic!("{line}: unexpected classification {other:?}"),
             };
-            assert_eq!(
-                reason,
-                "'/team retract' needs this session's own A2A egress — run it in a \
-                 non-attached session."
-            );
+            assert_eq!(actual, expected, "{line}");
         }
-        // Positive control: `/team ack` keeps its shipped verdict.
         assert!(matches!(
-            attached_team_line("/team ack ri_x"),
-            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
+            attached_team_line("/teamwork"),
+            AttachedTeamLine::PassThrough
+        ));
+        assert!(matches!(
+            attached_team_line("plain text"),
+            AttachedTeamLine::PassThrough
         ));
     }
 
     #[test]
-    fn attached_team_send_and_bare_team_do_not_reach_the_model() {
-        let AttachedTeamLine::Refused(reason) = attached_team_line("/team send a,b hi") else {
-            panic!("send must be refused aloud on the attached rail");
-        };
-        assert_eq!(
-            reason,
-            "'/team send' needs this session's own A2A egress — run it in a non-attached session."
-        );
-        for input in ["/team", " /team", "/team\tlog"] {
-            assert!(
-                matches!(attached_team_line(input), AttachedTeamLine::LocalLog(_)),
-                "{input:?}"
+    fn attached_deferred_commands_render_the_exact_s7_info_block() {
+        use crate::domain::models::FeedbackLevel;
+        use crossterm::event::KeyCode;
+
+        for verb in ["thread", "followup", "retract"] {
+            let command = match verb {
+                "thread" => "/team thread a ri-a",
+                "followup" => "/team followup a turn-1 hello",
+                _ => "/team retract a ri-a",
+            };
+            let mut state = TuiState::new(80, 24);
+            let mut input = command.to_owned();
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut requests = AttachedTeamRequests::default();
+            assert!(matches!(
+                attached_composer_key_with_team_requests(
+                    KeyCode::Enter,
+                    true,
+                    &mut input,
+                    &mut state,
+                    &tx,
+                    &mut requests
+                ),
+                ComposerOutcome::Handled
+            ));
+            let block = &state.feedback_blocks[&format!("team-{verb}")];
+            assert_eq!(block.level, FeedbackLevel::Info);
+            assert_eq!(
+                block.message,
+                format!(
+                    "'/team {verb}' unavailable in this session.\n    Run it in a non-attached session."
+                )
             );
+            assert_eq!(input, "");
         }
-        assert!(matches!(
-            attached_team_line("/teamwork today"),
-            AttachedTeamLine::PassThrough
-        ));
-        assert!(matches!(
-            attached_team_line("/team ack ri_x"),
-            AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })
-        ));
-        assert!(matches!(
-            attached_team_line("/team board"),
-            AttachedTeamLine::Refused(_)
-        ));
     }
 
+    #[test]
+    fn attached_read_commands_precede_read_only_guard_and_mutations_do_not() {
+        use crossterm::event::KeyCode;
+        let mut state = TuiState::new(80, 24);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut requests = AttachedTeamRequests::default();
+        for command in ["/team board --last", "/team status", "/team trust"] {
+            let mut input = command.to_owned();
+            assert!(matches!(
+                attached_composer_key_with_team_requests(
+                    KeyCode::Enter,
+                    true,
+                    &mut input,
+                    &mut state,
+                    &tx,
+                    &mut requests
+                ),
+                ComposerOutcome::FrameSent
+            ));
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(ClientFrame::TeamBoard { .. } | ClientFrame::TeamStatus { .. })
+            ));
+            assert!(input.is_empty());
+        }
+        for command in ["/team send a hello", "/team untrust a"] {
+            let mut input = command.to_owned();
+            assert!(matches!(
+                attached_composer_key_with_team_requests(
+                    KeyCode::Enter,
+                    true,
+                    &mut input,
+                    &mut state,
+                    &tx,
+                    &mut requests
+                ),
+                ComposerOutcome::Handled
+            ));
+            assert_eq!(input, command);
+            assert!(rx.try_recv().is_err());
+        }
+        let draft = "ordinary read-only draft";
+        let mut input = draft.to_owned();
+        assert!(matches!(
+            attached_composer_key_with_team_requests(
+                KeyCode::Enter,
+                true,
+                &mut input,
+                &mut state,
+                &tx,
+                &mut requests
+            ),
+            ComposerOutcome::Handled
+        ));
+        assert_eq!(input, draft, "read-only submission retains the draft");
+        assert!(rx.try_recv().is_err(), "read-only draft is never forwarded");
+    }
+
+    #[test]
+    fn attached_paste_keeps_multiline_team_send_body_intact() {
+        let mut input = "/team send --type story_assignment --subject sprint-7 jun-dev ".to_owned();
+        let body = "line one\n  indented line\n\nfinal line";
+        append_attached_paste(&mut input, body);
+        let AttachedTeamLine::Frame(ClientFrame::TeamSend {
+            request,
+            recipients,
+            text,
+            message_type,
+            subject,
+        }) = attached_team_line_for_request(&input, "paste-1".into())
+        else {
+            panic!("pasted send command must stay a typed daemon frame");
+        };
+        assert_eq!(request, "paste-1");
+        assert_eq!(recipients, ["jun-dev"]);
+        assert_eq!(text, body);
+        assert_eq!(
+            message_type,
+            Some(crate::domain::models::SemanticMessageType::StoryAssignment)
+        );
+        assert_eq!(subject.as_deref(), Some("sprint-7"));
+    }
+
+    #[test]
+    fn attached_team_send_enqueue_failure_paints_only_its_block() {
+        let mut state = TuiState::new(80, 24);
+        crate::adapters::tui::handlers::team_command::show_team_status(
+            &mut state,
+            "prior status".into(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let mut requests = AttachedTeamRequests::default();
+        assert!(!enqueue_attached_team_frame(
+            &mut state,
+            &mut requests,
+            ClientFrame::TeamSend {
+                request: "failed-send".into(),
+                recipients: vec!["a".into()],
+                text: "body".into(),
+                message_type: None,
+                subject: None,
+            },
+            &tx,
+        ));
+        assert!(
+            state.feedback_blocks["team-send-1"]
+                .message
+                .contains("could not enqueue")
+        );
+        assert_eq!(state.feedback_blocks["team-status"].message, "prior status");
+        assert!(state.team_send_blocks.is_empty());
+        assert!(requests.pending.is_empty());
+    }
+
+    #[test]
+    fn attached_requests_correlate_interleaved_sends_and_discard_stale_boards() {
+        use crate::adapters::daemon::protocol::{
+            ProtocolError, RecipientAction, RecipientActionOutcome, TeamBoardRequest,
+        };
+        use crate::domain::models::FeedbackLevel;
+        let mut state = TuiState::new(80, 24);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut requests = AttachedTeamRequests::default();
+        for (request, alias) in [("r1", "a"), ("r2", "b")] {
+            assert!(enqueue_attached_team_frame(
+                &mut state,
+                &mut requests,
+                ClientFrame::TeamSend {
+                    request: request.into(),
+                    recipients: vec![alias.into()],
+                    text: "body".into(),
+                    message_type: None,
+                    subject: None,
+                },
+                &tx,
+            ));
+            let _ = rx.try_recv().unwrap();
+        }
+        let untouched = state.feedback_blocks["team-send-1"].message.clone();
+        apply_attached_team_refusal(
+            &mut state,
+            &mut requests,
+            RecipientAction::TeamBoard,
+            "r1".into(),
+            RecipientActionOutcome::Refused {
+                error: ProtocolError::Internal("wrong kind".into()),
+            },
+        );
+        assert_eq!(state.feedback_blocks["team-send-1"].message, untouched);
+        assert!(requests.pending.contains_key("r1"));
+        for request in ["r1", "r2"] {
+            apply_attached_team_frame(
+                &mut state,
+                &mut requests,
+                DaemonFrame::TeamSendStarted {
+                    request: request.into(),
+                    action: crate::domain::models::SendActionId::mint(),
+                },
+            );
+        }
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamSendSettled {
+                request: "r1".into(),
+                index: 0,
+                outcome: crate::adapters::daemon::protocol::TeamSendOutcome::Delivered,
+            },
+        );
+        apply_attached_team_refusal(
+            &mut state,
+            &mut requests,
+            RecipientAction::TeamSend,
+            "r2".into(),
+            RecipientActionOutcome::Refused {
+                error: ProtocolError::Internal("refused r2".into()),
+            },
+        );
+        assert!(
+            state.feedback_blocks["team-send-1"]
+                .message
+                .contains("delivered")
+        );
+        assert!(
+            state.feedback_blocks["team-send-2"]
+                .message
+                .contains("refused r2")
+        );
+        assert!(state.team_send_blocks.is_empty());
+        assert!(requests.pending.is_empty());
+
+        requests.pending.insert(
+            "board-old".into(),
+            AttachedTeamRequest::Board {
+                next_sequence: 0,
+                view: String::new(),
+            },
+        );
+        requests.pending.insert(
+            "board-new".into(),
+            AttachedTeamRequest::Board {
+                next_sequence: 0,
+                view: String::new(),
+            },
+        );
+        requests.latest_board = Some("board-new".into());
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamBoardChunk {
+                request: "board-old".into(),
+                sequence: 0,
+                view: "old view".into(),
+            },
+        );
+        assert!(!state.feedback_blocks.contains_key("team-board"));
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamBoardChunk {
+                request: "board-new".into(),
+                sequence: 0,
+                view: "new view".into(),
+            },
+        );
+        assert!(
+            !state.feedback_blocks.contains_key("team-board"),
+            "a partial board is never painted"
+        );
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamBoardDone {
+                request: "board-new".into(),
+                chunks: 1,
+            },
+        );
+        assert_eq!(state.feedback_blocks["team-board"].message, "new view");
+        assert_eq!(
+            state.feedback_blocks["team-board"].level,
+            FeedbackLevel::Info
+        );
+        requests.pending.insert(
+            "board-invalid".into(),
+            AttachedTeamRequest::Board {
+                next_sequence: 0,
+                view: String::new(),
+            },
+        );
+        requests.latest_board = Some("board-invalid".into());
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamBoardChunk {
+                request: "board-invalid".into(),
+                sequence: 1,
+                view: "invalid partial".into(),
+            },
+        );
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamBoardDone {
+                request: "board-invalid".into(),
+                chunks: 1,
+            },
+        );
+        assert_eq!(
+            state.feedback_blocks["team-board"].message, "new view",
+            "out-of-order chunks discard the entire response"
+        );
+        let _ = TeamBoardRequest::Actions;
+    }
     /// `DF-19-16C` review bullet — a pasted leading space must not smuggle a
     /// destructive `/team` verb past the intercept table into the model.
     ///
@@ -3747,8 +4596,8 @@ mod tests {
 
     /// Story 19.16g K08 / M08 — the attached `/team log` is a LOCAL read
     /// (zero frames, never a model turn), presented only by a successful
-    /// draw; a read-only client can reach it while every other submission
-    /// stays refused without a frame; and the observer never touches a turn.
+    /// draw; its read-only path remains reachable before the composer guard,
+    /// and the observer never touches a turn.
     #[tokio::test]
     async fn attached_log_is_local_and_streaming_survives() {
         use crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID;
@@ -3925,14 +4774,8 @@ mod tests {
         ));
     }
 
-    /// Story 19.18 `K14` — one intercept row per new verb. `/team reply` is a
-    /// daemon frame; the asker's verbs refuse aloud; nothing new falls
-    /// through to the model.
-    ///
-    /// `M24` → RED: delete the `Thread` refusal arm — it falls to
-    /// `PassThrough` and becomes a model prompt.
     #[test]
-    fn reply_is_a_frame_and_the_askers_verbs_refuse_on_the_attached_rail() {
+    fn reply_remains_a_frame_and_deferred_verb_classifier_is_explicit() {
         match attached_team_line("/team reply ri_x hi  there") {
             AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem { item_id, text }) => {
                 assert_eq!(item_id, "ri_x");
@@ -3941,20 +4784,18 @@ mod tests {
             other => panic!("expected the reply frame, got {other:?}"),
         }
         for (line, verb) in [
-            ("/team thread b ri_x", "'/team thread'"),
-            ("/team followup b rr_y hi", "'/team followup'"),
+            ("/team thread b ri_x", "thread"),
+            ("/team followup b rr_y hi", "followup"),
+            ("/team retract b ri_x", "retract"),
         ] {
-            let AttachedTeamLine::Refused(reason) = attached_team_line(line) else {
-                panic!("{line} must refuse aloud on the attached rail");
-            };
-            assert!(reason.starts_with(verb), "{reason}");
-            assert!(reason.contains("own A2A egress"), "{reason}");
+            assert!(
+                matches!(attached_team_line(line), AttachedTeamLine::Unavailable(found) if found == verb)
+            );
         }
         assert!(matches!(
             attached_team_line("/teamwork"),
             AttachedTeamLine::PassThrough
         ));
-        // Positive control: the shipped acknowledgement frame is unchanged.
         assert!(matches!(
             attached_team_line("/team ack ri_x"),
             AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. })

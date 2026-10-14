@@ -118,7 +118,7 @@ fn the_palette_row_names_the_cross_host_retract_and_the_narrowed_board() {
         .expect("/team is in the palette");
     for verb in [
         "/team retract <peer-id> <item-id>",
-        "/team board [<peer-id>]",
+        "/team board [--last | --actions | --action <action-id> | <peer-id>]",
         // Story 19.18 `AC1(c)`.
         "/team reply <item-id> <text…>",
         "/team thread <peer-id> <item-id>",

@@ -34,14 +34,22 @@
 //! # What this module does NOT do
 //!
 //! ⛔ No aggregate (`UX-DR-TM-02:217`): no `5 / 7`, no percentage, no single
-//! value standing for the set. ⛔ No catch-all token (`:254`). ⛔ The header
-//! counts exactly what it renders — **rows** — and deliberately does NOT
-//! claim the addressed-recipient set (`:252`): `A21` proved the sender's
-//! fan-out is not locally knowable, and an outcome-derived number wearing
-//! that label would be a lie whichever way it drifted; Story 19.21's scene,
-//! the only layer that knows the fan-out, owns the addressed count.
-//! ⛔ Story 19.21 composes the Act-1 scene; this is the read, the aggregation
-//! and one operator render.
+//! value standing for the set. ⛔ No catch-all token (`:254`).
+//!
+//! **Two boards, two headers.** The peer **inventory** (bare `/team board`)
+//! counts exactly what it renders — **rows** — and does not claim the
+//! addressed-recipient set (19.16b review ruling R1, 5–0): that number is not
+//! locally knowable from remote reads alone (`A21`). Story 19.21 closes that
+//! half of R1 where the fan-out **is** knowable: an **action board**
+//! (`/team board --last | --action <id>`) is assembled from this host's
+//! sender-local action record, so its header carries the **addressed count**
+//! the record froze — never the rows rendered, never the settled count — and
+//! each recipient's row joins that recipient's recorded send-time outcome
+//! with the remote acknowledgement state of **that action's** dispatches
+//! only (the dispatch rows carrying the action's own `{action, index}`
+//! reference; ⛔ never "the newest item for the peer", which would show an
+//! older action's acknowledgement as this one's). The inventory's heading is
+//! `Peer item inventory` (it used to be mislabelled with Act 1's name).
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -52,6 +60,11 @@ use super::client::CardSlot;
 use super::driver::{A2aDelegationRuntime, TaskClient};
 use super::endpoint::resolve_jsonrpc_endpoint;
 use super::lifecycle::PollConfig;
+use crate::domain::services::relative_time::format_relative_time;
+use crate::domain::services::send_action_ledger::SendActionView;
+use crate::domain::services::transparency::{
+    MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, sanitize_disclosable,
+};
 
 /// One recipient's own outcome, from `UX-DR-TM-02`'s ratified state set.
 ///
@@ -94,16 +107,28 @@ impl BoardOutcome {
         }
     }
 
-    /// The ratified row word.
+    /// The ratified row word; send-time outcomes reuse the shared vocabulary.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Acknowledged => "acknowledged",
-            Self::Delivered => "delivered",
-            Self::Declined => "declined",
-            Self::Unreachable => "unreachable",
+            Self::Delivered => crate::domain::models::team_send::TEAM_SEND_DELIVERED_LABEL,
+            Self::Declined => crate::domain::models::team_send::TEAM_SEND_DECLINED_LABEL,
+            Self::Unreachable => crate::domain::models::team_send::TEAM_SEND_UNREACHABLE_LABEL,
         }
     }
+}
+
+/// `task_id` is peer text: sanitized here, once.
+#[must_use]
+pub fn asked_question_label(task_id: &str) -> String {
+    format!(
+        "asked a question this verb cannot answer (task `{}` cancelled) — this peer uses A2A input-required, which rustain does not continue yet",
+        crate::domain::services::transparency::sanitize_disclosable(
+            task_id,
+            crate::domain::services::transparency::MAX_PEER_ID_BYTES
+        )
+    )
 }
 
 /// One row: the roster alias and that recipient's own outcome.
@@ -296,7 +321,9 @@ async fn collect(
     // In-flight first, so a rate refusal never consumes the fan-out slot and
     // a stacked collect never starts.
     let _in_flight = runtime.begin_board_collect()?;
-    runtime.admit_board_refresh(now, board_refresh_floor())?;
+    runtime
+        .admit_board_refresh(now, board_refresh_floor())
+        .await?;
 
     let dispatched = runtime.dispatched_tasks_by_peer().await;
     let mut view = BoardView {
@@ -340,7 +367,9 @@ async fn collect(
     }
     // The last rendered view, so a landed retract can re-render the board
     // with its mark WITHOUT a second fan-out (Story 19.16f `AC10(d)`).
-    runtime.remember_board(view.clone()).await;
+    runtime
+        .remember_board(RememberedBoard::Inventory(view.clone()))
+        .await;
     Ok(view)
 }
 
@@ -362,12 +391,7 @@ async fn read_peer(
     dispatched: Option<&std::collections::HashMap<String, HashSet<String>>>,
 ) -> Result<PeerReply, ()> {
     let (spec, client) = runtime.peer_binding(peer).ok_or(())?;
-    let CardSlot::Ready(card, _trust) = client.card_slot().await else {
-        return Err(());
-    };
-    let endpoint = resolve_jsonrpc_endpoint(&card).map_err(|_| ())?;
-    let transport = TaskClient::new(client, endpoint.url().to_owned());
-    let result = transport.list_items().await.map_err(|_| ())?;
+    let result = list_peer_items(client).await?;
     // The dispatch ledger is keyed by the peer's resolved identity (pinned or
     // alias-pseudonym) — the same key `RemoteEnvelopeDispatched` records.
     let dispatched_for_peer = dispatched.map(|ledger| {
@@ -384,6 +408,21 @@ async fn read_peer(
         items: parse_peer_items(&result, dispatched_for_peer.as_ref()),
         principal_collapsed: collapse_flag(&result),
     })
+}
+
+/// One `x-rustain-items/list` read of a bound roster peer. Every failure — no
+/// cached card, no endpoint, a refused anchor, a transport error, a `-32601`
+/// from a build without the verb — is the same operator fact: **this read did
+/// not land.** Shared by the inventory and the action board.
+async fn list_peer_items(
+    client: std::sync::Arc<super::client::A2aClientAdapter>,
+) -> Result<serde_json::Value, ()> {
+    let CardSlot::Ready(card, _trust) = client.card_slot().await else {
+        return Err(());
+    };
+    let endpoint = resolve_jsonrpc_endpoint(&card).map_err(|_| ())?;
+    let transport = TaskClient::new(client, endpoint.url().to_owned());
+    transport.list_items().await.map_err(|_| ())
 }
 
 /// The legibility flag, failing SAFE: a peer that will not say whether it can
@@ -562,8 +601,8 @@ pub fn render_item_row(item: &BoardItem) -> String {
 /// one peer; the cut is stated, and `{M}` is the number of correlated items
 /// for this peer BEFORE the cap (never the rendered count, which would read
 /// "the 60 most recent of 60").
-fn render_item_rows(out: &mut String, row: &BoardRow, narrowed: bool) {
-    let total = row.items.len();
+fn render_item_rows(out: &mut String, items: &[BoardItem], narrowed: bool) {
+    let total = items.len();
     let skipped = if narrowed {
         0
     } else {
@@ -575,7 +614,7 @@ fn render_item_rows(out: &mut String, row: &BoardRow, narrowed: bool) {
              peer — narrow with '/team board <peer-id>'\n"
         ));
     }
-    for item in row.items.iter().skip(skipped) {
+    for item in items.iter().skip(skipped) {
         out.push_str(&render_item_row(item));
         out.push('\n');
     }
@@ -642,10 +681,12 @@ pub fn render_board(view: &BoardView) -> String {
     }
     // The header counts ROWS — exactly what is rendered (19.16b review ruling
     // R1, 5–0). ⛔ It must not claim the addressed-recipient set: that number
-    // is not computable at this layer (`A21`), and it is NOT a completion
-    // aggregate either (`:252`); Story 19.21's scene owns the addressed count.
+    // is not computable from remote reads (`A21`). Story 19.21's action board
+    // is where the addressed count lives, from the action record. The
+    // heading says what this is — the PEER INVENTORY, not Act 1's board
+    // (Story 19.21 `S10`).
     let mut out = format!(
-        "Act 1 distribution board · {} row{}\n",
+        "Peer item inventory · {} row{}\n",
         view.rows.len(),
         if view.rows.len() == 1 { "" } else { "s" }
     );
@@ -662,7 +703,7 @@ pub fn render_board(view: &BoardView) -> String {
             row.peer,
             row.outcome.label(),
         ));
-        render_item_rows(&mut out, row, view.narrowed);
+        render_item_rows(&mut out, &row.items, view.narrowed);
     }
     if view.unnameable > 0 {
         out.push_str(&format!(
@@ -701,6 +742,688 @@ pub fn render_refresh_refusal(refusal: RefreshTooSoon) -> String {
         board_refresh_floor().as_millis(),
         refusal.remaining.as_millis().max(1),
     )
+}
+
+// ── Story 19.21 · the action board ──────────────────────────────────────────
+//
+// One recorded operator send action, one row per ADDRESSED recipient in the
+// operator's order (`UX-DR-TM-02`, 2026-10-11 amendment). A reader and a
+// command sender, never an item-state writer (`AD-1827`): it reads this host's
+// journal and each addressed peer's own `x-rustain-items/list`, and writes
+// nothing but its remembered view.
+
+/// Which recorded action `/team board --last | --action <id>` shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActionSelector {
+    /// The newest action in this workspace journal.
+    Last,
+    /// The action with this id. Operator text: it matches a recorded id or it
+    /// does not.
+    Id(String),
+}
+
+/// One recipient's state on an action board.
+///
+/// ⛔ Four outcome tokens, four distinct marks, no catch-all
+/// (`UX-DR-TM-02:254`). Every tokenless state is the *absence* of an outcome
+/// and says so in words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActionRowState {
+    /// `✓` — the recipient's own deliberate acknowledgement was reported.
+    Acknowledged,
+    /// `●` — the item exists on the recipient's side with no acknowledgement.
+    Delivered,
+    /// `✗` — the recipient's policy declined at send time.
+    Declined,
+    /// `⚠` — the send did not land; `cause` is the recorded refusal sentence.
+    Unreachable {
+        cause: Option<crate::domain::models::SettlementCause>,
+    },
+    AwaitingApproval,
+    NotSent,
+    AcceptedWithoutItem,
+    AskedQuestion {
+        task_id: String,
+    },
+    NoUsableAnswer,
+    /// Unsettled and still being sent **by this process** (rule 9).
+    Sending,
+    /// Unsettled and not live here: another process, or an interrupted send
+    /// (rule 10). ⛔ Never `sending…`.
+    NoOutcomeRecorded,
+    /// A settlement written by a newer build (rule 0, `S8`).
+    Unrecognised,
+}
+
+/// The indented line beneath a row that explains how it was (not) read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowNote {
+    /// `S3` — the read landed and found no item correlated to this action.
+    NoCorrelatedItem,
+    /// `S5` — no eligible current binding exists for the recorded peer, so
+    /// nothing was read (and nothing was asked of any replacement peer).
+    NoEligibleBinding,
+}
+
+/// One addressed recipient's row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionBoardRow {
+    /// The roster alias the action record froze at send time.
+    pub alias: String,
+    /// The **current** roster alias the row was read through, when the
+    /// identity precheck resolved one. A rename that kept the pin leaves
+    /// `alias` as sent and records the new name here (a retract mark matches
+    /// on this, since the operator types the current name).
+    pub bound_alias: Option<String>,
+    pub state: ActionRowState,
+    /// `S2` — a read this recipient needed did not land.
+    pub read_failed: bool,
+    pub note: Option<RowNote>,
+    /// The 19.16f picker rows beneath the row: **this action's** items only.
+    pub items: Vec<BoardItem>,
+}
+
+/// The assembled action board.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionBoardView {
+    pub action: crate::domain::models::SendActionId,
+    pub message_type: crate::domain::models::SemanticMessageType,
+    /// The operator's sender-local label, when `--subject` was given.
+    pub subject: Option<String>,
+    /// When the action record was appended (unix ms); `0` = no timestamp.
+    pub recorded_at_ms: i64,
+    /// The action record's recipient count. ⛔ Never the rows rendered and
+    /// never the settled count.
+    pub addressed: usize,
+    /// Operator order. A recipient whose correlated item carries an
+    /// unnameable state is **withheld** (counted in `unnameable`), so this can
+    /// be shorter than `addressed`.
+    pub rows: Vec<ActionBoardRow>,
+    pub unnameable: usize,
+    pub principal_collapsed: bool,
+}
+
+/// Why an action board (or the action list) was not shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActionBoardRefusal {
+    /// No journal reader is injected, or the journal could not be read.
+    LedgerUnreadable,
+    /// `S6` — the workspace journal records no send action.
+    NoAction,
+    /// `S12` — `--action <id>` names no recorded action.
+    UnknownAction(String),
+    /// The same floor / in-flight refusal every board refresh renders.
+    TooSoon(RefreshTooSoon),
+}
+
+/// What the remote read established for one recipient.
+enum RecipientRead {
+    /// Rules 0–3: the recorded outcome is final, nothing was asked.
+    NotNeeded,
+    /// The identity precheck found no eligible binding (`S5`).
+    NoBinding,
+    /// The read did not land.
+    Failed,
+    /// The read landed. `newest` mirrors [`parse_peer_reply`]: `None` = no
+    /// item correlated to this action, `Some(None)` = the newest correlated
+    /// item's state is unnameable.
+    Landed {
+        newest: Option<Option<BoardOutcome>>,
+        items: Vec<BoardItem>,
+        collapsed: bool,
+    },
+}
+/// The one remote read, before its items are correlated to the action's latest
+/// journaled dispatches. Retaining the raw reply lets a settlement/dispatch
+/// that lands while a sibling read is held participate in the final board.
+enum ActionPeerRead {
+    NotNeeded,
+    NoBinding,
+    Failed,
+    Landed(serde_json::Value),
+}
+
+/// One built row, or `None` when the row is withheld (rule 4u).
+struct BuiltRow {
+    row: Option<ActionBoardRow>,
+    collapsed: bool,
+}
+
+/// Rules 0–10 of `AC2`, in order, over one recipient. Pure: the journal fold,
+/// this process's liveness and the remote read arrive as arguments, so every
+/// rule is provable without a socket. **The first matching rule wins.**
+fn build_row(
+    recipient: &crate::domain::services::send_action_ledger::SendActionRecipientView,
+    live: bool,
+    bound_alias: Option<String>,
+    read: RecipientRead,
+) -> BuiltRow {
+    use crate::domain::models::SendSettlement;
+
+    let no_binding = matches!(read, RecipientRead::NoBinding);
+    let read_failed = matches!(read, RecipientRead::Failed);
+    let alias = recipient.recipient.alias.clone();
+    let binding_note = no_binding.then_some(RowNote::NoEligibleBinding);
+    let row =
+        |state: ActionRowState, note: Option<RowNote>, failed: bool, items: Vec<BoardItem>| {
+            Some(ActionBoardRow {
+                alias: alias.clone(),
+                bound_alias: bound_alias.clone(),
+                state,
+                read_failed: failed,
+                note,
+                items,
+            })
+        };
+    let settled = |state: ActionRowState| BuiltRow {
+        row: row(state, binding_note, false, Vec::new()),
+        collapsed: false,
+    };
+
+    // Rules 0–3 — the recorded send-time outcome is authoritative and a
+    // remote read never overrides it (`A5`).
+    match &recipient.settlement {
+        Some(SendSettlement::Unknown) => return settled(ActionRowState::Unrecognised),
+        Some(SendSettlement::Declined) => return settled(ActionRowState::Declined),
+        Some(SendSettlement::Unreachable { cause }) => {
+            return settled(ActionRowState::Unreachable {
+                cause: cause.clone(),
+            });
+        }
+        Some(SendSettlement::NotSent) => return settled(ActionRowState::NotSent),
+        Some(SendSettlement::AcceptedWithoutItem) => {
+            return settled(ActionRowState::AcceptedWithoutItem);
+        }
+        Some(SendSettlement::AskedQuestion { task_id }) => {
+            return settled(ActionRowState::AskedQuestion {
+                task_id: task_id.clone(),
+            });
+        }
+        Some(
+            SendSettlement::Delivered { .. }
+            | SendSettlement::AwaitingApproval
+            | SendSettlement::NoUsableAnswer,
+        )
+        | None => {}
+    }
+
+    // Rules 4u and 4 — a correlated remote item refines `Delivered`, and can
+    // establish delivery for a recipient the journal holds no (or a weaker)
+    // settlement for.
+    if let RecipientRead::Landed {
+        newest: Some(newest),
+        items,
+        collapsed,
+    } = read
+    {
+        let state = match newest {
+            Some(BoardOutcome::Acknowledged) => ActionRowState::Acknowledged,
+            Some(BoardOutcome::Delivered) => ActionRowState::Delivered,
+            // Unnameable (4u) — and the two outcomes a remote read can never
+            // produce, which fail the same safe way: the row is withheld and
+            // the count stated, never a borrowed token.
+            Some(BoardOutcome::Declined | BoardOutcome::Unreachable) | None => {
+                return BuiltRow {
+                    row: None,
+                    collapsed: false,
+                };
+            }
+        };
+        return BuiltRow {
+            row: row(state, binding_note, false, items),
+            collapsed,
+        };
+    }
+
+    // Rules 5–10 — nothing correlated was read; the settlement speaks.
+    let landed = matches!(read, RecipientRead::Landed { .. });
+    let (state, note, failed) = match &recipient.settlement {
+        Some(SendSettlement::Delivered { .. }) => {
+            (ActionRowState::Delivered, binding_note, read_failed)
+        }
+        Some(SendSettlement::AwaitingApproval) => {
+            (ActionRowState::AwaitingApproval, binding_note, read_failed)
+        }
+        Some(SendSettlement::NoUsableAnswer) => {
+            let note = if landed {
+                Some(RowNote::NoCorrelatedItem)
+            } else {
+                binding_note
+            };
+            (ActionRowState::NoUsableAnswer, note, read_failed)
+        }
+        _ if live => (ActionRowState::Sending, binding_note, false),
+        _ => (ActionRowState::NoOutcomeRecorded, binding_note, read_failed),
+    };
+    BuiltRow {
+        row: row(state, note, failed, Vec::new()),
+        collapsed: false,
+    }
+}
+
+/// Whether `settlement` leaves a remote read able to refine the row
+/// (rules 4u–10). Rules 0–3 never read.
+fn settlement_needs_read(settlement: Option<&crate::domain::models::SendSettlement>) -> bool {
+    use crate::domain::models::SendSettlement;
+
+    matches!(
+        settlement,
+        None | Some(
+            SendSettlement::Delivered { .. }
+                | SendSettlement::AwaitingApproval
+                | SendSettlement::NoUsableAnswer
+        )
+    )
+}
+
+/// Select the action to show, from the ledger **oldest first**.
+fn select_action<'a>(
+    actions: &'a [SendActionView],
+    selector: &ActionSelector,
+) -> Result<&'a SendActionView, ActionBoardRefusal> {
+    match selector {
+        ActionSelector::Last => actions.last().ok_or(ActionBoardRefusal::NoAction),
+        ActionSelector::Id(id) => actions
+            .iter()
+            .find(|action| action.id.as_str() == id)
+            .ok_or_else(|| ActionBoardRefusal::UnknownAction(id.clone())),
+    }
+}
+
+/// Assemble one recorded action's board: decide the selection locally first
+/// (an empty or unknown selection consumes neither the refresh floor nor the
+/// fan-out slot, and reads nothing), then read only the addressed peers that
+/// need a read, concurrently, under the same floor and in-flight guards as
+/// every board refresh.
+///
+/// ⛔ Never the whole roster, never "newest item for this peer".
+///
+/// The selected id is frozen before the first await. After concurrent reads,
+/// the same action is reloaded and saved raw replies are correlated against
+/// its latest task ids; liveness is sampled before that final journal fold.
+///
+/// # Errors
+///
+/// [`ActionBoardRefusal`].
+pub async fn collect_action_board(
+    runtime: &A2aDelegationRuntime,
+    selector: &ActionSelector,
+    now: Instant,
+) -> Result<ActionBoardView, ActionBoardRefusal> {
+    let actions = runtime
+        .send_action_ledger()
+        .await
+        .ok_or(ActionBoardRefusal::LedgerUnreadable)?;
+    // Freeze the selector's identity before any awaits. In particular, a
+    // concurrent action must not change what `Last` means for this refresh.
+    let action = select_action(&actions, selector)?;
+    let _in_flight = runtime
+        .begin_board_collect()
+        .map_err(ActionBoardRefusal::TooSoon)?;
+    runtime
+        .admit_board_refresh(now, board_refresh_floor())
+        .await
+        .map_err(ActionBoardRefusal::TooSoon)?;
+
+    let reads = join_all(
+        action
+            .recipients
+            .iter()
+            .map(|recipient| read_action_recipient(runtime, recipient)),
+    )
+    .await;
+
+    // A recipient's settlement append is attempted before its liveness token
+    // is dropped. Sample liveness first and reload the ledger afterward:
+    // completed recipients pair false liveness with their durable settlement
+    // if one landed, rather than stale journal facts with newer liveness.
+    let live = join_all(action.recipients.iter().enumerate().map(|(index, _)| {
+        runtime.send_recipient_is_live(&action.id, u32::try_from(index).unwrap_or(u32::MAX))
+    }))
+    .await;
+    let latest_actions = runtime
+        .send_action_ledger()
+        .await
+        .ok_or(ActionBoardRefusal::LedgerUnreadable)?;
+    let latest_action = latest_actions
+        .into_iter()
+        .find(|candidate| candidate.id == action.id)
+        .ok_or_else(|| ActionBoardRefusal::UnknownAction(action.id.as_str().to_owned()))?;
+
+    let mut view = ActionBoardView {
+        action: latest_action.id.clone(),
+        message_type: latest_action.message_type,
+        subject: latest_action.subject.clone(),
+        recorded_at_ms: latest_action.recorded_at_ms,
+        addressed: latest_action.recipients.len(),
+        rows: Vec::with_capacity(latest_action.recipients.len()),
+        unnameable: 0,
+        principal_collapsed: false,
+    };
+    for ((recipient, (bound_alias, raw_read)), live) in
+        latest_action.recipients.iter().zip(reads).zip(live)
+    {
+        let read = reconcile_action_read(recipient, raw_read);
+        let built = build_row(recipient, live, bound_alias, read);
+        match built.row {
+            Some(row) => {
+                // Accumulated only from rows the remote read produced: it
+                // scopes "the rows above".
+                view.principal_collapsed |= built.collapsed;
+                view.rows.push(row);
+            }
+            None => view.unnameable += 1,
+        }
+    }
+    runtime
+        .remember_board(RememberedBoard::Action(view.clone()))
+        .await;
+    Ok(view)
+}
+
+/// The identity precheck, then — only when a read can refine the row — one
+/// `list_items` against the resolved binding. Its raw result is correlated
+/// after all reads against the selected action's latest journaled tasks.
+async fn read_action_recipient(
+    runtime: &A2aDelegationRuntime,
+    recipient: &crate::domain::services::send_action_ledger::SendActionRecipientView,
+) -> (Option<String>, ActionPeerRead) {
+    // Before any read or rule: a recorded pin resolves by that pin even after
+    // an alias rename; an unpinned record applies the 19.18c `PQ2` ownership
+    // predicate. No eligible binding ⇒ ⛔ no read, and ⛔ never a lookup by
+    // alias alone (a reused alias would otherwise read an unrelated peer).
+    let Some((spec, client)) = runtime.eligible_binding(&recipient.recipient) else {
+        return (None, ActionPeerRead::NoBinding);
+    };
+    let bound = Some(spec.id.clone());
+    if !settlement_needs_read(recipient.settlement.as_ref()) {
+        return (bound, ActionPeerRead::NotNeeded);
+    }
+    let Ok(result) = list_peer_items(client).await else {
+        return (bound, ActionPeerRead::Failed);
+    };
+    if result
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .is_none()
+    {
+        // A shapeless success is a read that did not land (19.16b review).
+        return (bound, ActionPeerRead::Failed);
+    }
+    (bound, ActionPeerRead::Landed(result))
+}
+
+/// Reconcile a saved peer reply with the action's latest durable task ids.
+/// An intervening definitive settlement still wins in `build_row`.
+fn reconcile_action_read(
+    recipient: &crate::domain::services::send_action_ledger::SendActionRecipientView,
+    read: ActionPeerRead,
+) -> RecipientRead {
+    match read {
+        ActionPeerRead::NotNeeded => RecipientRead::NotNeeded,
+        ActionPeerRead::NoBinding => RecipientRead::NoBinding,
+        ActionPeerRead::Failed => RecipientRead::Failed,
+        ActionPeerRead::Landed(result) => {
+            if !settlement_needs_read(recipient.settlement.as_ref()) {
+                return RecipientRead::NotNeeded;
+            }
+            let tasks: HashSet<String> = recipient.tasks.iter().cloned().collect();
+            match parse_peer_reply(&result, Some(&tasks)) {
+                Ok(newest) => {
+                    let items = parse_peer_items(&result, Some(&tasks));
+                    let collapsed = newest.is_some() && collapse_flag(&result);
+                    RecipientRead::Landed {
+                        newest,
+                        items,
+                        collapsed,
+                    }
+                }
+                Err(()) => RecipientRead::Failed,
+            }
+        }
+    }
+}
+
+/// This workspace journal's recorded actions for `--actions`, **newest
+/// first**, uncapped. A local read: it touches neither the refresh floor nor
+/// any peer.
+///
+/// # Errors
+///
+/// [`ActionBoardRefusal::LedgerUnreadable`] / [`ActionBoardRefusal::NoAction`].
+pub async fn collect_action_list(
+    runtime: &A2aDelegationRuntime,
+) -> Result<Vec<SendActionView>, ActionBoardRefusal> {
+    let mut actions = runtime
+        .send_action_ledger()
+        .await
+        .ok_or(ActionBoardRefusal::LedgerUnreadable)?;
+    if actions.is_empty() {
+        return Err(ActionBoardRefusal::NoAction);
+    }
+    actions.reverse();
+    Ok(actions)
+}
+
+/// The age line's word, from the action record's journal timestamp and the
+/// caller's injected `now` (unix seconds). ⛔ Never reads a clock here.
+fn attempted_age(recorded_at_ms: i64, now_unix_secs: i64) -> String {
+    if recorded_at_ms == 0 {
+        // A line with no timestamp is an explicit unknown, never 1970.
+        return "at an unknown time".to_owned();
+    }
+    format_relative_time(recorded_at_ms.div_euclid(1_000), now_unix_secs)
+}
+
+fn type_noun(message_type: crate::domain::models::SemanticMessageType) -> Option<&'static str> {
+    (!message_type.is_unknown())
+        .then(|| crate::domain::models::semantic_message_type_metadata(message_type).token)
+}
+
+fn bounded(text: &str) -> String {
+    sanitize_disclosable(text, MAX_PEER_ID_BYTES)
+}
+
+/// `S1`, and the rows beneath it. Every peer- or operator-influenced field is
+/// sanitized here, once (`AD-1824`); ⛔ no aggregate, ⛔ no placeholder for an
+/// absent label.
+#[must_use]
+pub fn render_action_board(view: &ActionBoardView, now_unix_secs: i64) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    match type_noun(view.message_type) {
+        Some(noun) => {
+            let _ = writeln!(out, "Distribution board · {noun}");
+        }
+        None => out.push_str("Distribution board\n"),
+    }
+    if let Some(subject) = &view.subject {
+        let _ = writeln!(out, "{}", bounded(subject));
+    }
+    let _ = writeln!(
+        out,
+        "attempted {} · {} addressed",
+        attempted_age(view.recorded_at_ms, now_unix_secs),
+        view.addressed
+    );
+    let width = view
+        .rows
+        .iter()
+        .map(|row| bounded(&row.alias).chars().count())
+        .max()
+        .unwrap_or(0);
+    for row in &view.rows {
+        render_action_row(&mut out, row, width);
+    }
+    if view.unnameable > 0 {
+        out.push_str(&format!(
+            "· {} roster peer{} reported an outcome this build cannot name — the peer runs a \
+             newer build (A2A version boundary: row `19-16e`).\n",
+            view.unnameable,
+            if view.unnameable == 1 { "" } else { "s" }
+        ));
+    }
+    if view.principal_collapsed {
+        out.push_str(COLLAPSED_PRINCIPAL_DISCLOSURE);
+        out.push('\n');
+    }
+    out
+}
+
+fn render_action_row(out: &mut String, row: &ActionBoardRow, width: usize) {
+    use std::borrow::Cow;
+
+    let (token, label): (&str, Cow<'_, str>) = match &row.state {
+        ActionRowState::Acknowledged => (
+            BoardOutcome::Acknowledged.token(),
+            Cow::Borrowed(BoardOutcome::Acknowledged.label()),
+        ),
+        ActionRowState::Delivered => (
+            BoardOutcome::Delivered.token(),
+            Cow::Borrowed(BoardOutcome::Delivered.label()),
+        ),
+        ActionRowState::Declined => (
+            BoardOutcome::Declined.token(),
+            Cow::Borrowed(BoardOutcome::Declined.label()),
+        ),
+        ActionRowState::Unreachable { .. } => (
+            BoardOutcome::Unreachable.token(),
+            Cow::Borrowed(BoardOutcome::Unreachable.label()),
+        ),
+        ActionRowState::AwaitingApproval => (" ", Cow::Borrowed("awaiting their approval")),
+        ActionRowState::NotSent => (
+            " ",
+            Cow::Borrowed(crate::domain::models::team_send::TEAM_SEND_NOT_SENT_LABEL),
+        ),
+        ActionRowState::AcceptedWithoutItem => (
+            " ",
+            Cow::Borrowed(crate::domain::models::team_send::TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL),
+        ),
+        ActionRowState::AskedQuestion { task_id } => {
+            (" ", Cow::Owned(asked_question_label(task_id)))
+        }
+        ActionRowState::NoUsableAnswer => (" ", Cow::Borrowed("no usable answer")),
+        ActionRowState::Sending => (" ", Cow::Borrowed("sending…")),
+        ActionRowState::NoOutcomeRecorded => (" ", Cow::Borrowed("no outcome recorded")),
+        ActionRowState::Unrecognised => (
+            " ",
+            Cow::Borrowed("recorded outcome not recognised by this build"),
+        ),
+    };
+    let suffix = if row.read_failed {
+        " · not readable now"
+    } else {
+        ""
+    };
+    out.push_str(&format!(
+        "  {token} {:width$}  {label}{suffix}\n",
+        bounded(&row.alias)
+    ));
+    if let ActionRowState::Unreachable { cause: Some(cause) } = &row.state {
+        use crate::domain::models::SettlementCauseKind;
+
+        let limit = match cause.kind {
+            SettlementCauseKind::Ratified => MAX_SUMMARY_BYTES,
+            SettlementCauseKind::PeerInfluenced => MAX_PEER_ID_BYTES,
+        };
+        out.push_str("    ");
+        out.push_str(&sanitize_disclosable(&cause.text, limit));
+        out.push('\n');
+    }
+    match row.note {
+        Some(RowNote::NoCorrelatedItem) => {
+            out.push_str("    no correlated item reported on this read\n");
+        }
+        Some(RowNote::NoEligibleBinding) => {
+            out.push_str("    not read — no eligible binding for the recorded peer\n");
+        }
+        None => {}
+    }
+    render_item_rows(out, &row.items, false);
+}
+
+/// `S9` for every recorded action, newest first (the input order).
+#[must_use]
+pub fn render_action_list(actions: &[SendActionView], now_unix_secs: i64) -> String {
+    let mut out = String::new();
+    for action in actions {
+        out.push_str(&format!(
+            "{}  {}  attempted {} · {} addressed\n",
+            bounded(action.id.as_str()),
+            type_noun(action.message_type).unwrap_or("untyped"),
+            attempted_age(action.recorded_at_ms, now_unix_secs),
+            action.recipients.len()
+        ));
+        if let Some(subject) = &action.subject {
+            out.push_str(&format!("    {}\n", bounded(subject)));
+        }
+    }
+    out
+}
+
+/// `S6`, `S12`, the floor refusal, and `S13` — the one sentence for a send
+/// journal this host could not read.
+#[must_use]
+pub fn render_action_board_refusal(refusal: &ActionBoardRefusal) -> String {
+    match refusal {
+        ActionBoardRefusal::NoAction => "· no send action recorded in this workspace\n    \
+             '/team board' reads the peer item inventory."
+            .to_owned(),
+        ActionBoardRefusal::UnknownAction(id) => format!(
+            "· no send action '{}' is recorded in this workspace — '/team board --actions' \
+             lists them.",
+            bounded(id)
+        ),
+        ActionBoardRefusal::TooSoon(refusal) => render_refresh_refusal(*refusal),
+        ActionBoardRefusal::LedgerUnreadable => {
+            "· this host could not read its send journal.".to_owned()
+        }
+    }
+}
+
+/// The last board this runtime assembled, **with its view identity** (Story
+/// 19.21 `AC3(f)`): a landed retract re-renders the view the operator opened —
+/// the peer inventory as the inventory, an action board as that action's board
+/// — never the other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RememberedBoard {
+    Inventory(BoardView),
+    Action(ActionBoardView),
+}
+
+impl RememberedBoard {
+    /// Apply a landed retract's mark to the matching item, if this view holds
+    /// it. Returns whether an item matched.
+    pub(crate) fn apply_retract_mark(
+        &mut self,
+        peer: &str,
+        item_id: &str,
+        retracted_at_ms: i64,
+    ) -> bool {
+        match self {
+            Self::Inventory(view) => apply_retract_mark(view, peer, item_id, retracted_at_ms),
+            Self::Action(view) => view
+                .rows
+                .iter_mut()
+                .filter(|row| row.bound_alias.as_deref() == Some(peer))
+                .flat_map(|row| row.items.iter_mut())
+                .find(|item| item.item_id == item_id)
+                .map(|item| {
+                    item.retracted_at_ms.get_or_insert(retracted_at_ms);
+                })
+                .is_some(),
+        }
+    }
+
+    /// The view's own renderer, with the caller's injected `now`.
+    #[must_use]
+    pub fn render(&self, now_unix_secs: i64) -> String {
+        match self {
+            Self::Inventory(view) => render_board(view),
+            Self::Action(view) => render_action_board(view, now_unix_secs),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1224,6 +1947,480 @@ mod tests {
         assert_eq!(
             parse_peer_reply(&reply, None),
             Ok(Some(Some(BoardOutcome::Delivered)))
+        );
+    }
+
+    // ── Story 19.21 · the action board: the pure rules. The front-door
+    // keystones (real hosts, real journals) live in
+    // `tests/conformance_19_21_a2a_distribution.rs`. ──────────────────────
+
+    use crate::domain::models::{
+        PeerId, SemanticMessageType, SendActionId, SendActionRecipient, SendSettlement,
+        SettlementCause, SettlementCauseKind,
+    };
+    use crate::domain::services::send_action_ledger::SendActionRecipientView;
+
+    fn action_recipient(
+        alias: &str,
+        settlement: Option<SendSettlement>,
+    ) -> SendActionRecipientView {
+        SendActionRecipientView {
+            recipient: SendActionRecipient {
+                alias: alias.to_owned(),
+                peer: PeerId::from_public_key(&[1; 32]).expect("peer id"),
+                endpoint: None,
+            },
+            settlement,
+            tasks: vec!["task-1".to_owned()],
+        }
+    }
+
+    fn landed(newest: Option<Option<BoardOutcome>>) -> RecipientRead {
+        RecipientRead::Landed {
+            newest,
+            items: Vec::new(),
+            collapsed: false,
+        }
+    }
+
+    fn row_of(built: BuiltRow) -> ActionBoardRow {
+        built.row.expect("this rule renders a row")
+    }
+
+    /// Rules 0–3 — the recorded send-time outcome is authoritative, and a
+    /// remote read that WOULD say `acknowledged` never overrides it (`A5`).
+    ///
+    /// **Mutant → RED:** let a remote item override a recorded `declined`
+    /// (`M17`); swap `declined` and `unreachable` (`M13`); treat an `Unknown`
+    /// settlement as absent (`M23`). **Positive control:** the very same read
+    /// on a `delivered` settlement DOES render `acknowledged`.
+    #[test]
+    fn a_recorded_send_time_outcome_is_authoritative_and_a_remote_read_never_overrides_it() {
+        let cause = SettlementCause {
+            kind: SettlementCauseKind::Ratified,
+            text: "peer `c` is configured but its AgentCard is not cached".to_owned(),
+        };
+        let acknowledged_remote = || landed(Some(Some(BoardOutcome::Acknowledged)));
+        for (settlement, expected) in [
+            (SendSettlement::Declined, ActionRowState::Declined),
+            (
+                SendSettlement::Unreachable {
+                    cause: Some(cause.clone()),
+                },
+                ActionRowState::Unreachable {
+                    cause: Some(cause.clone()),
+                },
+            ),
+            (SendSettlement::NotSent, ActionRowState::NotSent),
+            (
+                SendSettlement::AcceptedWithoutItem,
+                ActionRowState::AcceptedWithoutItem,
+            ),
+            (
+                SendSettlement::AskedQuestion {
+                    task_id: "t9".to_owned(),
+                },
+                ActionRowState::AskedQuestion {
+                    task_id: "t9".to_owned(),
+                },
+            ),
+            (SendSettlement::Unknown, ActionRowState::Unrecognised),
+        ] {
+            let built = build_row(
+                &action_recipient("r", Some(settlement.clone())),
+                false,
+                Some("r".to_owned()),
+                acknowledged_remote(),
+            );
+            assert!(!built.collapsed, "{settlement:?} used no remote data");
+            assert_eq!(row_of(built).state, expected, "{settlement:?}");
+        }
+        // Positive control: the mapper does refine a settlement that allows it.
+        let refined = build_row(
+            &action_recipient("r", Some(SendSettlement::Delivered { item: None })),
+            false,
+            None,
+            acknowledged_remote(),
+        );
+        assert_eq!(row_of(refined).state, ActionRowState::Acknowledged);
+    }
+
+    /// Rule 4u — a correlated item whose state this build cannot name WITHHOLDS
+    /// its row (the header still counts it); it never falls through to the
+    /// settlement row and never borrows a ratified token (`M21`).
+    ///
+    /// **Positive control:** a nameable `received` item renders `●`.
+    #[test]
+    fn an_unnameable_correlated_state_withholds_the_row_instead_of_falling_through() {
+        for settlement in [None, Some(SendSettlement::Delivered { item: None })] {
+            let built = build_row(
+                &action_recipient("r", settlement),
+                true,
+                None,
+                landed(Some(None)),
+            );
+            assert!(built.row.is_none(), "an unnameable state is withheld");
+        }
+        let named = build_row(
+            &action_recipient("r", Some(SendSettlement::Delivered { item: None })),
+            false,
+            None,
+            landed(Some(Some(BoardOutcome::Delivered))),
+        );
+        assert_eq!(row_of(named).state, ActionRowState::Delivered);
+    }
+
+    /// Rules 5–10 — with nothing correlated read, the settlement speaks; `S2`
+    /// appears ONLY when a needed read failed, a landed send is never `⚠`
+    /// because a read failed (`M14`, `TM-02:236`), a live unsettled recipient
+    /// is `sending…` (never `●`, never omitted — `M18`) and one that is not
+    /// live here is `no outcome recorded`, never `sending…` (`M30`).
+    ///
+    /// **Mutant → RED:** `S2` on a successful empty read (`M20`); a read
+    /// failure renders `unreachable` (`M14`); a live unsettled row renders `●`.
+    #[test]
+    fn rules_5_to_10_speak_from_the_settlement_and_state_s2_only_for_a_failed_read() {
+        let delivered = Some(SendSettlement::Delivered { item: None });
+        let cases: [(
+            Option<SendSettlement>,
+            bool,
+            RecipientRead,
+            ActionRowState,
+            bool,
+            Option<RowNote>,
+        ); 11] = [
+            (
+                delivered.clone(),
+                false,
+                landed(None),
+                ActionRowState::Delivered,
+                false,
+                None,
+            ),
+            (
+                delivered,
+                false,
+                RecipientRead::Failed,
+                ActionRowState::Delivered,
+                true,
+                None,
+            ),
+            (
+                Some(SendSettlement::AwaitingApproval),
+                false,
+                landed(None),
+                ActionRowState::AwaitingApproval,
+                false,
+                None,
+            ),
+            (
+                Some(SendSettlement::AwaitingApproval),
+                false,
+                RecipientRead::Failed,
+                ActionRowState::AwaitingApproval,
+                true,
+                None,
+            ),
+            (
+                Some(SendSettlement::NoUsableAnswer),
+                false,
+                landed(None),
+                ActionRowState::NoUsableAnswer,
+                false,
+                Some(RowNote::NoCorrelatedItem),
+            ),
+            (
+                Some(SendSettlement::NoUsableAnswer),
+                false,
+                RecipientRead::Failed,
+                ActionRowState::NoUsableAnswer,
+                true,
+                None,
+            ),
+            (
+                None,
+                true,
+                landed(None),
+                ActionRowState::Sending,
+                false,
+                None,
+            ),
+            (
+                None,
+                true,
+                RecipientRead::Failed,
+                ActionRowState::Sending,
+                false,
+                None,
+            ),
+            (
+                None,
+                false,
+                landed(None),
+                ActionRowState::NoOutcomeRecorded,
+                false,
+                None,
+            ),
+            (
+                None,
+                false,
+                RecipientRead::Failed,
+                ActionRowState::NoOutcomeRecorded,
+                true,
+                None,
+            ),
+            // An item that landed before any settlement was recorded
+            // establishes delivery through its dispatch correlation (rule 4).
+            (
+                None,
+                false,
+                landed(Some(Some(BoardOutcome::Delivered))),
+                ActionRowState::Delivered,
+                false,
+                None,
+            ),
+        ];
+        for (settlement, live, read, state, read_failed, note) in cases {
+            let label = format!("{settlement:?} live={live}");
+            let row = row_of(build_row(
+                &action_recipient("r", settlement),
+                live,
+                None,
+                read,
+            ));
+            assert_eq!(row.state, state, "{label}");
+            assert_eq!(row.read_failed, read_failed, "{label}");
+            assert_eq!(row.note, note, "{label}");
+        }
+    }
+
+    /// The identity precheck — no eligible binding means NO read and the
+    /// recorded outcome renders without remote refinement, with `S5`
+    /// appended, for EVERY rule (`M22`).
+    ///
+    /// **Positive control:** the same recipient with a binding is not noted.
+    #[test]
+    fn no_eligible_binding_appends_s5_and_never_refines_remotely() {
+        for (settlement, live, state) in [
+            (
+                Some(SendSettlement::Declined),
+                false,
+                ActionRowState::Declined,
+            ),
+            (
+                Some(SendSettlement::Delivered { item: None }),
+                false,
+                ActionRowState::Delivered,
+            ),
+            (
+                Some(SendSettlement::NoUsableAnswer),
+                false,
+                ActionRowState::NoUsableAnswer,
+            ),
+            (None, true, ActionRowState::Sending),
+            (None, false, ActionRowState::NoOutcomeRecorded),
+        ] {
+            let row = row_of(build_row(
+                &action_recipient("r", settlement.clone()),
+                live,
+                None,
+                RecipientRead::NoBinding,
+            ));
+            assert_eq!(row.state, state, "{settlement:?}");
+            assert_eq!(row.note, Some(RowNote::NoEligibleBinding), "{settlement:?}");
+            assert!(!row.read_failed, "a read that never happened did not fail");
+        }
+        let bound = row_of(build_row(
+            &action_recipient("r", Some(SendSettlement::Declined)),
+            false,
+            Some("r".to_owned()),
+            RecipientRead::NotNeeded,
+        ));
+        assert_eq!(bound.note, None);
+    }
+
+    fn action_view(rows: Vec<ActionBoardRow>, addressed: usize) -> ActionBoardView {
+        ActionBoardView {
+            action: SendActionId::from_replay("sa_test"),
+            message_type: SemanticMessageType::StoryAssignment,
+            subject: Some("sprint-7".to_owned()),
+            recorded_at_ms: 1_700_000_000_000,
+            addressed,
+            rows,
+            unnameable: 0,
+            principal_collapsed: false,
+        }
+    }
+
+    fn action_row(alias: &str, state: ActionRowState) -> ActionBoardRow {
+        ActionBoardRow {
+            alias: alias.to_owned(),
+            bound_alias: Some(alias.to_owned()),
+            state,
+            read_failed: false,
+            note: None,
+            items: Vec::new(),
+        }
+    }
+
+    /// `S1` — the header carries the type, the sender-local label, the age
+    /// from the INJECTED `now` and the **addressed count** from the action
+    /// record: six addressed, five rows rendered (one withheld) reads
+    /// `6 addressed`; no aggregate stands for the set; an absent label leaves
+    /// no line and no placeholder.
+    ///
+    /// **Mutant → RED:** count rows or settlements instead of the record
+    /// (`M24`); append `k of N` / a percentage / an acknowledged count
+    /// (`M25`); measure the age against the wall clock (`M31`); render a
+    /// placeholder for an absent label (`M33`). **Positive control:** the five
+    /// per-recipient tokens and the count ARE present.
+    #[test]
+    fn the_header_carries_the_addressed_count_and_no_aggregate() {
+        let mut view = action_view(
+            vec![
+                action_row("jun-dev", ActionRowState::Acknowledged),
+                action_row("tom-dev", ActionRowState::Delivered),
+                action_row("yuki-dev", ActionRowState::Declined),
+                action_row("nina-ux", ActionRowState::Unreachable { cause: None }),
+                action_row("sam-qa", ActionRowState::Sending),
+            ],
+            6,
+        );
+        view.unnameable = 1;
+        let rendered = render_action_board(&view, 1_700_000_000 + 180);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines[0], "Distribution board · story_assignment");
+        assert_eq!(lines[1], "sprint-7");
+        assert_eq!(lines[2], "attempted 3m ago · 6 addressed");
+        // Positive control — per-recipient tokens, in operator order.
+        for (index, expected) in [
+            "  ✓ jun-dev   acknowledged",
+            "  ● tom-dev   delivered",
+            "  ✗ yuki-dev  declined",
+            "  ⚠ nina-ux   unreachable",
+            "    sam-qa    sending…",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(lines[3 + index], expected, "{rendered}");
+        }
+        assert!(rendered.contains("1 roster peer reported an outcome this build cannot name"));
+        for aggregate in ["5 of 6", "5 / 6", "%", "1 acknowledged", "of 6", "settled"] {
+            assert!(!rendered.contains(aggregate), "{aggregate}: {rendered}");
+        }
+        // The age follows the injected `now`, nothing else.
+        assert!(render_action_board(&view, 1_700_000_000 + 7_200).contains("attempted 2h ago"));
+        // No label ⇒ no line; untyped ⇒ the bare title; no placeholder.
+        view.subject = None;
+        view.message_type = SemanticMessageType::Unknown;
+        let plain = render_action_board(&view, 1_700_000_000);
+        let plain: Vec<&str> = plain.lines().collect();
+        assert_eq!(plain[0], "Distribution board");
+        assert_eq!(plain[1], "attempted just now · 6 addressed");
+        // A line with no journal timestamp is an explicit unknown, never 1970.
+        view.recorded_at_ms = 0;
+        assert!(render_action_board(&view, 1_700_000_000).contains("attempted at an unknown time"),);
+    }
+
+    /// `S6`, `S9`, `S12` and `S13` (the unreadable send journal) render
+    /// exactly, newest first, with the label line only when present.
+    #[test]
+    fn the_action_list_and_refusals_render_the_ratified_copy() {
+        use crate::domain::services::send_action_ledger::SendActionView;
+
+        let action = |id: &str, subject: Option<&str>, kind, count: usize| SendActionView {
+            id: SendActionId::from_replay(id),
+            recorded_at_ms: 1_700_000_000_000,
+            message_type: kind,
+            subject: subject.map(str::to_owned),
+            recipients: (0..count)
+                .map(|n| action_recipient(&format!("r{n}"), None))
+                .collect(),
+        };
+        let list = render_action_list(
+            &[
+                action("sa_b", None, SemanticMessageType::Unknown, 2),
+                action(
+                    "sa_a",
+                    Some("sprint-7"),
+                    SemanticMessageType::StoryAssignment,
+                    4,
+                ),
+            ],
+            1_700_000_000 + 3_600,
+        );
+        assert_eq!(
+            list,
+            "sa_b  untyped  attempted 1h ago · 2 addressed\n\
+             sa_a  story_assignment  attempted 1h ago · 4 addressed\n    sprint-7\n"
+        );
+        assert_eq!(
+            render_action_board_refusal(&ActionBoardRefusal::NoAction),
+            "· no send action recorded in this workspace\n    '/team board' reads the peer item inventory."
+        );
+        assert_eq!(
+            render_action_board_refusal(&ActionBoardRefusal::UnknownAction("sa_zz".to_owned())),
+            "· no send action 'sa_zz' is recorded in this workspace — '/team board --actions' lists them."
+        );
+        assert_eq!(
+            render_action_board_refusal(&ActionBoardRefusal::LedgerUnreadable),
+            "· this host could not read its send journal."
+        );
+    }
+
+    /// Peer- and operator-influenced fields are sanitized once at render
+    /// (`AD-1824`): an alias or label carrying a newline cannot forge a second
+    /// row or a second header line.
+    ///
+    /// **Mutant → RED:** drop the sanitizer on the alias or the label.
+    #[test]
+    fn a_hostile_alias_or_label_cannot_forge_a_row() {
+        let mut view = action_view(
+            vec![action_row(
+                "jun\n  ✓ forged  acknowledged",
+                ActionRowState::Declined,
+            )],
+            1,
+        );
+        view.subject = Some("sprint\n  ✓ forged2  acknowledged".to_owned());
+        let rendered = render_action_board(&view, 1_700_000_000);
+        assert_eq!(rendered.lines().count(), 4, "{rendered}");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| !line.trim_start().starts_with("✓ forged")),
+            "{rendered}"
+        );
+    }
+
+    /// `AC3(f)` — the remembered board keeps its view identity: a landed
+    /// retract re-renders the ACTION board it was opened from (matching on the
+    /// CURRENT roster alias the row was read through), and the inventory as
+    /// the inventory — never the other.
+    ///
+    /// **Mutant → RED:** patch the wrong remembered view (`M32`).
+    /// **Positive control:** a mark for another peer matches nothing.
+    #[test]
+    fn a_retract_mark_re_renders_the_view_it_was_opened_from() {
+        let mut row = action_row("jun-dev", ActionRowState::Delivered);
+        row.bound_alias = Some("jun-dev-renamed".to_owned());
+        row.items = vec![item("ri_a", 0)];
+        let mut remembered = RememberedBoard::Action(action_view(vec![row], 1));
+        assert!(!remembered.apply_retract_mark("jun-dev", "ri_a", 1_700_000_000_000));
+        assert!(remembered.apply_retract_mark("jun-dev-renamed", "ri_a", 1_700_000_000_000));
+        let rendered = remembered.render(1_700_000_000);
+        assert!(
+            rendered.starts_with("Distribution board · story_assignment"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("[retracted 22:13]"), "{rendered}");
+        let inventory = RememberedBoard::Inventory(view_with(vec![item("ri_a", 0)]));
+        assert!(
+            inventory
+                .render(0)
+                .starts_with("Peer item inventory · 1 row"),
+            "the inventory keeps its own heading"
         );
     }
 }

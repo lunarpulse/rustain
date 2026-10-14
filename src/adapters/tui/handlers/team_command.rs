@@ -22,7 +22,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [<peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
 
 /// Three verbs retract three different objects (`…addendum-team-messaging.md:116`),
 /// so every refusal of one names the others **by object** (Story 19.16f
@@ -79,6 +79,50 @@ pub struct TeamLogArgs {
     pub export: bool,
 }
 
+/// Which board `/team board …` asks for (Story 19.21 `AC3(a)`). The selectors
+/// are mutually exclusive: a flag and a peer id never combine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamBoardSelector {
+    /// Bare `/team board` — Story 19.16f's cross-peer item inventory/picker.
+    Inventory,
+    /// `/team board <peer-id>` — one roster peer, its item rows uncapped.
+    Peer(String),
+    /// `/team board --last` — the newest send action in this workspace journal.
+    Last,
+    /// `/team board --action <id>` — one recorded send action.
+    Action(String),
+    /// `/team board --actions` — every recorded send action, newest first.
+    Actions,
+}
+
+/// The wire form of a board selector (`ClientFrame::TeamBoard`). The attached
+/// client sends this; the bridge turns it back, so the daemon never names a
+/// TUI type.
+impl From<&TeamBoardSelector> for crate::adapters::daemon::protocol::TeamBoardRequest {
+    fn from(selector: &TeamBoardSelector) -> Self {
+        match selector {
+            TeamBoardSelector::Inventory => Self::Inventory,
+            TeamBoardSelector::Peer(peer) => Self::Peer(peer.clone()),
+            TeamBoardSelector::Last => Self::Last,
+            TeamBoardSelector::Action(id) => Self::Action(id.clone()),
+            TeamBoardSelector::Actions => Self::Actions,
+        }
+    }
+}
+
+impl From<crate::adapters::daemon::protocol::TeamBoardRequest> for TeamBoardSelector {
+    fn from(request: crate::adapters::daemon::protocol::TeamBoardRequest) -> Self {
+        use crate::adapters::daemon::protocol::TeamBoardRequest as Request;
+        match request {
+            Request::Inventory => Self::Inventory,
+            Request::Peer(peer) => Self::Peer(peer),
+            Request::Last => Self::Last,
+            Request::Action(id) => Self::Action(id),
+            Request::Actions => Self::Actions,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum TeamCommandArgs {
     Log(TeamLogArgs),
@@ -87,12 +131,15 @@ pub enum TeamCommandArgs {
     /// `<peer-id>`, that one roster peer with its item rows uncapped (Story
     /// 19.16f `AC9`).
     Board {
-        peer: Option<String>,
+        selector: TeamBoardSelector,
     },
     Send {
         recipients: Vec<String>,
         text: String,
         message_type: Option<crate::domain::models::SemanticMessageType>,
+        /// Story 19.21 `C3` — the optional sender-local label. ⛔ Never sent
+        /// to a recipient and never derived from the body.
+        subject: Option<String>,
     },
     Acknowledge {
         item_id: String,
@@ -149,14 +196,34 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
     let verb = tokens.next().unwrap_or("log");
     match verb {
         "board" => {
-            let peer = tokens.next().map(str::to_owned);
+            let selector = match tokens.next() {
+                None => TeamBoardSelector::Inventory,
+                Some("--last") => TeamBoardSelector::Last,
+                Some("--actions") => TeamBoardSelector::Actions,
+                Some("--action") => {
+                    let id = tokens.next().ok_or_else(|| {
+                        format!("Missing action id after '/team board --action'. Use: {USAGE}")
+                    })?;
+                    TeamBoardSelector::Action(id.to_owned())
+                }
+                Some(flag) if flag.starts_with("--") => {
+                    return Err(format!(
+                        "Unknown /team board flag '{}'. Use: {USAGE}",
+                        crate::domain::services::transparency::sanitize_disclosable(
+                            flag,
+                            crate::domain::services::transparency::MAX_PEER_ID_BYTES
+                        )
+                    ));
+                }
+                Some(peer) => TeamBoardSelector::Peer(peer.to_owned()),
+            };
             if tokens.next().is_some() {
                 return Err(format!(
-                    "'/team board' reads every configured A2A peer, or one named peer: it takes \
-                     at most one peer id. Use: {USAGE}"
+                    "'/team board' takes one selector — --last, --actions, --action <action-id> \
+                     or one peer id — and never a flag together with a peer id. Use: {USAGE}"
                 ));
             }
-            Ok(TeamCommandArgs::Board { peer })
+            Ok(TeamCommandArgs::Board { selector })
         }
         "retract" => {
             let (Some(peer), Some(item_id), None) = (tokens.next(), tokens.next(), tokens.next())
@@ -172,15 +239,20 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
             })
         }
         "send" => {
-            let first_token = tokens
+            // `/team send [--type <t>] [--subject <label>] <aliases> <body>`, in
+            // that order. `body_tokens` counts the positional tokens before the
+            // body, so it is located by POSITION (the 19.17 `M01` defect).
+            let mut body_tokens = 1usize;
+            let mut next = tokens
                 .next()
                 .ok_or_else(|| format!("Missing peer id after '/team send'. Use: {USAGE}"))?;
-            let (message_type, recipient_token, body_tokens) = if first_token == "--type" {
+            let mut message_type = None;
+            if next == "--type" {
                 let type_token = tokens.next().ok_or_else(|| {
                     format!("Missing message type after '/team send --type'. Use: {USAGE}")
                 })?;
-                let message_type = crate::domain::models::SemanticMessageType::parse(type_token);
-                if message_type == crate::domain::models::SemanticMessageType::Unknown {
+                let parsed = crate::domain::models::SemanticMessageType::parse(type_token);
+                if parsed == crate::domain::models::SemanticMessageType::Unknown {
                     let valid = crate::domain::models::semantic_message_type_tokens();
                     let count = valid.len();
                     let prefix = "message type '";
@@ -205,13 +277,46 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
                     }
                     return Err(refusal);
                 }
-                let recipient_token = tokens.next().ok_or_else(|| {
+                message_type = Some(parsed);
+                next = tokens.next().ok_or_else(|| {
                     format!("Missing peer id after '/team send --type {type_token}'. Use: {USAGE}")
                 })?;
-                (Some(message_type), recipient_token, 3)
-            } else {
-                (None, first_token, 1)
-            };
+                body_tokens += 2;
+            }
+            let mut subject = None;
+            if next == "--subject" {
+                use crate::domain::services::send_action_ledger::{
+                    MAX_SUBJECT_CHARS, SubjectRefusal, validate_subject,
+                };
+
+                let missing =
+                    || format!("Missing subject after '/team send --subject'. Use: {USAGE}");
+                let label = tokens.next().ok_or_else(missing)?;
+                match validate_subject(label) {
+                    Ok(()) => {}
+                    Err(SubjectRefusal::TooLong) => {
+                        return Err(format!(
+                            "Subject '{}' is longer than {MAX_SUBJECT_CHARS} characters. \
+                             Use: {USAGE}",
+                            crate::domain::services::transparency::sanitize_disclosable(
+                                label,
+                                crate::domain::services::transparency::MAX_PEER_ID_BYTES
+                            )
+                        ));
+                    }
+                    // A token cannot hold whitespace, so `NotOneToken` is a
+                    // rail-neutral guard the wire path needs, not this one.
+                    Err(SubjectRefusal::Missing | SubjectRefusal::NotOneToken) => {
+                        return Err(missing());
+                    }
+                }
+                subject = Some(label.to_owned());
+                next = tokens.next().ok_or_else(|| {
+                    format!("Missing peer id after '/team send --subject {label}'. Use: {USAGE}")
+                })?;
+                body_tokens += 2;
+            }
+            let recipient_token = next;
             let mut recipients = Vec::new();
             for id in recipient_token.split(',') {
                 if id.is_empty() || recipients.iter().any(|existing| existing == id) {
@@ -228,6 +333,7 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
                 recipients,
                 text,
                 message_type,
+                subject,
             })
         }
         // Story 19.18 `AC1` — bodies are located by TOKEN POSITION, ⛔ never
@@ -644,20 +750,22 @@ pub(crate) fn show_team_board(state: &mut TuiState, message: String) {
 
 /// Typed, action-local row state. The block text is always a projection of
 /// these rows, never mutated by line number or completion order.
-#[cfg(feature = "a2a")]
 #[derive(Clone)]
 pub struct TeamSendRow {
     pub alias: String,
-    pub outcome: Option<crate::adapters::a2a::send::RecipientOutcome>,
+    pub outcome: Option<crate::domain::models::RecipientOutcome>,
 }
 
-#[cfg(feature = "a2a")]
+/// The single feature-independent renderer for standalone and attached sends.
 pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
     use std::borrow::Cow;
     use std::fmt::Write;
 
-    use crate::adapters::a2a::board::BoardOutcome;
-    use crate::adapters::a2a::send::{RecipientOutcome, SendCause};
+    use crate::domain::models::team_send::{
+        TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL, TEAM_SEND_DECLINED_LABEL, TEAM_SEND_DELIVERED_LABEL,
+        TEAM_SEND_NOT_SENT_LABEL, TEAM_SEND_UNREACHABLE_LABEL,
+    };
+    use crate::domain::models::{RecipientOutcome, SendCause};
     use crate::domain::services::transparency::{
         MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, sanitize_disclosable,
     };
@@ -674,19 +782,15 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
             .as_ref()
         {
             None => (" ", Cow::Borrowed("sending…"), None),
-            Some(RecipientOutcome::Delivered) => (
-                BoardOutcome::Delivered.token(),
-                Cow::Borrowed(BoardOutcome::Delivered.label()),
-                None,
-            ),
-            Some(RecipientOutcome::Declined) => (
-                BoardOutcome::Declined.token(),
-                Cow::Borrowed(BoardOutcome::Declined.label()),
-                None,
-            ),
+            Some(RecipientOutcome::Delivered) => {
+                ("●", Cow::Borrowed(TEAM_SEND_DELIVERED_LABEL), None)
+            }
+            Some(RecipientOutcome::Declined) => {
+                ("✗", Cow::Borrowed(TEAM_SEND_DECLINED_LABEL), None)
+            }
             Some(RecipientOutcome::Unreachable { cause }) => (
-                BoardOutcome::Unreachable.token(),
-                Cow::Borrowed(BoardOutcome::Unreachable.label()),
+                "⚠",
+                Cow::Borrowed(TEAM_SEND_UNREACHABLE_LABEL),
                 cause.as_ref(),
             ),
             Some(RecipientOutcome::AwaitingApproval) => {
@@ -694,7 +798,7 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
             }
             Some(RecipientOutcome::AcceptedWithoutItem) => (
                 " ",
-                Cow::Borrowed("accepted — this peer keeps no item id"),
+                Cow::Borrowed(TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL),
                 None,
             ),
             Some(RecipientOutcome::NoUsableAnswer) => (
@@ -702,16 +806,14 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
                 Cow::Borrowed("no usable answer — '/team board' shows whether it arrived"),
                 None,
             ),
-            Some(RecipientOutcome::NotSent) => (
-                " ",
-                Cow::Borrowed("not sent — this host could not record the attempt"),
-                None,
-            ),
+            Some(RecipientOutcome::NotSent) => (" ", Cow::Borrowed(TEAM_SEND_NOT_SENT_LABEL), None),
             Some(RecipientOutcome::AskedQuestion { task_id }) => (
                 " ",
-                Cow::Owned(format!(
-                    "asked a question this verb cannot answer (task `{}` cancelled) — this peer uses A2A input-required, which rustain does not continue yet",
-                    sanitize_disclosable(task_id, MAX_PEER_ID_BYTES)
+                Cow::Owned(crate::domain::services::transparency::sanitize_disclosable(
+                    &format!(
+                        "asked a question this verb cannot answer (task `{task_id}` cancelled) — this peer uses A2A input-required, which rustain does not continue yet"
+                    ),
+                    MAX_PEER_ID_BYTES,
                 )),
                 None,
             ),
@@ -1049,19 +1151,41 @@ mod tests {
     /// "takes no arguments" refusal: one `<peer-id>` narrows the board to that
     /// roster peer — the escape hatch the capped picker's overflow line names.
     /// Two tokens still refuse.
-    fn board_is_a_named_verb_that_takes_at_most_one_peer_id() {
-        assert_eq!(
-            parse_team_command(Some("board")),
-            Ok(TeamCommandArgs::Board { peer: None })
-        );
-        assert_eq!(
-            parse_team_command(Some("board jun-dev")),
-            Ok(TeamCommandArgs::Board {
-                peer: Some("jun-dev".to_owned())
-            })
-        );
-        parse_team_command(Some("board jun-dev tom-dev"))
-            .expect_err("one narrowed peer, never a peer list");
+    fn board_selectors_are_mutually_exclusive_and_a_peer_id_is_never_a_flag() {
+        for (input, selector) in [
+            ("board", TeamBoardSelector::Inventory),
+            (
+                "board jun-dev",
+                TeamBoardSelector::Peer("jun-dev".to_owned()),
+            ),
+            ("board --last", TeamBoardSelector::Last),
+            ("board --actions", TeamBoardSelector::Actions),
+            (
+                "board --action sa_abc123",
+                TeamBoardSelector::Action("sa_abc123".to_owned()),
+            ),
+        ] {
+            assert_eq!(
+                parse_team_command(Some(input)),
+                Ok(TeamCommandArgs::Board { selector }),
+                "{input}"
+            );
+        }
+        // A flag and a peer id never combine, and a flag is never a peer id.
+        for malformed in [
+            "board jun-dev tom-dev",
+            "board --last jun-dev",
+            "board jun-dev --last",
+            "board --last --actions",
+            "board --actions extra",
+            "board --action",
+            "board --action sa_a sa_b",
+            "board --nonsense",
+        ] {
+            let refusal =
+                parse_team_command(Some(malformed)).expect_err(&format!("{malformed} must refuse"));
+            assert!(refusal.contains("Use: /team log"), "{malformed}: {refusal}");
+        }
     }
 
     /// Retract requires exactly a peer and an item.
@@ -1103,6 +1227,7 @@ mod tests {
                 recipients: vec!["moon".to_owned()],
                 text: "Καλημέρα 🌕\tsecond  line".to_owned(),
                 message_type: None,
+                subject: None,
             })
         );
         assert!(parse_team_command(Some("send")).is_err());
@@ -1120,7 +1245,85 @@ mod tests {
                 recipients: vec!["κ".to_owned(), "δ".to_owned()],
                 text: body.to_owned(),
                 message_type: Some(crate::domain::models::SemanticMessageType::Consultation),
+                subject: None,
             })
+        );
+    }
+
+    /// Story 19.21 `AC1(b)` — `--subject` follows `--type`, takes ONE token of
+    /// at most 64 characters that never starts with `--`, and never shifts the
+    /// body: the body is located by position, and text that merely *looks* like
+    /// the flag inside the body stays body.
+    ///
+    /// **Mutant → RED:** read the label after the aliases; drop the length
+    /// bound; count the label in the wrong number of positional tokens (the
+    /// body loses or gains its first word).
+    #[test]
+    fn subject_follows_type_takes_one_bounded_token_and_never_shifts_the_body() {
+        use crate::domain::models::SemanticMessageType::StoryAssignment;
+
+        assert_eq!(
+            parse_team_command(Some(
+                "send --type story_assignment --subject sprint-7 jun-dev,tom-dev  story 1\n story 2"
+            )),
+            Ok(TeamCommandArgs::Send {
+                recipients: vec!["jun-dev".to_owned(), "tom-dev".to_owned()],
+                text: "story 1\n story 2".to_owned(),
+                message_type: Some(StoryAssignment),
+                subject: Some("sprint-7".to_owned()),
+            })
+        );
+        // Untyped, and the flag spelled inside the body stays body.
+        assert_eq!(
+            parse_team_command(Some("send --subject s jun-dev --subject x")),
+            Ok(TeamCommandArgs::Send {
+                recipients: vec!["jun-dev".to_owned()],
+                text: "--subject x".to_owned(),
+                message_type: None,
+                subject: Some("s".to_owned()),
+            })
+        );
+        assert_eq!(
+            parse_team_command(Some("send jun-dev --subject x")),
+            Ok(TeamCommandArgs::Send {
+                recipients: vec!["jun-dev".to_owned()],
+                text: "--subject x".to_owned(),
+                message_type: None,
+                subject: None,
+            }),
+            "no label before the aliases means no label"
+        );
+        // The bound is inclusive at 64 characters (positive control).
+        let at_bound = "é".repeat(64);
+        assert!(matches!(
+            parse_team_command(Some(&format!("send --subject {at_bound} jun-dev hi"))),
+            Ok(TeamCommandArgs::Send { subject: Some(label), .. }) if label == at_bound
+        ));
+        let over = "é".repeat(65);
+        let refusal = parse_team_command(Some(&format!("send --subject {over} jun-dev hi")))
+            .expect_err("65 characters refuse the whole action");
+        assert!(
+            refusal.contains("is longer than 64 characters. Use: /team log"),
+            "{refusal}"
+        );
+        for missing in [
+            "send --subject",
+            "send --subject --type story_assignment jun-dev hi",
+            "send --type story_assignment --subject",
+        ] {
+            let refusal = parse_team_command(Some(missing)).expect_err(missing);
+            assert!(
+                refusal.starts_with("Missing subject after '/team send --subject'. Use: "),
+                "{missing}: {refusal}"
+            );
+        }
+        assert!(
+            parse_team_command(Some("send --subject s")).is_err(),
+            "no aliases"
+        );
+        assert!(
+            parse_team_command(Some("send --subject s jun-dev")).is_err(),
+            "no body"
         );
     }
 
@@ -1174,6 +1377,7 @@ mod tests {
                 recipients: vec!["a".into(), "b".into(), "c".into()],
                 text: "body".into(),
                 message_type: None,
+                subject: None,
             })
         );
         assert_eq!(
@@ -1182,6 +1386,7 @@ mod tests {
                 recipients: vec!["e".into()],
                 text: "hi".into(),
                 message_type: None,
+                subject: None,
             })
         );
         for input in [
@@ -1195,10 +1400,9 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "a2a")]
     #[test]
     fn send_rows_keep_operator_order_and_strip_peer_line_injection() {
-        use crate::adapters::a2a::send::{RecipientOutcome, SendCause};
+        use crate::domain::models::{RecipientOutcome, SendCause};
 
         let rows = [
             TeamSendRow {
@@ -1708,6 +1912,7 @@ mod tests {
                 recipients: vec!["a".to_owned(), "a2".to_owned()],
                 text: "a2  hello".to_owned(),
                 message_type: None,
+                subject: None,
             })
         );
     }

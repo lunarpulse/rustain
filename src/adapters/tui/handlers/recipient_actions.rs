@@ -100,6 +100,8 @@ pub(crate) fn action_is_pending(
             && match pending_target {
                 RecipientActionTarget::Item { item_id } => matches!(target, RecipientSurfaceTarget::Item(address) if address.item().as_str() == item_id),
                 RecipientActionTarget::Node { node_id } => node == Some(node_id.as_str()),
+                // A `/team` request key never names a recipient surface.
+                RecipientActionTarget::Request { .. } => false,
             }
     })
 }
@@ -289,6 +291,10 @@ fn action_notice<'a>(
                 RecipientAction::Reply | RecipientAction::Response => "response",
                 RecipientAction::ContextSelect => "context selection",
                 RecipientAction::ContextRemove => "context removal",
+                RecipientAction::TeamSend => "team send",
+                RecipientAction::TeamBoard => "team board",
+                RecipientAction::TeamStatus => "team status",
+                RecipientAction::RevokeSenderConsent => "sender consent revocation",
             };
             let id = target_id(target);
             Cow::Owned(format!(
@@ -357,6 +363,7 @@ fn target_id(target: &RecipientActionTarget) -> &str {
     match target {
         RecipientActionTarget::Item { item_id } => item_id,
         RecipientActionTarget::Node { node_id } => node_id,
+        RecipientActionTarget::Request { request } => request,
     }
 }
 
@@ -370,6 +377,7 @@ fn surface_matches(
             matches!(surface, RecipientSurfaceTarget::Item(address) if address.item().as_str() == item_id)
         }
         RecipientActionTarget::Node { node_id } => node == Some(node_id.as_str()),
+        RecipientActionTarget::Request { .. } => false,
     }
 }
 

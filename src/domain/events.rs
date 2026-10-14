@@ -178,7 +178,7 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         block_id: String,
         index: usize,
-        outcome: crate::adapters::a2a::send::RecipientOutcome,
+        outcome: crate::domain::models::RecipientOutcome,
     },
 
     /// The confirm-time read behind `/team retract` finished (Story 19.16f

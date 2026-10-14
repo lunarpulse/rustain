@@ -150,6 +150,8 @@ class RustainTUI:
     extra_args: list[str] | None = None
     """Arguments appended after the binary (and ``--new``), e.g.
     ``["daemon", "attach"]`` to drive the daemon-attached client."""
+    binary: Path | None = None
+    """Per-process binary override; defaults to RUSTAIN_TUI_BINARY/build behavior."""
 
     _child: pexpect.spawn | None = field(default=None, init=False, repr=False)
     _tmpdir: tempfile.TemporaryDirectory | None = field(
@@ -167,12 +169,14 @@ class RustainTUI:
         # A named binary is spawned as named: no build, and no silent fallback to
         # target/debug — a missing path is the caller's mistake, said out loud
         # before cargo runs and before pexpect turns it into its own error.
-        self._binary, overridden = _resolve_binary()
+        if self.binary is not None:
+            self._binary, overridden = self.binary.resolve(), True
+        else:
+            self._binary, overridden = _resolve_binary()
         if overridden:
-            if not self._binary.exists():
-                raise FileNotFoundError(
-                    f"RUSTAIN_TUI_BINARY={self._binary} does not exist"
-                )
+            if not self._binary.is_file():
+                source = f"binary={self._binary}" if self.binary is not None else f"RUSTAIN_TUI_BINARY={self._binary}"
+                raise FileNotFoundError(f"{source} does not exist")
         elif self.build:
             _build_binary()
 

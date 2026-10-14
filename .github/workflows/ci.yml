@@ -164,6 +164,7 @@ jobs:
             --test conformance_19_18d_a2a_peer_binding \
             --test conformance_19_18e_a2a_task_continuity \
             --test conformance_19_19_a2a_consultation \
+            --test conformance_19_21_a2a_distribution \
             --test conformance_a2a_architecture \
             --test conformance_18_3c_response_modes \
             --test conformance_18_3a_c_artifacts \
@@ -403,4 +404,50 @@ jobs:
           name: story-19-19-act2
           path: |
             act2-results.xml
+            tests_tui/journeys/j10/receipts/evidence/${{ github.run_id }}-${{ github.run_attempt }}/**
+  tui-act1:
+    name: Story 19.21 Executing Act 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build four-feature release capture binary
+        run: cargo build --release --features self-update,relay-server,a2a,p2p
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install native TUI capture dependencies
+        run: pip install -e "./tests_tui[dev]"
+      - name: Execute named Act 1 viewports and daemon restart without reruns
+        env:
+          RUSTAIN_TUI_BINARY: ${{ github.workspace }}/target/release/rustain
+          RUSTAIN_CAPTURE_EVIDENCE_DIR: ${{ github.workspace }}/tests_tui/journeys/j10/receipts/evidence/${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          pytest \
+            'tests_tui/test_story_19_21_act1_distribution.py::test_act1_attached_distribution[80x24]' \
+            'tests_tui/test_story_19_21_act1_distribution.py::test_act1_attached_distribution[130x30]' \
+            'tests_tui/test_story_19_21_act1_distribution.py::test_act1_attached_distribution[60x16]' \
+            'tests_tui/test_story_19_21_act1_distribution.py::test_act1_daemon_crash_restart' \
+            -p no:rerunfailures -n 0 --timeout=420 --junitxml=act1-results.xml -v
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("act1-results.xml").findall(".//testcase")
+          expected = {
+              "test_act1_attached_distribution[80x24]",
+              "test_act1_attached_distribution[130x30]",
+              "test_act1_attached_distribution[60x16]",
+              "test_act1_daemon_crash_restart",
+          }
+          assert {case.attrib["name"] for case in cases} == expected and len(cases) == 4, cases
+          assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required Act 1 case skipped/failed/errored"
+          PY
+      - name: Retain actual Act 1 receipts, evidence, and named-case results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: story-19-21-act1
+          path: |
+            act1-results.xml
             tests_tui/journeys/j10/receipts/evidence/${{ github.run_id }}-${{ github.run_attempt }}/**

@@ -272,7 +272,7 @@ fn production_wiring_uses_the_journal_projection_and_central_a2a_gate() {
     assert!(!startup_production.contains("EmptyConsentProjection"));
     assert!(!doctor.contains("EmptyConsentProjection"));
     assert!(a2a.contains("runtime.enforces_sender_consent()"));
-    assert!(daemon.contains("new_with_node_tree_bus_policy_journal_and_urgency"));
+    assert!(daemon.contains("new_with_node_tree_bus_policy_journal_urgency_and_team"));
 }
 
 #[test]

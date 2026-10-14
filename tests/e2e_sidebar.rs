@@ -559,8 +559,10 @@ fn test_e2e_bulk_delete_with_confirmation() {
 
 #[test]
 fn test_format_relative_time_ranges() {
+    use rustain::domain::services::relative_time::format_relative_time;
+
     let now = 1_700_000_000;
-    assert_eq!(sidebar::format_relative_time(now - 5, now), "just now");
-    assert_eq!(sidebar::format_relative_time(now - 120, now), "2m ago");
-    assert_eq!(sidebar::format_relative_time(now - 7200, now), "2h ago");
+    assert_eq!(format_relative_time(now - 5, now), "just now");
+    assert_eq!(format_relative_time(now - 120, now), "2m ago");
+    assert_eq!(format_relative_time(now - 7200, now), "2h ago");
 }

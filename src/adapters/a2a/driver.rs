@@ -32,8 +32,8 @@ use crate::domain::events::{AppEvent, DomainEventPayload};
 use crate::domain::models::{
     A2aPeerSpec, AgentId, AgentMetrics, CapabilityTokenId, ContentHash, CorrelationId, Direction,
     MessageKind, NodeState, Op, PeerId, RapTaskState, RefuseReason, RejectReason, RoomEvent,
-    SemanticMessageType, SubagentEnvelope, SubagentEvent, TrustTier,
-    semantic_message_type_metadata,
+    SemanticMessageType, SendActionId, SendActionRecipient, SendActionRef, SendSettlement,
+    SubagentEnvelope, SubagentEvent, TrustTier, semantic_message_type_metadata,
 };
 use crate::domain::ports::{RoomJournal, RoomJournalError};
 use crate::domain::services::peer_text::sanitize_peer_text_line;
@@ -287,6 +287,74 @@ impl std::fmt::Display for DelegationError {
 }
 pub(crate) type A2aPeerBindings = Arc<[(A2aPeerSpec, Arc<A2aClientAdapter>)]>;
 
+/// Story 19.21 rule 9 — which recipients of which action this process is still
+/// sending.
+///
+/// The registry holds only [`Weak`](std::sync::Weak) lifetime tokens; the one
+/// strong `Arc<()>` of every slot is owned by that recipient's in-flight future
+/// ([`SendLiveness`]). A recipient is therefore live exactly while its future
+/// exists: settlement drops its token, and a cancelled send drops every
+/// unfinished future — and their tokens — by ordinary ownership. Nothing
+/// mutates shared state in a `Drop`, so the project-default `tokio` lock is
+/// enough. Dead slots are pruned lazily by the next insert or read; an entry's
+/// mere presence is ⛔ never evidence of liveness.
+type LiveSendActions = Arc<
+    tokio::sync::Mutex<std::collections::HashMap<SendActionId, Vec<(u32, std::sync::Weak<()>)>>>,
+>;
+
+/// One recipient's in-flight proof. Held by that recipient's future from before
+/// its first poll until its settlement was attempted, or until the future is
+/// dropped (a cancelled send), whichever comes first.
+#[derive(Debug)]
+pub(crate) struct SendLiveness {
+    _token: Arc<()>,
+}
+
+/// The proof that one operator send action was journaled.
+/// [`Self::into_recipients`] hands each recipient its [`SendActionRef`] and its
+/// [`SendLiveness`] exactly once; the handle keeps no strong owner afterwards.
+pub(crate) struct SendActionHandle {
+    id: SendActionId,
+    tokens: Vec<Arc<()>>,
+}
+
+impl SendActionHandle {
+    pub(crate) fn id(&self) -> &SendActionId {
+        &self.id
+    }
+
+    /// One `(reference, liveness)` pair per recipient, in operator order. The
+    /// reference is what the recipient's dispatch row and settlement carry; the
+    /// liveness token must be moved into that recipient's future **before** it
+    /// is first polled, so a future dropped unpolled still releases it.
+    pub(crate) fn into_recipients(self) -> Vec<(SendActionRef, SendLiveness)> {
+        let Self { id, tokens } = self;
+        tokens
+            .into_iter()
+            .enumerate()
+            .map(|(index, token)| {
+                (
+                    SendActionRef {
+                        action: id.clone(),
+                        index: u32::try_from(index).unwrap_or(u32::MAX),
+                    },
+                    SendLiveness { _token: token },
+                )
+            })
+            .collect()
+    }
+}
+
+/// Drop every slot whose recipient future is gone, and every action left empty.
+fn prune_dead_send_slots(
+    live: &mut std::collections::HashMap<SendActionId, Vec<(u32, std::sync::Weak<()>)>>,
+) {
+    live.retain(|_, slots| {
+        slots.retain(|(_, token)| token.strong_count() > 0);
+        !slots.is_empty()
+    });
+}
+
 /// Shared A2A delegation runtime. Injected by the composition root with the
 /// live node tree, the durable journal, and the domain event sink.
 #[derive(Clone)]
@@ -300,14 +368,9 @@ pub struct A2aDelegationRuntime {
     ///
     /// Held on the runtime rather than a UI state so the stated poll floor
     /// binds every rail that can reach the egress, not just the one that
-    /// happens to render.
-    ///
-    /// ⚠ Deliberately `std::sync`, not `tokio::sync`: the critical section is
-    /// a compare and a store on one `Option<Instant>`, it is ⛔ never held
-    /// across an `.await`, and an async lock would force
-    /// [`Self::admit_board_refresh`] to be `async` — which would make the
-    /// deterministic ratchet that proves the bound an async test for no gain.
-    board_refresh_gate: Arc<std::sync::Mutex<Option<std::time::Instant>>>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: one compare + one store, never across `.await`; process-architecture.md §1.2
+    /// happens to render. `now` is injected by the caller, so the bound stays a
+    /// deterministic ratchet rather than a timing window.
+    board_refresh_gate: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
     /// Read side of the same journal, for the board's dispatch-ledger probe
     /// (19.16b `AC3(g)`). `RoomJournal` itself is write-only by design, so
     /// the reader is injected beside it — `None` degrades the board to
@@ -322,8 +385,10 @@ pub struct A2aDelegationRuntime {
     /// The last board this runtime assembled (Story 19.16f `AC10(d)`): a
     /// landed retract re-renders it with the recipient's mark applied, ⛔
     /// never by a second fan-out (the refresh floor would refuse one, and a
-    /// retract is not a board read).
-    last_board: Arc<tokio::sync::Mutex<Option<super::board::BoardView>>>,
+    /// retract is not a board read). Story 19.21 `AC3(f)`: it keeps its
+    /// **view identity** — an inventory or one action board — so the re-render
+    /// is the view the operator opened, never the other.
+    last_board: Arc<tokio::sync::Mutex<Option<super::board::RememberedBoard>>>,
     /// Story 19.18 `A13`/`Q2` — the per-process thread ledger: which peer
     /// reply turns this host already journaled, and which `(peer, task,
     /// content hash)` it dispatched. Seeded ONCE per process from the sender
@@ -334,6 +399,19 @@ pub struct A2aDelegationRuntime {
     /// Story 19.18c `PQ1` — this host's item-capability key, loaded by the
     /// composition root and injected through `A2aEgress::compose` (`A3`).
     item_capability: ItemCapabilityKeyState,
+    /// Story 19.21 rule 9 — the `(action, recipient index)` pairs THIS process
+    /// started and has not yet settled. "Live" is per process: the TUI and the
+    /// daemon share one workspace journal, so a recipient with no settlement
+    /// that is not live here is `no outcome recorded`, never `sending…`.
+    live_send_actions: LiveSendActions,
+    /// Story 19.21 `AC1(a)` — every action id this runtime knows is recorded
+    /// in the workspace journal, seeded ONCE from the journal and kept current
+    /// by this runtime's own mints, so a minted id is unique within it.
+    recorded_action_ids: Arc<tokio::sync::Mutex<Option<std::collections::HashSet<SendActionId>>>>,
+    /// Story 19.21 `AC3(c)` — the wall clock an action board's age is measured
+    /// against: the **injected `now`** (`A14`). Defaults to the system clock;
+    /// a test seam supplies a controllable one, never a sleep.
+    clock: Arc<dyn crate::domain::clock::Clock>,
 }
 
 /// One own task dispatch: peer/origin correlation and the optional human-text
@@ -497,12 +575,15 @@ impl A2aDelegationRuntime {
             event_tx,
             peer_bindings: Arc::from([]),
             journal_failure_latch: Arc::new(JournalFailureLatch::new()),
-            board_refresh_gate: Arc::new(std::sync::Mutex::new(None)), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: see the field declaration; process-architecture.md §1.2
+            board_refresh_gate: Arc::new(tokio::sync::Mutex::new(None)),
             journal_reader: None,
             board_in_flight: Arc::new(tokio::sync::Mutex::new(())),
             last_board: Arc::new(tokio::sync::Mutex::new(None)),
             thread_ledger: Arc::new(tokio::sync::Mutex::new(None)),
             item_capability: ItemCapabilityKeyState::Disabled,
+            live_send_actions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            recorded_action_ids: Arc::new(tokio::sync::Mutex::new(None)),
+            clock: Arc::new(crate::domain::clock::SystemClock::default()),
         }
     }
     /// Supply the journal's read side for the board's dispatch-ledger probe
@@ -686,6 +767,47 @@ impl A2aDelegationRuntime {
             .cloned()
     }
 
+    /// Story 19.21 `AC2` identity precheck — the **current** roster binding a
+    /// recorded recipient resolves to, or `None`.
+    ///
+    /// A recorded **pin** resolves by that pin even after an alias rename; an
+    /// unpinned record applies the 19.18c `PQ2` ownership predicate
+    /// ([`dispatch_row_is_own`]) against the binding's origin digest. ⛔ Never a
+    /// lookup by alias alone: a reused alias, or a changed pin, must resolve to
+    /// nothing rather than to an unrelated peer. Of several eligible bindings
+    /// the one still named as at send time wins.
+    pub(crate) fn eligible_binding(
+        &self,
+        recipient: &SendActionRecipient,
+    ) -> Option<(A2aPeerSpec, Arc<A2aClientAdapter>)> {
+        let mut eligible = self.peer_bindings.iter().filter(|(spec, client)| {
+            dispatch_row_is_own(
+                recipient.peer.as_str(),
+                recipient.endpoint.as_deref(),
+                spec,
+                Some(client.origin_digest().as_str()),
+            )
+        });
+        let first = eligible.next()?;
+        let chosen = std::iter::once(first)
+            .chain(eligible)
+            .find(|(spec, _)| spec.id == recipient.alias)
+            .unwrap_or(first);
+        Some(chosen.clone())
+    }
+
+    /// Replace the wall clock an action board's age is measured against.
+    #[must_use]
+    pub(crate) fn with_clock(mut self, clock: Arc<dyn crate::domain::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The injected `now`, in unix seconds.
+    pub(crate) fn wall_now_unix_secs(&self) -> i64 {
+        self.clock.wall_now_ms().div_euclid(1_000)
+    }
+
     pub(crate) fn known_peer_ids(&self) -> Vec<String> {
         let mut ids = self
             .peer_bindings
@@ -706,15 +828,12 @@ impl A2aDelegationRuntime {
     /// `now` is a parameter, not a `Instant::now()` call inside, so the bound
     /// is proven by a deterministic ratchet rather than a sleep: correct code
     /// refuses `t0 + 100ms` and admits `t0 + floor` with no timing window.
-    pub(crate) fn admit_board_refresh(
+    pub(crate) async fn admit_board_refresh(
         &self,
         now: std::time::Instant,
         floor: std::time::Duration,
     ) -> Result<(), super::board::RefreshTooSoon> {
-        let mut last = self
-            .board_refresh_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut last = self.board_refresh_gate.lock().await;
         if let Some(previous) = *last {
             let elapsed = now.saturating_duration_since(previous);
             if elapsed < floor {
@@ -754,6 +873,7 @@ impl A2aDelegationRuntime {
         spec: &A2aPeerSpec,
         task: &str,
         text: &str,
+        action: Option<&SendActionRef>,
     ) -> Result<(), DelegationError> {
         let peer = spec.resolved_identity();
         let task = sanitize_disclosable(task, MAX_PEER_ID_BYTES);
@@ -766,6 +886,7 @@ impl A2aDelegationRuntime {
             act: crate::domain::models::DispatchAct::Task,
             content_hash: Some(hash),
             endpoint: endpoint.clone(),
+            action: action.cloned(),
         })
         .await?;
         // Kept current by this path's own appends (`A13`): a send after the
@@ -908,23 +1029,195 @@ impl A2aDelegationRuntime {
         .await
     }
 
-    /// Remember the board just assembled (Story 19.16f `AC10(d)`).
-    pub(crate) async fn remember_board(&self, view: super::board::BoardView) {
-        *self.last_board.lock().await = Some(view);
+    /// Story 19.21 `AC1(a)` — journal the operator's send action: the first
+    /// write of the action, **before** any recipient preflight, dispatch or
+    /// POST. Each alias freezes the identity [`Self::journal_send_dispatch`]
+    /// resolves (pinned identity or alias pseudonym, plus `PQ2`'s unpinned
+    /// origin digest). ⛔ No body bytes: the row carries the hash and the byte
+    /// count only, and the `subject` label is sender-local.
+    ///
+    /// On success every recipient slot has a liveness token (rule 9) that its
+    /// recipient future owns until its settlement is attempted or it is dropped.
+    ///
+    /// # Errors
+    ///
+    /// An unresolved alias, or the append failure (latched like every other
+    /// send-path failure). The caller then does no recipient I/O at all.
+    pub(crate) async fn record_send_action(
+        &self,
+        recipients: &[String],
+        text: &str,
+        message_type: Option<SemanticMessageType>,
+        subject: Option<&str>,
+    ) -> Result<SendActionHandle, DelegationError> {
+        let mut frozen = Vec::with_capacity(recipients.len());
+        for alias in recipients {
+            let (spec, _) = self.peer_binding(alias).ok_or_else(|| {
+                DelegationError::Driver(format!("no roster binding for recipient `{alias}`"))
+            })?;
+            frozen.push(SendActionRecipient {
+                alias: alias.clone(),
+                peer: spec.resolved_identity(),
+                endpoint: self.dispatch_endpoint(&spec),
+            });
+        }
+        let action = self.mint_send_action_id().await?;
+        self.emit_room(RoomEvent::TeamSendActionRecorded {
+            action: action.clone(),
+            recipients: frozen,
+            message_type: message_type.unwrap_or(SemanticMessageType::Unknown),
+            subject: subject.map(str::to_owned),
+            body_hash: text_content_hash(text),
+            body_bytes: text.len(),
+        })
+        .await?;
+        let tokens: Vec<Arc<()>> = recipients.iter().map(|_| Arc::new(())).collect();
+        {
+            let mut live = self.live_send_actions.lock().await;
+            prune_dead_send_slots(&mut live);
+            live.insert(
+                action.clone(),
+                tokens
+                    .iter()
+                    .enumerate()
+                    .map(|(index, token)| {
+                        (
+                            u32::try_from(index).unwrap_or(u32::MAX),
+                            Arc::downgrade(token),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        Ok(SendActionHandle { id: action, tokens })
     }
 
-    /// Apply a landed retract's mark to the remembered board and return the
-    /// updated view, or `None` when no board was assembled this session or
-    /// the item is not on it (then nothing re-renders).
+    /// A fresh id, unique among every id this workspace journal records
+    /// (`AC1(a)`). The recorded set is seeded once from the journal and kept
+    /// current by this runtime's own mints. If the journal cannot be read the
+    /// set cannot be established: ⛔ no id is minted and ⛔ nothing is cached,
+    /// so the next send reads again. (A runtime composed without a reader is a
+    /// test-only shape; `A2aEgress::compose` requires one.)
+    async fn mint_send_action_id(&self) -> Result<SendActionId, DelegationError> {
+        let mut known = self.recorded_action_ids.lock().await;
+        if known.is_none() {
+            let mut seeded = std::collections::HashSet::new();
+            if let Some(reader) = self.journal_reader.as_ref() {
+                let entries = reader.load_entries().await.map_err(|error| {
+                    tracing::warn!(%error, "send-action ids unreadable; the action cannot be recorded");
+                    DelegationError::Driver(format!("the send journal could not be read: {error}"))
+                })?;
+                seeded.extend(
+                    crate::domain::services::send_action_ledger::fold_send_actions(&entries)
+                        .into_iter()
+                        .map(|action| action.id),
+                );
+            }
+            *known = Some(seeded);
+        }
+        let known = known.as_mut().expect("seeded above");
+        loop {
+            let id = SendActionId::mint();
+            if known.insert(id.clone()) {
+                return Ok(id);
+            }
+        }
+    }
+
+    /// Story 19.21 `AC1(d)` — journal one recipient's typed settlement, after
+    /// every row its delivery path emitted. Durable or not, the recipient's
+    /// liveness ends with its [`SendLiveness`] token, which the coordinator
+    /// drops as soon as this returns: a failed append leaves the recipient
+    /// durably unsettled (reconciled through its dispatch correlation), ⛔ never
+    /// rewritten as `NotSent`.
+    ///
+    /// # Errors
+    ///
+    /// The append failure, already latched. The caller then does **not**
+    /// publish the settle.
+    pub(crate) async fn journal_send_settlement(
+        &self,
+        reference: &SendActionRef,
+        settlement: SendSettlement,
+    ) -> Result<(), DelegationError> {
+        self.emit_room(RoomEvent::TeamSendRecipientSettled {
+            action: reference.action.clone(),
+            index: reference.index,
+            settlement,
+        })
+        .await
+    }
+
+    /// Whether this process is still sending `index` of `action` (rule 9): the
+    /// slot's token still has a living owner. Prunes the action's dead slots,
+    /// and the action itself once none is left.
+    pub(crate) async fn send_recipient_is_live(&self, action: &SendActionId, index: u32) -> bool {
+        let mut live = self.live_send_actions.lock().await;
+        let Some(slots) = live.get_mut(action) else {
+            return false;
+        };
+        slots.retain(|(_, token)| token.strong_count() > 0);
+        let is_live = slots.iter().any(|(slot, _)| *slot == index);
+        if slots.is_empty() {
+            live.remove(action);
+        }
+        is_live
+    }
+
+    /// How many `(action, slot)` entries the live-send registry still holds,
+    /// dead or alive — the pruning oracle's observation point. ⛔ Never a
+    /// liveness answer: [`Self::send_recipient_is_live`] is.
+    #[cfg(test)]
+    pub(crate) async fn live_send_slot_entries(&self) -> usize {
+        self.live_send_actions
+            .lock()
+            .await
+            .values()
+            .map(Vec::len)
+            .sum()
+    }
+
+    /// This workspace journal's recorded send actions, **oldest first**, or
+    /// `None` when no reader is injected or the journal cannot be read. ⛔ Never
+    /// this host's inbound projection: the action board answers for what this
+    /// host sent.
+    pub(crate) async fn send_action_ledger(
+        &self,
+    ) -> Option<Vec<crate::domain::services::send_action_ledger::SendActionView>> {
+        let reader = self.journal_reader.as_ref()?;
+        match reader.load_entries().await {
+            Ok(entries) => {
+                Some(crate::domain::services::send_action_ledger::fold_send_actions(&entries))
+            }
+            Err(error) => {
+                tracing::warn!(%error, "send-action ledger unreadable; no action board can be shown");
+                None
+            }
+        }
+    }
+
+    /// Remember the board just assembled (Story 19.16f `AC10(d)`).
+    pub(crate) async fn remember_board(&self, board: super::board::RememberedBoard) {
+        *self.last_board.lock().await = Some(board);
+    }
+
+    /// Apply a landed retract's mark to the remembered board and return that
+    /// same view re-rendered, or `None` when no board was assembled this
+    /// session or the item is not on it (then nothing re-renders). Story 19.21
+    /// `AC3(f)`: an inventory re-renders as the inventory, an action board as
+    /// that action's board.
     pub(crate) async fn mark_board_item_retracted(
         &self,
         peer: &str,
         item_id: &str,
         retracted_at_ms: i64,
-    ) -> Option<super::board::BoardView> {
+        now_unix_secs: i64,
+    ) -> Option<String> {
         let mut last = self.last_board.lock().await;
-        let view = last.as_mut()?;
-        super::board::apply_retract_mark(view, peer, item_id, retracted_at_ms).then(|| view.clone())
+        let board = last.as_mut()?;
+        board
+            .apply_retract_mark(peer, item_id, retracted_at_ms)
+            .then(|| board.render(now_unix_secs))
     }
 
     /// Journal one item-retract dispatch (Story 19.16f `AC5`, owner gate item
@@ -932,26 +1225,29 @@ impl A2aDelegationRuntime {
     /// discriminator, durable **before** the POST. `item` is peer-minted text,
     /// stripped on write. Goes through `emit_room`, so a journal failure is
     /// latched exactly as the send path latches it.
+    ///
+    /// Story 19.21 `A15`: **returns the append result** — a retract whose
+    /// dispatch row could not be made durable must not POST (`AD-1803`).
     pub(crate) async fn journal_item_retract_dispatch(
         &self,
         spec: &A2aPeerSpec,
         task: Option<&str>,
         item: &str,
         bytes: usize,
-    ) {
-        let _ = self
-            .emit_room(RoomEvent::RemoteEnvelopeDispatched {
-                peer: spec.resolved_identity(),
-                task: task.map(|task| sanitize_disclosable(task, MAX_PEER_ID_BYTES)),
-                bytes,
-                act: crate::domain::models::DispatchAct::ItemRetract {
-                    item: sanitize_disclosable(item, MAX_PEER_ID_BYTES),
-                },
-                content_hash: None,
-                // A retract dispatched no task: it never grants a capability.
-                endpoint: None,
-            })
-            .await;
+    ) -> Result<(), DelegationError> {
+        self.emit_room(RoomEvent::RemoteEnvelopeDispatched {
+            peer: spec.resolved_identity(),
+            task: task.map(|task| sanitize_disclosable(task, MAX_PEER_ID_BYTES)),
+            bytes,
+            act: crate::domain::models::DispatchAct::ItemRetract {
+                item: sanitize_disclosable(item, MAX_PEER_ID_BYTES),
+            },
+            content_hash: None,
+            // A retract dispatched no task: it never grants a capability.
+            endpoint: None,
+            action: None,
+        })
+        .await
     }
 
     /// Journal a retract whose outcome PROVES nothing was marked (Story
@@ -1090,6 +1386,8 @@ impl A2aDelegationRuntime {
             // `you` label reads its rows. Story 19.18c: they are own tasks.
             content_hash: None,
             endpoint: endpoint.clone(),
+            // The model rail records no operator send action (19.21 `AC1(i)`).
+            action: None,
         })
         .await?;
         if let Some(task) = submitted_task.clone()
@@ -2235,8 +2533,8 @@ mod tests {
     /// **Mutant → RED:** drop the elapsed check (the mid-floor refresh is
     /// admitted), or seed the gate as already-admitted (the first refresh is
     /// refused).
-    #[test]
-    fn the_board_refresh_floor_is_enforced_on_the_configured_poll_interval() {
+    #[tokio::test]
+    async fn the_board_refresh_floor_is_enforced_on_the_configured_poll_interval() {
         use crate::adapters::a2a::board::board_refresh_floor;
 
         let (rt, _tree, _rx) = runtime();
@@ -2249,17 +2547,18 @@ mod tests {
         let t0 = std::time::Instant::now();
 
         assert!(
-            rt.admit_board_refresh(t0, floor).is_ok(),
+            rt.admit_board_refresh(t0, floor).await.is_ok(),
             "positive control: a first refresh is admitted, so the refusal \
              below is a bound and not a permanently closed door"
         );
         let refused = rt
             .admit_board_refresh(t0 + floor / 5, floor)
+            .await
             .expect_err("a refresh inside the stated floor is refused");
         assert!(refused.remaining > std::time::Duration::ZERO);
         assert!(refused.remaining < floor);
         assert!(
-            rt.admit_board_refresh(t0 + floor, floor).is_ok(),
+            rt.admit_board_refresh(t0 + floor, floor).await.is_ok(),
             "once the floor has elapsed the board refreshes again"
         );
     }
@@ -2672,7 +2971,8 @@ mod tests {
         let raw_task = format!("task\n{}", "x".repeat(MAX_PEER_ID_BYTES + 10));
 
         rt.journal_item_retract_dispatch(&peer, Some(&raw_task), "ri_x", 17)
-            .await;
+            .await
+            .expect("the dispatch row is durable");
         rt.journal_item_retract_refusal(&peer, Some(&raw_task), "item retract refused: test")
             .await;
 
@@ -3243,7 +3543,7 @@ mod tests {
         let peer = spec("marcus", false);
         let asker = runtime();
         asker
-            .journal_send_dispatch(&peer, "task-q", "question")
+            .journal_send_dispatch(&peer, "task-q", "question", None)
             .await
             .unwrap();
         let hash = |text: &str| Some(text_content_hash(text));
@@ -3293,7 +3593,7 @@ mod tests {
         );
         // A dispatch AFTER the ledger was seeded is a `you` source too.
         asker
-            .journal_send_dispatch(&peer, "task-f", "and retries?")
+            .journal_send_dispatch(&peer, "task-f", "and retries?", None)
             .await
             .unwrap();
         let later = [ObservedTurn::Item {

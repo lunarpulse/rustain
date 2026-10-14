@@ -455,6 +455,8 @@ async fn run_daemon_foreground(
         )
         .map_err(|error| anyhow::anyhow!("composing daemon A2A egress: {error}"))?,
     );
+    #[cfg(feature = "a2a")]
+    let team_runtime = a2a_egress.runtime().clone();
 
     let core = std::sync::Arc::new(
         crate::infrastructure::composition::build_daemon_core(
@@ -579,7 +581,7 @@ async fn run_daemon_foreground(
         delivery_policy.clone(),
     );
     let server =
-        crate::adapters::daemon::server::AttachServer::new_with_node_tree_bus_policy_journal_and_urgency(
+        crate::adapters::daemon::server::AttachServer::new_with_node_tree_bus_policy_journal_urgency_and_team(
             core.clone(),
             conversation.clone(),
             domain_tx.clone(),
@@ -590,6 +592,11 @@ async fn run_daemon_foreground(
             reader.clone(),
             Some(consent_projection.clone()),
             Some(urgency_router.clone()),
+            #[cfg(feature = "a2a")]
+            Some(team_runtime),
+            a2a_peers.clone(),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            None,
         );
     server
         .configure_consent_policy(effective_policy.clone())

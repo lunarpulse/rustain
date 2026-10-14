@@ -67,6 +67,7 @@ markers = [
     "story_19_10: Story 19-10 — J3 Marco capture; the request log's `skills` field",
     "story_19_16g: Story 19-16g — passive `log: N` transparency reminder (standalone + attached)",
     "story_19_19: Story 19-19 — executing consultation and ADR fan-out capture",
+    "story_19_21: Story 19.21 — attached Act 1 distribution capture",
     "a2a_binary: test requires an explicitly built binary with the a2a feature",
 ]
 # Default: skip tests that need a live API unless explicitly requested.

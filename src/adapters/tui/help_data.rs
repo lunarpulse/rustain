@@ -252,8 +252,13 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
-                    key: "/team send [--type <type>] <peer-id>[,<peer-id>…] <text…>",
-                    description: "Send an optionally typed message to each addressed A2A peer (a2a feature)",
+                    key: "/team board [--last | --actions | --action <action-id> | <peer-id>]",
+                    description: "Daemon-served board/inventory over the composed egress; read-only attachment is allowed, Peer tier is refused; explicit reads only (a2a feature)",
+                    available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
+                    key: "/team send [--type <type>] [--subject <label>] <peer-id>[,<peer-id>…] <text…>",
+                    description: "Daemon-served typed send over the composed egress; requires trusted-local writer attachment; --subject is sender-local (a2a feature)",
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {
@@ -283,22 +288,27 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "/team thread <peer-id> <item-id>",
-                    description: "Read one thread on a peer's host (a2a feature)",
+                    description: "Read one thread on a peer's host; unavailable in an attached session (S7)",
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {
                     key: "/team followup <peer-id> <turn-id> <text…>",
-                    description: "Answer a turn in a thread on a peer's host (a2a feature)",
+                    description: "Answer a turn in a peer thread; unavailable in an attached session (S7)",
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {
+                    key: "/team status",
+                    description: "Daemon-authoritative effective sender-consent status over its composed roster; read-only attachment is allowed, Peer tier is refused",
+                    available: true,
+                },
+                HelpBinding {
                     key: "/team trust",
-                    description: "List effective peer-consent grants (journaled vs TOML-implied)",
+                    description: "Same daemon-authoritative read as /team status; read-only attachment is allowed",
                     available: true,
                 },
                 HelpBinding {
                     key: "/team untrust <peer>",
-                    description: "Revoke standing consent for a peer (alias or PeerId)",
+                    description: "Durably revoke standing consent; trusted-local writer attachment only, Peer/read-only refused",
                     available: true,
                 },
                 HelpBinding {

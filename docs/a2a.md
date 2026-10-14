@@ -204,11 +204,45 @@ There is exactly one `message/send` attempt per recipient and no automatic retry
 
 Each recipient is journaled independently. A request that may leave the host records `dispatched` before its POST; a delivered or accepted answer adds `accepted`; a proved rejection (including JSON-RPC `-32040`), a connection that never opened, or a post-dispatch credential/trust-anchor refusal adds `refused`; and an approval-needed or no-usable-answer row (including a timeout, HTTP or other JSON-RPC error, or unreadable answer after dispatch) remains dispatch-only. A pre-I/O refusal writes one outbound `refused` row and no `dispatched` row. If durable dispatch recording fails, nothing is sent and no row is written. An accepted answer contributes a content hash, not stored reply text; a decline stores its sanitized reason. `/team send` never renders a peer reply and never materializes an `a2a-peer` node in the Agents panel. FR169 replies use `/team thread` as the later answer channel.
 
-`/team send` exists only in the interactive, non-attached TUI. On the attached rail it refuses aloud: `'/team send' needs this session's own A2A egress — run it in a non-attached session.` There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
+`/team send` is available in both the interactive TUI and an attached trusted-local writer session. The attached client sends it through the daemon's already-composed A2A runtime; it creates no client egress. Read-only and Peer-tier attachments are refused. There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
+
+### The send action, its record and the action board (Story 19.21)
+
+A typed or untyped `/team send` is also one **send action**. After the whole action validates and **before** any recipient preflight, dispatch or POST, this host journals one sender-local action record: a host-minted id (`sa_…`, at most 16 characters), the addressed aliases in the order typed with the identity each resolved to, the semantic type, the optional label, and the body's hash and byte count — never the body and nothing derived from it. Each recipient's `dispatched` row carries that action's id and its position, and after every row a recipient's delivery path emits, its **typed settlement** (delivered with the item id, declined, unreachable with the complete cause, awaiting approval, accepted without an item, asked a question, no usable answer, not sent) is journaled before its row settles on screen. None of it is ever sent to a peer: no recipient can see or address the action id or the label, and there is no group identity, aggregate outcome or retry. If the record cannot be appended, nothing is sent and every row reads `not sent — this host could not record the attempt`. A settlement whose append fails after the recipient was reached is not shown and is never rewritten as `not sent`; the board reconciles it through the recipient's own item. `/team followup`, retract dispatches and model delegations record no action.
+
+```text
+/team send --type story_assignment --subject sprint-7 jun-dev,tom-dev,yuki-dev,nina-ux <stories…>
+```
+
+`--subject <label>` is an optional label **only you see**: one token of at most 64 characters, after `--type` and before the aliases. It is stored in the action record and shown on the board; it is never added to the message a recipient receives and is never derived from the body.
+
+`/team board` reads, never pushes:
+
+| Command | Shows |
+|---|---|
+| `/team board` | the peer item inventory (every roster peer's items correlated to your sends), headed `Peer item inventory · N rows` |
+| `/team board <peer-id>` | one peer's items, uncapped |
+| `/team board --last` | the board of your newest send action in this workspace journal |
+| `/team board --action <id>` | the board of one recorded action |
+| `/team board --actions` | every recorded action, newest first: id, type, age and addressed count |
+
+An action board is headed by the type, the label (only when one was given) and `attempted <age> · <N> addressed`. `N` is the number of aliases the record froze — not the rows rendered and not how many have settled. Beneath it, one row per addressed alias in the order typed: `✓ acknowledged` (the recipient's own deliberate acknowledgement was reported), `● delivered`, `✗ declined`, `⚠ unreachable` (with the recorded cause on its own line), or a tokenless state in words (`sending…` while this process is still sending, `no outcome recorded` after an interruption or when another process sent it, `awaiting their approval`, `no usable answer`, `not sent — …`). There is no completion count, percentage or list of who has not answered. The recorded send-time outcome always wins; the board then asks each addressed peer that could change the answer (one `x-rustain-items/list` each, never the whole roster) and joins only the items that arrived through **this action's** dispatches, so an earlier send's acknowledgement is never shown as this one's. A recipient that was reached but whose read fails is never `⚠`, and a recipient whose peer binding changed since the send (a changed key, a removed alias) is not read at all and says so. A newer action never hides an older one's declines: `--action <id>` and `--actions` reach them. Refreshing is an explicit command; the board has a 500 ms refresh floor and does not poll. The attached rail is unchanged by this story: `/team send` and `/team board` still refuse aloud there.
+
+On the receiving host, an opened `story_assignment` item offers `[a] Acknowledge` to an attached writer while the item is `received`. Viewing it, discussing it, or an automatic reply never acknowledges it, and none of them selects the item as model context. An acknowledgement attributes a deliberate receipt to the roster alias — it is not an acceptance and not a statement that a person acted. A received `story_assignment` item proves receipt only; it records no assignment of a story to anyone.
+
+A retract (`/team retract`) whose dispatch row cannot be journaled is not sent either: it renders `not sent — this host could not record the attempt` (a local fact: nothing is attributed to the peer).
+
+If this host cannot read its own send journal, `/team board --last`, `--action <id>` and `--actions` read exactly `· this host could not read its send journal.` — never *no send action recorded*, which an unreadable journal cannot establish. For the same reason a `/team send` whose new action id cannot be checked against that journal is not sent: every row reads `not sent — this host could not record the attempt`, nothing is journaled or delivered, and the next send reads the journal again.
+
+A board field wider than the block (a long alias or id) wraps at grapheme
+boundaries using terminal-cell width, never byte/character clipping. The byte
+bounds on peer- and operator-influenced text (alias and id fields 256 bytes,
+ratified remedies 512) are disclosure bounds, not a width rule, and keep their
+`…[truncated]` marker.
 
 ## Live daemon recipient rows
 
-Daemon attachments use protocol **v4**. Continuously attached trusted-local
+Daemon attachments use protocol **v6**. Continuously attached trusted-local
 writers and read-only observers receive revisioned peer-row upserts and removals
 only after successful persistence. Snapshot and live updates use the same row
 identity; duplicate or older updates cannot restore a settled/deleted card.
@@ -223,10 +257,21 @@ its item address but has no live node-resolution target. Control metadata and
 ordering revisions survive conversation persistence and trusted-local reattach.
 
 The new operations and snapshot control targets are omitted for authenticated
-Peer-tier attachments. Their existing read-only raw transcript/Event access is
-unchanged; this is **not** a new confidentiality guarantee for that legacy stream.
+Peer-tier attachments. The raw event projection also omits sender-local
+`TeamSendActionRecorded`/`TeamSendRecipientSettled` events and strips the
+additive action reference from legacy `RemoteEnvelopeDispatched`; unrelated
+legacy raw-stream behavior is unchanged. This is not a blanket confidentiality
+guarantee for that legacy stream.
 This local synchronization is not A2A reply push. The plain attach reader emits
 addressed row-operation JSON, rather than presenting replacements as new replies.
+
+### Attached operator commands (Story 19.21)
+
+The attached client composes no A2A egress. It sends `/team send` to the daemon's already-composed runtime, preserving the parsed multiline body, type and sender-local subject; sends and `/team untrust` require a trusted-local read/write attachment. `/team board`, `/team status` and `/team trust` are explicit daemon-side reads and are available to trusted-local read-only attachments. Peer-tier attachments are refused for all four command families. Board text arrives in bounded request-correlated chunks and is painted only after an in-order sequence and explicit completion boundary. Send rows use the same feature-independent typed renderer and remain in their own stable `team-send-N` Info block.
+
+An unresolved `sending…` row remains visible when a recorded action's settlement cannot be published, including a `NotSent` outcome whose dispatch append and typed-settlement append both failed. The distinct action-record-failure branch has no action or settlement and may show visible `NotSent`. This matches standalone send-board behavior: the client does not invent a terminal outcome or add a timeout.
+
+`/team thread`, `/team followup` and `/team retract` remain unavailable in attached sessions. They render the two-line S7 Info response naming the unavailable verb and directing the operator to a non-attached session. No team board is pushed or refreshed by a timer.
 
 ## Reading a received item locally
 
@@ -818,7 +863,10 @@ migration of old journal rows.
 
 `/team untrust <alias-or-peer-id>` revokes every stored kind for that peer:
 pinned, pseudonymous and legacy. A later typed grant re-trusts only its own
-kind. `/team trust` is a listing command, not a way to create a grant.
+kind. `/team trust` is a listing command, not a way to create a grant. Status and
+untrust refresh the journal authoritatively and refuse without reporting a
+cached success or mutating trust when that read fails; admission remains
+best-effort and may continue using the cached consent snapshot.
 
 `/team status` keeps one row per roster alias, including aliases sharing a pin,
 plus one row per distinct journal-only peer. Multiple consent slots do not

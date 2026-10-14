@@ -8073,6 +8073,26 @@ mod tests {
                          answers={answers:?} content={content:?} content_hash={content_hash:?}"
                     ));
                 }
+                // Story 19.21 `C1` — sender-local send-action facts: a flat-root
+                // execution never emits them, so a stray one is a drift to see.
+                RoomEvent::TeamSendActionRecorded {
+                    action, recipients, ..
+                } => {
+                    lines.push(format!(
+                        "journal TeamSendActionRecorded action={action:?} recipients={}",
+                        recipients.len()
+                    ));
+                }
+                RoomEvent::TeamSendRecipientSettled {
+                    action,
+                    index,
+                    settlement,
+                } => {
+                    lines.push(format!(
+                        "journal TeamSendRecipientSettled action={action:?} index={index} \
+                         settlement={settlement:?}"
+                    ));
+                }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());
                 }

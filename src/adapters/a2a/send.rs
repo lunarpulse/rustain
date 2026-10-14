@@ -6,18 +6,33 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 
 use super::client::CardSlot;
-use super::driver::{A2aDelegationRuntime, MessageCarriers, OwnTask, TaskClient, build_message};
+use super::driver::{
+    A2aDelegationRuntime, MessageCarriers, OwnTask, SendLiveness, TaskClient, build_message,
+};
 use super::endpoint::resolve_jsonrpc_endpoint;
 use super::error::{A2aError, anchor_error};
 use super::item_capability::ItemCapability;
+use crate::domain::models::{RecipientOutcome, SendCause};
 use crate::domain::services::transparency::MAX_PEER_ID_BYTES;
 
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SendError {
-    UnknownPeer { peer: String, known: Vec<String> },
-    CardNotCached { peer: String },
-    Endpoint { peer: String, source: A2aError },
+    UnknownPeer {
+        peer: String,
+        known: Vec<String>,
+    },
+    CardNotCached {
+        peer: String,
+    },
+    Endpoint {
+        peer: String,
+        source: A2aError,
+    },
+    /// Story 19.21 `AC1(b)` — the sender-local `--subject` label broke its
+    /// grammar. Decided with the unknown-peer check, before any journal write
+    /// or I/O.
+    InvalidSubject(crate::domain::services::send_action_ledger::SubjectRefusal),
 }
 
 impl std::fmt::Display for SendError {
@@ -46,6 +61,7 @@ impl std::fmt::Display for SendError {
             Self::Endpoint { peer, source } => {
                 write!(f, "peer `{peer}` has no usable A2A endpoint: {source}")
             }
+            Self::InvalidSubject(refusal) => write!(f, "{refusal}"),
         }
     }
 }
@@ -125,31 +141,177 @@ pub(crate) async fn capability_for(
     })
 }
 
-/// Drive N independent sends and report each row as it settles. The callback
-/// runs on the caller's task; it never waits for an unrelated recipient.
+/// Whole-action validation (Story 19.17 `G4`, 19.21 `AC1(b)`): every addressed
+/// alias is a configured A2A roster peer and the optional label keeps its
+/// grammar. Decided **before** any journal write, recipient preflight or I/O,
+/// and before a front door paints a row — so a refused action leaves no trace.
+/// [`coordinate_send`] runs it first; a rail that must refuse synchronously
+/// (the standalone TUI paints rows only for a valid action) calls it too.
 ///
-/// Story 19.18 `A9`: `reply_to` is `Some` only for `/team followup` (N = 1),
-/// the one addition to the 19.17 delivery — ⛔ no second send path.
-pub async fn deliver_to_recipients<F>(
+/// # Errors
+///
+/// [`SendError::UnknownPeer`] / [`SendError::InvalidSubject`].
+pub fn validate_send_request(
     runtime: &A2aDelegationRuntime,
-    recipients: &[String],
-    text: &str,
-    message_type: Option<crate::domain::models::SemanticMessageType>,
-    reply_to: Option<&str>,
+    request: &SendRequest<'_>,
+) -> Result<(), SendError> {
+    let known = runtime.known_peer_ids();
+    let unknown: Vec<_> = request
+        .recipients
+        .iter()
+        .filter(|peer| !known.contains(peer))
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        return Err(SendError::UnknownPeer {
+            peer: unknown.join(", "),
+            known,
+        });
+    }
+    if let Some(subject) = request.subject {
+        crate::domain::services::send_action_ledger::validate_subject(subject)
+            .map_err(SendError::InvalidSubject)?;
+    }
+    Ok(())
+}
+
+/// What one operator send asks of the coordinator.
+///
+/// ⛔ `subject` is the sender-local label: it is journaled in the action record
+/// and shown on the board, and it never reaches [`outbound_message`], so no
+/// recipient ever sees it (`M11`).
+#[derive(Debug, Clone, Copy)]
+pub struct SendRequest<'a> {
+    pub recipients: &'a [String],
+    pub text: &'a str,
+    pub message_type: Option<crate::domain::models::SemanticMessageType>,
+    /// `Some` only for `/team followup` (N = 1): the one addition to the 19.17
+    /// delivery. A follow-up reuses the coordinator and **records no action**
+    /// (Story 19.21 `AC1(i)`).
+    pub reply_to: Option<&'a str>,
+    pub subject: Option<&'a str>,
+}
+
+/// The one send coordinator (Story 19.21 `C1`): validate the whole action,
+/// journal it, drive N independent sends and settle each recipient as it
+/// lands. Rail-neutral — the standalone TUI arm calls it today, the daemon's
+/// send frame calls the same function.
+///
+/// Order is the invariant, asserted on journal sequence (`Rule 4`):
+///
+/// 1. whole-action validation — an unknown alias or a malformed label refuses
+///    the **whole** action before any journal write or I/O (19.17 `G4`);
+/// 2. the action record — before any recipient preflight, dispatch or POST. If
+///    it cannot be appended nothing else happens: no recipient I/O, every row
+///    `NotSent` (`AC1(f)`);
+/// 3. per recipient, independently: its delivery rows (preflight / dispatch /
+///    outcome rows, exactly as the preserved path emits them), then its typed
+///    settlement, then — only if the settlement is durable — `on_settle`.
+///
+/// `on_started` runs **once**, after the action record is durable and before
+/// any recipient I/O, with the sender-local action id (never on a follow-up,
+/// which records no action, and never when the record failed). A rail that
+/// needs to tell its operator which action a block belongs to — the daemon's
+/// `TeamSendStarted` — uses it; the standalone arm passes a no-op.
+///
+/// A settlement append failure after recipient I/O leaves the recipient
+/// durably unsettled: the latched journal-failure notice fires, the remote
+/// outcome is ⛔ never rewritten as `NotSent`, `on_settle` is ⛔ not called
+/// (no undurable settle is shown), and the board reconciles the recipient
+/// through its dispatch correlation (`AC1(g)`). A recorded `NotSent` outcome
+/// is visible only after its typed settlement is durable; the separate
+/// action-record-failed branch still reports `NotSent` because no action or
+/// settlement could be recorded.
+///
+/// ⛔ No automatic retry, no group identity, no aggregate. Dropping the future
+/// (the caller's `cancel`) abandons in-flight recipients exactly as before;
+/// the action's liveness ends with it. The daemon's coordinator passes its own
+/// token, never a connection's.
+///
+/// # Errors
+///
+/// [`SendError::UnknownPeer`] / [`SendError::InvalidSubject`] when the whole
+/// action is refused; nothing was journaled or sent.
+pub async fn coordinate_send<S, F>(
+    runtime: &A2aDelegationRuntime,
+    request: SendRequest<'_>,
     cancel: CancellationToken,
+    on_started: S,
     mut on_settle: F,
-) where
+) -> Result<(), SendError>
+where
+    S: FnOnce(&crate::domain::models::SendActionId),
     F: FnMut(usize, RecipientOutcome),
 {
     use futures::{StreamExt, stream::FuturesUnordered};
 
+    validate_send_request(runtime, &request)?;
+
+    let slots: Vec<Option<(crate::domain::models::SendActionRef, SendLiveness)>> =
+        if request.reply_to.is_none() {
+            match runtime
+                .record_send_action(
+                    request.recipients,
+                    request.text,
+                    request.message_type,
+                    request.subject,
+                )
+                .await
+            {
+                Ok(handle) => {
+                    on_started(handle.id());
+                    handle.into_recipients().into_iter().map(Some).collect()
+                }
+                Err(_) => {
+                    // The journal could not record the attempt: nothing was sent
+                    // and nothing will be (`AC1(f)`).
+                    for index in 0..request.recipients.len() {
+                        on_settle(index, RecipientOutcome::NotSent);
+                    }
+                    return Ok(());
+                }
+            }
+        } else {
+            request.recipients.iter().map(|_| None).collect()
+        };
+
     let pending = FuturesUnordered::new();
-    for (index, peer) in recipients.iter().enumerate() {
+    for (index, (peer, slot)) in request.recipients.iter().zip(slots).enumerate() {
+        // `slot` is captured by the future when it is CREATED, so a future
+        // dropped before its first poll still drops its liveness token.
         pending.push(async move {
-            (
-                index,
-                deliver_text(runtime, peer, text, message_type, reply_to).await,
+            let (reference, liveness) = match slot {
+                Some((reference, liveness)) => (Some(reference), Some(liveness)),
+                None => (None, None),
+            };
+            let mut item = None;
+            let outcome = deliver_one(
+                runtime,
+                peer,
+                request.text,
+                request.message_type,
+                request.reply_to,
+                reference.as_ref(),
+                &mut item,
             )
+            .await;
+            // The settlement is journaled INSIDE the recipient's own future,
+            // after every row its delivery path emitted and before anything
+            // is shown. ⚠ Not in the drain loop below: a sibling future that is
+            // suspended mid-append advances only while `pending` is polled,
+            // so awaiting an append in the loop body would stall behind it.
+            let durable = match reference.as_ref() {
+                Some(reference) => runtime
+                    .journal_send_settlement(reference, settlement_of(&outcome, item))
+                    .await
+                    .is_ok(),
+                None => true,
+            };
+            // Rule 9: once its settlement was attempted — durable or not —
+            // this recipient is no longer sending, however long its siblings
+            // take. Dropping the future elsewhere drops this token the same way.
+            drop(liveness);
+            (index, outcome, durable)
         });
     }
     tokio::pin!(pending);
@@ -159,43 +321,65 @@ pub async fn deliver_to_recipients<F>(
             _ = cancel.cancelled() => break,
             next = pending.next() => next,
         };
-        let Some((index, outcome)) = next else { break };
+        let Some((index, outcome, durable)) = next else {
+            break;
+        };
         if cancel.is_cancelled() {
             break;
         }
-        on_settle(index, outcome);
-    }
-}
-
-/// A ratified local sentence can exceed the peer-text cap (notably the
-/// CardNotCached guidance). Only peer-influenced causes use that tighter cap.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SendCause {
-    Ratified(String),
-    PeerInfluenced(String),
-}
-
-impl SendCause {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Ratified(text) | Self::PeerInfluenced(text) => text,
+        if durable {
+            on_settle(index, outcome);
         }
     }
+    Ok(())
 }
 
-/// Story 19.17: an addressed send settles at the first answer, never at the
-/// delegation lifecycle's terminal projection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RecipientOutcome {
-    Delivered,
-    Declined,
-    AwaitingApproval,
-    AcceptedWithoutItem,
-    AskedQuestion { task_id: String },
-    Unreachable { cause: Option<SendCause> },
-    NoUsableAnswer,
-    NotSent,
+/// The typed, journaled form of one recipient's outcome (Story 19.21
+/// `AC1(d)`). Every variant is matched explicitly: a new outcome must decide
+/// how it is recorded.
+fn settlement_of(
+    outcome: &RecipientOutcome,
+    item: Option<String>,
+) -> crate::domain::models::SendSettlement {
+    use crate::domain::models::{SendSettlement, SettlementCause, SettlementCauseKind};
+
+    match outcome {
+        RecipientOutcome::Delivered => SendSettlement::Delivered { item },
+        RecipientOutcome::Declined => SendSettlement::Declined,
+        RecipientOutcome::AwaitingApproval => SendSettlement::AwaitingApproval,
+        RecipientOutcome::AcceptedWithoutItem => SendSettlement::AcceptedWithoutItem,
+        RecipientOutcome::AskedQuestion { task_id } => SendSettlement::AskedQuestion {
+            task_id: task_id.clone(),
+        },
+        RecipientOutcome::Unreachable { cause } => SendSettlement::Unreachable {
+            cause: cause.as_ref().map(|cause| SettlementCause {
+                kind: match cause {
+                    SendCause::Ratified(_) => SettlementCauseKind::Ratified,
+                    SendCause::PeerInfluenced(_) => SettlementCauseKind::PeerInfluenced,
+                },
+                // Stored raw and sanitized once at render (`AD-1824`); only
+                // the line's size is bounded here.
+                text: bounded_cause_text(cause.as_str()),
+            }),
+        },
+        RecipientOutcome::NoUsableAnswer => SendSettlement::NoUsableAnswer,
+        RecipientOutcome::NotSent => SendSettlement::NotSent,
+    }
+}
+
+/// The longest cause text one settlement row carries — well above both render
+/// bounds, so the render's own sanitizer is what cuts visibly.
+const MAX_SETTLEMENT_CAUSE_BYTES: usize = 1024;
+
+fn bounded_cause_text(text: &str) -> String {
+    if text.len() <= MAX_SETTLEMENT_CAUSE_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_SETTLEMENT_CAUSE_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
 }
 
 /// Deliver one independently addressed message. Resolve the roster binding
@@ -213,6 +397,32 @@ pub async fn deliver_text(
     text: &str,
     message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<&str>,
+) -> RecipientOutcome {
+    deliver_one(
+        runtime,
+        peer_id,
+        text,
+        message_type,
+        reply_to,
+        None,
+        &mut None,
+    )
+    .await
+}
+
+/// [`deliver_text`] inside one operator send action: `action` rides the
+/// dispatch row, and a first answer that minted an item hands its id back
+/// through `item_out` for the typed settlement. Every row the delivery path
+/// emits is the preserved 19.17/19.18 shape (`AC1`, "byte-identical when
+/// `action` is absent").
+async fn deliver_one(
+    runtime: &A2aDelegationRuntime,
+    peer_id: &str,
+    text: &str,
+    message_type: Option<crate::domain::models::SemanticMessageType>,
+    reply_to: Option<&str>,
+    action: Option<&crate::domain::models::SendActionRef>,
+    item_out: &mut Option<String>,
 ) -> RecipientOutcome {
     use super::lifecycle::A2aTaskTransport;
 
@@ -303,7 +513,7 @@ pub async fn deliver_text(
     let result = transport
         .send_after(message, || async {
             runtime
-                .journal_send_dispatch(&spec, &task_id, text)
+                .journal_send_dispatch(&spec, &task_id, text, action)
                 .await
                 .map_err(|_| A2aError::JournalDispatch)?;
             dispatched.store(true, Ordering::Relaxed);
@@ -313,6 +523,12 @@ pub async fn deliver_text(
     let outcome = match result {
         Ok(answer) => {
             let outcome = classify_first_answer(&answer, &task_id);
+            if outcome == RecipientOutcome::Delivered {
+                *item_out = answer
+                    .pointer("/metadata/x-rustain-item-id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+            }
             match &outcome {
                 RecipientOutcome::Delivered | RecipientOutcome::AcceptedWithoutItem => {
                     let _ = runtime
@@ -535,6 +751,10 @@ pub enum RetractNotSent {
     AnchorRefused(A2aError),
     /// The cached card names no usable JSON-RPC endpoint.
     Endpoint(A2aError),
+    /// Story 19.21 `A15` — the retract's dispatch row could not be journaled,
+    /// so no request was sent (`AD-1803`: durable before the POST). A local
+    /// fact: ⛔ it attributes nothing to the peer.
+    JournalDispatch,
 }
 
 /// A retract answer that is not a success, classified on the **variant** —
@@ -774,15 +994,19 @@ pub async fn retract_item_on_peer(
     let request_started = AtomicBool::new(false);
     let outcome = match transport
         .retract_item(params, || async {
+            // Story 19.21 `A15` — fail closed: a dispatch whose row is not
+            // durable must not POST. The append result decides.
             runtime
                 .journal_item_retract_dispatch(&spec, task.as_deref(), item_id, bytes)
-                .await;
+                .await
+                .map_err(|_| A2aError::JournalDispatch)?;
             request_started.store(true, Ordering::Relaxed);
             Ok(())
         })
         .await
     {
         Ok(result) => retract_success(&result),
+        Err(A2aError::JournalDispatch) => RetractOutcome::NotSent(RetractNotSent::JournalDispatch),
         Err(error) => RetractOutcome::Refused(RetractRefusal::classify(&error)),
     };
     if request_started.load(Ordering::Relaxed)
@@ -1137,6 +1361,75 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::unbounded_channel::<AppEvent>();
         A2aDelegationRuntime::new(NodeTree::new(), Arc::new(AcceptingJournal), event_tx)
             .with_peer_bindings(peers.into())
+    }
+
+    /// Story 19.21 rule 9 — the live-send registry's lifecycle, observed on the
+    /// SAME runtime (a restart's fresh runtime starts empty and proves nothing
+    /// about cleanup).
+    ///
+    /// A slot is live exactly while its recipient token has an owner; a dropped
+    /// (cancelled) send is dead on the very next read; and recording the next
+    /// action prunes every dead slot, so repeated cancellations cannot grow the
+    /// registry.
+    ///
+    /// **Mutants → RED:** `M57-no-prune-on-insert` (the insert-time prune is
+    /// removed: the dead first slot is still counted), `M57-stale-entry-live`
+    /// (a dead entry's mere presence answers `live`), `M57-shared-action-token`
+    /// (one token for every slot: the dropped sibling below stays live).
+    #[tokio::test]
+    async fn dropped_recipient_tokens_are_dead_and_the_next_insert_prunes_them() {
+        let known = peer("known");
+        let client = Arc::new(client::A2aClientAdapter::new(&known, None).expect("client"));
+        let rt = runtime(vec![(known, client)]);
+        let two = ["known".to_owned(), "known".to_owned()];
+
+        // Action 1: two recipient slots, each with its own owner.
+        let first = rt
+            .record_send_action(&two, "one", None, None)
+            .await
+            .expect("the action is recorded");
+        let first_id = first.id().clone();
+        let mut owners = first.into_recipients();
+        assert_eq!(rt.live_send_slot_entries().await, 2);
+        assert!(
+            rt.send_recipient_is_live(&first_id, 0).await
+                && rt.send_recipient_is_live(&first_id, 1).await,
+            "positive control: owned tokens are live"
+        );
+
+        // Slot 0's recipient finishes (its token drops); slot 1 is still held.
+        drop(owners.remove(0));
+        assert!(
+            !rt.send_recipient_is_live(&first_id, 0).await,
+            "a finished recipient is not sending, however long its sibling takes"
+        );
+        assert!(
+            rt.send_recipient_is_live(&first_id, 1).await,
+            "the held sibling is still live"
+        );
+
+        // The cancelled send drops every remaining owner. Nothing reads the
+        // registry before the next insert, so only the insert-time prune can
+        // remove the dead slots.
+        drop(owners);
+        let second = rt
+            .record_send_action(&two, "two", None, None)
+            .await
+            .expect("the next action is recorded");
+        assert_eq!(
+            rt.live_send_slot_entries().await,
+            2,
+            "recording the next action pruned the dead action; only its own slots remain"
+        );
+        assert!(
+            !rt.send_recipient_is_live(&first_id, 1).await,
+            "a dropped send is dead on the very next read"
+        );
+        let second_id = second.id().clone();
+        assert!(
+            rt.send_recipient_is_live(&second_id, 0).await,
+            "the newer action is unaffected"
+        );
     }
 
     #[tokio::test]

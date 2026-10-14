@@ -1,4 +1,5 @@
 use ratatui::prelude::*;
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::{FeedbackBlock, FeedbackLevel};
@@ -72,8 +73,8 @@ pub fn render_feedback_lines(
         // Action keys on last line only
         if i == max_lines - 1 && !block.actions.is_empty() {
             // Pad to push actions to the right
-            let current_len = 2 + 2 + msg_line.len();
-            let actions_len = action_text.len();
+            let current_len = 2 + 2 + msg_line.width();
+            let actions_len = action_text.width();
             let pad = (width as usize).saturating_sub(current_len + actions_len + 2);
             spans.push(Span::raw(" ".repeat(pad)));
 
@@ -116,35 +117,84 @@ pub fn render_feedback_lines(
 /// layout — `/team board`'s peer and item rows are built from them); one
 /// that does not fit word-wraps with its leading-space run on its first
 /// visual line only. Continuation lines carry only the renderer's own 2-cell
-/// indent. Widths count bytes, as before.
+/// indent. Widths count terminal cells.
+///
+/// A single word wider than a whole line (an alias, an id) is broken only
+/// between styled grapheme clusters, as on the recipient surface, so accents
+/// and joined emoji survive painting at the 60-column floor.
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for logical in text.lines() {
         let logical = logical.trim_end();
-        if max_width == 0 || logical.len() <= max_width {
+        if max_width == 0 || logical.width() <= max_width {
             lines.push(logical.to_string());
             continue;
         }
         let body = logical.trim_start_matches(' ');
         let indent = &logical[..logical.len() - body.len()];
-        let mut current_line = String::new();
-        let mut first = true;
+        // The first visual line carries the leading-space run.
+        let mut current = String::from(indent);
+        let mut current_width = indent.width();
+        // Nothing but that run is on the line yet.
+        let mut fresh = true;
         for word in body.split_whitespace() {
-            if current_line.is_empty() {
-                if first {
-                    current_line.push_str(indent);
+            let mut rest = word;
+            let mut remaining_width = word.width();
+            loop {
+                let separator = usize::from(!fresh);
+                let room = max_width.saturating_sub(current_width + separator);
+                if remaining_width <= room {
+                    if !fresh {
+                        current.push(' ');
+                    }
+                    current.push_str(rest);
+                    fresh = false;
+                    current_width += separator + remaining_width;
+                    break;
                 }
-                current_line.push_str(word);
-            } else if current_line.len() + 1 + word.len() > max_width {
-                lines.push(std::mem::take(&mut current_line));
-                current_line.push_str(word);
-            } else {
-                current_line.push(' ');
-                current_line.push_str(word);
+                if !fresh {
+                    // Try the word again on a line of its own.
+                    lines.push(std::mem::take(&mut current));
+                    current_width = 0;
+                    fresh = true;
+                    continue;
+                }
+                // Preserve whole graphemes; a standalone combining mark is
+                // otherwise lost when ratatui paints the next message span.
+                let span = Span::raw(rest);
+                let mut cut = 0;
+                let mut cut_width = 0;
+                for grapheme in span.styled_graphemes(Style::default()) {
+                    let cells = grapheme.symbol.width();
+                    if cut_width + cells > room {
+                        break;
+                    }
+                    cut += grapheme.symbol.len();
+                    cut_width += cells;
+                }
+                if cut == 0 {
+                    if !current.is_empty() {
+                        lines.push(std::mem::take(&mut current));
+                        current_width = 0;
+                        continue;
+                    }
+                    // A terminal narrower than one grapheme cannot split it
+                    // losslessly. Keep it intact rather than corrupting it.
+                    let grapheme = span
+                        .styled_graphemes(Style::default())
+                        .next()
+                        .expect("an over-wide word is nonempty");
+                    cut = grapheme.symbol.len();
+                    cut_width = grapheme.symbol.width();
+                }
+                current.push_str(&rest[..cut]);
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+                remaining_width -= cut_width;
+                rest = &rest[cut..];
             }
-            first = false;
         }
-        lines.push(current_line);
+        lines.push(current);
     }
     if lines.is_empty() {
         lines.push(String::new());
@@ -332,5 +382,75 @@ mod tests {
     fn a_single_line_message_still_renders_as_one_line() {
         let texts = message_texts(&info("Session restarted"), 120);
         assert_eq!(texts, vec!["Session restarted".to_string()]);
+    }
+
+    /// `TM-02`'s width rule: a token wider than the whole block (a long alias
+    /// or id) is character-broken, never left to overflow and be clipped.
+    /// Re-joining the visual lines yields the token byte-for-byte.
+    ///
+    /// **Mutant → RED:** append an over-wide word whole instead of breaking it.
+    #[test]
+    fn a_token_wider_than_the_block_is_character_broken_and_loses_nothing() {
+        let token = "a".repeat(200);
+        let block = info(&format!("  ● {token}  delivered"));
+        // overhead = 6 ⇒ 24 cells of text.
+        let texts = message_texts(&block, 30);
+        assert!(
+            texts.iter().all(|text| text.len() <= 24),
+            "no visual line exceeds the block: {texts:?}"
+        );
+        assert_eq!(
+            texts.concat().matches(&token).count(),
+            1,
+            "the whole token survives the break: {texts:?}"
+        );
+    }
+
+    /// A break never splits a `char`, and the first visual line keeps the
+    /// leading-space run while its continuations do not.
+    #[test]
+    fn breaking_an_overwide_token_is_utf8_safe_and_keeps_the_first_line_indent() {
+        let token = "é".repeat(40);
+        let block = info(&format!("    {token} tail"));
+        let texts = message_texts(&block, 26);
+        assert!(texts[0].starts_with("    "), "{texts:?}");
+        assert!(
+            texts[1..].iter().all(|text| !text.starts_with(' ')),
+            "a continuation never repeats the row's indent: {texts:?}"
+        );
+        assert_eq!(texts.join("").replace(' ', "").matches(&token).count(), 1);
+    }
+
+    #[test]
+    fn grapheme_fields_survive_actual_painting_at_sixty_columns() {
+        use ratatui::{buffer::Buffer, widgets::Widget};
+
+        for token in [
+            format!("{}e\u{301}b", "x".repeat(53)),
+            format!("{}👩‍🔬b", "x".repeat(53)),
+            "界".repeat(40),
+        ] {
+            let lines = render_feedback_lines(&info(&token), 60, &test_theme());
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 60, lines.len() as u16));
+            for (index, line) in lines.into_iter().enumerate() {
+                assert!(
+                    line.width() <= 60,
+                    "a field must fit without terminal clipping"
+                );
+                line.render(Rect::new(0, index as u16, 60, 1), &mut buffer);
+            }
+            let painted: String = buffer
+                .content
+                .iter()
+                .flat_map(|cell| cell.symbol().chars())
+                .filter(|character| {
+                    !character.is_whitespace() && *character != '│' && *character != 'ℹ'
+                })
+                .collect();
+            assert_eq!(
+                painted, token,
+                "painted graphemes must retain the complete field"
+            );
+        }
     }
 }

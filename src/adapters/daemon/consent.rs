@@ -40,13 +40,14 @@ fn pending_key(principal: &PolicyPrincipal) -> (ConsentSlot, PeerId) {
     (ConsentSlot::of(principal), principal.peer().clone())
 }
 
-/// Groups pending tasks by consent cell and owns durable grants.
+/// Groups pending tasks by consent cell and owns durable grants/revocations.
 pub(crate) struct PendingConsentManager {
     projection: Arc<JournalConsentProjection>,
     journal: Arc<dyn RoomJournal>,
     clock: Arc<dyn Clock>,
     reader: Option<Arc<dyn RoomJournalReader>>,
     last_seq: AtomicU64,
+    projection_serial: Mutex<()>,
     policy: tokio::sync::Mutex<Option<Arc<EffectivePolicy>>>,
     pending: Mutex<HashMap<(ConsentSlot, PeerId), PendingSender>>,
     always_requests: Mutex<HashSet<RequestId>>,
@@ -65,6 +66,7 @@ impl PendingConsentManager {
             clock,
             reader,
             last_seq: AtomicU64::new(0),
+            projection_serial: Mutex::new(()),
             policy: tokio::sync::Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             always_requests: Mutex::new(HashSet::new()),
@@ -90,7 +92,8 @@ impl PendingConsentManager {
         }
         // D1: refresh the cached fold from the durable journal before deciding,
         // so a `/team untrust` issued from another client takes effect live.
-        self.refresh_projection().await;
+        let projection_serial = self.projection_serial.lock().await;
+        self.refresh_projection_locked_best_effort().await;
         // F2: a TOML `[interaction.overrides]` entry implies consent (the
         // operator authored it). Checked before the journaled projection per
         // the AC1 precedence rule; only an applicable (pinned, matching)
@@ -122,6 +125,8 @@ impl PendingConsentManager {
         });
         group.summaries.push(summary.chars().take(400).collect());
         group.waiters.push(decision_tx);
+        drop(pending);
+        drop(projection_serial);
         PendingConsentRegistration {
             pending: true,
             first_for_sender,
@@ -164,28 +169,86 @@ impl PendingConsentManager {
         self.pending.lock().await.remove(&pending_key(sender));
     }
 
-    /// Re-fold the cached projection from the durable journal when it has
-    /// advanced (D1). Idempotent and best-effort: a read error leaves the cached
-    /// snapshot in place. The sync query contract is unchanged.
-    async fn refresh_projection(&self) {
+    /// Re-fold the cached projection from the durable journal when available.
+    ///
+    /// Admission remains best-effort to preserve its existing behavior; status
+    /// and revocation use the fallible helper below because they report
+    /// authoritative consent state to the operator.
+    async fn refresh_projection_locked_best_effort(&self) {
+        if let Err(error) = self.refresh_projection_locked().await {
+            tracing::warn!(
+                %error,
+                "consent projection refresh failed; proceeding with cached state"
+            );
+        }
+    }
+
+    /// Refresh from the authoritative journal without changing the projection
+    /// unless the complete read succeeds.
+    async fn refresh_projection_locked(&self) -> Result<(), String> {
         let Some(reader) = &self.reader else {
-            return;
+            return Ok(());
         };
-        let entries = match reader.load_entries().await {
-            Ok(entries) => entries,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "consent projection refresh failed; proceeding with cached state"
-                );
-                return;
-            }
-        };
+        let entries = reader
+            .load_entries()
+            .await
+            .map_err(|error| error.to_string())?;
         let max_seq = entries.last().map(|entry| entry.seq).unwrap_or(0);
         if max_seq > self.last_seq.load(Ordering::Acquire) {
             self.projection.replace_from(&entries);
             self.last_seq.store(max_seq, Ordering::Release);
         }
+        Ok(())
+    }
+
+    /// Revoke a sender's standing consent using the daemon-owned journal.
+    pub(crate) async fn revoke_sender_consent(
+        &self,
+        alias: &str,
+        peers: &[crate::domain::models::A2aPeerSpec],
+    ) -> Result<String, String> {
+        let sender =
+            crate::adapters::tui::handlers::team_command::resolve_peer_target(alias, peers)?;
+        self.refresh_projection_locked().await?;
+        if crate::domain::ports::peer_consent_state(self.projection.as_ref(), &sender)
+            != crate::domain::ports::ConsentState::Trusted
+        {
+            return Ok(format!(
+                "No active grant for {alias} ({sender}); nothing changed."
+            ));
+        }
+        let event = RoomEvent::ConsentRevoked {
+            sender: Some(sender.clone()),
+            revoked_at: self.clock.wall_now_ms(),
+        };
+        self.journal
+            .record_event(event.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        self.projection.apply(&event);
+        Ok(format!(
+            "Revoked trust for {alias} ({sender}). Future tasks require consent."
+        ))
+    }
+
+    pub(crate) async fn render_team_status(
+        &self,
+        peers: &[crate::domain::models::A2aPeerSpec],
+    ) -> Result<String, String> {
+        self.refresh_projection_locked().await?;
+        let policy = self
+            .policy
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| "daemon consent policy is unavailable".to_owned())?;
+        Ok(
+            crate::adapters::tui::handlers::team_command::render_team_status(
+                &policy,
+                self.projection.as_ref(),
+                peers,
+            ),
+        )
     }
 
     /// Install the resolved effective policy so the gate can honour TOML
@@ -240,6 +303,7 @@ impl PendingConsentManager {
     }
 
     async fn persist_grant(&self, sender: &PolicyPrincipal) -> bool {
+        let _serial = self.projection_serial.lock().await;
         if self.projection.consent_for(sender) == ConsentState::Trusted {
             return true;
         }
@@ -346,6 +410,177 @@ mod tests {
             None,
         ));
         (manager, projection)
+    }
+    struct SwitchableConsentReader {
+        entries: tokio::sync::RwLock<Vec<crate::domain::models::JournalEntry>>,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::RoomJournalReader for SwitchableConsentReader {
+        async fn load_entries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::JournalEntry>, RoomJournalError> {
+            if self.fail.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(RoomJournalError::Read(
+                    "injected authoritative read failure".into(),
+                ));
+            }
+            Ok(self.entries.read().await.clone())
+        }
+    }
+
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn authoritative_consent_read_failure_refuses_status_and_untrust_until_recovery() {
+        use crate::domain::models::{JournalEntry, JournalRecord};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let peer_spec = crate::domain::models::A2aPeerSpec::new(
+            "external-sender",
+            crate::domain::models::RedactedUrl::from("http://127.0.0.1:9/"),
+            crate::domain::models::A2aPeerSource::Workspace,
+        )
+        .with_pinned_key(Some(crate::domain::models::PinnedKey::new(
+            crate::domain::models::PinnedKeyAlgorithm::EdDsa,
+            "ZO2qP7kxDpjNsYPN2_FW2ZZKBcAX-n-O48JikJ-jZ1k".to_owned(),
+            None,
+        )));
+        let sender = peer_spec.resolved_identity();
+        let external_grant = RoomEvent::ConsentGranted {
+            sender: Some(sender.clone()),
+            granted_at: 1,
+            principal: None,
+        };
+        let reader = Arc::new(SwitchableConsentReader {
+            entries: tokio::sync::RwLock::new(vec![JournalEntry::new(
+                1,
+                JournalRecord::Room(external_grant),
+                1,
+            )]),
+            fail: AtomicBool::new(true),
+        });
+        let journal = Arc::new(RecordingJournal::default());
+        let projection = Arc::new(crate::adapters::policy::JournalConsentProjection::default());
+        let manager = PendingConsentManager::new(
+            projection.clone(),
+            journal.clone(),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(42)),
+            Some(reader.clone()),
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let (policy, _) = loopback_collision_policy(workspace.path());
+        manager.set_effective_policy(Arc::new(policy)).await;
+
+        assert!(
+            manager
+                .render_team_status(std::slice::from_ref(&peer_spec))
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .revoke_sender_consent("external-sender", std::slice::from_ref(&peer_spec))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            crate::domain::ports::peer_consent_state(projection.as_ref(), &sender),
+            ConsentState::None,
+            "failed authoritative reads must not project a cached or partial grant"
+        );
+        assert!(journal.events.lock().await.is_empty());
+
+        reader.fail.store(false, Ordering::Release);
+        let status = manager
+            .render_team_status(std::slice::from_ref(&peer_spec))
+            .await
+            .expect("status refresh succeeds once the journal is readable");
+        assert!(status.contains("external-sender"));
+        assert_eq!(
+            crate::domain::ports::peer_consent_state(projection.as_ref(), &sender),
+            ConsentState::Trusted,
+            "recovery observes the grant made by the other session"
+        );
+
+        let revoked = manager
+            .revoke_sender_consent("external-sender", std::slice::from_ref(&peer_spec))
+            .await
+            .expect("untrust refreshes the externally written grant before revoking");
+        assert!(revoked.starts_with("Revoked trust"));
+        assert_eq!(
+            crate::domain::ports::peer_consent_state(projection.as_ref(), &sender),
+            ConsentState::Revoked
+        );
+        assert!(matches!(
+            journal.events.lock().await.as_slice(),
+            [RoomEvent::ConsentRevoked { sender: Some(found), .. }] if found == &sender
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoke_is_durable_first_and_preserves_state_on_append_failure() {
+        let journal = Arc::new(RecordingJournal {
+            events: tokio::sync::Mutex::new(Vec::new()),
+            fail: true,
+        });
+        let (manager, projection) = manager(journal.clone());
+        let sender = peer(9);
+        projection.apply(&RoomEvent::ConsentGranted {
+            sender: Some(sender.clone()),
+            granted_at: 1,
+            principal: None,
+        });
+        assert!(
+            manager
+                .revoke_sender_consent(sender.as_str(), &[])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            crate::domain::ports::peer_consent_state(projection.as_ref(), &sender),
+            ConsentState::Trusted
+        );
+        assert!(journal.events.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn revoke_appends_before_projecting_and_is_idempotent() {
+        let journal = Arc::new(RecordingJournal::default());
+        let (manager, projection) = manager(journal.clone());
+        let sender = peer(10);
+        projection.apply(&RoomEvent::ConsentGranted {
+            sender: Some(sender.clone()),
+            granted_at: 1,
+            principal: None,
+        });
+        let message = manager
+            .revoke_sender_consent(sender.as_str(), &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            message,
+            format!(
+                "Revoked trust for {0} ({0}). Future tasks require consent.",
+                sender
+            )
+        );
+        assert!(matches!(
+            journal.events.lock().await.as_slice(),
+            [RoomEvent::ConsentRevoked { sender: Some(found), .. }] if found == &sender
+        ));
+        assert_eq!(
+            crate::domain::ports::peer_consent_state(projection.as_ref(), &sender),
+            ConsentState::Revoked
+        );
+        assert_eq!(
+            manager
+                .revoke_sender_consent(sender.as_str(), &[])
+                .await
+                .unwrap(),
+            format!("No active grant for {0} ({0}); nothing changed.", sender)
+        );
+        assert_eq!(journal.events.lock().await.len(), 1);
     }
 
     #[tokio::test]

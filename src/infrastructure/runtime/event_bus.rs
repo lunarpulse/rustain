@@ -292,11 +292,29 @@ impl RawEvent {
                 timestamp_ms: now,
                 kind: RawEventKind::Subagent(envelope.clone()),
             },
-            AppEvent::DomainEvent(payload) => RawEvent {
-                conversation_id: None,
-                timestamp_ms: now,
-                kind: RawEventKind::DomainEvent(payload.clone()),
-            },
+            AppEvent::DomainEvent(payload) => {
+                if matches!(
+                    payload,
+                    crate::domain::events::DomainEventPayload::Room(
+                        crate::domain::models::RoomEvent::TeamSendActionRecorded { .. }
+                            | crate::domain::models::RoomEvent::TeamSendRecipientSettled { .. }
+                    )
+                ) {
+                    return None;
+                }
+                let mut payload = payload.clone();
+                if let crate::domain::events::DomainEventPayload::Room(
+                    crate::domain::models::RoomEvent::RemoteEnvelopeDispatched { action, .. },
+                ) = &mut payload
+                {
+                    *action = None;
+                }
+                RawEvent {
+                    conversation_id: None,
+                    timestamp_ms: now,
+                    kind: RawEventKind::DomainEvent(payload),
+                }
+            }
             AppEvent::Tick
             | AppEvent::ConfigReload
             | AppEvent::Resize(..)
@@ -534,5 +552,50 @@ mod tests {
             assert_eq!(t.conversation_id, "conv-3");
             assert!(matches!(t.call, ToolCall::Validating { .. }));
         }
+    }
+    #[test]
+    fn domain_dispatch_projection_preserves_legacy_fields_but_strips_action_reference() {
+        let peer = crate::domain::models::PeerId::from_public_key(&[0x2a; 32]).unwrap();
+        let action = crate::domain::models::SendActionId::from_replay("sa_private123");
+        let event = AppEvent::DomainEvent(crate::domain::events::DomainEventPayload::Room(
+            crate::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+                peer: peer.clone(),
+                task: Some("legacy-task-1".to_owned()),
+                bytes: 19,
+                act: crate::domain::models::DispatchAct::ItemRetract {
+                    item: "peer-item-1".to_owned(),
+                },
+                content_hash: None,
+                endpoint: Some("sha256:origin-digest".to_owned()),
+                action: Some(crate::domain::models::SendActionRef { action, index: 3 }),
+            },
+        ));
+        let raw = RawEvent::from_app_event(&event).expect("legacy dispatch remains projected");
+        let RawEventKind::DomainEvent(crate::domain::events::DomainEventPayload::Room(
+            crate::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+                peer: projected_peer,
+                task,
+                bytes,
+                act,
+                content_hash,
+                endpoint,
+                action,
+            },
+        )) = raw.kind
+        else {
+            panic!("expected legacy dispatch in raw event");
+        };
+        assert_eq!(projected_peer, peer);
+        assert_eq!(task.as_deref(), Some("legacy-task-1"));
+        assert_eq!(bytes, 19);
+        assert_eq!(
+            act,
+            crate::domain::models::DispatchAct::ItemRetract {
+                item: "peer-item-1".to_owned()
+            }
+        );
+        assert_eq!(content_hash, None);
+        assert_eq!(endpoint.as_deref(), Some("sha256:origin-digest"));
+        assert_eq!(action, None, "sender-local action correlation is stripped");
     }
 }

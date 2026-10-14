@@ -23,6 +23,16 @@ use super::protocol::{
 };
 use crate::adapters::rap::IdentityKeyStore;
 
+fn print_frame_json(frame: &DaemonFrame) -> Result<()> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    serde_json::to_writer(&mut output, frame)?;
+    writeln!(output)?;
+    output.flush()?;
+    Ok(())
+}
+
 /// Connect + attach to this workspace's daemon and run the line-based client loop.
 pub async fn run_attach(workspace: &Path) -> Result<()> {
     let socket = crate::infrastructure::paths::daemon_socket_path(workspace)?;
@@ -78,6 +88,7 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
         other => anyhow::bail!("unexpected first frame from daemon: {other:?}"),
     };
 
+    let mut board_chunks = std::collections::HashMap::<String, (u32, String)>::new();
     let mut reader = tokio::spawn(async move {
         loop {
             match read_frame::<_, DaemonFrame>(&mut read_half).await {
@@ -103,13 +114,42 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
                             peer_row_revision = operation.revision();
                         }
                     }
+                    DaemonFrame::TeamBoardChunk {
+                        request,
+                        sequence,
+                        view,
+                    } => {
+                        let current = board_chunks.get(&request).map(|entry| entry.0);
+                        if current != Some(sequence) {
+                            board_chunks.remove(&request);
+                        } else if let Some(next) = sequence.checked_add(1) {
+                            if let Some(entry) = board_chunks.get_mut(&request) {
+                                entry.1.push_str(&view);
+                                entry.0 = next;
+                            }
+                        } else {
+                            board_chunks.remove(&request);
+                        }
+                    }
+                    DaemonFrame::TeamBoardDone { request, chunks } => {
+                        if let Some((received, view)) = board_chunks.remove(&request)
+                            && received == chunks
+                        {
+                            println!("{view}");
+                        }
+                    }
+                    result @ DaemonFrame::TeamSendStarted { .. }
+                    | result @ DaemonFrame::TeamSendSettled { .. }
+                    | result @ DaemonFrame::TeamStatusResult { .. }
+                    | result @ DaemonFrame::SenderConsentRevoked { .. } => {
+                        print_frame_json(&result)?;
+                    }
+                    result @ DaemonFrame::RecipientActionResult {
+                        target: super::protocol::RecipientActionTarget::Request { .. },
+                        ..
+                    } => print_frame_json(&result)?,
                     result @ DaemonFrame::RecipientActionResult { .. } => {
-                        use std::io::Write;
-                        let stdout = std::io::stdout();
-                        let mut output = stdout.lock();
-                        serde_json::to_writer(&mut output, &result)?;
-                        writeln!(output)?;
-                        output.flush()?;
+                        print_frame_json(&result)?
                     }
                     DaemonFrame::ApprovalRequest {
                         request_id, tool, ..

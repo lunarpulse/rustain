@@ -106,6 +106,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         act: DispatchAct::Task,
         content_hash: Some(content_hash),
         endpoint: None,
+        action: None,
     };
     let mut legacy_dispatched =
         serde_json::to_value(&dispatched).expect("serialize outbound dispatch");
@@ -290,6 +291,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
         act: DispatchAct::Task,
         content_hash: None,
         endpoint: Some("cd".repeat(32)),
+        action: None,
     };
     let encoded = serde_json::to_value(&unpinned).expect("serialize dispatch");
     assert_eq!(encoded["endpoint"], "cd".repeat(32));
@@ -304,6 +306,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
         act: DispatchAct::Task,
         content_hash: None,
         endpoint: None,
+        action: None,
     };
     let row = serde_json::to_value(&pinned).expect("serialize dispatch");
     assert_eq!(

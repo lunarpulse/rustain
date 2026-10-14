@@ -422,13 +422,43 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 
 ### Wire protocol
 
-Frames are a `u32` big-endian length prefix + a `serde_json` body (zero extra
-dependencies). The client speaks `ClientFrame` (`Attach`/`UserMessage`/
-`HistoryRequest`/`ApprovalResponse`/`Detach`); the daemon speaks `DaemonFrame`
-(`AttachAck`/`Event`/`History`/`ApprovalRequest`/`Detached`/`Error`). Forwarded
-turn events reuse the existing `RawEvent` projection (`ClientEvent = RawEvent`) — one
-`AppEvent → wire` mapping, in one place. A `protocol_version` mismatch is rejected
-with a clear `Error` frame (forward-compat for the Telegram/cron channels in
-12.3/12.4). Each message carries its originating `ChannelKind` (`terminal` today),
-**persisted** on `ChatMessage.origin` so the prefix survives a daemon restart /
-crash-recovery replay.
+Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
+attach handshake negotiates **protocol v6**; a client speaking another version
+receives `VersionMismatch` before registration or other attach side effects.
+Forwarded turn events reuse the existing `RawEvent` projection
+(`ClientEvent = RawEvent`) — one `AppEvent → wire` mapping, in one place. That
+projection omits sender-local team action/settlement events and strips the
+additive action reference from legacy dispatch events; unrelated raw-event
+behavior is unchanged.
+
+The client speaks `ClientFrame`, including `Attach`, `UserMessage`,
+`HistoryRequest`, `ApprovalResponse`, `Detach`, and the request-keyed team
+commands `TeamSend`, `TeamBoard`, `TeamStatus`, and `RevokeSenderConsent`.
+The daemon answers team boards with request-correlated `TeamBoardChunk` frames
+(sequence numbers start at zero) and a `TeamBoardDone` frame naming the complete
+chunk count; clients reassemble only the matching request and publish the board
+after a valid done boundary. The stream applies backpressure through only the
+originating connection's writer; it stops if that connection closes and does
+not hold the command reader while chunks drain. Board request keys are limited
+to 128 bytes. Each JSON frame, including escaped text and request overhead,
+fits the 8 MiB `MAX_FRAME_BYTES` limit. Team status uses
+`TeamStatusResult`; revocation uses `SenderConsentRevoked`; sends use
+`TeamSendStarted` plus typed, per-recipient `TeamSendSettled` frames. Refusals use a
+`RecipientActionResult` targeted at the originating request key.
+
+Team send and sender-consent revocation require a TrustedLocal read-write
+attachment. Board and status are explicit TrustedLocal reads and are available
+to read-only attachments. Peer-tier connections are refused for all four
+commands. Team sends enter the bounded operator FIFO and a separate finite
+daemon-owned in-flight limit. Once a send's action record is durable, it
+continues across client detach; settlements remain journaled and are published
+only to the connection that originated the request. A replacement writer does
+not inherit old results, and a command still queued when its writer is replaced
+is discarded by the stale-writer fence.
+
+The daemon injects the same composed outbound A2A runtime used by its core;
+the attach client composes no provider or egress. Protocol v6 changes only the
+local daemon attach protocol. It does **not** discharge the separate A2A
+boundary tracked by AD-1826. Each message also carries its originating
+`ChannelKind` (`terminal` today), persisted on `ChatMessage.origin` so the
+prefix survives restart and crash-recovery replay.

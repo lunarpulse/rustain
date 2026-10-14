@@ -3209,11 +3209,31 @@ async fn k18_an_unusable_key_refuses_credentialed_peers_and_is_never_rewritten()
     );
     let rows = room_events(&a.journal).await;
     let new_rows = &rows[a_rows..];
-    assert_eq!(new_rows.len(), 1, "{new_rows:?}");
+    // Story 19.21: the one preflight-refusal row now sits between the send
+    // action's record and the recipient's typed settlement — and nothing else:
+    // still no dispatch row, so still no POST (`PQ1`).
+    assert_eq!(new_rows.len(), 3, "{new_rows:?}");
     assert!(matches!(
         new_rows[0].1,
+        RoomEvent::TeamSendActionRecorded { .. }
+    ));
+    assert!(matches!(
+        new_rows[1].1,
         RoomEvent::RemoteEnvelopeRejected { task: None, .. }
     ));
+    assert!(matches!(
+        new_rows[2].1,
+        RoomEvent::TeamSendRecipientSettled {
+            settlement: rustain::domain::models::SendSettlement::Unreachable { .. },
+            ..
+        }
+    ));
+    assert!(
+        !new_rows
+            .iter()
+            .any(|row| matches!(row.1, RoomEvent::RemoteEnvelopeDispatched { .. })),
+        "a refused send writes no dispatch row: {new_rows:?}"
+    );
     assert_eq!(room_events(&b.host.journal).await.len(), b_length);
 
     // The model rail refuses before `delegate`: no dispatch row, so no POST.

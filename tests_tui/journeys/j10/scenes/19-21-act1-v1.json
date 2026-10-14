@@ -1,0 +1,10 @@
+{
+  "scene": "story-19-21-act1-v1",
+  "personas": {
+    "scene-lena-po": {"turns": []},
+    "scene-jun-dev": {"turns": []},
+    "scene-tom-dev": {"turns": []},
+    "scene-yuki-dev": {"turns": []},
+    "scene-nina-ux": {"turns": []}
+  }
+}

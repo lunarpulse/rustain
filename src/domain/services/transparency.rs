@@ -717,6 +717,14 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         // Retractions mutate the prior projected row in `fold_transparency`;
         // they never create a second visible row.
         RoomEvent::AutoResponseRetracted { .. } => return None,
+        // Story 19.21 `C1` — sender-local send-action facts. Decided, not
+        // defaulted: this build's `/team log` deliberately omits them (no new
+        // transparency kind), and an older build reads the tag as
+        // `Unrecognized`. They are not compile-forced by the trailing
+        // `_ => return None`, so the omission is stated here.
+        RoomEvent::TeamSendActionRecorded { .. } | RoomEvent::TeamSendRecipientSettled { .. } => {
+            return None;
+        }
         RoomEvent::Unrecognized => (
             TransparencyKind::Unknown,
             Direction::Unknown,
@@ -1411,6 +1419,7 @@ mod tests {
                 act: crate::domain::models::DispatchAct::Task,
                 content_hash: None,
                 endpoint: None,
+                action: None,
             },
         );
         let row = transparency_row(&entry).expect("dispatch projects");

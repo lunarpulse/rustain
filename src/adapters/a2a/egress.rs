@@ -39,6 +39,31 @@ impl A2aEgress {
         event_tx: UnboundedSender<AppEvent>,
         item_capability: ItemCapabilityKeyState,
     ) -> Result<Self> {
+        Self::compose_with_clock(
+            peers,
+            node_tree,
+            journal,
+            journal_reader,
+            event_tx,
+            item_capability,
+            Arc::new(crate::domain::clock::SystemClock::default()),
+        )
+    }
+
+    /// [`Self::compose`] with the wall clock an action board's age is measured
+    /// against supplied (Story 19.21 `AC3(c)`, `A14`). Production reaches this
+    /// through [`Self::compose`] with the system clock; a keystone injects a
+    /// controllable clock, so an age is a deterministic function of the
+    /// journal's recorded time and this clock — never a sleep.
+    pub fn compose_with_clock(
+        peers: Vec<A2aPeerSpec>,
+        node_tree: NodeTree,
+        journal: Arc<dyn RoomJournal>,
+        journal_reader: Arc<dyn crate::domain::ports::RoomJournalReader>,
+        event_tx: UnboundedSender<AppEvent>,
+        item_capability: ItemCapabilityKeyState,
+        clock: Arc<dyn crate::domain::clock::Clock>,
+    ) -> Result<Self> {
         let mut bindings = Vec::with_capacity(peers.len());
         for spec in peers {
             let client = Arc::new(A2aClientAdapter::new(&spec, None).map_err(|error| {
@@ -52,7 +77,8 @@ impl A2aEgress {
             A2aDelegationRuntime::new(node_tree, journal, event_tx.clone())
                 .with_peer_bindings(provider.peer_bindings())
                 .with_journal_reader(journal_reader)
-                .with_item_capability(item_capability),
+                .with_item_capability(item_capability)
+                .with_clock(clock),
         );
         provider.set_delegation_runtime(runtime.clone());
 
@@ -129,11 +155,10 @@ mod trust_anchor_tests {
         PeerFixture, RpcAnswer, TestLeaf, Validity, leaf_issued_by, self_signed_leaf, test_ca,
         unreachable_origin, write_pem,
     };
-    use crate::adapters::a2a::{
-        client::CardSlot,
-        send::{RecipientOutcome, deliver_text},
+    use crate::adapters::a2a::{client::CardSlot, send::deliver_text};
+    use crate::domain::models::{
+        A2aPeerSource, A2aPeerSpec, RecipientOutcome, RedactedUrl, RoomEvent,
     };
-    use crate::domain::models::{A2aPeerSource, A2aPeerSpec, RedactedUrl, RoomEvent};
     use crate::domain::ports::{RoomJournal, RoomJournalError};
 
     use super::*;
@@ -635,6 +660,7 @@ mod item_capability_tests {
             act: DispatchAct::Task,
             content_hash: None,
             endpoint: endpoint.map(str::to_owned),
+            action: None,
         }
     }
 

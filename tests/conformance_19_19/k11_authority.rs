@@ -433,7 +433,7 @@ async fn k11_http_arrival_reaches_pre_attached_reader_then_writer_actions_are_fe
 }
 
 #[tokio::test]
-async fn k11_signed_v3_attach_is_rejected_and_signed_v4_control_succeeds() {
+async fn k11_signed_v4_attach_is_rejected_and_signed_v6_control_succeeds() {
     let mut host = Host::serve(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let socket = SocketService::start(&mut host).await;
     let mut stream = tokio::net::UnixStream::connect(&socket.path)
@@ -447,7 +447,7 @@ async fn k11_signed_v3_attach_is_rejected_and_signed_v4_control_succeeds() {
     let signer = IdentityKeyStore::new(keys.path())
         .load_or_generate()
         .expect("actual signer");
-    let client_version = 3;
+    let client_version = 4;
     let tier = ConnectionTier::TrustedLocal;
     let proof = signer.attach_proof(&nonce, client_version, tier.proof_tag(), false);
     write_frame(
@@ -462,12 +462,12 @@ async fn k11_signed_v3_attach_is_rejected_and_signed_v4_control_succeeds() {
         },
     )
     .await
-    .expect("write authentic v3 attach proof");
+    .expect("write authentic v4 attach proof");
     assert!(matches!(
         socket_frame(&mut stream).await,
         DaemonFrame::Error(ProtocolError::VersionMismatch {
             daemon: PROTOCOL_VERSION,
-            client: 3
+            client: 4
         })
     ));
     drop(stream);

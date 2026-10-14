@@ -425,6 +425,134 @@ impl DispatchAct {
     }
 }
 
+/// Story 19.21 `C1` — the host-minted id of one operator send action.
+///
+/// Sender-local: it names a row of THIS host's journal and nothing else. ⛔ It
+/// never goes on the wire, no peer can address it, and it is not a group
+/// identity (`FR164`): the recipients of one action stay N independent sends.
+/// Shape: [`SEND_ACTION_ID_PREFIX`] + a short random token, at most
+/// [`MAX_SEND_ACTION_ID_LEN`] characters, so an operator can type it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SendActionId(String);
+
+/// The prefix every minted [`SendActionId`] starts with.
+pub const SEND_ACTION_ID_PREFIX: &str = "sa_";
+
+/// Longest minted [`SendActionId`], prefix included.
+pub const MAX_SEND_ACTION_ID_LEN: usize = 16;
+
+impl SendActionId {
+    /// Mint a fresh id. Uniqueness within one workspace journal is the
+    /// caller's to enforce (the runtime re-rolls on a collision with a
+    /// recorded id); 13 characters over 36 symbols make a collision
+    /// negligible before that check.
+    #[must_use]
+    pub fn mint() -> Self {
+        const ALPHABET: [char; 36] = [
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g',
+            'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x',
+            'y', 'z',
+        ];
+        const TOKEN_LEN: usize = MAX_SEND_ACTION_ID_LEN - SEND_ACTION_ID_PREFIX.len();
+        Self(format!(
+            "{SEND_ACTION_ID_PREFIX}{}",
+            nanoid::nanoid!(TOKEN_LEN, &ALPHABET)
+        ))
+    }
+
+    /// Rebuild an id read from the journal or typed by the operator. ⛔ No
+    /// validation: a replayed or mistyped id simply matches no recorded
+    /// action, and every render bounds and sanitizes it.
+    #[must_use]
+    pub fn from_replay(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Story 19.21 `C1` — which recipient of which operator send action a journal
+/// row belongs to. Carried additively by the dispatch row and directly by the
+/// typed settlement, so membership is never reconstructed from an alias,
+/// timing, a body hash or "the newest dispatch".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendActionRef {
+    pub action: SendActionId,
+    /// 0-based position in the action's operator-ordered recipient list.
+    pub index: u32,
+}
+
+/// One addressed recipient as the action record froze it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendActionRecipient {
+    /// The roster alias as the operator typed it.
+    pub alias: String,
+    /// The resolved identity exactly as the dispatch row resolves it (the
+    /// pinned identity, else the alias pseudonym).
+    pub peer: PeerId,
+    /// Story 19.18c `PQ2` — the roster origin's digest for an **unpinned**
+    /// peer (never the raw URL); `None` for a pinned peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+/// Whether a recorded unreachable cause is a ratified local sentence or text a
+/// peer influenced. Decides the render bound only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementCauseKind {
+    Ratified,
+    /// Also where a kind written by a newer build lands: the tighter bound is
+    /// the safe one.
+    #[default]
+    #[serde(other)]
+    PeerInfluenced,
+}
+
+/// The complete cause of an unreachable settlement, stored raw and sanitized
+/// once at render (`AD-1824`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementCause {
+    pub kind: SettlementCauseKind,
+    pub text: String,
+}
+
+/// Story 19.21 `C1` — one recipient's typed send-time outcome, journaled after
+/// every row the preserved delivery path emits and before the settle is shown.
+///
+/// ⛔ Never an invented Accepted/Rejected row, never a reply body, credential
+/// or raw capability. `Unknown` is what an older build reads for an outcome a
+/// newer one wrote: it renders as an explicit unrecognised row, never as any
+/// ratified token.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+#[non_exhaustive]
+pub enum SendSettlement {
+    /// The first answer minted an item (`item`, peer text, when it named one).
+    Delivered {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
+    Declined,
+    Unreachable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<SettlementCause>,
+    },
+    AwaitingApproval,
+    AcceptedWithoutItem,
+    AskedQuestion {
+        task_id: String,
+    },
+    NoUsableAnswer,
+    NotSent,
+    #[serde(other)]
+    Unknown,
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
@@ -505,6 +633,12 @@ pub enum RoomEvent {
         /// serializes byte-identically to a 19.18 row.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
+        /// Story 19.21 `C1` — which operator send action and recipient index
+        /// this dispatch belongs to. `None` on every row written before 19.21,
+        /// on a `/team followup`, a retract row and a model delegation, each of
+        /// which serializes byte-identically to the previous shape.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<SendActionRef>,
     },
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.
@@ -1052,6 +1186,39 @@ pub enum RoomEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_hash: Option<ContentHash>,
     },
+    /// Story 19.21 `C1` — this host's operator submitted one send action to
+    /// N addressed recipients. Journaled **after** whole-action validation and
+    /// **before** any recipient preflight, dispatch or POST.
+    ///
+    /// Sender-local and journal-only: ⛔ never on the wire, never addressable by
+    /// a peer, no group outcome, no retry, no body bytes and nothing derived
+    /// from them but the hash and the byte count. An older build reads this tag
+    /// as [`RoomEvent::Unrecognized`]; this build's transparency projection
+    /// deliberately omits it (no new transparency kind).
+    TeamSendActionRecorded {
+        action: SendActionId,
+        /// Operator order. The vector's length is the **addressed count**.
+        recipients: Vec<SendActionRecipient>,
+        /// The semantic type, or [`SemanticMessageType::Unknown`] for an
+        /// untyped send (omitted on write).
+        #[serde(default, skip_serializing_if = "SemanticMessageType::is_unknown")]
+        message_type: SemanticMessageType,
+        /// The operator-authored, sender-local label (`--subject`). ⛔ Never
+        /// derived from body bytes and never sent to a peer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+        body_hash: ContentHash,
+        body_bytes: usize,
+    },
+    /// Story 19.21 `C1` — the typed outcome of one recipient of a send action,
+    /// appended after every row that recipient's delivery path emitted and
+    /// before the settle is shown.
+    TeamSendRecipientSettled {
+        action: SendActionId,
+        /// 0-based position in the action's operator-ordered recipient list.
+        index: u32,
+        settlement: SendSettlement,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -1472,7 +1639,14 @@ impl OrchestrationRoom {
             // An asker-side receipt of a peer's reply turn: a fact about one
             // peer's served thread, not a room node. It renders through the
             // transparency projection.
-            | RoomEvent::PeerReplyObserved { .. } => {}
+            | RoomEvent::PeerReplyObserved { .. }
+            // Story 19.21 `C1` — sender-local send-action facts. The action
+            // board folds them from the journal (`a2a::board`); no node,
+            // wave, artifact or approval exists for them to attach to, and
+            // this build's transparency projection deliberately omits them
+            // (no new transparency kind).
+            | RoomEvent::TeamSendActionRecorded { .. }
+            | RoomEvent::TeamSendRecipientSettled { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent

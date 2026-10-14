@@ -447,6 +447,7 @@ async fn the_typed_retract_reaches_the_recipients_durable_mark_through_the_confi
             act: DispatchAct::Task,
             content_hash: None,
             endpoint: None,
+            action: None,
         })
         .await
         .expect("seed the sender's dispatch");
@@ -553,6 +554,7 @@ async fn a_landed_retract_re_renders_the_remembered_board_with_its_mark() {
             act: DispatchAct::Task,
             content_hash: None,
             endpoint: None,
+            action: None,
         })
         .await
         .expect("seed the sender's dispatch");
@@ -1037,6 +1039,7 @@ async fn a_narrowed_board_renders_every_item_and_the_full_board_states_its_cap()
                 act: DispatchAct::Task,
                 content_hash: None,
                 endpoint: None,
+                action: None,
             })
             .await
             .expect("seed dispatch");
