@@ -1,0 +1,6 @@
+# Development/CI only; no runtime dependency.
+# Complete-function command: python3 .github/scripts/event-loop-complexity.py <source.rs>
+# Pins match the existing environment used for the comparable 19.21e evidence.
+# Installation and metric semantics ratified by Lunarpulse, 2026-10-16 (Story 19.21e).
+tree-sitter==0.25.2
+tree-sitter-rust==0.24.2

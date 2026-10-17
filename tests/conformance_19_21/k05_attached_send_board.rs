@@ -12,7 +12,7 @@ use rustain::adapters::rap::IdentityKeyStore;
 use rustain::domain::models::{RoomEvent, SemanticMessageType};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::{TcpListener, UnixStream};
+use tokio::net::{TcpSocket, UnixStream};
 
 const BODY: &str = "first line\n  indented second line\n\nlast line";
 
@@ -523,7 +523,7 @@ async fn k05_interleaved_send_results_and_refusal_stay_with_their_request() {
 }
 
 #[tokio::test]
-async fn k05_v4_and_v5_signed_attach_are_rejected_and_v6_control_succeeds() {
+async fn k05_v4_v5_v6_signed_attach_are_rejected_and_v7_control_succeeds() {
     let daemon = AttachedDaemon::start(Vec::new()).await;
     let mut stream = UnixStream::connect(&daemon.path)
         .await
@@ -570,7 +570,7 @@ async fn k05_v4_and_v5_signed_attach_are_rejected_and_v6_control_succeeds() {
         matches!(
             frame,
             DaemonFrame::Error(ProtocolError::VersionMismatch {
-                daemon: 6,
+                daemon: 7,
                 client: 4
             })
         ),
@@ -608,25 +608,76 @@ async fn k05_v4_and_v5_signed_attach_are_rejected_and_v6_control_succeeds() {
     assert!(matches!(
         read_frame::<_, DaemonFrame>(&mut older).await.unwrap(),
         Some(DaemonFrame::Error(ProtocolError::VersionMismatch {
-            daemon: 6,
+            daemon: 7,
             client: 5
         }))
     ));
     drop(older);
+    let mut previous = UnixStream::connect(&daemon.path)
+        .await
+        .expect("connect v6 client");
+    let nonce = match tokio::time::timeout(
+        crate::attached_harness::FIXTURE_TIMEOUT,
+        read_frame::<_, DaemonFrame>(&mut previous),
+    )
+    .await
+    .expect("v6 challenge deadline")
+    .expect("read v6 challenge")
+    .expect("v6 challenge frame")
+    {
+        DaemonFrame::AttachChallenge { nonce } => nonce,
+        other => panic!("challenge expected: {other:?}"),
+    };
+    let proof = signer.attach_proof(&nonce, 6, ConnectionTier::TrustedLocal.proof_tag(), false);
+    write_frame(
+        &mut previous,
+        &ClientFrame::Attach {
+            protocol_version: 6,
+            read_only_ok: false,
+            tier: ConnectionTier::TrustedLocal,
+            challenge_nonce: nonce,
+            identity: signer.identity().clone(),
+            proof,
+        },
+    )
+    .await
+    .expect("write fixed-v6 attach");
+    let frame = tokio::time::timeout(
+        crate::attached_harness::FIXTURE_TIMEOUT,
+        read_frame::<_, DaemonFrame>(&mut previous),
+    )
+    .await
+    .expect("v6 version result deadline")
+    .expect("read v6 mismatch")
+    .expect("v6 mismatch frame");
+    assert!(
+        matches!(
+            frame,
+            DaemonFrame::Error(ProtocolError::VersionMismatch {
+                daemon: 7,
+                client: 6
+            })
+        ),
+        "signed-v6 client must be refused by protocol v7: {frame:?}"
+    );
+    drop(previous);
     let control = AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
     assert_eq!(
         control.granted,
         AttachMode::ReadWrite,
-        "signed-v6 control attaches"
+        "signed-v7 control attaches"
     );
     daemon.stop().await;
 }
 
 #[tokio::test]
 async fn k05_boot_down_egress_slot_stays_refused_after_peer_comes_up() {
-    let reserved = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve endpoint");
+    // Bound but not listening: warm-up fails without releasing this test's port.
+    let reserved = TcpSocket::new_v4().expect("create reserved socket");
+    reserved
+        .bind(([127, 0, 0, 1], 0).into())
+        .expect("reserve endpoint");
     let address = reserved.local_addr().expect("reserved address");
-    drop(reserved);
     let boot_down = rustain::domain::models::A2aPeerSpec::new(
         "boot-down",
         rustain::domain::models::RedactedUrl::from(format!("http://{address}/")),
@@ -635,8 +686,8 @@ async fn k05_boot_down_egress_slot_stays_refused_after_peer_comes_up() {
     let boot_up_host = RecipientHost::start(A2aAdmissionPolicy::Allow).await;
     let boot_up = boot_up_host.peer("boot-up");
     let daemon = AttachedDaemon::start(vec![boot_down, boot_up]).await;
-    let listener = TcpListener::bind(address)
-        .await
+    let listener = reserved
+        .listen(1024)
         .expect("bring boot-down peer up on same address");
     let boot_down_host = RecipientHost::start_on(listener, A2aAdmissionPolicy::Allow, None).await;
     let mut client =

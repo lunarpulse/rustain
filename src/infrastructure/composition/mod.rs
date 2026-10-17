@@ -1302,6 +1302,7 @@ pub fn build_daemon_core(
     _node_tree: crate::infrastructure::subagent::NodeTree,
     _node_journal: Arc<crate::infrastructure::subagent::NodeJournal>,
     #[cfg(feature = "a2a")] a2a_egress: Arc<crate::adapters::a2a::egress::A2aEgress>,
+    team_proposals: Arc<crate::adapters::daemon::team_proposal::TeamProposalRegistry>,
 ) -> Result<crate::adapters::daemon::runtime::DaemonCore, AdapterCompositionError> {
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
     use crate::adapters::filesystem::FileSystemStorage;
@@ -1329,6 +1330,8 @@ pub fn build_daemon_core(
     );
     #[cfg(not(feature = "a2a"))]
     let tools_name = picked_tools_name;
+    #[cfg(not(feature = "a2a"))]
+    let _ = team_proposals;
     #[cfg(feature = "a2a")]
     if let Some(notice) = daemon_tools_upgrade_notice {
         tracing::warn!("daemon toolset upgraded to host A2A peers: {notice}");
@@ -1401,7 +1404,7 @@ pub fn build_daemon_core(
                 if let Some(composite) = tools.as_any().downcast_ref::<
                     crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
                 >() {
-                    a2a_egress.install(composite);
+                    a2a_egress.install(composite, Some(team_proposals.clone()));
                 }
                 // Story 17.5a — deferred MCP Tasks injection preserves the
                 // daemon's lazy provider/tool construction while connecting

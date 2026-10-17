@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import BINARY, PROJECT_ROOT
+from harness import _resolve_binary
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ class TestMigrateCliSubcommand:
             _make_claude_code_project(Path(src_dir))
 
             result = subprocess.run(
-                [str(BINARY), "migrate", "--from", "claude-code",
+                [str(_resolve_binary()[0]), "migrate", "--from", "claude-code",
                  "--path", src_dir, "--dry-run"],
                 cwd=ws_dir,
                 capture_output=True,
@@ -109,7 +109,7 @@ class TestMigrateCliSubcommand:
             _make_claude_code_project(Path(src_dir))
 
             result = subprocess.run(
-                [str(BINARY), "migrate", "--from", "claude-code",
+                [str(_resolve_binary()[0]), "migrate", "--from", "claude-code",
                  "--path", src_dir, "--yes"],
                 cwd=ws_dir,
                 capture_output=True,
@@ -140,7 +140,7 @@ class TestMigrateCliSubcommand:
         """Unknown --from value exits with non-zero and helpful error message."""
         with tempfile.TemporaryDirectory(prefix="rustain_workspace_") as ws_dir:
             result = subprocess.run(
-                [str(BINARY), "migrate", "--from", "nonexistent-tool"],
+                [str(_resolve_binary()[0]), "migrate", "--from", "nonexistent-tool"],
                 cwd=ws_dir,
                 capture_output=True,
                 text=True,
@@ -161,7 +161,7 @@ class TestMigrateCliSubcommand:
             _make_claude_code_project(Path(src_dir))
 
             common_args = [
-                str(BINARY), "migrate", "--from", "claude-code",
+                str(_resolve_binary()[0]), "migrate", "--from", "claude-code",
                 "--path", src_dir, "--yes",
             ]
 

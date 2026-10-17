@@ -87,6 +87,7 @@ pub mod tab;
 pub mod taint;
 pub mod task_handle;
 pub mod team_policy;
+pub mod team_proposal;
 pub mod team_send;
 pub mod ticket_addressee;
 pub mod tool_call;
@@ -351,6 +352,7 @@ pub use team_policy::{
     SenderPolicy, SharingBreadth, TEAM_POLICY_FILE, TeamDefaults, TeamOverrides, TeamPolicy,
     TeamTransparency, TeamTypeOverride, TransparencyInvariant,
 };
+pub use team_proposal::{ProposalRaiseOutcome, TeamProposal, TeamProposalDecision};
 pub use team_send::{RecipientOutcome, SendCause};
 #[allow(unused_imports)]
 pub use tool_call::{
@@ -358,11 +360,11 @@ pub use tool_call::{
     status_chip,
 };
 pub use tool_descriptor::{ToolAnnotations, ToolDescriptor, ToolId};
-pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
+pub use tools::{ToolCallInfo, ToolDefinition, ToolInvocation, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]
 pub use turn::{
-    InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnOrigin, TurnPart, generate_turn_id,
-    migrate_chat_message_to_turn, tool_call_id_for,
+    InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnOrigin, TurnPart, TurnRoute,
+    generate_turn_id, migrate_chat_message_to_turn, tool_call_id_for,
 };
 #[allow(unused_imports)]
 pub use turn_group::{

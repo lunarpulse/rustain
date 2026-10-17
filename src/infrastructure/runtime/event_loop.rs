@@ -42,11 +42,14 @@ use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
     autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
-    input_box, model_selector, profile_switcher, reverse_search, sidebar, status_bar, usage_panel,
-    which_key_bar,
+    input_box, model_selector, profile_switcher, reverse_search, sidebar, status_bar,
+    team_proposal_card, usage_panel, which_key_bar,
 };
 use crate::domain::services::session_index::SessionIndex;
-use crate::infrastructure::runtime::transparency_bridge;
+use crate::infrastructure::runtime::panel_bridge::{self, PanelOpenOutcome};
+#[cfg(feature = "a2a")]
+use crate::infrastructure::runtime::team_proposal_bridge::synchronize_surface;
+use crate::infrastructure::runtime::{artifact_bridge, room_bridge, transparency_bridge};
 use ratatui::layout::Rect;
 
 /// Timeout for background tasks (title generation, session save).
@@ -196,7 +199,9 @@ fn render_lines_bottom(
 use crate::domain::events::{AppEvent, ChunkAction, CompactionPurpose};
 use crate::domain::models::tab::TabManager;
 use crate::domain::models::turn::TurnId;
-use crate::domain::models::visual::{ConfirmationType, DeleteConfirmTarget, OverlayType};
+use crate::domain::models::visual::{
+    ConfirmationType, DeleteConfirmTarget, OverlayType, PanelType,
+};
 use crate::domain::models::{
     AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
     FeedbackAction, FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole,
@@ -724,23 +729,29 @@ pub async fn run(
     // from this scope so the call sites stay short.
     macro_rules! submit_turn {
         ($text:expr, $images:expr, $synthetic:expr, $activation:expr, $agent:expr, $cancel:expr $(,)?) => {
-            turn_driver.submit(
-                crate::infrastructure::runtime::turn_driver::UserSubmission {
-                    text: $text,
-                    images: $images,
-                    synthetic: $synthetic,
-                    activation_set: $activation,
-                    agent_snapshot: $agent,
-                    turn_cancel: $cancel,
-                },
-                crate::infrastructure::runtime::turn_driver::TurnViewState {
-                    conversation: &mut conversation,
-                    streaming: &mut streaming,
-                    state: &mut state,
-                    active_turn: &mut _active_turn,
-                    session_manager: &mut session_manager,
-                },
-            )
+            async {
+                #[cfg(feature = "a2a")]
+                synchronize_surface(&mut state, &app_state, &tab_manager, &conversation).await;
+                turn_driver
+                    .submit(
+                        crate::infrastructure::runtime::turn_driver::UserSubmission {
+                            text: $text,
+                            images: $images,
+                            synthetic: $synthetic,
+                            activation_set: $activation,
+                            agent_snapshot: $agent,
+                            turn_cancel: $cancel,
+                        },
+                        crate::infrastructure::runtime::turn_driver::TurnViewState {
+                            conversation: &mut conversation,
+                            streaming: &mut streaming,
+                            state: &mut state,
+                            active_turn: &mut _active_turn,
+                            session_manager: &mut session_manager,
+                        },
+                    )
+                    .await
+            }
         };
     }
 
@@ -973,6 +984,8 @@ pub async fn run(
     );
 
     loop {
+        #[cfg(feature = "a2a")]
+        synchronize_surface(&mut state, &app_state, &tab_manager, &conversation).await;
         tokio::select! {
             // Branch 1: Terminal input (crossterm event stream)
             Some(event_result) = terminal_events.next() => {
@@ -1330,10 +1343,7 @@ pub async fn run(
                                     }
                             }
 
-                            if crate::adapters::tui::app::recipient_surface_ignores_raw_key(&state, &event) {
-                                continue;
-                            }
-                            let action = handle_input(&mut state, &domain_event);
+                            let Some(action) = crate::adapters::tui::app::handle_operator_input(&mut state, &event, &domain_event) else { continue };
 
                             // AC-10-4-10: Reject mutations on read-only tabs
                             if tab_manager.active_tab().read_only && action.is_mutation() {
@@ -1637,6 +1647,7 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     }
                                 }
+                                #[cfg(feature = "a2a")] InputAction::TeamProposal { conversation_id, proposal_id, decision } => crate::infrastructure::runtime::team_proposal_bridge::proposal_action(&mut state, &app_state, &conversation.id, &conversation_id, &proposal_id, decision).await,
                                 // PlanCard key handlers (Story 6-1a AC7)
                                 InputAction::PlanCardApprove => {
                                     if let Some(ref pending) = state.pending_plan_card {
@@ -2137,87 +2148,13 @@ pub async fn run(
                                         )
                                         .await;
                                     } else if cmd_name == "mode" {
-                                        // /mode plan|normal|autoedit|yolo — AC9
-                                        // Bare `/mode` shows the current mode instead of silently resetting.
-                                        match cmd_arg.map(|s| s.trim().to_ascii_lowercase()) {
-                                            None => {
-                                                let current = match security.current_mode() {
-                                                    PermissionMode::Plan => "Plan",
-                                                    PermissionMode::Normal => "Normal",
-                                                    PermissionMode::AutoEdit => "AutoEdit",
-                                                    PermissionMode::Yolo => "YOLO",
-                                                };
-                                                if !matches!(state.status, StatusState::Flash { .. }) {
-                                                    state.status_before_flash = Some(state.status.clone());
-                                                }
-                                                state.status = StatusState::Flash {
-                                                    message: format!("Current mode: {} — use /mode <plan|normal|autoedit|yolo> to switch", current),
-                                                    remaining_ms: state.theme.timing.status_flash_ms,
-                                                };
-                                                state.needs_redraw = true;
-                                            }
-                                            Some(arg) => {
-                                                let mode = crate::domain::services::permission_chain::parse_mode_arg(
-                                                    Some(arg.as_str()),
-                                                );
-                                                if let Some(m) = mode {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(m));
-                                                } else {
-                                                    if !matches!(state.status, StatusState::Flash { .. }) {
-                                                        state.status_before_flash = Some(state.status.clone());
-                                                    }
-                                                    state.status = StatusState::Flash {
-                                                        message: format!("Unknown mode: {}. Use plan, normal, autoedit, or yolo", arg),
-                                                        remaining_ms: state.theme.timing.status_flash_ms,
-                                                    };
-                                                    state.needs_redraw = true;
-                                                }
-                                            }
-                                        }
+                                        handlers::config_slash::apply_mode_command(
+                                            &mut state, cmd_arg, security.current_mode(), &app_state.event_bus,
+                                        );
                                     } else if cmd_name == "plan" {
-                                        // /plan on|off|toggle — Story 6-0d AC5
-                                        match cmd_arg.map(|s| s.trim().to_ascii_lowercase()) {
-                                            None => {
-                                                let current = match security.current_mode() {
-                                                    PermissionMode::Plan => "Plan",
-                                                    _ => "not Plan",
-                                                };
-                                                if !matches!(state.status, StatusState::Flash { .. }) {
-                                                    state.status_before_flash = Some(state.status.clone());
-                                                }
-                                                state.status = StatusState::Flash {
-                                                    message: format!("Plan mode is {} — use /plan on|off|toggle to switch", current),
-                                                    remaining_ms: state.theme.timing.status_flash_ms,
-                                                };
-                                                state.needs_redraw = true;
-                                            }
-                                            Some(arg) => {
-                                                let target = match arg.as_str() {
-                                                    "on" => Some(PermissionMode::Plan),
-                                                    "off" => Some(PermissionMode::Normal),
-                                                    "toggle" => {
-                                                        if security.current_mode() == PermissionMode::Plan {
-                                                            Some(PermissionMode::Normal)
-                                                        } else {
-                                                            Some(PermissionMode::Plan)
-                                                        }
-                                                    }
-                                                    _ => None,
-                                                };
-                                                if let Some(m) = target {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(m));
-                                                } else {
-                                                    if !matches!(state.status, StatusState::Flash { .. }) {
-                                                        state.status_before_flash = Some(state.status.clone());
-                                                    }
-                                                    state.status = StatusState::Flash {
-                                                        message: format!("Unknown /plan argument: {}. Use on, off, or toggle", arg),
-                                                        remaining_ms: state.theme.timing.status_flash_ms,
-                                                    };
-                                                    state.needs_redraw = true;
-                                                }
-                                            }
-                                        }
+                                        handlers::config_slash::apply_plan_command(
+                                            &mut state, cmd_arg, security.current_mode(), &app_state.event_bus,
+                                        );
                                     } else if cmd_name == "compact" {
                                         let app_context = AppContext::new(&app_state, &router);
                                         match handlers::compact_slash::handle_compact_slash(
@@ -2230,6 +2167,7 @@ pub async fn run(
                                             _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
                                         }
                                     } else if cmd_name == "new" || cmd_name == "clear" {
+                                        #[cfg(feature = "a2a")] crate::infrastructure::runtime::team_proposal_bridge::withdraw_conversation(&mut state, &app_state, &conversation.id).await;
                                         // /new and /clear are true context resets. Unlike
                                         // /compact, they discard context and therefore clear
                                         // provenance taint by starting a fresh conversation.
@@ -2849,32 +2787,8 @@ pub async fn run(
                                                             message: "Task edit cancelled.".to_string(),
                                                         });
                                                     } else {
-                                                        let mut new_title = String::new();
-                                                        let mut new_desc_lines: Vec<String> = Vec::new();
-                                                        let mut reading_desc = false;
-                                                        for line in content.lines() {
-                                                            // Only skip comment lines before the description block
-                                                            if line.starts_with('#') && !reading_desc {
-                                                                continue;
-                                                            }
-                                                            if line == "description: |" {
-                                                                reading_desc = true;
-                                                            } else if reading_desc {
-                                                                if let Some(rest) = line.strip_prefix("  ") {
-                                                                    new_desc_lines.push(rest.to_string());
-                                                                } else if line.is_empty() {
-                                                                    // preserve empty lines within description body
-                                                                    new_desc_lines.push(String::new());
-                                                                } else {
-                                                                    reading_desc = false;
-                                                                }
-                                                            } else if let Some(rest) = line.strip_prefix("title: ") {
-                                                                new_title = rest.to_string();
-                                                            } else if !line.trim().is_empty() && new_title.is_empty() {
-                                                                // fallback: first non-comment non-empty line is title
-                                                                new_title = line.to_string();
-                                                            }
-                                                        }
+                                                        let (new_title, new_desc_lines) =
+                                                            crate::infrastructure::runtime::task_panel_bridge::parse_task_edit(&content);
                                                         if new_title.is_empty() {
                                                             let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                                 conversation_id: Some(conversation.id.clone()),
@@ -3038,114 +2952,31 @@ pub async fn run(
                                 }
 
                                 InputAction::TaskReorderEnter(n) => {
-                                    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
-                                        Some(id) => id.clone(),
-                                        None => {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: NoticeLevel::Warning,
-                                                message: "No active plan.".to_string(),
-                                            });
-                                            continue;
-                                        }
-                                    };
-                                    if let Some(plan) = conversation.plans.get(&plan_id) {
-                                        let idx = (n.saturating_sub(1)) as usize;
-                                        if idx < plan.tasks.len() && plan.tasks[idx].status == PlanTaskStatus::Pending {
-                                            let orig_order: Vec<u32> = plan.tasks.iter().map(|t| t.number).collect();
-                                            state.task_panel_state.reorder_mode_for = Some(n);
-                                            state.task_panel_state.reorder_original_order = Some(orig_order);
-                                        } else {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: NoticeLevel::Warning,
-                                                message: "Reorder requires a pending task selected.".to_string(),
-                                            });
-                                        }
+                                    if !crate::infrastructure::runtime::task_panel_bridge::enter_reorder(
+                                        &mut state, &conversation, n, &app_state.event_bus,
+                                    ) {
+                                        continue;
                                     }
-                                    state.needs_redraw = true;
                                 }
 
                                 InputAction::TaskReorderMove(dir) => {
-                                    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
-                                        Some(id) => id.clone(),
-                                        None => continue,
-                                    };
-                                    let task_n = match state.task_panel_state.reorder_mode_for {
-                                        Some(tn) => tn,
-                                        None => continue,
-                                    };
-                                    if let Some(plan) = conversation.plans.get_mut(&plan_id) {
-                                        let current_idx = plan.tasks.iter().position(|t| t.number == task_n);
-                                        if let Some(i) = current_idx {
-                                            let new_i = match dir {
-                                                crate::adapters::tui::state::Direction::Up => {
-                                                    if i > 0 { i - 1 } else { i }
-                                                }
-                                                crate::adapters::tui::state::Direction::Down => {
-                                                    if i + 1 < plan.tasks.len() { i + 1 } else { i }
-                                                }
-                                                crate::adapters::tui::state::Direction::Left | crate::adapters::tui::state::Direction::Right => i,
-                                            };
-                                            if i == new_i {
-                                                continue;
-                                            }
-                                            if let Err(reason) = crate::domain::services::plan_runtime::validate_reorder(plan, task_n, new_i) {
-                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                    conversation_id: Some(conversation.id.clone()),
-                                                    level: NoticeLevel::Warning,
-                                                    message: format!("Reorder violates dependencies: {}.", reason),
-                                                });
-                                            } else {
-                                                let task = plan.tasks.remove(i);
-                                                plan.tasks.insert(new_i, task);
-                                            }
-                                        }
+                                    if !crate::infrastructure::runtime::task_panel_bridge::move_reorder(
+                                        &mut state, &mut conversation, dir, &app_state.event_bus,
+                                    ) {
+                                        continue;
                                     }
-                                    state.needs_redraw = true;
                                 }
 
                                 InputAction::TaskReorderCommit => {
-                                    if let Some(plan_id) = state.task_panel_state.last_executed_plan_id.as_ref() {
-                                        if let Some(plan) = conversation.plans.get(plan_id) {
-                                            for task in &plan.tasks {
-                                                let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
-                                                    conversation_id: conversation.id.clone(),
-                                                    plan_id: plan_id.clone(),
-                                                    task_number: task.number,
-                                                    status: PlanTaskStatus::Pending,
-                                                });
-                                            }
-                                        }
-                                    }
-                                    state.task_panel_state.reorder_mode_for = None;
-                                    state.task_panel_state.reorder_original_order = None;
-                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                        conversation_id: Some(conversation.id.clone()),
-                                        level: NoticeLevel::Info,
-                                        message: "Plan reordered.".to_string(),
-                                    });
-                                    state.needs_redraw = true;
+                                    crate::infrastructure::runtime::task_panel_bridge::commit_reorder(
+                                        &mut state, &conversation, &app_state.event_bus,
+                                    );
                                 }
 
                                 InputAction::TaskReorderCancel => {
-                                    if let (Some(plan_id), Some(orig)) = (
-                                        state.task_panel_state.last_executed_plan_id.as_ref(),
-                                        state.task_panel_state.reorder_original_order.take(),
-                                    ) {
-                                        if let Some(plan) = conversation.plans.get_mut(plan_id) {
-                                            let mut restored = Vec::new();
-                                            for num in &orig {
-                                                if let Some(idx) = plan.tasks.iter().position(|t| &t.number == num) {
-                                                    restored.push(plan.tasks.remove(idx));
-                                                }
-                                            }
-                                            plan.tasks = restored;
-                                        }
-                                    }
-                                    state.task_panel_state.reorder_mode_for = None;
-                                    state.task_panel_state.reorder_original_order = None;
-                                    state.needs_redraw = true;
+                                    crate::infrastructure::runtime::task_panel_bridge::cancel_reorder(
+                                        &mut state, &mut conversation,
+                                    );
                                 }
 
                                 InputAction::SkipCascadeAck(choice) => {
@@ -3676,6 +3507,7 @@ pub async fn run(
                                             }));
                                         }
                                         // Close the tab (TabManager adjusts active index)
+                                        #[cfg(feature = "a2a")] crate::infrastructure::runtime::team_proposal_bridge::withdraw_conversation(&mut state, &app_state, &closing_conv_id).await;
                                         tab_manager.close_tab(tab_id);
                                         state.tab_render_states.remove(&tab_id);
                                         agent_activator.on_tab_closed(&closing_conv_id).await;
@@ -3792,78 +3624,28 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::OpenPanel(panel_type) => {
-                                    use crate::domain::models::visual::PanelType;
-                                    if panel_type == PanelType::Tasks {
-                                        let term_width = state.terminal_width;
-                                        let outcome = crate::adapters::tui::task_panel_handlers::handle_open_panel_tasks(
-                                            &mut state,
-                                            &conversation,
-                                            term_width,
-                                            layout::SIDEBAR_MIN_WIDTH,
-                                        );
-                                        if outcome.opened {
+                                    match panel_bridge::open_panel(&mut state, &conversation, panel_type) {
+                                        PanelOpenOutcome::Opened => {
+                                            match panel_type {
+                                                PanelType::TransparencyLog => transparency_bridge::open_panel(&app_state, &mut state).await,
+                                                PanelType::Room => room_bridge::open_panel(&app_state, &mut state).await,
+                                                PanelType::Artifacts => artifact_bridge::open_panel(&app_state, &mut state, security.current_mode()).await,
+                                                _ => {}
+                                            }
                                             state.focus = FocusState::Sidebar {
                                                 panel: panel_type,
                                                 selected: state.sidebar_selected,
                                             };
-                                        } else if outcome.closed {
-                                            state.focus = FocusState::Chat;
+                                            state.needs_redraw = true;
                                         }
-                                        if let Some(notice) = outcome.notice {
+                                        PanelOpenOutcome::Notice(notice) => {
                                             let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(notice.conversation_id),
                                                 level: notice.level,
                                                 message: notice.message,
                                             });
                                         }
-                                    } else if state.sidebar_visible && state.sidebar_panel == Some(panel_type) {
-                                        state.sidebar_visible = false;
-                                        state.sidebar_panel = None;
-                                        state.sidebar_entry_count = 0;
-                                        state.focus = FocusState::Chat;
-                                        state.needs_redraw = true;
-                                    } else if state.terminal_width >= layout::SIDEBAR_MIN_WIDTH {
-                                        state.sidebar_visible = true;
-                                        state.sidebar_panel = Some(panel_type);
-                                        if panel_type == PanelType::Adapters {
-                                            state.sidebar_entry_count = crate::adapters::tui::widgets::adapter_status_panel::port_count();
-                                            if state.sidebar_selected >= state.sidebar_entry_count {
-                                                state.sidebar_selected = 0;
-                                            }
-                                        } else if panel_type == PanelType::Agents {
-                                            state.sidebar_entry_count = state.agent_panel_state.cached_entries.len();
-                                            if state.sidebar_selected >= state.sidebar_entry_count && state.sidebar_entry_count > 0 {
-                                                state.sidebar_selected = state.sidebar_entry_count - 1;
-                                            }
-                                        } else if panel_type == PanelType::TransparencyLog {
-                                            transparency_bridge::open_panel(&app_state, &mut state).await;
-                                        } else if panel_type == PanelType::Room {
-                                            crate::infrastructure::runtime::room_bridge::open_panel(&app_state, &mut state).await;
-                                        } else if panel_type == PanelType::Artifacts {
-                                            // Without this arm `Ctrl+X, E` makes the panel
-                                            // visible with `sidebar_entry_count` untouched —
-                                            // a blank pane, and it COMPILES CLEAN because
-                                            // this is an `if / else if` chain, not a match.
-                                            crate::infrastructure::runtime::artifact_bridge::open_panel(&app_state, &mut state, security.current_mode()).await;
-                                        }
-                                        state.focus = FocusState::Sidebar {
-                                            panel: panel_type,
-                                            selected: state.sidebar_selected,
-                                        };
-                                        state.needs_redraw = true;
-                                    } else {
-                                        let narrow_msg = if panel_type == PanelType::Adapters {
-                                            "Adapter Status: terminal too narrow for sidebar — widen to ≥120 cols or use /memory|/persona|... slash commands".to_string()
-                                        } else if panel_type == PanelType::Agents {
-                                            "Subagent panel: terminal too narrow for sidebar — widen to ≥120 cols.".to_string()
-                                        } else {
-                                            "Panel requires terminal width >= 120 cols.".to_string()
-                                        };
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                            conversation_id: Some(conversation.id.clone()),
-                                            level: NoticeLevel::Warning,
-                                            message: narrow_msg,
-                                        });
+                                        PanelOpenOutcome::Handled => {}
                                     }
                                 }
                                 InputAction::ExportTransparency => {
@@ -4061,6 +3843,7 @@ pub async fn run(
                                     if let Some(target) = state.pending_delete.take() {
                                         match target {
                                             DeleteConfirmTarget::Single { id: conv_id, .. } => {
+                                                #[cfg(feature = "a2a")] crate::infrastructure::runtime::team_proposal_bridge::withdraw_conversation(&mut state, &app_state, &conv_id).await;
                                                 // Single conversation delete
                                                 if conv_id == conversation.id {
                                                     let tab_id = tab_manager.active_tab_id();
@@ -4110,6 +3893,7 @@ pub async fn run(
                                                 state.status = StatusState::Idle;
                                             }
                                             DeleteConfirmTarget::Bulk { .. } => {
+                                                #[cfg(feature = "a2a")] crate::infrastructure::runtime::team_proposal_bridge::withdraw_all(&mut state, &app_state).await;
                                                 // Delete all conversations - F16: Fix race by clearing index BEFORE spawning task
                                                 if streaming.is_streaming {
                                                     if let Some(handle) = _active_turn.take() {
@@ -6283,21 +6067,7 @@ pub async fn run(
                     AppEvent::TeamRetractPreviewReady { conversation_id: c, preview } => crate::infrastructure::runtime::transparency_bridge::team_retract_preview_ready(conversation.id.clone(), &mut state, &mut tab_manager, c, preview),
                     AppEvent::TeamRetractAnswered { conversation_id: c, message, board } => crate::infrastructure::runtime::transparency_bridge::team_retract_answered(conversation.id.clone(), &mut state, &mut tab_manager, c, message, board),
                     AppEvent::TeamThreadReady { conversation_id: c, message } => crate::infrastructure::runtime::transparency_bridge::team_thread_ready(&conversation.id, &mut state, &mut tab_manager, &c, message),
-                    AppEvent::TeamBoardReady { conversation_id: board_conv_id, message: board_msg } => {
-                        if board_conv_id == conversation.id {
-                            crate::adapters::tui::handlers::team_command::show_team_board(
-                                &mut state, board_msg,
-                            );
-                        } else if let Some(tab) = tab_manager.find_by_conversation_mut(&board_conv_id) {
-                            // A background tab's board must survive the switch.
-                            crate::adapters::tui::handlers::notice::store_background_notice(
-                                tab,
-                                crate::domain::models::NoticeLevel::Advisory,
-                                board_msg,
-                            );
-                            state.needs_redraw = true;
-                        }
-                    }
+                    AppEvent::TeamBoardReady { conversation_id: c, message } => crate::infrastructure::runtime::transparency_bridge::team_board_ready(&conversation.id, &mut state, &mut tab_manager, &c, message),
                     AppEvent::ApprovalRuntimeEventBridged { event } => {
                         use crate::domain::services::approval_runtime::ApprovalRuntimeEvent;
                         match event {
@@ -6448,6 +6218,7 @@ pub async fn run(
                             }
                         }
                     }
+                    #[cfg(feature = "a2a")] AppEvent::TeamProposalReady { proposal } => crate::infrastructure::runtime::team_proposal_bridge::proposal_ready(&mut state, &app_state, proposal).await,
                     AppEvent::PlanProposed { conversation_id, plan } => {
                         if conversation.id != conversation_id {
                             tracing::warn!("PlanProposed for unknown conversation {}", conversation_id);
@@ -8346,70 +8117,13 @@ pub async fn run(
                 // Update elapsed_ms for Executing state each tick
                 let tick_ms = state.theme.timing.tick_interval_ms;
 
-                // The Room is an honest replay, not a subscription. While it
-                // is open, observe the durable head at 1 Hz without replacing
-                // the anchored fold; a newer head becomes the boundary marker.
-                if state.sidebar_visible
-                    && state.sidebar_panel
-                        == Some(crate::domain::models::visual::PanelType::Room)
-                {
-                    if state.room_panel.head_poll_due(
-                        tick_ms,
-                        crate::infrastructure::runtime::room_bridge::ROOM_HEAD_POLL_INTERVAL_MS,
-                    ) {
-                        crate::infrastructure::runtime::room_bridge::refresh_head(
-                            &app_state,
-                            &mut state,
-                        )
-                        .await;
-                    }
-                } else {
-                    state.room_panel.reset_head_poll();
+                if panel_bridge::room_head_poll_due(&mut state, tick_ms) {
+                    room_bridge::refresh_head(&app_state, &mut state).await;
                 }
                 state.needs_redraw |= log_awareness.tick(&mut state.log_awareness);
-                if let StatusState::Executing { elapsed_ms, .. } = &mut state.status {
-                    *elapsed_ms += tick_ms;
-                    state.needs_redraw = true;
-                }
-
-                // PD2: keep Running-task elapsed display live in the Tasks panel.
-                // Without this tick-driven redraw, `task.elapsed_ms()` for Running
-                // tasks (which calls `now_unix_ms()` each render) only refreshes
-                // on `PlanTaskStatusChanged` events — between status changes the
-                // counter visibly freezes. Piggybacks on the existing 4Hz tick.
-                if state.sidebar_visible
-                    && state.sidebar_panel
-                        == Some(crate::domain::models::visual::PanelType::Tasks)
-                    && crate::adapters::tui::task_panel_handlers::any_plan_has_running_task(
-                        &conversation,
-                    )
-                {
-                    state.needs_redraw = true;
-                }
-
-                // Flash message expiry: decrement remaining_ms each tick.
-                // remaining_ms == u64::MAX is a sticky sentinel (used by YOLO warning, AC7) —
-                // it never expires; only a mode change or CancelOrQuit replaces it.
-                if let StatusState::Flash { remaining_ms, .. } = &mut state.status {
-                    if *remaining_ms == u64::MAX {
-                        // sticky — do nothing
-                    } else if *remaining_ms <= tick_ms {
-                        // Flash expired — revert to previous status or Idle
-                        state.status = state.status_before_flash.take().unwrap_or(StatusState::Idle);
-                        state.needs_redraw = true;
-                    } else {
-                        *remaining_ms -= tick_ms;
-                    }
-                }
-
-                // Which-key timeout check: auto-dismiss if expired (AC6)
-                if state.which_key.active && state.which_key.is_timed_out(state.theme.timing.which_key_timeout_ms) {
-                    let prev = state.which_key.dismiss();
-                    if let Some(focus) = prev {
-                        state.focus = focus;
-                    }
-                    state.needs_redraw = true;
-                }
+                crate::infrastructure::runtime::panel_bridge::tick_status(
+                    &mut state, &conversation, tick_ms,
+                );
 
                 if state.needs_redraw {
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
@@ -9106,7 +8820,7 @@ fn render(
     let mut visible_feedback_ids: Vec<String> = Vec::new(); // Story 19.16g
     state.restore_unflushed_log_visits();
 
-    let recipient_blocked = crate::adapters::tui::app::recipient_higher_confirmation_active(state);
+    let (recipient_blocked, card) = team_proposal_card::frame(state);
     let permission_mode = security.current_mode();
 
     // Split borrows: tool_block_states needs &, feedback_blocks needs &
@@ -9184,6 +8898,7 @@ fn render(
                     let requested_height = ((bookmark_count + 3).min(6)) as u16;
                     app_layout.reserve_bookmark_panel(requested_height);
                 }
+                let card = card.prepare(&mut app_layout, area, theme);
 
                 // Render tab bar if present
                 if let (Some(tab_bar_area), Some(tm)) = (app_layout.tab_bar, tab_manager_for_bar) {
@@ -9751,6 +9466,7 @@ fn render(
                         );
                     }
                 }
+                state.team_proposal_visible = team_proposal_card::render(card, frame.buffer_mut(), theme);
                 // Story 10.5: render delegation suggestion card as a centered popup over chat pane
                 if let Some(ref card) = state.pending_delegation_card {
                     let card_width = 60u16.min(app_layout.chat_pane.width);
@@ -10221,6 +9937,7 @@ fn render(
                 }
             }
             None => {
+                state.team_proposal_visible = None;
                 // Terminal too small
                 let msg = ratatui::widgets::Paragraph::new("Terminal too small (min 60x16)")
                     .style(ratatui::prelude::Style::default().fg(ratatui::prelude::Color::Red))

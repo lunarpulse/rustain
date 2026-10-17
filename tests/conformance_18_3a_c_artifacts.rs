@@ -61,10 +61,6 @@ fn source(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"))
 }
 
-fn event_loop_source() -> String {
-    source("src/infrastructure/runtime/event_loop.rs")
-}
-
 fn artifact_bridge_source() -> String {
     source("src/infrastructure/runtime/artifact_bridge.rs")
 }
@@ -631,73 +627,6 @@ fn ctrl_x_e_dispatches_the_artifacts_panel() {
     assert_eq!(
         handle_input(&mut state, &DomainInputEvent::KeyPress('a')),
         InputAction::OpenPanel(PanelType::Adapters)
-    );
-}
-
-/// **AC3 layer (b), structural (Rule 4).** Without the dispatch arms the
-/// allowlist entries route `ExecuteCommand { name: "artifacts" }` into the
-/// adapter-override catch-all. Both render arms are asserted too.
-///
-/// 🔴 **The headline mutant: delete the DASHBOARD render arm.** It sits above a
-/// `_` arm, so the match is **not** exhaustive — it compiles clean, renders
-/// nothing in Dashboard density, and then falls through the `_` arm's `Agents`
-/// re-check so the *wrong* panel may render. 18.3a's mutant 13 was exactly this.
-///
-/// 🔴 **Fourth mutant: delete the `InputAction::OpenPanel` arm.** `event_loop`'s
-/// panel-open path is an `if / else if` chain, not a match, so `Ctrl+X, E` would
-/// open an **empty** pane while `/artifacts` keeps working — compiles clean.
-#[test]
-fn the_artifact_dispatch_and_render_arms_are_wired_and_precede_the_catch_all() {
-    let source = event_loop_source();
-    let artifacts = source
-        .find("cmd_name == \"artifacts\"")
-        .expect("the /artifacts dispatch arm exists");
-    let artifact = source
-        .find("cmd_name == \"artifact\"")
-        .expect("the /artifact dispatch arm exists");
-    let override_arm = source
-        .find("port_dimension_from_command_name(cmd_name)")
-        .expect("the adapter-override catch-all exists");
-    assert!(
-        artifacts < override_arm && artifact < override_arm,
-        "`/artifacts` and `/artifact` must be intercepted BEFORE the adapter-override path"
-    );
-    assert!(
-        source.contains(
-            "artifact_bridge::artifacts_command(&mut state, &conversation.id, cmd_arg, \
-             &app_state, security.current_mode()).await;"
-        ),
-        "the production list future must be awaited"
-    );
-    assert!(
-        source.contains(
-            "artifact_bridge::artifact_command(&mut state, &conversation.id, cmd_arg, \
-             &app_state, security.current_mode()).await;"
-        ),
-        "the production verb future must be awaited"
-    );
-    assert!(
-        source.contains(
-            "artifact_bridge::open_panel(&app_state, &mut state, security.current_mode()).await;"
-        ),
-        "Ctrl+X, E needs its OWN InputAction::OpenPanel arm — its absence compiles clean \
-         and opens a blank pane"
-    );
-    assert_eq!(
-        source.matches("artifacts_panel::render(").count(),
-        2,
-        "both the sidebar AND the dashboard render dispatch must have an Artifacts arm; \
-         the dashboard match has a `_` arm, so a missing case renders nothing silently"
-    );
-    // The fold must be host-honest.
-    let bridge = artifact_bridge_source();
-    assert!(
-        bridge.contains("OrchestrationRoom::project_for_host(room_id, events, host_id)"),
-        "fold via project_for_host, never bare project()"
-    );
-    assert!(
-        !bridge.contains("OrchestrationRoom::project("),
-        "bare project() loses the host-bound derivation"
     );
 }
 

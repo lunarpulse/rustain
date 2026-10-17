@@ -1361,39 +1361,279 @@ fn after_attached_draw(state: &mut TuiState, drawn: bool, visible_feedback_ids: 
     }
 }
 
+fn begin_attached_team_send(state: &mut TuiState, recipients: &[String]) -> AttachedTeamRequest {
+    use crate::adapters::tui::handlers::team_command::{
+        TeamSendRow, render_team_send_rows, show_team_send,
+    };
+    state.team_send_next_id += 1;
+    let block_id = format!("team-send-{}", state.team_send_next_id);
+    let rows: Vec<_> = recipients
+        .iter()
+        .map(|alias| TeamSendRow {
+            alias: alias.clone(),
+            outcome: None,
+        })
+        .collect();
+    show_team_send(state, &block_id, render_team_send_rows(&rows));
+    state.team_send_blocks.insert(block_id.clone(), rows);
+    AttachedTeamRequest::Send {
+        block_id,
+        action: None,
+    }
+}
+
+fn attached_proposal_higher_confirmation(
+    state: &TuiState,
+    consent: bool,
+    consolidation: bool,
+    retract: bool,
+) -> bool {
+    consent
+        || consolidation
+        || retract
+        || crate::adapters::tui::app::proposal_higher_confirmation_active(state)
+}
+
+fn attached_proposal_pending(
+    state: &TuiState,
+) -> Option<&Arc<crate::domain::models::TeamProposal>> {
+    state
+        .team_proposal_conversation_id
+        .as_ref()
+        .and_then(|id| state.pending_team_proposals.get(id))
+}
+
+/// The pending recipient action retains the visible composition after taking
+/// the local buffer. Display and decision guards must consult the same text.
+fn attached_display_input<'a>(state: &'a TuiState, input: &'a str) -> &'a str {
+    crate::adapters::tui::handlers::recipient_actions::pending_composition(state).unwrap_or(input)
+}
+
+/// Nearest production-path key seam: called before recipient/composer dispatch.
+/// Only a painted snapshot can decide; a nonempty composer owns its letters.
+#[allow(clippy::too_many_arguments)] // Attached loop owns separate composer/tab/socket state.
+fn attached_proposal_key(
+    key: crossterm::event::KeyEvent,
+    higher_confirmation: bool,
+    read_only: bool,
+    input: &str,
+    state: &mut TuiState,
+    tab: &mut TabRenderState,
+    requests: &mut AttachedTeamRequests,
+    frame_tx: &mpsc::UnboundedSender<ClientFrame>,
+) -> bool {
+    use crate::domain::models::TeamProposalDecision;
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    if higher_confirmation
+        || read_only
+        || !matches!(state.focus, FocusState::Chat | FocusState::Input)
+    {
+        return false;
+    }
+    let Some(proposal) = attached_proposal_pending(state).cloned() else {
+        return false;
+    };
+    if !state
+        .team_proposal_visible
+        .as_ref()
+        .is_some_and(|visible| Arc::ptr_eq(visible, &proposal))
+    {
+        return false;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    if key.code == KeyCode::Esc {
+        return true; // Keep pending, rather than detaching the approving surface.
+    }
+    if !attached_display_input(state, input).is_empty() {
+        return false;
+    }
+    if key.code == KeyCode::Enter {
+        return true; // Enter is never a proposal decision.
+    }
+    if !matches!(key.code, KeyCode::Char('y' | 'r' | 'n')) {
+        return false;
+    }
+    if key.kind != KeyEventKind::Press || !key.modifiers.is_empty() {
+        return true;
+    }
+    if key.code == KeyCode::Char('r') {
+        let id = format!("team-proposal-review-{}", proposal.id);
+        crate::adapters::tui::handlers::team_command::show_team_send(
+            state,
+            &id,
+            format!(
+                "Proposed message (not sent) · {}",
+                crate::domain::models::semantic_message_type_metadata(proposal.message_type).token
+            ),
+        );
+        tab.team_proposal_reviews.insert(id, proposal);
+        state.needs_redraw = true;
+        return true;
+    }
+    let decision = if key.code == KeyCode::Char('y') {
+        TeamProposalDecision::Send
+    } else {
+        TeamProposalDecision::Dismiss
+    };
+    let frame = ClientFrame::TeamProposalDecision {
+        proposal: proposal.id.clone(),
+        decision,
+    };
+    let queued = if decision == TeamProposalDecision::Send {
+        enqueue_attached_team_frame(state, requests, frame, frame_tx)
+    } else {
+        frame_tx.send(frame).is_ok()
+    };
+    if queued {
+        state
+            .pending_team_proposals
+            .remove(&proposal.conversation_id);
+        state.team_proposal_visible = None;
+        if decision == TeamProposalDecision::Dismiss {
+            crate::adapters::tui::handlers::team_command::show_team_send(
+                state,
+                "team-proposal-status",
+                "Proposal dismissed. Nothing was sent.".into(),
+            );
+        }
+    } else {
+        crate::adapters::tui::handlers::team_command::show_team_send(
+            state,
+            "team-proposal-status",
+            "Attach socket closed — the proposal decision was not sent.".into(),
+        );
+    }
+    state.needs_redraw = true;
+    true
+}
+
+#[allow(clippy::too_many_arguments)] // Match the split attached render state without copying it.
+fn prepare_attached_proposal(
+    state: &TuiState,
+    tab: &TabRenderState,
+    input: &str,
+    higher_confirmation: bool,
+    read_only: bool,
+    layout: &mut crate::adapters::tui::layout::AppLayout,
+    area: ratatui::layout::Rect,
+) -> Option<crate::adapters::tui::widgets::team_proposal_card::CardPaint> {
+    let proposal = (!higher_confirmation && !read_only)
+        .then(|| attached_proposal_pending(state).cloned())
+        .flatten();
+    let reviewing = proposal.as_ref().is_some_and(|pending| {
+        tab.team_proposal_reviews
+            .values()
+            .any(|review| Arc::ptr_eq(review, pending))
+    });
+    crate::adapters::tui::widgets::team_proposal_card::CardView::attached(
+        proposal,
+        attached_display_input(state, input).is_empty(),
+        reviewing,
+    )
+    .prepare(layout, area, &state.theme)
+}
+
+/// Consume private DTOs explicitly; these never enter the public RawEvent bus.
+fn apply_attached_proposal_frame(
+    state: &mut TuiState,
+    tab: &mut TabRenderState,
+    requests: &mut AttachedTeamRequests,
+    conversation_id: &str,
+    frame: DaemonFrame,
+) {
+    use crate::adapters::daemon::protocol::TeamProposalCloseOutcome;
+    match frame {
+        DaemonFrame::TeamProposal {
+            proposal,
+            recipients,
+            message_type,
+            body,
+        } => {
+            // The authenticated socket is the conversation binding. A reset's
+            // withdrawal arrives before any proposal from its replacement turn.
+            state.team_proposal_conversation_id = Some(conversation_id.to_owned());
+            state.pending_team_proposals.insert(
+                conversation_id.to_owned(),
+                Arc::new(crate::domain::models::TeamProposal {
+                    id: proposal,
+                    conversation_id: conversation_id.to_owned(),
+                    recipients,
+                    message_type,
+                    body,
+                }),
+            );
+            state.team_proposal_visible = None;
+        }
+        DaemonFrame::TeamProposalClosed { proposal, outcome } => {
+            state
+                .pending_team_proposals
+                .retain(|_, pending| pending.id != proposal);
+            if state
+                .team_proposal_visible
+                .as_ref()
+                .is_some_and(|pending| pending.id == proposal)
+            {
+                state.team_proposal_visible = None;
+            }
+            if outcome == TeamProposalCloseOutcome::Withdrawn {
+                tab.team_proposal_reviews
+                    .retain(|_, pending| pending.id != proposal);
+            }
+            if let Some(AttachedTeamRequest::Send { block_id, .. }) =
+                requests.pending.remove(&proposal)
+            {
+                state.team_send_blocks.remove(&block_id);
+                state.feedback_blocks.remove(&block_id);
+            }
+            let message = match outcome {
+                TeamProposalCloseOutcome::Dismissed => {
+                    "Proposal dismissed. Nothing was sent.".into()
+                }
+                TeamProposalCloseOutcome::Withdrawn => {
+                    "Proposal withdrawn with the conversation. Nothing was sent.".into()
+                }
+                TeamProposalCloseOutcome::Refused { reason } => reason,
+            };
+            crate::adapters::tui::handlers::team_command::show_team_send(
+                state,
+                "team-proposal-status",
+                message,
+            );
+        }
+        _ => return,
+    }
+    state.needs_redraw = true;
+}
+
 fn enqueue_attached_team_frame(
     state: &mut TuiState,
     requests: &mut AttachedTeamRequests,
     frame: ClientFrame,
     frame_tx: &mpsc::UnboundedSender<ClientFrame>,
 ) -> bool {
-    use crate::adapters::tui::handlers::team_command::{
-        TeamSendRow, render_team_send_rows, show_team_send,
-    };
+    use crate::domain::models::TeamProposalDecision;
 
     let (request, pending) = match &frame {
         ClientFrame::TeamSend {
             request,
             recipients,
             ..
+        } => (request.clone(), begin_attached_team_send(state, recipients)),
+        ClientFrame::TeamProposalDecision {
+            proposal,
+            decision: TeamProposalDecision::Send,
         } => {
-            state.team_send_next_id += 1;
-            let block_id = format!("team-send-{}", state.team_send_next_id);
-            let rows: Vec<_> = recipients
-                .iter()
-                .map(|alias| TeamSendRow {
-                    alias: alias.clone(),
-                    outcome: None,
-                })
-                .collect();
-            show_team_send(state, &block_id, render_team_send_rows(&rows));
-            state.team_send_blocks.insert(block_id.clone(), rows);
+            let Some(snapshot) = attached_proposal_pending(state)
+                .filter(|snapshot| snapshot.id == *proposal)
+                .cloned()
+            else {
+                return false;
+            };
             (
-                request.clone(),
-                AttachedTeamRequest::Send {
-                    block_id,
-                    action: None,
-                },
+                proposal.clone(),
+                begin_attached_team_send(state, &snapshot.recipients),
             )
         }
         ClientFrame::TeamBoard { request, .. } => {
@@ -1817,22 +2057,31 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     let loop_result: Result<()> = loop {
         let mut visible_feedback_ids: Vec<String> = Vec::new();
+        let mut visible_proposal = None;
         let drawn = term.draw(|f| {
             let area = f.area();
-            let Some(layout) = crate::adapters::tui::layout::compute_layout(
+            let Some(mut layout) = crate::adapters::tui::layout::compute_layout(
                 area,
                 &state.theme,
-                crate::adapters::tui::handlers::recipient_actions::pending_composition(&state).unwrap_or(&input),
+                attached_display_input(&state, &input),
                 1,
                 false,
                 DensityMode::Focus,
             ) else {
                 return;
             };
+            let proposal_higher = attached_proposal_higher_confirmation(
+                &state, !pending_consent_approvals.is_empty(),
+                pending_consolidation_card.is_some(), retract_confirm.is_some(),
+            );
+            let proposal_card = prepare_attached_proposal(
+                &state, &tab_render_state, &input, proposal_higher, read_only, &mut layout, area,
+            );
             let peer_card = if state.recipient_surface.is_none()
                 && retract_confirm.is_none()
                 && pending_consolidation_card.is_none()
                 && pending_consent_approvals.is_empty()
+                && attached_proposal_pending(&state).is_none()
             {
                 pending_peer_response(&conversation)
                     .map(|pending| peer_response_card_lines(&pending, read_only))
@@ -1891,7 +2140,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 Some(&attach_info),
             state.log_awareness.display,
 );
-            let display_input = crate::adapters::tui::handlers::recipient_actions::pending_composition(&state).unwrap_or(&input);
+            let display_input = attached_display_input(&state, &input);
             input_box::render(
                 f,
                 layout.input_area,
@@ -1959,15 +2208,31 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     layout.chat_pane,
                 );
             }
+            visible_proposal = crate::adapters::tui::widgets::team_proposal_card::render(
+                proposal_card, f.buffer_mut(), &state.theme,
+            );
+            // Inline cards can leave fewer than five rows; paging must not skip visible content.
+            state.viewport_height = transcript_area.height;
         });
         after_attached_draw(&mut state, drawn.is_ok(), &visible_feedback_ids);
+        state.team_proposal_visible = drawn.is_ok().then_some(visible_proposal).flatten();
 
         tokio::select! {
             maybe_ev = events.next() => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                        let higher_confirmation = !pending_consent_approvals.is_empty()
-                            || pending_consolidation_card.is_some() || retract_confirm.is_some();
+                        let proposal_higher = attached_proposal_higher_confirmation(
+                            &state, !pending_consent_approvals.is_empty(),
+                            pending_consolidation_card.is_some(), retract_confirm.is_some(),
+                        );
+                        if attached_proposal_key(
+                            key, proposal_higher, read_only, &input, &mut state,
+                            &mut tab_render_state, &mut attached_team_requests, &frame_tx,
+                        ) {
+                            continue;
+                        }
+                        let higher_confirmation = proposal_higher
+                            || attached_proposal_pending(&state).is_some();
                         if key.kind != KeyEventKind::Press
                             && (state.recipient_surface.is_some() || higher_confirmation)
                         {
@@ -2218,11 +2483,11 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                 }
                             }
                             (KeyCode::PageUp, _) => {
-                                scroll_offset = scroll_offset.saturating_add(5);
+                                scroll_offset = scroll_offset.saturating_add(usize::from(state.viewport_height).clamp(1, 5));
                                 auto_scroll = false;
                             }
                             (KeyCode::PageDown, _) => {
-                                scroll_offset = scroll_offset.saturating_sub(5);
+                                scroll_offset = scroll_offset.saturating_sub(usize::from(state.viewport_height).clamp(1, 5));
                                 if scroll_offset == 0 {
                                     auto_scroll = true;
                                 }
@@ -2361,6 +2626,13 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                         pending_consolidation_token = Some(token);
                         state.needs_redraw = true;
                     }
+                    Ok(Some(frame @ DaemonFrame::TeamProposal { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamProposalClosed { .. })) => {
+                        apply_attached_proposal_frame(
+                            &mut state, &mut tab_render_state, &mut attached_team_requests,
+                            &conversation.id, frame,
+                        );
+                    }
                     Ok(Some(DaemonFrame::Detached)) => break Ok(()),
                     Ok(Some(frame @ DaemonFrame::TeamSendStarted { .. }))
                     | Ok(Some(frame @ DaemonFrame::TeamSendSettled { .. }))
@@ -2438,6 +2710,811 @@ mod tests {
     use crate::domain::models::{NoticeLevel, StopReason, StreamChunk};
     use std::time::Instant;
     use tokio::net::UnixStream;
+
+    /// In-crate nearest-production-path seams, not native socket/PTY evidence.
+    mod attached_proposals {
+        use super::*;
+        use crate::adapters::daemon::protocol::{TeamProposalCloseOutcome, TeamSendOutcome};
+        use crate::domain::models::{FeedbackLevel, SemanticMessageType, TeamProposalDecision};
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        struct Surface {
+            state: TuiState,
+            tab: TabRenderState,
+            requests: AttachedTeamRequests,
+            input: String,
+            tx: mpsc::UnboundedSender<ClientFrame>,
+            rx: mpsc::UnboundedReceiver<ClientFrame>,
+        }
+
+        impl Surface {
+            fn new(body: &str) -> Self {
+                let (tx, rx) = mpsc::unbounded_channel();
+                let mut surface = Self {
+                    state: TuiState::new(80, 24),
+                    tab: TabRenderState::default(),
+                    requests: AttachedTeamRequests::default(),
+                    input: String::new(),
+                    tx,
+                    rx,
+                };
+                surface.frame(DaemonFrame::TeamProposal {
+                    proposal: "tp_attached".into(),
+                    recipients: vec!["lena-po".into(), "jun-dev".into()],
+                    message_type: SemanticMessageType::ArchitectureUpdate,
+                    body: body.into(),
+                });
+                surface
+            }
+
+            fn frame(&mut self, frame: DaemonFrame) {
+                apply_attached_proposal_frame(
+                    &mut self.state,
+                    &mut self.tab,
+                    &mut self.requests,
+                    "conversation",
+                    frame,
+                );
+            }
+
+            fn key(&mut self, code: KeyCode, higher: bool, read_only: bool) -> bool {
+                attached_proposal_key(
+                    KeyEvent::new(code, KeyModifiers::NONE),
+                    higher,
+                    read_only,
+                    &self.input,
+                    &mut self.state,
+                    &mut self.tab,
+                    &mut self.requests,
+                    &self.tx,
+                )
+            }
+
+            fn paint(&mut self, width: u16, height: u16, higher: bool, read_only: bool) -> String {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                let mut visible = None;
+                terminal
+                    .draw(|frame| {
+                        let area = frame.area();
+                        let display_input =
+                            crate::adapters::tui::handlers::recipient_actions::pending_composition(
+                                &self.state,
+                            )
+                            .unwrap_or(&self.input);
+                        let mut layout = crate::adapters::tui::layout::compute_layout(
+                            area,
+                            &self.state.theme,
+                            display_input,
+                            1,
+                            false,
+                            DensityMode::Focus,
+                        )
+                        .unwrap();
+                        let card = prepare_attached_proposal(
+                            &self.state,
+                            &self.tab,
+                            &self.input,
+                            higher,
+                            read_only,
+                            &mut layout,
+                            area,
+                        );
+                        chat_pane::render_attached(
+                            frame,
+                            layout.chat_pane,
+                            &Conversation::default(),
+                            &StreamingState::default(),
+                            0,
+                            true,
+                            &self.state.theme,
+                            &mut self.tab,
+                            &HashMap::new(),
+                            &self.state.feedback_blocks,
+                            self.state.active_feedback_id.as_deref(),
+                        );
+                        crate::adapters::tui::widgets::input_box::render(
+                            frame,
+                            layout.input_area,
+                            display_input,
+                            display_input.chars().count(),
+                            self.state.focus.clone(),
+                            &self.state.theme,
+                            false,
+                            0,
+                            None,
+                        );
+                        visible = crate::adapters::tui::widgets::team_proposal_card::render(
+                            card,
+                            frame.buffer_mut(),
+                            &self.state.theme,
+                        );
+                    })
+                    .unwrap();
+                self.state.team_proposal_visible = visible;
+                let buffer = terminal.backend().buffer();
+                (0..height)
+                    .map(|y| {
+                        (0..width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+
+            fn assert_send(&mut self) {
+                assert!(self.key(KeyCode::Char('y'), false, false));
+                assert!(
+                    matches!(
+                        self.rx.try_recv().unwrap(),
+                        ClientFrame::TeamProposalDecision { proposal, decision: TeamProposalDecision::Send }
+                            if proposal == "tp_attached"
+                    ),
+                    "attached Send must emit exactly the snapshot proposal decision"
+                );
+                assert!(
+                    self.rx.try_recv().is_err(),
+                    "one human Send emits one frame"
+                );
+            }
+
+            fn submit_pending_reply(&mut self, draft: &str, reply: &str) {
+                self.input = draft.to_owned();
+                assert!(
+                    matches!(
+                        attached_composer_key_with_team_requests(
+                            KeyCode::Enter,
+                            false,
+                            &mut self.input,
+                            &mut self.state,
+                            &self.tx,
+                            &mut self.requests,
+                        ),
+                        ComposerOutcome::FrameSent
+                    ),
+                    "the real composer must submit the recipient reply before testing proposal guards"
+                );
+                assert!(
+                    matches!(
+                        self.rx.try_recv().unwrap(),
+                        ClientFrame::ReplyToRecipientItem { item_id, text }
+                            if item_id == "ri_pending" && text == reply
+                    ),
+                    "the recipient reply must retain its target and exact operator-authored body"
+                );
+                assert!(
+                    self.input.is_empty(),
+                    "begin_action must move the submitted draft out of the local buffer"
+                );
+                assert_eq!(
+                    crate::adapters::tui::handlers::recipient_actions::pending_composition(
+                        &self.state
+                    ),
+                    Some(draft),
+                    "the real pending-action producer must retain the displayed draft"
+                );
+                assert!(
+                    self.rx.try_recv().is_err(),
+                    "submitting a recipient reply must not submit a proposal decision"
+                );
+                // Intentionally withhold the recipient result until resolve_pending_reply:
+                // channel consumption, not a sleep, establishes the pending interval.
+            }
+
+            fn resolve_pending_reply(&mut self) {
+                use crate::adapters::daemon::protocol::{
+                    RecipientAction, RecipientActionOutcome, RecipientActionTarget,
+                };
+                crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                    &mut self.state,
+                    &mut self.input,
+                    RecipientAction::Reply,
+                    RecipientActionTarget::Item {
+                        item_id: "ri_pending".into(),
+                    },
+                    RecipientActionOutcome::Applied { reply: None },
+                );
+                assert!(
+                    crate::adapters::tui::handlers::recipient_actions::pending_composition(
+                        &self.state
+                    )
+                    .is_none(),
+                    "the correlated recipient result must end the displayed pending composition"
+                );
+                assert!(
+                    self.input.is_empty(),
+                    "successful reply settlement must leave the composer genuinely empty"
+                );
+            }
+        }
+
+        #[test]
+        fn attached_proposal_enter_and_escape_never_send() {
+            let mut surface = Surface::new("body");
+            surface.paint(80, 24, false, false);
+            for key in [KeyCode::Enter, KeyCode::Esc] {
+                assert!(surface.key(key, false, false));
+                assert!(
+                    surface.rx.try_recv().is_err(),
+                    "attached Enter/Escape must not send a proposal"
+                );
+                assert!(attached_proposal_pending(&surface.state).is_some());
+                assert!(surface.state.team_send_blocks.is_empty());
+            }
+            surface.assert_send();
+        }
+
+        #[test]
+        fn attached_proposal_nonempty_composer_owns_y_r_n_and_t9() {
+            let mut surface = Surface::new("body");
+            surface.input = "draft ".into();
+            let text = surface.paint(80, 24, false, false);
+            assert!(
+                text.contains("Finish or clear your draft to decide."),
+                "attached draft must paint T9"
+            );
+            assert!(!text.contains("[y] Send to"));
+            for letter in ['y', 'r', 'n'] {
+                assert!(
+                    !surface.key(KeyCode::Char(letter), false, false),
+                    "composer letters must not decide an attached proposal"
+                );
+                attached_composer_key_with_team_requests(
+                    KeyCode::Char(letter),
+                    false,
+                    &mut surface.input,
+                    &mut surface.state,
+                    &surface.tx,
+                    &mut surface.requests,
+                );
+            }
+            assert_eq!(
+                surface.input, "draft yrn",
+                "attached proposal keys must preserve and edit the draft"
+            );
+            assert!(
+                surface.rx.try_recv().is_err(),
+                "composer letters must not decide an attached proposal"
+            );
+            assert!(surface.tab.team_proposal_reviews.is_empty());
+            surface.input.clear();
+            surface.paint(80, 24, false, false);
+            surface.assert_send();
+        }
+
+        #[test]
+        fn attached_proposal_pending_reply_composition_cannot_authorize_send() {
+            use crate::adapters::tui::handlers::recipient_actions::pending_composition;
+            let reply = "operator draft e\u{301}界";
+            let draft = format!("/team reply ri_pending {reply}");
+            let mut surface = Surface::new("proposal body distinct from the operator reply");
+            let snapshot = attached_proposal_pending(&surface.state).unwrap().clone();
+            surface.submit_pending_reply(&draft, reply);
+            let painted = surface.paint(80, 24, false, false);
+            assert!(
+                painted.contains(&draft),
+                "the real input renderer must still show the submitted draft while its result is delayed"
+            );
+            assert!(
+                Arc::ptr_eq(
+                    surface.state.team_proposal_visible.as_ref().unwrap(),
+                    &snapshot
+                ),
+                "the pending-input guard must be exercised against an actually painted proposal"
+            );
+
+            let handled = surface.key(KeyCode::Char('y'), false, false);
+            assert!(
+                surface.rx.try_recv().is_err(),
+                "pending recipient composition must not authorize a proposal Send merely because the local buffer was taken"
+            );
+            assert!(
+                !handled,
+                "a visible nonempty pending draft must retain ownership of proposal decision letters"
+            );
+            assert!(
+                Arc::ptr_eq(
+                    attached_proposal_pending(&surface.state).unwrap(),
+                    &snapshot
+                ),
+                "blocked Send must preserve the exact immutable waiting proposal"
+            );
+            assert_eq!(
+                pending_composition(&surface.state),
+                Some(draft.as_str()),
+                "blocked proposal Send must preserve the pending recipient composition byte-for-byte"
+            );
+            assert!(surface.requests.pending.is_empty());
+            assert!(surface.state.team_send_blocks.is_empty());
+
+            surface.resolve_pending_reply();
+            surface.paint(80, 24, false, false);
+            assert!(Arc::ptr_eq(
+                attached_proposal_pending(&surface.state).unwrap(),
+                &snapshot
+            ));
+            surface.assert_send();
+        }
+
+        #[test]
+        fn attached_proposal_pending_reply_card_uses_existing_draft_disabled_state() {
+            use crate::adapters::tui::handlers::recipient_actions::pending_composition;
+            let reply = "operator draft e\u{301}界";
+            let draft = format!("/team reply ri_pending {reply}");
+            let mut surface = Surface::new("proposal body distinct from the operator reply");
+            let snapshot = attached_proposal_pending(&surface.state).unwrap().clone();
+            surface.input = draft.clone();
+            let local_draft = surface.paint(80, 24, false, false);
+            let card_rows = |text: &str| {
+                text.lines()
+                    .filter(|row| row.contains('║') || row.contains('╔') || row.contains('╚'))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            };
+            let disabled_card = card_rows(&local_draft);
+            assert!(
+                !disabled_card.is_empty(),
+                "the local-draft control must paint a proposal card"
+            );
+            assert!(
+                !disabled_card.iter().any(|row| row.contains("[y]")),
+                "the existing nonempty-composer control must disable the proposal Send action"
+            );
+
+            surface.submit_pending_reply(&draft, reply);
+            let pending_draft = surface.paint(80, 24, false, false);
+            assert!(
+                pending_draft.contains(&draft),
+                "the pending recipient draft must remain visible in the real composer renderer"
+            );
+            assert_eq!(
+                card_rows(&pending_draft),
+                disabled_card,
+                "pending recipient composition must paint the same T9/action-disabled card as the identical local draft, not offer Send"
+            );
+            assert!(Arc::ptr_eq(
+                attached_proposal_pending(&surface.state).unwrap(),
+                &snapshot
+            ));
+            assert_eq!(pending_composition(&surface.state), Some(draft.as_str()));
+            assert!(surface.rx.try_recv().is_err());
+
+            surface.resolve_pending_reply();
+            let empty_composer = surface.paint(80, 24, false, false);
+            assert!(
+                card_rows(&empty_composer)
+                    .iter()
+                    .any(|row| row.contains("[y]")),
+                "after the recipient result clears the displayed composer, the waiting proposal must offer Send again"
+            );
+            surface.assert_send();
+        }
+
+        #[test]
+        fn attached_proposal_dismiss_is_only_a_decision_and_shared_info() {
+            let mut surface = Surface::new("private body");
+            surface.paint(80, 24, false, false);
+            assert!(surface.key(KeyCode::Char('n'), false, false));
+            assert!(
+                matches!(
+                    surface.rx.try_recv().unwrap(),
+                    ClientFrame::TeamProposalDecision {
+                        decision: TeamProposalDecision::Dismiss,
+                        ..
+                    }
+                ),
+                "attached Dismiss must not emit a Send frame"
+            );
+            assert!(surface.rx.try_recv().is_err());
+            assert!(surface.requests.pending.is_empty());
+            assert!(
+                surface.state.team_send_blocks.is_empty(),
+                "attached Dismiss must not open a send block"
+            );
+            assert!(attached_proposal_pending(&surface.state).is_none());
+            let block = &surface.state.feedback_blocks["team-proposal-status"];
+            assert_eq!(block.level, FeedbackLevel::Info);
+            assert_eq!(block.message, "Proposal dismissed. Nothing was sent.");
+            surface.frame(DaemonFrame::TeamProposalClosed {
+                proposal: "tp_attached".into(),
+                outcome: TeamProposalCloseOutcome::Dismissed,
+            });
+            assert!(
+                surface
+                    .paint(80, 24, false, false)
+                    .contains("Proposal dismissed. Nothing was sent.")
+            );
+            let mut positive = Surface::new("private body");
+            positive.paint(80, 24, false, false);
+            positive.assert_send();
+        }
+
+        #[test]
+        fn attached_proposal_review_is_stable_uncapped_and_delimited() {
+            let body = format!(
+                "{}\nTo: x\n[y] Send to x\nYour agent proposes a message. Nothing has been sent. Awaiting your decision.",
+                (0..45)
+                    .map(|i| format!("body-row-{i:02} e\u{301}界"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            let mut surface = Surface::new(&body);
+            surface.paint(80, 24, false, false);
+            assert!(surface.key(KeyCode::Char('r'), false, false));
+            assert!(
+                surface.rx.try_recv().is_err(),
+                "attached Review must not send or decide"
+            );
+            assert!(attached_proposal_pending(&surface.state).is_some());
+            assert!(surface.state.team_send_blocks.is_empty());
+            let id = "team-proposal-review-tp_attached";
+            let block = &surface.state.feedback_blocks[id];
+            assert_eq!(block.level, FeedbackLevel::Info);
+            let snapshot = &surface.tab.team_proposal_reviews[id];
+            for width in [56, 76, 126] {
+                let lines = crate::adapters::tui::widgets::feedback_block::render_feedback_lines_with_review(
+                    block, width, &surface.state.theme, Some(snapshot),
+                );
+                let rows = lines
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    rows.len() > 45,
+                    "attached Review must not cap the full body"
+                );
+                assert!(rows.iter().any(|row| row == "│ body-row-44 e\u{301}界"));
+                let body_start = rows.iter().position(|row| row.starts_with("│ ")).unwrap();
+                assert!(
+                    rows[body_start..].iter().all(|row| row.starts_with("│ ")),
+                    "attached Review must delimit every body row"
+                );
+                assert!(rows.iter().any(|row| row == "│ To: x"));
+                assert!(rows.iter().any(|row| row == "│ [y] Send to x"));
+            }
+            let painted = surface.paint(80, 24, false, false);
+            assert!(
+                painted.contains("body-row-44"),
+                "attached chat must consume the real Review render cache"
+            );
+            surface.paint(130, 30, false, false);
+            assert_eq!(surface.tab.team_proposal_reviews[id].body, body);
+            surface.assert_send();
+        }
+
+        #[test]
+        fn attached_proposal_send_binds_ordinary_block_and_receipts() {
+            let mut proposed = Surface::new("exact\n\tbody e\u{301}界");
+            proposed.paint(80, 24, false, false);
+            let snapshot = attached_proposal_pending(&proposed.state).unwrap().clone();
+            proposed.assert_send();
+            let mut typed = TuiState::new(80, 24);
+            let mut typed_requests = AttachedTeamRequests::default();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            assert!(enqueue_attached_team_frame(
+                &mut typed,
+                &mut typed_requests,
+                ClientFrame::TeamSend {
+                    request: "typed".into(),
+                    recipients: snapshot.recipients.clone(),
+                    text: snapshot.body.clone(),
+                    message_type: Some(snapshot.message_type),
+                    subject: None,
+                },
+                &tx,
+            ));
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                ClientFrame::TeamSend { .. }
+            ));
+            let proposed_block = match &proposed.requests.pending["tp_attached"] {
+                AttachedTeamRequest::Send {
+                    block_id,
+                    action: None,
+                } => block_id.clone(),
+                other => panic!(
+                    "human Send must open the ordinary send block before receipts: {other:?}"
+                ),
+            };
+            assert_eq!(
+                proposed.state.feedback_blocks[&proposed_block].message,
+                typed.feedback_blocks["team-send-1"].message,
+                "attached proposal must use the ordinary send-block renderer"
+            );
+            for (state, requests, request) in [
+                (&mut proposed.state, &mut proposed.requests, "tp_attached"),
+                (&mut typed, &mut typed_requests, "typed"),
+            ] {
+                assert!(apply_attached_team_frame(
+                    state,
+                    requests,
+                    DaemonFrame::TeamSendStarted {
+                        request: request.into(),
+                        action: crate::domain::models::SendActionId::mint(),
+                    }
+                ));
+                for index in 0..2 {
+                    assert!(apply_attached_team_frame(
+                        state,
+                        requests,
+                        DaemonFrame::TeamSendSettled {
+                            request: request.into(),
+                            index,
+                            outcome: TeamSendOutcome::Delivered,
+                        }
+                    ));
+                }
+            }
+            assert_eq!(
+                proposed.state.feedback_blocks[&proposed_block].message,
+                typed.feedback_blocks["team-send-1"].message,
+                "attached proposal receipts must settle exactly like a typed send"
+            );
+            assert!(proposed.requests.pending.is_empty());
+            let text = proposed.paint(80, 24, false, false);
+            assert!(
+                !text.contains("Your agent proposes a message"),
+                "attached proposal card must disappear rather than render a settlement"
+            );
+            assert!(attached_proposal_pending(&proposed.state).is_none());
+        }
+
+        #[test]
+        fn attached_proposal_60_columns_preserve_aliases_type_keys_and_spoof_region() {
+            let mut surface = Surface::new(
+                "To: x\n[y] Send to x\nYour agent proposes a message. Nothing has been sent. Awaiting your decision.\nfourth\nfifth",
+            );
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                let text = surface.paint(width, height, false, false);
+                let joined = text
+                    .chars()
+                    .filter(|ch| {
+                        !ch.is_whitespace() && !matches!(ch, '║' | '═' | '╔' | '╗' | '╚' | '╝')
+                    })
+                    .collect::<String>();
+                assert!(
+                    text.contains('╔'),
+                    "attached proposal must paint the shared double-bordered card"
+                );
+                for token in [
+                    "To:lena-po,jun-dev",
+                    "Type:architecture_update",
+                    "[y]Sendtolena-po,jun-dev",
+                    "[r]Reviewfirst",
+                    "[n]Dismiss",
+                ] {
+                    assert!(
+                        joined.contains(token),
+                        "attached card must preserve aliases/type/keys at {width}: missing {token}"
+                    );
+                }
+                for spoof in ["To: x", "[y] Send to x"] {
+                    if width >= 80 {
+                        assert!(
+                            text.contains(spoof),
+                            "attached preview positive control must paint the spoof row"
+                        );
+                    }
+                    assert!(
+                        text.lines()
+                            .filter(|row| row.contains(spoof))
+                            .all(|row| row.contains(&format!("│ {spoof}"))),
+                        "attached proposal spoof rows must stay inside the body delimiter"
+                    );
+                }
+                assert!(
+                    text.contains("… more not shown — [r] Review first"),
+                    "attached preview must disclose the hidden body"
+                );
+                assert!(
+                    !text.contains("Delivered"),
+                    "attached card must never paint a send outcome"
+                );
+            }
+            surface.assert_send();
+        }
+
+        #[test]
+        fn attached_proposal_higher_confirmations_and_raw_key_fences_keep_ownership() {
+            let mut surface = Surface::new("body");
+            for (consent, consolidation, retract) in [
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+            ] {
+                let higher = attached_proposal_higher_confirmation(
+                    &surface.state,
+                    consent,
+                    consolidation,
+                    retract,
+                );
+                assert!(higher);
+                surface.paint(80, 24, false, false);
+                assert!(
+                    !surface.key(KeyCode::Char('y'), higher, false),
+                    "attached higher confirmation must retain its Send key"
+                );
+                assert!(
+                    !surface
+                        .paint(80, 24, higher, false)
+                        .contains("Your agent proposes a message")
+                );
+            }
+            surface.state.pending_permission =
+                Some(crate::adapters::tui::state::PendingPermission {
+                    id: crate::domain::models::RequestId::new(),
+                    source: crate::domain::models::ApprovalSource::ForegroundTurn {
+                        conversation_id: surface
+                            .state
+                            .team_proposal_conversation_id
+                            .clone()
+                            .unwrap(),
+                    },
+                    tool_name: "Write".into(),
+                    tool_input: "{}".into(),
+                    risk: crate::domain::models::ToolRisk::Safe,
+                });
+            assert!(
+                attached_proposal_higher_confirmation(&surface.state, false, false, false),
+                "attached permission prompts must outrank proposals"
+            );
+            assert!(!surface.key(KeyCode::Char('y'), true, false));
+            surface.state.pending_permission = None;
+            surface.state.team_proposal_visible = None;
+            assert!(
+                !surface.key(KeyCode::Char('y'), false, false),
+                "unpainted attached proposal cannot decide"
+            );
+            surface.paint(80, 24, false, false);
+            for key in [
+                KeyEvent::new_with_kind(
+                    KeyCode::Char('y'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Repeat,
+                ),
+                KeyEvent::new_with_kind(
+                    KeyCode::Char('n'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Release,
+                ),
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::SHIFT),
+            ] {
+                assert!(attached_proposal_key(
+                    key,
+                    false,
+                    false,
+                    "",
+                    &mut surface.state,
+                    &mut surface.tab,
+                    &mut surface.requests,
+                    &surface.tx
+                ));
+            }
+            assert!(
+                surface.rx.try_recv().is_err(),
+                "attached repeat/release/modified keys must not decide"
+            );
+            assert!(surface.tab.team_proposal_reviews.is_empty());
+            assert!(!surface.key(KeyCode::Char('y'), false, true));
+            assert!(
+                !surface
+                    .paint(80, 24, false, true)
+                    .contains("Your agent proposes a message")
+            );
+            surface.paint(80, 24, false, false);
+            surface.assert_send();
+        }
+
+        #[test]
+        fn attached_proposal_refusal_withdrawal_and_reemit_are_correlated() {
+            let mut surface = Surface::new("body");
+            surface.paint(80, 24, false, false);
+            surface.assert_send();
+            let busy = "Not sent yet — this daemon is busy sending. The proposal is still waiting.";
+            surface.frame(DaemonFrame::TeamProposalClosed {
+                proposal: "tp_attached".into(),
+                outcome: TeamProposalCloseOutcome::Refused {
+                    reason: busy.into(),
+                },
+            });
+            assert!(surface.requests.pending.is_empty());
+            assert!(surface.state.team_send_blocks.is_empty());
+            assert_eq!(
+                surface.state.feedback_blocks["team-proposal-status"].message,
+                busy
+            );
+            assert!(
+                attached_proposal_pending(&surface.state).is_none(),
+                "a refusal alone must not resurrect a terminal attached proposal"
+            );
+            surface.frame(DaemonFrame::TeamProposal {
+                proposal: "tp_attached".into(),
+                recipients: vec!["lena-po".into(), "jun-dev".into()],
+                message_type: SemanticMessageType::ArchitectureUpdate,
+                body: "body".into(),
+            });
+            surface.paint(80, 24, false, false);
+            assert!(surface.key(KeyCode::Char('r'), false, false));
+            surface.frame(DaemonFrame::TeamProposalClosed {
+                proposal: "unrelated".into(),
+                outcome: TeamProposalCloseOutcome::Withdrawn,
+            });
+            assert!(
+                attached_proposal_pending(&surface.state).is_some(),
+                "an unrelated close must not remove the current attached snapshot"
+            );
+            surface.frame(DaemonFrame::TeamProposalClosed {
+                proposal: "tp_attached".into(),
+                outcome: TeamProposalCloseOutcome::Withdrawn,
+            });
+            assert!(attached_proposal_pending(&surface.state).is_none());
+            assert!(surface.tab.team_proposal_reviews.is_empty());
+            assert_eq!(
+                surface.state.feedback_blocks["team-proposal-status"].message,
+                "Proposal withdrawn with the conversation. Nothing was sent."
+            );
+            assert!(
+                surface.rx.try_recv().is_err(),
+                "attached withdrawal must never submit a decision"
+            );
+            surface.state.team_proposal_conversation_id = Some("other-conversation".into());
+            surface.frame(DaemonFrame::TeamProposal {
+                proposal: "tp_attached".into(),
+                recipients: vec!["lena-po".into(), "jun-dev".into()],
+                message_type: SemanticMessageType::ArchitectureUpdate,
+                body: "body".into(),
+            });
+            surface.paint(80, 24, false, false);
+            surface.assert_send();
+        }
+
+        #[test]
+        fn attached_proposal_conversation_binding_and_enqueue_failure_keep_snapshot() {
+            let mut surface = Surface::new("exact body");
+            surface.paint(80, 24, false, false);
+            let snapshot = attached_proposal_pending(&surface.state).unwrap().clone();
+            surface.state.team_proposal_conversation_id = Some("different-view".into());
+            assert!(
+                !surface.key(KeyCode::Char('y'), false, false),
+                "attached proposal must not decide from a different conversation view"
+            );
+            assert!(
+                !surface
+                    .paint(80, 24, false, false)
+                    .contains("Your agent proposes a message")
+            );
+            surface.state.team_proposal_conversation_id = Some("conversation".into());
+            surface.paint(80, 24, false, false);
+            assert!(Arc::ptr_eq(
+                attached_proposal_pending(&surface.state).unwrap(),
+                &snapshot
+            ));
+            surface.rx.close();
+            assert!(surface.key(KeyCode::Char('y'), false, false));
+            assert!(
+                Arc::ptr_eq(
+                    attached_proposal_pending(&surface.state).unwrap(),
+                    &snapshot
+                ),
+                "failed attached decision enqueue must preserve the exact pending snapshot"
+            );
+            assert!(surface.requests.pending.is_empty());
+            assert!(surface.state.team_send_blocks.is_empty());
+            assert_eq!(
+                surface.state.feedback_blocks["team-proposal-status"].message,
+                "Attach socket closed — the proposal decision was not sent."
+            );
+            let mut positive = Surface::new("exact body");
+            positive.paint(80, 24, false, false);
+            positive.assert_send();
+        }
+    }
 
     #[test]
     fn consent_card_queue_indicator_is_derived_from_the_daemon_fifo() {

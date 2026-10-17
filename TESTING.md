@@ -13,6 +13,32 @@ Run these tests before marking an epic as done. Estimated time: under 5 minutes.
 - `cargo fmt --check`
 - `cargo build --release`
 
+### Pinned complete-function metric
+
+The conformance suite requires the development-only parser pins in
+[`tools/ci/requirements-metrics.txt`](tools/ci/requirements-metrics.txt). Missing
+Python/parser packages, wrong versions, parse/selection errors, nonzero execution
+and invalid JSON/identities fail the metric gate; they are never a skip.
+
+```sh
+python3 -m venv /tmp/rustain-metrics-venv
+. /tmp/rustain-metrics-venv/bin/activate
+python3 -m pip install -r tools/ci/requirements-metrics.txt
+python3 .github/scripts/event-loop-complexity.py src/infrastructure/runtime/event_loop.rs
+python3 .github/scripts/test_event_loop_complexity.py
+python3 .github/scripts/test_ratchet_signoff_guard.py
+cargo test --locked --test conformance
+```
+
+`rust-legacy-condition-tokens-v1` measures the entire single top-level `run` with
+all written cfg branches and unexpanded macro tokens. The CLI documents the
+counting model and emits bounds, decision counts, exact versions and SHA-256
+identities. ADR-08-01 §D6.6 / Story19.21e records the separately owner-ratified
+complete historical baseline **634** and unchanged **120%** multiplier: integer-floor
+budget **760**. The independent **11,487-line** hard ceiling remains binding. A protected constant
+change requires its own `RATCHET-SIGNOFF: CONSTANT_NAME — rationale; reviewer`
+in the commit range or PR body; an unrelated or partial approval is insufficient.
+
 ---
 
 ## What CI runs vs. what you run locally
@@ -99,11 +125,11 @@ These manual tests complement the automated suite:
 |----------------|-----------|--------|
 | `tests/e2e_harness.rs` | 13 | Core user journey, streaming, tool use, P0 regression |
 | `tests/e2e_crash_recovery.rs` | 14 | Crash detection, recovery prompt, context rebuild |
-| `tests/conformance.rs` | 2 | Hexagonal architecture enforcement |
+| `tests/conformance.rs` | 17 | Hexagonal architecture, strict complete-function metric, independent line ceiling and ownership/async-lock ratchets |
 | `tests/doctor_health.rs` | 35 | Health check framework, API validation |
 | `tests/init_wizard.rs` | 12 | Init wizard, TTY detection, config creation |
 | `tests/session_persistence.rs` | 3 | Save/load round-trip, atomic writes |
 | `tests/title_generation.rs` | 22 | Auto-title trigger, post-processing |
 | All integration tests | 33 files | Full feature coverage |
 
-Run all automated tests: `cargo test`
+Run all automated targets: `cargo test --all-targets --no-fail-fast`

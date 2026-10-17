@@ -210,7 +210,7 @@ def _surface_pages(tui, name, snapshots, limit=12):
 
 
 def _chat_pages(tui, name, snapshots, limit=20):
-    # Attached PageUp/PageDown change the chat pane's five-line scroll offset.
+    # Attached PageUp/PageDown use the last painted viewport, capped at five rows.
     # Capture each position after the event loop redraws; keep sending at a
     # boundary too, so a repeated blank screen cannot leave the composer scrolled.
     # Compare row order only in the top-to-bottom pass; retain reverse-scroll evidence too.
@@ -355,7 +355,7 @@ def test_act1_attached_distribution(columns, rows, monkeypatch):
             (config / "config.toml").write_text('[permissions]\nalways_tools = ["Read"]\n')
             environments[alias] = {
                 **os.environ, **stub.env(PERSONAS[alias], homes[alias]),
-                "TERM": "xterm-256color", "RUSTAIN_CONFIG_DIR": str(config),
+                "TERM": "xterm-256color", "RUST_LOG": "debug", "RUSTAIN_CONFIG_DIR": str(config),
                 "RUSTAIN_DATA_DIR": str(workspace / ".rustain_data"),
                 "RUSTAIN_LOG_PATH": str(root / (alias + ".runtime.log")),
             }
@@ -557,7 +557,7 @@ def test_act1_attached_distribution(columns, rows, monkeypatch):
             "client_binary": str(client_binary or binary),
             "client_binary_sha256": _sha(client_binary or binary),
             "client_binary_bytes": (client_binary or binary).stat().st_size,
-            "daemon_protocol_version": 6,
+            "daemon_protocol_version": 7,
             "source_sha256": _sha(Path(__file__)), "scene_sha256": _sha(SCENE),
             "columns": columns, "rows": rows, "jun_item_from_painted_surface": jun_item,
             "tom_item_from_painted_surface": tom_item, "provider_turns": {alias: len(_turns(stub, alias)) for alias in aliases},
@@ -656,7 +656,7 @@ def test_act1_daemon_crash_restart(monkeypatch):
             (config / "config.toml").write_text('[permissions]\nalways_tools = ["Read"]\n')
             environments[alias] = {
                 **os.environ, **stub.env(PERSONAS[alias], homes[alias]),
-                "TERM": "xterm-256color", "RUSTAIN_CONFIG_DIR": str(config),
+                "TERM": "xterm-256color", "RUST_LOG": "debug", "RUSTAIN_CONFIG_DIR": str(config),
                 "RUSTAIN_DATA_DIR": str(workspace / ".rustain_data"),
                 "RUSTAIN_LOG_PATH": str(root / (alias + ".runtime.log")),
             }
@@ -765,7 +765,7 @@ def test_act1_daemon_crash_restart(monkeypatch):
             "case": "test_act1_daemon_crash_restart",
             "daemon_binary": str(binary), "daemon_binary_sha256": binary_sha,
             "client_binary": str(client_binary), "client_binary_sha256": client_sha,
-            "daemon_protocol_version": 6,
+            "daemon_protocol_version": 7,
             "held_post_observed_before_os_kill": True,
             "sender_exit_code": sender_process.returncode,
             "held_recipient": "tom-dev", "landed_recipient": "jun-dev",

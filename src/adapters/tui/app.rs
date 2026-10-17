@@ -139,6 +139,13 @@ pub enum InputAction {
     TeamRetractConfirm,
     /// Story 19.16f (AC4): cancel the `/team retract` card. Sends nothing.
     TeamRetractDecline,
+    #[cfg(feature = "a2a")]
+    TeamProposal {
+        conversation_id: String,
+        proposal_id: String,
+        /// None is Review, not an approval.
+        decision: Option<crate::domain::models::TeamProposalDecision>,
+    },
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -481,7 +488,7 @@ fn feedback_action_to_input_action(action: crate::domain::models::FeedbackAction
     }
 }
 
-pub(crate) fn recipient_higher_confirmation_active(state: &TuiState) -> bool {
+pub(crate) fn proposal_higher_confirmation_active(state: &TuiState) -> bool {
     state.pending_plan_card.is_some()
         || state.pending_delegation_card.is_some()
         || state.pending_consolidation_card.is_some()
@@ -497,12 +504,53 @@ pub(crate) fn recipient_higher_confirmation_active(state: &TuiState) -> bool {
         || matches!(state.focus, FocusState::Overlay(_))
 }
 
+pub(crate) fn recipient_higher_confirmation_active(state: &TuiState) -> bool {
+    if proposal_higher_confirmation_active(state) {
+        return true;
+    }
+    #[cfg(feature = "a2a")]
+    {
+        state
+            .team_proposal_conversation_id
+            .as_ref()
+            .is_some_and(|id| state.pending_team_proposals.contains_key(id))
+    }
+    #[cfg(not(feature = "a2a"))]
+    false
+}
+
+#[cfg(feature = "a2a")]
+fn visible_team_proposal(
+    state: &TuiState,
+) -> Option<&std::sync::Arc<crate::domain::models::TeamProposal>> {
+    if !matches!(state.focus, FocusState::Chat | FocusState::Input)
+        || proposal_higher_confirmation_active(state)
+    {
+        return None;
+    }
+    let pending = state
+        .pending_team_proposals
+        .get(state.team_proposal_conversation_id.as_ref()?)?;
+    state
+        .team_proposal_visible
+        .as_ref()
+        .filter(|visible| std::sync::Arc::ptr_eq(visible, pending))
+}
+
 /// Preserve raw key ownership before conversion discards modifiers and kind.
 pub(crate) fn recipient_surface_ignores_raw_key(
     state: &TuiState,
     event: &crossterm::event::Event,
 ) -> bool {
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+    #[cfg(feature = "a2a")]
+    if state.input_buffer.is_empty()
+        && visible_team_proposal(state).is_some()
+        && let Event::Key(key) = event
+        && matches!(key.code, KeyCode::Char('y' | 'r' | 'n'))
+    {
+        return key.kind != KeyEventKind::Press || !key.modifiers.is_empty();
+    }
     if recipient_higher_confirmation_active(state) {
         return false;
     }
@@ -514,6 +562,19 @@ pub(crate) fn recipient_surface_ignores_raw_key(
         || (!key.modifiers.is_empty()
             && !(key.modifiers == KeyModifiers::CONTROL
                 && matches!(key.code, KeyCode::Char('c' | 'q'))))
+}
+
+/// Preserve the raw event's key ownership before dispatching its converted form.
+pub fn handle_operator_input(
+    state: &mut TuiState,
+    raw_event: &crossterm::event::Event,
+    domain_event: &DomainInputEvent,
+) -> Option<InputAction> {
+    if recipient_surface_ignores_raw_key(state, raw_event) {
+        None
+    } else {
+        Some(handle_input(state, domain_event))
+    }
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -1081,6 +1142,25 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         return InputAction::Consumed;
     }
 
+    #[cfg(feature = "a2a")]
+    if matches!(c, 'y' | 'r' | 'n')
+        && state.input_buffer.is_empty()
+        && let Some(proposal) = visible_team_proposal(state)
+    {
+        use crate::domain::models::TeamProposalDecision;
+        let decision = match c {
+            'y' => Some(TeamProposalDecision::Send),
+            'r' => None,
+            'n' => Some(TeamProposalDecision::Dismiss),
+            _ => unreachable!("proposal key filtered above"),
+        };
+        return InputAction::TeamProposal {
+            conversation_id: proposal.conversation_id.clone(),
+            proposal_id: proposal.id.clone(),
+            decision,
+        };
+    }
+
     // Any keypress dismisses an active peek overlay (AC5)
     if state.focus == FocusState::Chat {
         let had_peek = state.tool_block_states.values().any(|tbs| tbs.peek_active);
@@ -1091,6 +1171,15 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             state.needs_redraw = true;
             return InputAction::Consumed;
         }
+    }
+
+    #[cfg(feature = "a2a")]
+    if matches!(c, 'y' | 'r' | 'n')
+        && state.focus == FocusState::Chat
+        && !state.input_buffer.is_empty()
+        && visible_team_proposal(state).is_some()
+    {
+        state.focus = FocusState::Input;
     }
 
     match state.focus {

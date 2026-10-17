@@ -3,7 +3,35 @@
 #[path = "conformance_19_21/attached_harness.rs"]
 mod attached_harness;
 #[path = "conformance_19_21/harness.rs"]
-mod harness;
+mod inherited;
+use inherited as harness;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_entrypoints.rs"]
+mod g_entrypoints;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_harness.rs"]
+mod g_harness;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_k01_boundaries.rs"]
+mod g_k01_boundaries;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_k02_authorization.rs"]
+mod g_k02_authorization;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_k04_lifecycle.rs"]
+mod g_k04_lifecycle;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_k05_liveness.rs"]
+mod g_k05_liveness;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_k06_authorship.rs"]
+mod g_k06_authorship;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_k06_payload.rs"]
+mod g_k06_payload;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_process_restart.rs"]
+mod g_process_restart;
 #[path = "conformance_19_21/k01_send_action.rs"]
 mod k01_send_action;
 #[path = "conformance_19_21/k02_board_rules.rs"]
@@ -26,3 +54,9 @@ mod k05_sender_local_privacy;
 mod k06_attached_status_consent;
 #[path = "conformance_19_21/k07_k08_recipient.rs"]
 mod k07_k08_recipient;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/observed_host.rs"]
+mod observed_host;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/tool_provider.rs"]
+mod tool_provider;

@@ -28,7 +28,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fixtures.scene_provider import SceneStub
-from harness import PROJECT_ROOT, RustainTUI
+from harness import PROJECT_ROOT, RustainTUI, _resolve_binary
 
 SCENE = Path(__file__).parent / "fixtures" / "scenes" / "smoke.json"
 RELEASE_BINARY = PROJECT_ROOT / "target" / "release" / "rustain"
@@ -354,13 +354,13 @@ def test_non_tui_binary_override_fails_as_a_dead_process(monkeypatch):
         harness.stop()
 
 
-@pytest.mark.skipif(
-    not RELEASE_BINARY.exists(),
-    reason="release binary not built — run cargo build --release --features p2p,a2a",
-)
 def test_release_binary_override_drives_a_turn(monkeypatch, stub, scratch_home):
-    """AC3(a) positive control: the release-profile binary, which is 19.13's path."""
-    monkeypatch.setenv("RUSTAIN_TUI_BINARY", str(RELEASE_BINARY))
+    """AC3(a) positive control: supplied prebuilt binary or conventional release."""
+    selected, overridden = _resolve_binary()
+    release_binary = selected if overridden else RELEASE_BINARY
+    if not release_binary.is_file():
+        pytest.skip("release binary not built — run cargo build --release --features p2p,a2a")
+    monkeypatch.setenv("RUSTAIN_TUI_BINARY", str(release_binary))
     with RustainTUI(fresh=True, build=True, env_overrides=stub.env("scene-ci", scratch_home)) as tui:
         tui.send_message("scene ping")
         assert tui.wait_for_screen("Ready", timeout=60) is True, tui.get_screen_text()

@@ -290,15 +290,33 @@ pub(crate) struct Host {
 
 impl Host {
     pub(crate) async fn start(policy: A2aAdmissionPolicy, mode: ResponseMode) -> Self {
-        let journal = Journal::open().await;
-        let sink = journal.room.clone();
-        Self::start_with_journal(journal, sink, policy, mode).await
+        Self::start_at_authority(policy, mode, None).await
     }
     pub(crate) async fn start_with_journal(
         journal: Journal,
         sink: Arc<dyn RoomJournal>,
         policy: A2aAdmissionPolicy,
         mode: ResponseMode,
+    ) -> Self {
+        Self::start_with_authority(journal, sink, policy, mode, None).await
+    }
+
+    pub(crate) async fn start_at_authority(
+        policy: A2aAdmissionPolicy,
+        mode: ResponseMode,
+        authority: Option<String>,
+    ) -> Self {
+        let journal = Journal::open().await;
+        let sink = journal.room.clone();
+        Self::start_with_authority(journal, sink, policy, mode, authority).await
+    }
+
+    async fn start_with_authority(
+        journal: Journal,
+        sink: Arc<dyn RoomJournal>,
+        policy: A2aAdmissionPolicy,
+        mode: ResponseMode,
+        advertised_host: Option<String>,
     ) -> Self {
         let keys = tempfile::tempdir().expect("identity directory");
         let (domain_tx, _domain_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -358,7 +376,7 @@ impl Host {
                 ),
                 policy,
                 workspace: journal.workspace.path().to_path_buf(),
-                advertised_host: None,
+                advertised_host,
                 cards: Arc::new(SignedCardCache::new()),
             },
             cancel.child_token(),
@@ -371,10 +389,13 @@ impl Host {
             _keys: keys,
         }
     }
+    pub(crate) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
     pub(crate) fn peer(&self, alias: &str) -> A2aPeerSpec {
         A2aPeerSpec::new(
             alias,
-            rustain::domain::models::RedactedUrl::from(self.endpoint.clone()),
+            rustain::domain::models::RedactedUrl::from(self.endpoint().to_owned()),
             A2aPeerSource::Workspace,
         )
     }
@@ -392,7 +413,7 @@ pub(crate) struct Sender {
     pub(crate) domain_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     pub(crate) egress_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     pub(crate) clock: Arc<rustain::domain::clock::MockClock>,
-    egress: A2aEgress,
+    pub(crate) egress: A2aEgress,
     _keys: tempfile::TempDir,
 }
 

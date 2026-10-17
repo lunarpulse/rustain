@@ -37,6 +37,9 @@ pub fn risk_for_builtin(tool_name: &str) -> ToolRisk {
     match tool_name {
         "Read" | "Glob" | "Grep" | "activate_skill" | "exit_plan_mode" | "propose_plan"
         | "remember" | "remember_fact" => ToolRisk::Safe,
+        // Raising has no recipient I/O. Safe never authorizes sending; the
+        // operator's explicit proposal decision remains the only send boundary.
+        "propose_team_message" => ToolRisk::Safe,
         "Write" | "Edit" | "edit" | "apply_patch" => ToolRisk::Standard,
         "Bash" | "WebFetch" => ToolRisk::Elevated,
         _ => ToolRisk::Elevated,

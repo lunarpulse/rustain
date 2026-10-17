@@ -1,4 +1,4 @@
-//! Shared real-socket fixture for Story 19.21 K05/K06 attached-rail keystones.
+//! Shared real-socket fixture for Story 19.21 distribution and 19.21g proposals.
 //! All socket and HTTP work enters through production `AttachServer::run` and
 //! the production signed-card A2A server. Fixture timeouts are hang guards only.
 
@@ -25,9 +25,7 @@ use rustain::adapters::daemon::server::AttachServer;
 #[cfg(feature = "test-instrumentation")]
 use rustain::adapters::daemon::server::TeamSendTestHooks;
 use rustain::adapters::filesystem::FileSystemStorage;
-use rustain::adapters::noop::{
-    NoOpApprovalPersistence, NoOpMemory, NoOpPersona, NoOpSecurity, NoOpToolSet, NoOpUsageLedger,
-};
+use rustain::adapters::noop::{NoOpMemory, NoOpPersona, NoOpSecurity, NoOpUsageLedger};
 use rustain::adapters::policy::JournalConsentProjection;
 use rustain::adapters::rap::{AgentSigner, IdentityKeyStore};
 use rustain::domain::errors::ProviderError;
@@ -57,11 +55,51 @@ use tokio_util::sync::CancellationToken;
 pub const FIXTURE_TIMEOUT: Duration = Duration::from_secs(20);
 pub type ProviderRequestTrace = Arc<parking_lot::Mutex<Vec<(Vec<Message>, CompletionOptions)>>>;
 
+/// Queued provider exchanges still run through the real daemon turn/scheduler.
+/// Each enqueue includes its tool-result continuation, so later turns cannot
+/// accidentally consume an earlier turn's response.
+#[derive(Default)]
+pub struct ToolScript {
+    exchanges: parking_lot::Mutex<std::collections::VecDeque<Vec<StreamChunk>>>,
+}
+impl ToolScript {
+    /// Queue one provider response without a continuation, for interleaved turns.
+    /// Only the cron-enabled interleaving consumer uses it.
+    #[cfg(feature = "cron")]
+    pub fn exchange(&self, chunks: Vec<StreamChunk>) {
+        self.exchanges.lock().push_back(chunks);
+    }
+
+    pub fn tool(&self, name: &str, input: serde_json::Value) {
+        let mut exchanges = self.exchanges.lock();
+        exchanges.push_back(vec![
+            StreamChunk::ToolUse {
+                id: RequestId::new().0,
+                name: name.into(),
+                input,
+            },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]);
+        exchanges.push_back(vec![
+            StreamChunk::Text {
+                content: "Scripted tool turn completed.".into(),
+                parent_tool_use_id: None,
+            },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]);
+    }
+}
+
 /// Real daemon-side provider used only by the turn runtime factory. Its trace is
 /// per daemon and its calls are not shared with recipients or standalone rails.
 struct ObservedProvider {
     requests: ProviderRequestTrace,
     turns: Arc<std::sync::atomic::AtomicUsize>,
+    script: Arc<ToolScript>,
 }
 
 #[async_trait::async_trait]
@@ -73,6 +111,9 @@ impl StreamingProvider for ObservedProvider {
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
         self.requests.lock().push((messages, options));
         self.turns.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some(chunks) = self.script.exchanges.lock().pop_front() {
+            return Ok(futures::stream::iter(chunks).boxed());
+        }
         Ok(futures::stream::iter(vec![
             StreamChunk::Text {
                 content: "attached-fixture response".into(),
@@ -107,10 +148,50 @@ fn daemon_runtime(
     provider: Arc<dyn StreamingProvider>,
     storage: Arc<dyn StoragePort>,
     workspace: &Path,
+    egress: Option<&A2aEgress>,
+    proposals: Arc<rustain::adapters::daemon::team_proposal::TeamProposalRegistry>,
+    app_config: Arc<ArcSwap<AppConfig>>,
+    security: Arc<dyn SecurityPort>,
 ) -> Arc<DaemonTurnRuntime> {
-    let security: Arc<dyn SecurityPort> = Arc::new(NoOpSecurity);
-    let tools: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
-    let approval = ApprovalRuntime::new(64, Arc::new(NoOpApprovalPersistence));
+    let builtin = Arc::new(rustain::adapters::toolset_adapter::ToolSetAdapter::new(
+        workspace.to_path_buf(),
+        storage.clone(),
+        Arc::new(ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn rustain::domain::ports::SandboxManager>,
+        )),
+        Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::SandboxPolicy::Permissive,
+        )),
+    ));
+    let composite = Arc::new(
+        rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter::new(
+            builtin,
+            vec![],
+            vec![],
+            true,
+            None,
+            Some(Arc::new(
+                rustain::adapters::skill_activation::SkillActivator::new(),
+            )),
+            None,
+        ),
+    );
+    if let Some(egress) = egress {
+        egress.install(&composite, Some(proposals));
+    }
+    let tools: Arc<dyn ToolSetPort> = composite;
+    let persistence = Arc::new(
+        rustain::adapters::approval_persistence_toml::ApprovalPersistenceToml::new(
+            workspace.join(".rustain-test-home/config.toml"),
+            workspace.join(".rustain/permissions.toml"),
+        ),
+    );
+    let approval = ApprovalRuntime::new_with_subagent_policy(
+        64,
+        persistence,
+        app_config.load().subagents.auto_approve,
+    );
     let tool_scheduler = rustain::domain::services::tool_scheduler::ToolScheduler::new(
         security.clone(),
         tools.clone(),
@@ -122,7 +203,7 @@ fn daemon_runtime(
             rustain::adapters::daemon::recipient_context::RecipientContextState::default(),
         ),
         provider,
-        app_config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+        app_config,
         security,
         tools,
         tool_scheduler,
@@ -261,6 +342,12 @@ pub fn is_consent_event(event: &RoomEvent) -> bool {
 /// Named alias emphasizing the held recipient-append use case.
 pub type GateRoomJournal = AppendGateJournal;
 
+#[cfg(feature = "test-instrumentation")]
+struct ScriptedRuntimeOptions {
+    config: AppConfig,
+    install_egress: bool,
+}
+
 /// One real daemon composition: one AppEvent channel, real journal/tree/core,
 /// one injected-clock A2aEgress and its original runtime, then the production
 /// attached-team constructor and a real Unix listener.
@@ -272,6 +359,14 @@ pub struct AttachedDaemon {
     pub egress: Arc<A2aEgress>,
     pub requests: ProviderRequestTrace,
     pub model_turns: Arc<std::sync::atomic::AtomicUsize>,
+    pub script: Arc<ToolScript>,
+    pub proposals: Arc<rustain::adapters::daemon::team_proposal::TeamProposalRegistry>,
+    #[cfg(feature = "cron")]
+    pub core: Arc<DaemonCore>,
+    pub runtime: Arc<DaemonTurnRuntime>,
+    pub conversation: Arc<tokio::sync::Mutex<Conversation>>,
+    pub domain_tx: mpsc::UnboundedSender<rustain::domain::events::AppEvent>,
+    pub channel_tx: mpsc::UnboundedSender<rustain::domain::models::ChannelTurnRequest>,
     approval_events: tokio::sync::Mutex<
         tokio::sync::broadcast::Receiver<
             rustain::domain::services::approval_runtime::ApprovalRuntimeEvent,
@@ -405,6 +500,59 @@ impl AttachedDaemon {
         test_hooks: TeamSendTestHooks,
         effective_policy: Option<Arc<rustain::domain::models::EffectivePolicy>>,
     ) -> Self {
+        Self::compose_scripted(
+            journal,
+            peers,
+            room_journal,
+            clock,
+            test_hooks,
+            effective_policy,
+            ScriptedRuntimeOptions {
+                config: AppConfig::default(),
+                install_egress: true,
+            },
+        )
+        .await
+    }
+    #[cfg(feature = "test-instrumentation")]
+    pub async fn start_scripted(
+        peers: Vec<rustain::domain::models::A2aPeerSpec>,
+        config: AppConfig,
+        install_egress: bool,
+        hooks: TeamSendTestHooks,
+    ) -> Self {
+        let journal = Journal::open().await;
+        let room = journal.room.clone();
+        Self::compose_scripted(
+            journal,
+            peers,
+            room,
+            Arc::new(rustain::domain::clock::MockClock::at_wall_ms(
+                1_800_000_000_000,
+            )),
+            hooks,
+            None,
+            ScriptedRuntimeOptions {
+                config,
+                install_egress,
+            },
+        )
+        .await
+    }
+    #[cfg(feature = "test-instrumentation")]
+    async fn compose_scripted(
+        journal: Journal,
+        peers: Vec<rustain::domain::models::A2aPeerSpec>,
+        room_journal: Arc<dyn RoomJournal>,
+        clock: Arc<rustain::domain::clock::MockClock>,
+        test_hooks: TeamSendTestHooks,
+        effective_policy: Option<Arc<rustain::domain::models::EffectivePolicy>>,
+        options: ScriptedRuntimeOptions,
+    ) -> Self {
+        let ScriptedRuntimeOptions {
+            config,
+            install_egress,
+        } = options;
         let workspace = journal.workspace.path().to_path_buf();
         let (domain_tx, domain_rx) = mpsc::unbounded_channel();
         // Default fixtures use the production journal-to-domain-event path.
@@ -431,31 +579,6 @@ impl AttachedDaemon {
         ));
         let requests: ProviderRequestTrace = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let model_turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let core = {
-            let requests = requests.clone();
-            let model_turns = model_turns.clone();
-            let storage = storage.clone();
-            let workspace = workspace.clone();
-            Arc::new(DaemonCore::new(
-                workspace.clone(),
-                Arc::new(ArcSwap::from_pointee(AppConfig::default())),
-                Arc::new(NoOpMemory),
-                storage.clone(),
-                Arc::new(NoOpSecurity),
-                Arc::new(NoOpPersona),
-                Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
-                Box::new(move || {
-                    Ok(daemon_runtime(
-                        Arc::new(ObservedProvider {
-                            requests: requests.clone(),
-                            turns: model_turns.clone(),
-                        }),
-                        storage.clone(),
-                        &workspace,
-                    ))
-                }),
-            ))
-        };
         let egress = Arc::new(
             A2aEgress::compose_with_clock(
                 peers.clone(),
@@ -469,6 +592,48 @@ impl AttachedDaemon {
             .expect("compose one daemon egress"),
         );
         egress.await_cards_settled().await;
+        let script = Arc::new(ToolScript::default());
+        let proposals =
+            Arc::new(rustain::adapters::daemon::team_proposal::TeamProposalRegistry::new());
+        let config = Arc::new(ArcSwap::from_pointee(config));
+        let security: Arc<dyn SecurityPort> = Arc::new(
+            rustain::adapters::security_adapter::SecurityAdapter::new(workspace.clone()),
+        );
+        let core = {
+            let requests = requests.clone();
+            let model_turns = model_turns.clone();
+            let storage = storage.clone();
+            let workspace = workspace.clone();
+            let script = script.clone();
+            let proposals = proposals.clone();
+            let egress = egress.clone();
+            let config = config.clone();
+            let security = security.clone();
+            Arc::new(DaemonCore::new(
+                workspace.clone(),
+                config.clone(),
+                Arc::new(NoOpMemory),
+                storage.clone(),
+                security.clone(),
+                Arc::new(NoOpPersona),
+                Arc::new(rustain::adapters::rap::PeerTopicStore::new()),
+                Box::new(move || {
+                    Ok(daemon_runtime(
+                        Arc::new(ObservedProvider {
+                            requests: requests.clone(),
+                            turns: model_turns.clone(),
+                            script: script.clone(),
+                        }),
+                        storage.clone(),
+                        &workspace,
+                        install_egress.then_some(egress.as_ref()),
+                        proposals.clone(),
+                        config.clone(),
+                        security.clone(),
+                    ))
+                }),
+            ))
+        };
         let projection = Arc::new(JournalConsentProjection::from_entries(
             &journal.entries().await,
         ));
@@ -485,6 +650,7 @@ impl AttachedDaemon {
             .ensure_runtime()
             .await
             .expect("create daemon runtime for consent observations");
+        runtime.approval.load_session().await;
         let approval_events = tokio::sync::Mutex::new(runtime.approval.subscribe());
         let delivery: Arc<dyn DeliveryPolicy> =
             Arc::new(EffectiveDeliveryPolicy::new(effective.clone()));
@@ -492,13 +658,14 @@ impl AttachedDaemon {
             &node_tree,
             delivery.clone(),
         );
+        let conversation = Arc::new(tokio::sync::Mutex::new(Conversation {
+            id: "attached-fixture".into(),
+            ..Conversation::default()
+        }));
         let server = AttachServer::new_with_node_tree_bus_policy_journal_and_team(
-            core,
-            Arc::new(tokio::sync::Mutex::new(Conversation {
-                id: "attached-fixture".into(),
-                ..Conversation::default()
-            })),
-            domain_tx,
+            core.clone(),
+            conversation.clone(),
+            domain_tx.clone(),
             node_tree,
             bus,
             delivery,
@@ -507,6 +674,7 @@ impl AttachedDaemon {
             Some(projection.clone()),
             Some(egress.runtime().clone()),
             peers,
+            proposals.clone(),
             #[cfg(feature = "test-instrumentation")]
             Some(test_hooks.clone()),
         );
@@ -514,10 +682,11 @@ impl AttachedDaemon {
         let path = workspace.join("daemon.sock");
         let listener = UnixListener::bind(&path).expect("bind attached fixture socket");
         let shutdown = CancellationToken::new();
+        let (channel_tx, channel_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(server.clone().run(
             listener,
             domain_rx,
-            None,
+            Some(channel_rx),
             None,
             shutdown.child_token(),
         ));
@@ -529,6 +698,14 @@ impl AttachedDaemon {
             egress,
             requests,
             model_turns,
+            script,
+            proposals,
+            #[cfg(feature = "cron")]
+            core,
+            runtime,
+            conversation,
+            domain_tx,
+            channel_tx,
             approval_events,
             observed_approval_events: parking_lot::Mutex::new(Vec::new()),
             approval_prompt_cursors: parking_lot::Mutex::new(HashMap::new()),
@@ -919,6 +1096,7 @@ pub struct InboundSendResult {
 pub struct RecipientHost {
     pub journal: Journal,
     pub endpoint: String,
+    pub registry: Arc<CapabilityRegistry>,
     cancel: CancellationToken,
     task: JoinHandle<anyhow::Result<()>>,
     _keys: tempfile::TempDir,
@@ -992,9 +1170,14 @@ impl RecipientHost {
                     Arc::new(ObservedProvider {
                         requests: runtime_requests.clone(),
                         turns: runtime_turns.clone(),
+                        script: Arc::new(ToolScript::default()),
                     }),
                     runtime_storage.clone(),
                     &runtime_workspace,
+                    None,
+                    Arc::new(rustain::adapters::daemon::team_proposal::TeamProposalRegistry::new()),
+                    Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+                    Arc::new(NoOpSecurity),
                 ))
             }),
         ));
@@ -1017,10 +1200,11 @@ impl RecipientHost {
             listener.local_addr().expect("recipient address")
         );
         let cancel = CancellationToken::new();
+        let registry = Arc::new(CapabilityRegistry::new(None));
         let task = tokio::spawn(serve(
             listener,
             ServeConfig {
-                registry: Arc::new(CapabilityRegistry::new(None)),
+                registry: registry.clone(),
                 signer,
                 security: A2aServerSecurity::default(),
                 runtime: Some(attach as Arc<dyn rustain::domain::ports::InboundPeerRuntime>),
@@ -1037,6 +1221,7 @@ impl RecipientHost {
         Self {
             journal,
             endpoint,
+            registry,
             cancel,
             task,
             _keys: keys,
@@ -1132,6 +1317,24 @@ impl AttachedClient {
             received: Vec::new(),
             consumed_frames: HashSet::new(),
         }
+    }
+    /// EOF is the cleanup fence: server removes this signed writer before
+    /// dropping its outbound half, so replacement tests never race `drop()`.
+    pub async fn detach(mut self) {
+        use tokio::io::AsyncWriteExt;
+        self.stream
+            .shutdown()
+            .await
+            .expect("half-close attached writer");
+        tokio::time::timeout(FIXTURE_TIMEOUT, async {
+            while read_frame::<_, DaemonFrame>(&mut self.stream)
+                .await
+                .expect("detach drain")
+                .is_some()
+            {}
+        })
+        .await
+        .expect("daemon detach cleanup fence");
     }
     pub async fn send_frame(&mut self, frame: ClientFrame) {
         write_frame(&mut self.stream, &frame)
@@ -1672,17 +1875,20 @@ async fn attached_harness_smoke_user_message_is_provider_positive_control() {
 
 #[tokio::test]
 async fn attached_harness_smoke_boot_down_peer_keeps_card_not_cached_refusal() {
-    let reserved = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve recipient address");
+    // Bound but not listening: warm-up fails without releasing this test's port.
+    let reserved = tokio::net::TcpSocket::new_v4().expect("create reserved socket");
+    reserved
+        .bind(([127, 0, 0, 1], 0).into())
+        .expect("reserve recipient address");
     let addr = reserved.local_addr().unwrap();
-    drop(reserved);
     let peer = rustain::domain::models::A2aPeerSpec::new(
         "down",
         rustain::domain::models::RedactedUrl::from(format!("http://{addr}/")),
         rustain::domain::models::A2aPeerSource::Workspace,
     );
     let daemon = AttachedDaemon::start(vec![peer]).await;
-    let listener = TcpListener::bind(addr)
-        .await
+    let listener = reserved
+        .listen(1024)
         .expect("bring peer up on same address");
     let host = RecipientHost::start_on(listener, A2aAdmissionPolicy::Allow, None).await;
     let mut client =

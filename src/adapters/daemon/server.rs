@@ -128,7 +128,7 @@ fn try_publish_team_frame(
     }
 }
 
-fn publish_team_frame(
+pub(crate) fn publish_team_frame(
     tx: &mpsc::Sender<DaemonFrame>,
     terminal_tx: &watch::Sender<Option<ProtocolError>>,
     frame: DaemonFrame,
@@ -225,7 +225,7 @@ struct TeamSendTestHooksInner {
     send_action_count: AtomicUsize,
     send_action_notify: Notify,
     send_action_release: Semaphore,
-    outbound_queue_capacity: Option<usize>,
+    outbound_queue_capacity: AtomicUsize,
     board_now: Option<Arc<dyn Fn() -> std::time::Instant + Send + Sync>>,
 }
 
@@ -285,7 +285,7 @@ impl TeamSendTestHooks {
                 send_action_count: AtomicUsize::new(0),
                 send_action_notify: Notify::new(),
                 send_action_release: Semaphore::new(0),
-                outbound_queue_capacity,
+                outbound_queue_capacity: AtomicUsize::new(outbound_queue_capacity.unwrap_or(0)),
                 board_now: None,
             }),
         }
@@ -387,6 +387,14 @@ impl TeamSendTestHooks {
         self.inner.writer_release.add_permits(1);
     }
 
+    /// Restore production capacity for subsequent healthy reconnections only.
+    /// Existing overloaded channels retain their original fixed capacity.
+    pub fn restore_default_queue_capacity(&self) {
+        self.inner
+            .outbound_queue_capacity
+            .store(0, Ordering::Release);
+    }
+
     /// Wait until this many admitted send tasks have reached the coordinator
     /// gate. The count is cumulative for this server.
     pub async fn wait_for_send_action_count(&self, count: usize) {
@@ -466,7 +474,10 @@ impl TeamSendTestHooks {
     }
 
     fn queue_capacity(&self) -> Option<usize> {
-        self.inner.outbound_queue_capacity
+        match self.inner.outbound_queue_capacity.load(Ordering::Acquire) {
+            0 => None,
+            capacity => Some(capacity),
+        }
     }
 
     fn board_now(&self) -> Option<std::time::Instant> {
@@ -506,6 +517,8 @@ impl TeamSendTestHooks {
             | DaemonFrame::History { .. }
             | DaemonFrame::ApprovalRequest { .. }
             | DaemonFrame::ConsolidationProposed { .. }
+            | DaemonFrame::TeamProposal { .. }
+            | DaemonFrame::TeamProposalClosed { .. }
             | DaemonFrame::PeerAccepted { .. }
             | DaemonFrame::PeerShareResult { .. }
             | DaemonFrame::RecipientActionResult { .. }
@@ -522,14 +535,14 @@ impl TeamSendTestHooks {
 }
 
 fn team_send_request_key(frame: &ClientFrame) -> Option<&str> {
-    if let ClientFrame::TeamSend { request, .. } = frame {
-        Some(request)
-    } else {
-        None
+    match frame {
+        ClientFrame::TeamSend { request, .. } => Some(request),
+        ClientFrame::TeamProposalDecision { proposal, .. } => Some(proposal),
+        _ => None,
     }
 }
 
-fn publish_team_frame_to_connection(
+pub(crate) fn publish_team_frame_to_connection(
     tx: &mpsc::Sender<DaemonFrame>,
     terminal_tx: &watch::Sender<Option<ProtocolError>>,
     frame: DaemonFrame,
@@ -900,7 +913,7 @@ fn peer_row_control(
     node_id: &AgentId,
     item_address: Option<ItemAddress>,
     provenance: &InteractionPolicySnapshot,
-    principal_label: &str,
+    fallback_label: &str,
     stage: PeerRowStage,
     node_resolvable: bool,
 ) -> PeerRowControl {
@@ -911,7 +924,7 @@ fn peer_row_control(
         sender_label: provenance
             .sender_label
             .clone()
-            .unwrap_or_else(|| principal_label.to_owned()),
+            .unwrap_or_else(|| fallback_label.to_owned()),
         stage,
         node_resolvable,
     }
@@ -1016,6 +1029,46 @@ const RECIPIENT_ITEM_REMOVED: &str = "recipient item already removed";
 #[cfg(feature = "a2a")]
 const PEER_RESPONSE_ROW_PREFIX: &str = "peer-response-";
 
+enum TeamSendPayload {
+    Human {
+        recipients: Vec<String>,
+        text: String,
+        message_type: Option<crate::domain::models::SemanticMessageType>,
+        subject: Option<String>,
+    },
+    #[cfg(feature = "a2a")]
+    Agent(Arc<crate::domain::models::TeamProposal>),
+}
+
+#[cfg(feature = "a2a")]
+impl TeamSendPayload {
+    fn request(&self) -> crate::adapters::a2a::send::SendRequest<'_> {
+        match self {
+            Self::Human {
+                recipients,
+                text,
+                message_type,
+                subject,
+            } => crate::adapters::a2a::send::SendRequest {
+                recipients,
+                text,
+                message_type: *message_type,
+                reply_to: None,
+                subject: subject.as_deref(),
+                authorship: crate::domain::models::ReplyAuthorship::HumanWritten,
+            },
+            Self::Agent(proposal) => crate::adapters::a2a::send::SendRequest {
+                recipients: &proposal.recipients,
+                text: &proposal.body,
+                message_type: Some(proposal.message_type),
+                reply_to: None,
+                subject: None,
+                authorship: crate::domain::models::ReplyAuthorship::AgentComposed,
+            },
+        }
+    }
+}
+
 pub struct AttachServer {
     core: Arc<DaemonCore>,
     conversation: Arc<Mutex<Conversation>>,
@@ -1102,6 +1155,7 @@ pub struct AttachServer {
     #[cfg(feature = "a2a")]
     a2a_runtime: Option<Arc<A2aDelegationRuntime>>,
     team_peers: Vec<crate::domain::models::A2aPeerSpec>,
+    team_proposals: Arc<super::team_proposal::TeamProposalRegistry>,
     team_send_slots: Arc<Semaphore>,
     team_send_shutdown: CancellationToken,
     team_send_accepting: AtomicBool,
@@ -1325,6 +1379,7 @@ impl AttachServer {
             None,
             None,
             None,
+            Arc::new(super::team_proposal::TeamProposalRegistry::new()),
         )
     }
 
@@ -1349,6 +1404,7 @@ impl AttachServer {
             None,
             None,
             None,
+            Arc::new(super::team_proposal::TeamProposalRegistry::new()),
         )
     }
 
@@ -1392,6 +1448,7 @@ impl AttachServer {
             None,
             None,
             None,
+            Arc::new(super::team_proposal::TeamProposalRegistry::new()),
         )
     }
 
@@ -1444,6 +1501,7 @@ impl AttachServer {
             Some(room_journal_reader),
             consent_projection,
             urgency_router,
+            Arc::new(super::team_proposal::TeamProposalRegistry::new()),
         )
     }
     /// Journaled construction path for attached team commands. The runtime and
@@ -1461,19 +1519,22 @@ impl AttachServer {
         urgency_router: Option<Arc<super::urgency::UrgencyRouter>>,
         #[cfg(feature = "a2a")] runtime: Option<Arc<A2aDelegationRuntime>>,
         peers: Vec<crate::domain::models::A2aPeerSpec>,
+        team_proposals: Arc<super::team_proposal::TeamProposalRegistry>,
         #[cfg(any(test, feature = "test-instrumentation"))] test_hooks: Option<TeamSendTestHooks>,
     ) -> Arc<Self> {
-        let mut server = Self::new_with_node_tree_bus_policy_journal_and_urgency(
+        let mut server = Self::with_clock_and_node_tree(
             core,
             conversation,
             domain_tx,
+            Arc::new(SystemClock::default()),
             node_tree,
             peer_bus,
             delivery_policy,
-            room_journal,
-            room_journal_reader,
+            Some(room_journal),
+            Some(room_journal_reader),
             consent_projection,
             urgency_router,
+            team_proposals,
         );
         let server_mut = Arc::get_mut(&mut server).expect("new AttachServer has a unique Arc");
         #[cfg(feature = "a2a")]
@@ -1501,6 +1562,7 @@ impl AttachServer {
         consent_projection: Option<Arc<crate::adapters::policy::JournalConsentProjection>>,
         #[cfg(feature = "a2a")] runtime: Option<Arc<A2aDelegationRuntime>>,
         peers: Vec<crate::domain::models::A2aPeerSpec>,
+        team_proposals: Arc<super::team_proposal::TeamProposalRegistry>,
         #[cfg(any(test, feature = "test-instrumentation"))] test_hooks: Option<TeamSendTestHooks>,
     ) -> Arc<Self> {
         Self::new_with_node_tree_bus_policy_journal_urgency_and_team(
@@ -1517,6 +1579,7 @@ impl AttachServer {
             #[cfg(feature = "a2a")]
             runtime,
             peers,
+            team_proposals,
             #[cfg(any(test, feature = "test-instrumentation"))]
             test_hooks,
         )
@@ -1534,6 +1597,7 @@ impl AttachServer {
         room_journal_reader: Option<Arc<dyn crate::domain::ports::RoomJournalReader>>,
         consent_projection: Option<Arc<crate::adapters::policy::JournalConsentProjection>>,
         urgency_router: Option<Arc<super::urgency::UrgencyRouter>>,
+        team_proposals: Arc<super::team_proposal::TeamProposalRegistry>,
     ) -> Arc<Self> {
         let pending_consent =
             room_journal
@@ -1584,6 +1648,7 @@ impl AttachServer {
             #[cfg(feature = "a2a")]
             a2a_runtime: None,
             team_peers: Vec::new(),
+            team_proposals,
             team_send_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_TEAM_SENDS)),
             team_send_shutdown: CancellationToken::new(),
             team_send_tasks: Mutex::new(Vec::new()),
@@ -1669,7 +1734,10 @@ impl AttachServer {
         self.registry.try_lock().map(|r| r.conns.len()).unwrap_or(0)
     }
 
-    async fn item_address_for_node(&self, node_id: &AgentId) -> Option<ItemAddress> {
+    async fn item_context_for_node(
+        &self,
+        node_id: &AgentId,
+    ) -> Option<(ItemAddress, Option<String>)> {
         #[cfg(feature = "a2a")]
         {
             let reader = self.room_journal_reader.as_ref()?;
@@ -1683,7 +1751,7 @@ impl AttachServer {
             let projection =
                 crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
             crate::adapters::a2a::exec::recipient_item_for_node(&projection, node_id)
-                .map(|item| item.address)
+                .map(|item| (item.address, item.alias))
         }
         #[cfg(not(feature = "a2a"))]
         {
@@ -1767,6 +1835,7 @@ impl AttachServer {
         for task in tasks {
             let _ = task.await;
         }
+        self.team_proposals.shutdown().await;
         forwarder.abort();
     }
     async fn surface_queued_interactions(
@@ -2268,7 +2337,7 @@ impl AttachServer {
             }
             reg.conns.push(Conn {
                 id: conn_id,
-                tx,
+                tx: tx.clone(),
                 terminal_tx: terminal_tx.clone(),
                 mode: granted,
                 tier,
@@ -2383,12 +2452,18 @@ impl AttachServer {
         if granted_mode == AttachMode::ReadWrite {
             self.emit_session_queue_notices(conn_id).await;
             self.emit_pending_consent_cards(conn_id).await;
+            if tier == ConnectionTier::TrustedLocal {
+                self.grant_team_proposal_writer(conn_id).await;
+            }
         }
 
         // Turns, History fences and context commands share a bounded writer-side FIFO.
         // Approval replies and independent recipient actions remain reader-side.
         let operator_turns =
             if granted_mode == AttachMode::ReadWrite && tier == ConnectionTier::TrustedLocal {
+                // Retain the deciding endpoint with the daemon-owned worker:
+                // EOF removes its registry entry before queued sends may run.
+                let send_connection = (tx, terminal_tx.clone());
                 let (tx, mut rx) = mpsc::channel::<ClientFrame>(OPERATOR_QUEUE_DEPTH);
                 let server = self.clone();
                 #[cfg(any(test, feature = "test-instrumentation"))]
@@ -2442,9 +2517,51 @@ impl AttachServer {
                             let _order = hooks.inner.fifo_serial.lock().await;
                             hooks.record_fifo(request, conn_id, TeamSendFifoEventKind::Dequeued);
                         }
-                        server
-                            .handle_client_frame_tiered(frame, granted_mode, tier, conn_id)
-                            .await;
+                        match frame {
+                            ClientFrame::TeamSend {
+                                request,
+                                recipients,
+                                text,
+                                message_type,
+                                subject,
+                            } => {
+                                server
+                                    .handle_team_send(
+                                        conn_id,
+                                        tier,
+                                        granted_mode,
+                                        request,
+                                        Some(TeamSendPayload::Human {
+                                            recipients,
+                                            text,
+                                            message_type,
+                                            subject,
+                                        }),
+                                        Some(send_connection.clone()),
+                                    )
+                                    .await;
+                            }
+                            ClientFrame::TeamProposalDecision {
+                                proposal,
+                                decision: crate::domain::models::TeamProposalDecision::Send,
+                            } => {
+                                server
+                                    .handle_team_send(
+                                        conn_id,
+                                        tier,
+                                        granted_mode,
+                                        proposal,
+                                        None,
+                                        Some(send_connection.clone()),
+                                    )
+                                    .await;
+                            }
+                            frame => {
+                                server
+                                    .handle_client_frame_tiered(frame, granted_mode, tier, conn_id)
+                                    .await;
+                            }
+                        }
                         #[cfg(any(test, feature = "test-instrumentation"))]
                         if let (Some(request), Some(hooks)) =
                             (team_request.as_deref(), worker_hooks.as_ref())
@@ -2481,6 +2598,7 @@ impl AttachServer {
                                 | ClientFrame::InspectRecipientContext
                                 | ClientFrame::SetRecipientContext { .. }
                                 | ClientFrame::TeamSend { .. }
+                                | ClientFrame::TeamProposalDecision { .. }
                                 | ClientFrame::RevokeSenderConsent { .. }
                         )
                     {
@@ -2537,6 +2655,7 @@ impl AttachServer {
             let mut reg = self.registry.lock().await;
             reg.remove(conn_id);
         }
+        self.team_proposals.detach_writer(conn_id).await;
         drop(operator_turns);
         let terminal_error_published = if terminal_shutdown {
             writer.await.unwrap_or(false)
@@ -3692,6 +3811,22 @@ impl AttachServer {
         mutations
     }
 
+    /// The authenticated grant and isolated lifecycle tests enter this same
+    /// targeted publication seam. It owns no timer or automatic decision.
+    async fn grant_team_proposal_writer(self: &Arc<Self>, conn_id: u64) {
+        if let Some((tx, terminal)) = self.team_connection(conn_id).await {
+            self.team_proposals
+                .grant_writer(
+                    conn_id,
+                    tx,
+                    terminal,
+                    #[cfg(any(test, feature = "test-instrumentation"))]
+                    self.team_send_test_hooks.clone(),
+                )
+                .await;
+        }
+    }
+
     async fn team_connection(
         &self,
         conn_id: u64,
@@ -4174,84 +4309,154 @@ impl AttachServer {
         }
     }
 
+    async fn close_team_proposal(
+        &self,
+        conn_id: u64,
+        proposal: String,
+        outcome: super::protocol::TeamProposalCloseOutcome,
+    ) {
+        if let Some((tx, terminal)) = self.team_connection(conn_id).await {
+            publish_team_frame(
+                &tx,
+                &terminal,
+                DaemonFrame::TeamProposalClosed { proposal, outcome },
+            );
+        }
+    }
+
+    async fn refuse_team_send(
+        &self,
+        conn_id: u64,
+        request: String,
+        error: ProtocolError,
+        proposed: bool,
+    ) {
+        if proposed {
+            self.close_team_proposal(
+                conn_id,
+                request,
+                super::protocol::TeamProposalCloseOutcome::Refused {
+                    reason: error.to_string(),
+                },
+            )
+            .await;
+        } else {
+            self.refuse_team_request(conn_id, RecipientAction::TeamSend, request, error)
+                .await;
+        }
+    }
+
     async fn handle_team_send(
         &self,
         conn_id: u64,
         tier: ConnectionTier,
         mode: AttachMode,
         request: String,
-        recipients: Vec<String>,
-        text: String,
-        message_type: Option<crate::domain::models::SemanticMessageType>,
-        subject: Option<String>,
+        payload: Option<TeamSendPayload>,
+        connection: Option<(
+            mpsc::Sender<DaemonFrame>,
+            watch::Sender<Option<ProtocolError>>,
+        )>,
     ) {
-        let action = RecipientAction::TeamSend;
+        let proposed = payload.is_none();
         if let Some(error) = Self::team_request_error(tier, mode, true) {
-            self.refuse_team_request(conn_id, action, request, error)
+            self.refuse_team_send(conn_id, request, error, proposed)
                 .await;
             return;
         }
         #[cfg(feature = "a2a")]
         {
             let Some(runtime) = self.a2a_runtime.clone() else {
-                self.refuse_team_request(
+                self.refuse_team_send(
                     conn_id,
-                    action,
                     request,
                     ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
+                    proposed,
                 )
                 .await;
                 return;
             };
-            let permit = match self.team_send_slots.clone().try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    self.team_send_saturation_refusals
-                        .fetch_add(1, Ordering::AcqRel);
-                    self.refuse_team_request(
+            let (tx, terminal_tx) = if let Some(connection) = connection {
+                connection
+            } else if let Some(connection) = self.team_connection(conn_id).await {
+                connection
+            } else {
+                return;
+            };
+            use super::team_proposal::ProposalTakeError;
+            let admitted = match payload {
+                Some(payload) => self
+                    .team_send_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .map(|permit| (payload, permit))
+                    .map_err(|_| ProposalTakeError::Busy),
+                None => self
+                    .team_proposals
+                    .take_for_send(&request, self.team_send_slots.clone())
+                    .await
+                    .map(|(proposal, permit)| (TeamSendPayload::Agent(proposal), permit)),
+            };
+            let (payload, permit) = match admitted {
+                Ok(admitted) => admitted,
+                Err(ProposalTakeError::Unknown) => {
+                    self.close_team_proposal(
                         conn_id,
-                        action,
                         request,
-                        ProtocolError::Internal(
-                            "daemon team-send limit reached; try again later".to_owned(),
-                        ),
+                        super::protocol::TeamProposalCloseOutcome::Refused {
+                            reason: "That proposal is no longer waiting. Nothing was sent."
+                                .to_owned(),
+                        },
                     )
                     .await;
                     return;
                 }
+                Err(ProposalTakeError::Busy) => {
+                    self.team_send_saturation_refusals
+                        .fetch_add(1, Ordering::AcqRel);
+                    if proposed {
+                        self.close_team_proposal(conn_id, request.clone(),
+                            super::protocol::TeamProposalCloseOutcome::Refused {
+                                reason: "Not sent yet — this daemon is busy sending. The proposal is still waiting.".to_owned(),
+                            }).await;
+                        self.team_proposals.reemit(&request, conn_id).await;
+                    } else {
+                        self.refuse_team_send(
+                            conn_id,
+                            request,
+                            ProtocolError::Internal(
+                                "daemon team-send limit reached; try again later".to_owned(),
+                            ),
+                            false,
+                        )
+                        .await;
+                    }
+                    return;
+                }
             };
-            let send_request = crate::adapters::a2a::send::SendRequest {
-                recipients: &recipients,
-                text: &text,
-                message_type,
-                reply_to: None,
-                subject: subject.as_deref(),
-            };
+            let send_request = payload.request();
             if let Err(error) =
                 crate::adapters::a2a::send::validate_send_request(&runtime, &send_request)
             {
                 drop(permit);
-                self.refuse_team_request(
+                self.refuse_team_send(
                     conn_id,
-                    action,
                     request,
                     ProtocolError::Malformed(error.to_string()),
+                    proposed,
                 )
                 .await;
                 return;
             }
-            let Some((tx, terminal_tx)) = self.team_connection(conn_id).await else {
-                return;
-            };
             let mut tasks = self.team_send_tasks.lock().await;
             if !self.team_send_accepting.load(Ordering::Acquire) {
                 drop(tasks);
                 drop(permit);
-                self.refuse_team_request(
+                self.refuse_team_send(
                     conn_id,
-                    action,
                     request,
                     ProtocolError::Internal("daemon is shutting down".to_owned()),
+                    proposed,
                 )
                 .await;
                 return;
@@ -4292,13 +4497,7 @@ impl AttachServer {
                 }
                 let _ = crate::adapters::a2a::send::coordinate_send(
                     &runtime,
-                    crate::adapters::a2a::send::SendRequest {
-                        recipients: &recipients,
-                        text: &text,
-                        message_type,
-                        reply_to: None,
-                        subject: subject.as_deref(),
-                    },
+                    payload.request(),
                     cancel,
                     |action| {
                         started_count.fetch_add(1, Ordering::AcqRel);
@@ -4350,15 +4549,25 @@ impl AttachServer {
             tasks.push(task);
         }
         #[cfg(not(feature = "a2a"))]
-        self.refuse_team_request(
-            conn_id,
-            action,
-            request,
-            ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
-        )
-        .await;
-        #[cfg(not(feature = "a2a"))]
-        let _ = (recipients, text, message_type, subject);
+        {
+            let _ = connection;
+            self.refuse_team_send(
+                conn_id,
+                request,
+                ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
+                proposed,
+            )
+            .await;
+            if let Some(TeamSendPayload::Human {
+                recipients,
+                text,
+                message_type,
+                subject,
+            }) = payload
+            {
+                let _ = (recipients, text, message_type, subject);
+            }
+        }
     }
 
     /// Returns `true` if the connection should detach.
@@ -4986,12 +5195,38 @@ impl AttachServer {
                     tier,
                     mode,
                     request,
-                    recipients,
-                    text,
-                    message_type,
-                    subject,
+                    Some(TeamSendPayload::Human {
+                        recipients,
+                        text,
+                        message_type,
+                        subject,
+                    }),
+                    None,
                 )
                 .await;
+            }
+            ClientFrame::TeamProposalDecision { proposal, decision } => {
+                if let Some(error) = Self::team_request_error(tier, mode, true) {
+                    self.send_to(conn_id, DaemonFrame::Error(error)).await;
+                    return false;
+                }
+                match decision {
+                    crate::domain::models::TeamProposalDecision::Send => {
+                        self.handle_team_send(conn_id, tier, mode, proposal, None, None)
+                            .await;
+                    }
+                    crate::domain::models::TeamProposalDecision::Dismiss => {
+                        let outcome = if self.team_proposals.take(&proposal).await.is_some() {
+                            super::protocol::TeamProposalCloseOutcome::Dismissed
+                        } else {
+                            super::protocol::TeamProposalCloseOutcome::Refused {
+                                reason: "That proposal is no longer waiting. Nothing was sent."
+                                    .to_owned(),
+                            }
+                        };
+                        self.close_team_proposal(conn_id, proposal, outcome).await;
+                    }
+                }
             }
             ClientFrame::TeamBoard { request, selector } => {
                 self.handle_team_board(conn_id, tier, mode, request, selector)
@@ -5456,6 +5691,10 @@ impl AttachServer {
             {
                 tracing::warn!(%error, "clearing conversation rows failed");
             } else {
+                let conversation_id = self.conversation.lock().await.id.clone();
+                self.team_proposals
+                    .withdraw_conversation(&conversation_id)
+                    .await;
                 let _row_guard = self.peer_row_serial.lock().await;
                 if let Some(runtime) = self.core.built_runtime() {
                     runtime.recipient_context.clear().await;
@@ -6807,7 +7046,14 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 } else {
                     true
                 };
-            let item_address = self.item_address_for_node(&task.node_id).await;
+            let (item_address, item_alias) = self
+                .item_context_for_node(&task.node_id)
+                .await
+                .map_or((None, None), |(address, alias)| (Some(address), alias));
+            // The durable ingress alias is display-only; policy authority stays on the principal.
+            let sender_label = item_alias
+                .as_deref()
+                .unwrap_or(task.principal.peer().as_str());
             match task.response_policy.mode {
                 crate::domain::models::ResponseMode::NotifyAndWait => {
                     let row_guard = self.peer_row_serial.lock().await;
@@ -6851,7 +7097,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                             &task.node_id,
                             item_address.clone(),
                             &task.response_policy.provenance,
-                            task.principal.peer().as_str(),
+                            sender_label,
                             PeerRowStage::AwaitingOperator,
                             true,
                         )),
@@ -6935,7 +7181,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                             &task.node_id,
                             item_address.clone(),
                             &task.response_policy.provenance,
-                            task.principal.peer().as_str(),
+                            sender_label,
                             PeerRowStage::Settled,
                             false,
                         )),
@@ -7008,7 +7254,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                             &task.node_id,
                             item_address,
                             &task.response_policy.provenance,
-                            task.principal.peer().as_str(),
+                            sender_label,
                             PeerRowStage::Drafting,
                             true,
                         )),
@@ -8807,6 +9053,7 @@ mod tests {
             #[cfg(feature = "a2a")]
             None,
             Vec::new(),
+            Arc::new(super::super::team_proposal::TeamProposalRegistry::new()),
             Some(hooks),
         )
     }
@@ -14415,5 +14662,121 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+    /// K02b is intentionally isolated: no Unix/TCP socket or paused live I/O.
+    /// The existing coordinator gate is a counting front-door double; the
+    /// explicit decision still enters the actual daemon frame dispatcher.
+    #[cfg(feature = "a2a")]
+    #[tokio::test(start_paused = true)]
+    async fn proposal_24h_never_enters_send_frontdoor_then_human_send_once() {
+        use crate::domain::ports::TeamProposalSink;
+        let workspace = tempfile::tempdir().unwrap();
+        let (core, _) = mock_core(workspace.path(), vec![]);
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let tree = crate::infrastructure::subagent::NodeTree::new();
+        let journal = Arc::new(RecordingJournal::default());
+        let peer = crate::domain::models::A2aPeerSpec::new(
+            "lena-po",
+            crate::domain::models::RedactedUrl::from("http://127.0.0.1:9".to_owned()),
+            crate::domain::models::A2aPeerSource::Workspace,
+        );
+        // Construct bindings without A2aEgress's boot card-fetch tasks: this
+        // lifecycle test must never start a socket while time is paused.
+        let client =
+            Arc::new(crate::adapters::a2a::client::A2aClientAdapter::new(&peer, None).unwrap());
+        let provider =
+            crate::adapters::a2a::provider::A2aProvider::new(vec![(peer.clone(), client)]);
+        let runtime = Arc::new(
+            A2aDelegationRuntime::new(tree.clone(), journal.clone(), domain_tx.clone())
+                .with_peer_bindings(provider.peer_bindings()),
+        );
+        let policy: Arc<dyn crate::domain::ports::DeliveryPolicy> =
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy);
+        let bus = peer_bus_slot_with_policy(&tree, policy.clone());
+        let proposals = Arc::new(super::super::team_proposal::TeamProposalRegistry::new());
+        let hooks = TeamSendTestHooks::new(None, None, false).with_send_action_gate();
+        let server = AttachServer::new_with_node_tree_bus_policy_journal_and_team(
+            core,
+            Arc::new(Mutex::new(Conversation {
+                id: "isolated-timer".into(),
+                ..Default::default()
+            })),
+            domain_tx,
+            tree,
+            bus,
+            policy,
+            journal.clone(),
+            journal.clone(),
+            None,
+            Some(runtime),
+            vec![peer],
+            proposals.clone(),
+            Some(hooks.clone()),
+        );
+        let (tx, mut rx) = mpsc::channel(16);
+        let (terminal_tx, _terminal_rx) = watch::channel(None);
+        server.registry.lock().await.conns.push(Conn {
+            id: 1,
+            tx,
+            terminal_tx,
+            mode: AttachMode::ReadWrite,
+            tier: ConnectionTier::TrustedLocal,
+        });
+        server.last_writer_conn_id.store(1, Ordering::SeqCst);
+        server.grant_team_proposal_writer(1).await;
+        let proposal = Arc::new(crate::domain::models::TeamProposal {
+            id: "tp_isolated_timer".into(),
+            conversation_id: "isolated-timer".into(),
+            recipients: vec!["lena-po".into()],
+            message_type: crate::domain::models::SemanticMessageType::ArchitectureUpdate,
+            body: "operator-reviewed exact body".into(),
+        });
+        assert_eq!(
+            proposals.raise(proposal.clone()).await,
+            crate::domain::models::ProposalRaiseOutcome::Shown
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(DaemonFrame::TeamProposal { .. })
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(24 * 60 * 60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            hooks.send_action_count(),
+            0,
+            "K02b elapsed 24h must call the send frontdoor zero times"
+        );
+        assert_eq!(
+            proposals.pending().await,
+            vec![proposal.clone()],
+            "K02b elapsed 24h must call the send frontdoor zero times and retain the exact pending proposal"
+        );
+        server
+            .handle_client_frame_tiered(
+                ClientFrame::TeamProposalDecision {
+                    proposal: proposal.id.clone(),
+                    decision: crate::domain::models::TeamProposalDecision::Send,
+                },
+                AttachMode::ReadWrite,
+                ConnectionTier::TrustedLocal,
+                1,
+            )
+            .await;
+        hooks.wait_for_send_action_count(1).await;
+        assert_eq!(
+            hooks.send_action_count(),
+            1,
+            "K02b explicit human Send must call the send frontdoor exactly once"
+        );
+        assert!(proposals.pending().await.is_empty());
+        // The counting double never releases its coordinator gate. Cancel and
+        // reap the owned task rather than opening a real network connection.
+        server.team_send_shutdown.cancel();
+        for task in server.team_send_tasks.lock().await.drain(..) {
+            task.abort();
+            let _ = task.await;
+        }
+        assert!(journal.events.lock().await.is_empty());
     }
 }

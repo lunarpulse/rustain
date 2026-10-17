@@ -190,6 +190,8 @@ pub struct SendRequest<'a> {
     /// (Story 19.21 `AC1(i)`).
     pub reply_to: Option<&'a str>,
     pub subject: Option<&'a str>,
+    /// Provenance for this outbound dispatch; never sent to the peer.
+    pub authorship: crate::domain::models::ReplyAuthorship,
 }
 
 /// The one send coordinator (Story 19.21 `C1`): validate the whole action,
@@ -292,6 +294,7 @@ where
                 request.message_type,
                 request.reply_to,
                 reference.as_ref(),
+                request.authorship,
                 &mut item,
             )
             .await;
@@ -405,6 +408,7 @@ pub async fn deliver_text(
         message_type,
         reply_to,
         None,
+        crate::domain::models::ReplyAuthorship::HumanWritten,
         &mut None,
     )
     .await
@@ -422,6 +426,7 @@ async fn deliver_one(
     message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<&str>,
     action: Option<&crate::domain::models::SendActionRef>,
+    authorship: crate::domain::models::ReplyAuthorship,
     item_out: &mut Option<String>,
 ) -> RecipientOutcome {
     use super::lifecycle::A2aTaskTransport;
@@ -513,7 +518,7 @@ async fn deliver_one(
     let result = transport
         .send_after(message, || async {
             runtime
-                .journal_send_dispatch(&spec, &task_id, text, action)
+                .journal_send_dispatch(&spec, &task_id, text, action, authorship)
                 .await
                 .map_err(|_| A2aError::JournalDispatch)?;
             dispatched.store(true, Ordering::Relaxed);

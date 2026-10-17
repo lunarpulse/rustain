@@ -55,6 +55,8 @@ mod socket;
 #[cfg(unix)]
 pub mod status;
 #[cfg(unix)]
+pub mod team_proposal;
+#[cfg(unix)]
 pub(crate) mod urgency;
 
 #[cfg(unix)]
@@ -457,6 +459,7 @@ async fn run_daemon_foreground(
     );
     #[cfg(feature = "a2a")]
     let team_runtime = a2a_egress.runtime().clone();
+    let team_proposals = std::sync::Arc::new(team_proposal::TeamProposalRegistry::new());
 
     let core = std::sync::Arc::new(
         crate::infrastructure::composition::build_daemon_core(
@@ -470,6 +473,7 @@ async fn run_daemon_foreground(
             node_journal.clone(),
             #[cfg(feature = "a2a")]
             a2a_egress,
+            team_proposals.clone(),
         )
         .map_err(|e| anyhow::anyhow!("composing daemon core: {e}"))?,
     );
@@ -595,6 +599,7 @@ async fn run_daemon_foreground(
             #[cfg(feature = "a2a")]
             Some(team_runtime),
             a2a_peers.clone(),
+            team_proposals,
             #[cfg(any(test, feature = "test-instrumentation"))]
             None,
         );

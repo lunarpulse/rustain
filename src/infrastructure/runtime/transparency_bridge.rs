@@ -572,11 +572,11 @@ pub async fn team_command(
                 state,
                 conversation_id,
                 app_state,
-                recipients,
-                text,
+                TeamSendPayload::Typed { recipients, text },
                 message_type,
                 None,
                 subject,
+                crate::domain::models::ReplyAuthorship::HumanWritten,
             );
         }
         // Story 19.18 `AC7` — a follow-up IS a 19.17 delivery, N = 1, with the
@@ -591,11 +591,14 @@ pub async fn team_command(
                 state,
                 conversation_id,
                 app_state,
-                vec![peer],
-                text,
+                TeamSendPayload::Typed {
+                    recipients: vec![peer],
+                    text,
+                },
                 None,
                 Some(turn_id),
                 None,
+                crate::domain::models::ReplyAuthorship::HumanWritten,
             );
         }
         // Story 19.18 `AC6` — rail 3 SERVES the thread read: the only rail
@@ -735,6 +738,47 @@ pub async fn team_command(
     }
 }
 
+/// Keep a reviewed proposal shared while its send is in flight; the Review
+/// history may still own the same body, so copying it into a task is unnecessary.
+enum TeamSendPayload {
+    Typed {
+        recipients: Vec<String>,
+        text: String,
+    },
+    #[cfg(feature = "a2a")]
+    Proposed(std::sync::Arc<crate::domain::models::TeamProposal>),
+}
+
+impl TeamSendPayload {
+    fn parts(&self) -> (&[String], &str) {
+        match self {
+            Self::Typed { recipients, text } => (recipients, text),
+            #[cfg(feature = "a2a")]
+            Self::Proposed(proposal) => (&proposal.recipients, &proposal.body),
+        }
+    }
+}
+
+#[cfg(feature = "a2a")]
+pub(crate) fn start_proposed_team_send(
+    state: &mut TuiState,
+    conversation_id: &str,
+    app_state: &AppState,
+    proposal: std::sync::Arc<crate::domain::models::TeamProposal>,
+) {
+    let message_type = Some(proposal.message_type);
+    start_team_send(
+        state,
+        conversation_id,
+        app_state,
+        TeamSendPayload::Proposed(proposal),
+        message_type,
+        None,
+        None,
+        crate::domain::models::ReplyAuthorship::AgentComposed,
+    );
+}
+
 /// The rail-3 addressed send (Story 19.17), shared by `/team send` and Story
 /// 19.18's `/team followup` (N = 1, `reply_to` set): ⛔ one send path, one
 /// block, one settle handler, one journal discipline (`A9`, `M21`). Story
@@ -746,11 +790,11 @@ fn start_team_send(
     state: &mut TuiState,
     conversation_id: &str,
     app_state: &AppState,
-    recipients: Vec<String>,
-    text: String,
+    payload: TeamSendPayload,
     message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<String>,
     subject: Option<String>,
+    authorship: crate::domain::models::ReplyAuthorship,
 ) {
     #[cfg(not(feature = "a2a"))]
     use crate::adapters::tui::handlers::team_command as handler;
@@ -762,6 +806,7 @@ fn start_team_send(
     {
         use crate::adapters::a2a::send::{SendRequest, coordinate_send, validate_send_request};
         use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
+        let (recipients, text) = payload.parts();
         let Some(runtime) = app_state.a2a_send.clone() else {
             show_team_send(
                 state,
@@ -775,11 +820,12 @@ fn start_team_send(
         let refusal = validate_send_request(
             &runtime,
             &SendRequest {
-                recipients: &recipients,
-                text: &text,
+                recipients,
+                text,
                 message_type,
                 reply_to: reply_to.as_deref(),
                 subject: subject.as_deref(),
+                authorship,
             },
         );
         if let Err(refusal) = refusal {
@@ -799,14 +845,16 @@ fn start_team_send(
         let conversation_id = conversation_id.to_owned();
         let cancel = app_state.session_cancel.child_token();
         tokio::spawn(async move {
+            let (recipients, text) = payload.parts();
             let _ = coordinate_send(
                 &runtime,
                 SendRequest {
-                    recipients: &recipients,
-                    text: &text,
+                    recipients,
+                    text,
                     message_type,
                     reply_to: reply_to.as_deref(),
                     subject: subject.as_deref(),
+                    authorship,
                 },
                 cancel.clone(),
                 |_| {},
@@ -829,11 +877,11 @@ fn start_team_send(
     #[cfg(not(feature = "a2a"))]
     {
         let _ = (
-            recipients,
-            text,
+            payload.parts(),
             message_type,
             reply_to,
             subject,
+            authorship,
             conversation_id,
             app_state,
         );
@@ -918,6 +966,26 @@ pub fn team_thread_ready(
                 message,
                 actions: Vec::new(),
             },
+        );
+        state.needs_redraw = true;
+    }
+}
+
+/// Apply the asynchronous board answer to its issuing conversation.
+pub fn team_board_ready(
+    active_conversation_id: &str,
+    state: &mut TuiState,
+    tab_manager: &mut crate::domain::models::tab::TabManager,
+    conversation_id: &str,
+    message: String,
+) {
+    if conversation_id == active_conversation_id {
+        crate::adapters::tui::handlers::team_command::show_team_board(state, message);
+    } else if let Some(tab) = tab_manager.find_by_conversation_mut(conversation_id) {
+        crate::adapters::tui::handlers::notice::store_background_notice(
+            tab,
+            crate::domain::models::NoticeLevel::Advisory,
+            message,
         );
         state.needs_redraw = true;
     }

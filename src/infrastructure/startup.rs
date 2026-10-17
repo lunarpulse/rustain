@@ -1641,6 +1641,14 @@ pub async fn run() -> Result<()> {
         .resolve_active()
         .expect("post-Pass-2 toml_resolver always has resolve_active populated");
     ensure_a2a_feature_enabled(&resolved.a2a_peers, false)?;
+    #[cfg(feature = "a2a")]
+    let team_proposals = (!resolved.a2a_peers.is_empty()).then(|| {
+        Arc::new(
+            crate::infrastructure::runtime::team_proposal_bridge::StandaloneTeamProposalSink::new(
+                event_bus.clone(),
+            ),
+        )
+    });
     let compose_ctx = crate::infrastructure::composition::ComposeContext {
         workspace_path: workspace_path.clone(),
         project_context: project_context.clone(),
@@ -1927,7 +1935,12 @@ pub async fn run() -> Result<()> {
                         crate::infrastructure::paths::data_dir(),
                     ),
                 )?);
-                egress.install(composite);
+                egress.install(
+                    composite,
+                    team_proposals.as_ref().map(|sink| {
+                        sink.clone() as Arc<dyn crate::domain::ports::TeamProposalSink>
+                    }),
+                );
                 a2a_send_runtime = Some(egress.runtime().clone());
             }
             // Story 17.5a — inject the MCP Tasks runtime into every MCP
@@ -2365,6 +2378,7 @@ pub async fn run() -> Result<()> {
     #[cfg(feature = "a2a")]
     {
         app_state.a2a_send = a2a_send_runtime;
+        app_state.team_proposals = team_proposals;
     }
 
     // 5d. Use the same storage adapter constructed above for session management.

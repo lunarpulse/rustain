@@ -64,6 +64,31 @@ pub enum TurnOrigin {
     Cron,
     Channel,
 }
+/// Per-invocation routing identity. Deliberately not serializable or persisted.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnRoute {
+    Interactive,
+    Acp,
+    RemotePeer,
+    Subagent,
+    Cron,
+    Channel,
+}
+
+impl TurnOrigin {
+    /// Return the route without copying origin-specific or persisted data.
+    pub fn route(&self) -> TurnRoute {
+        match self {
+            Self::Interactive => TurnRoute::Interactive,
+            Self::Acp { .. } => TurnRoute::Acp,
+            Self::RemotePeer { .. } => TurnRoute::RemotePeer,
+            Self::Subagent => TurnRoute::Subagent,
+            Self::Cron => TurnRoute::Cron,
+            Self::Channel => TurnRoute::Channel,
+        }
+    }
+}
 
 impl TurnOrigin {
     /// Map every turn route to the corresponding node-birth origin.

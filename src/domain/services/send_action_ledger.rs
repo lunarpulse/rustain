@@ -231,6 +231,7 @@ mod tests {
                 action: SendActionId::from_replay(id),
                 index,
             }),
+            authorship: crate::domain::models::ReplyAuthorship::Unknown,
         }
     }
 

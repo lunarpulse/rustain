@@ -414,6 +414,7 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             task,
             bytes,
             act,
+            authorship,
             ..
         } => (
             TransparencyKind::Dispatched,
@@ -421,9 +422,14 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             peer.as_str().to_owned(),
             task.clone(),
             match act {
-                crate::domain::models::DispatchAct::Task => {
-                    format!("task dispatched to peer ({bytes} bytes)")
-                }
+                crate::domain::models::DispatchAct::Task => format!(
+                    "task dispatched to peer ({bytes} bytes){}",
+                    if *authorship == crate::domain::models::ReplyAuthorship::AgentComposed {
+                        " [agent-composed]"
+                    } else {
+                        ""
+                    }
+                ),
                 // Story 19.16f `AC5(b)`: a retract is one outbound write of
                 // its own, ⛔ never a second dispatch of the item's task.
                 crate::domain::models::DispatchAct::ItemRetract { item } => {
@@ -1420,6 +1426,7 @@ mod tests {
                 content_hash: None,
                 endpoint: None,
                 action: None,
+                authorship: crate::domain::models::ReplyAuthorship::Unknown,
             },
         );
         let row = transparency_row(&entry).expect("dispatch projects");

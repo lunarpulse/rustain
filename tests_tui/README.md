@@ -27,6 +27,61 @@ pytest -m story_4_3b -v
 pytest -v -s
 ```
 
+## Canonical receipt controls
+
+`.github/scripts/check-receipt.sh [--product-root ROOT] [--legacy-demo-root ROOT] RECEIPT`
+is the only receipt-consistency verifier. The executable defaults to its own product
+checkout root, not the current directory. It uses Bash, GNU `date`, `sha256sum` and
+the existing GNU text utilities; no sibling checkout, download, credentials or Rust
+build is needed. The complete outer executing epic gate passes its genuine demo
+root explicitly and delegates its committed-receipt sweep to this command. The
+old outer `--check-receipt` entrypoint no longer exists.
+
+```bash
+# From the product checkout; also works from an unrelated CWD with absolute paths.
+.github/scripts/check-receipt.sh --product-root "$PWD" /absolute/path/to/receipt.transcript.txt
+
+# All 45 exact authored controls: 16 genuine-capture and 29 policy-boundary cases.
+# Run after fresh native Act 1 (all three viewports) and Act 2 captures.
+RUSTAIN_RECEIPT_EVIDENCE_DIR="$PWD/receipt-checker-evidence" \
+  python3 -m pytest tests_tui/test_receipt_controls.py \
+  -p no:rerunfailures -n 0 --timeout=120 --junitxml=receipt-checker-results.xml -v
+
+# Product-only policy lane before native capture (29 cases, no binary bootstrap).
+python3 -m pytest tests_tui/test_receipt_controls.py -m "not a2a_binary" \
+  -p no:rerunfailures -n 0 --timeout=120 --junitxml=receipt-policy-results.xml -v
+```
+
+The two migrated mutation selectors are
+`tests_tui/test_receipt_controls.py::test_genuine_receipt_rejects_changed_identity`
+(3 cases) and
+`tests_tui/test_receipt_controls.py::test_genuine_act1_receipt_rejects_changed_identity`
+(9 cases). Native cases are marked `a2a_binary` so the generic pre-capture lane
+does not certify stale source identities; dedicated receipt enforcement selects
+them explicitly without marker exclusion. Missing captures are assertion failures,
+not skips. Each selector picks the latest filename stamp (then run-directory
+identity) for its required viewport; old flat and nested Act 2 receipts are both
+recognized. Changed capture-source bytes require new genuine capture receipts:
+never rewrite old headers or accept an archived source as the current source.
+
+CI must check the JUnit exact selected counts (45 complete, 29 policy-only,
+3 Act 2 identity, 9 Act 1 identity, 4 genuine product-only/CWD), with no skipped,
+failed or errored nodes and reruns disabled. Run the dedicated complete step only
+after the current-source genuine inputs are present. On all outcomes upload only
+`receipt-checker-results.xml`, `receipt-policy-results.xml` when produced, named
+command logs, and `receipt-checker-evidence/**/{positive,negative,restored}.json`
+(spell the three JSON paths separately in the workflow; do not rely on brace
+expansion). Never upload the pytest temporary tree, environment, homes, credentials
+or full repository. These are integration requirements, not an assertion that CI
+or the controls have already run.
+
+The controls execute the real command, test independent scene/source/stamp
+corruption, exact paths, required and duplicate applicable headers, all supported
+timestamp shapes and the inclusive ±one-hour window. Policy fixtures isolate
+retained historical scene bytes versus latest drift and the two exact historical
+stamp exceptions plus adjacent nonexceptions; fixtures are not runtime evidence.
+The checker asserts internal consistency, not authenticated-journal provenance.
+
 ## Architecture
 
 ```
@@ -38,7 +93,6 @@ tests_tui/
   manual_test_ledger.py   # Plain script: one scripted turn + the ledger rows it minted
   fixtures/scene_provider.py    # Anthropic-API stand-in: scripted turns, no account
   fixtures/scenes/smoke.json    # The scene it serves (one text turn, one Write turn)
-  test_smoke.py           # Binary existence, --help, startup/shutdown
   test_story_3_x_input.py # Stories 3.1, 3.3, 3.5 — input, palette, help
   test_story_4_3a_fork.py # Story 4-3a — fork conversations
   test_story_4_3b_rewind.py # Story 4-3b — rewind with file snapshot

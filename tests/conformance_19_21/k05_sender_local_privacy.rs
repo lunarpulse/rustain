@@ -3,7 +3,7 @@ use crate::attached_harness::{AttachedClient, AttachedDaemon, RecipientHost};
 use crate::harness::read_room_events;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{AttachMode, ConnectionTier, DaemonFrame};
-use rustain::domain::models::RoomEvent;
+use rustain::domain::models::{ReplyAuthorship, RoomEvent};
 use rustain::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
 #[tokio::test]
@@ -68,6 +68,8 @@ async fn peer_raw_events_omit_sender_action_facts_but_keep_sanitized_legacy_disp
                 content_hash,
                 endpoint,
                 action: Some(action_ref),
+                authorship: ReplyAuthorship::HumanWritten,
+                ..
             } if action_ref.action == action => Some((
                 peer.clone(),
                 task.clone(),
@@ -137,6 +139,7 @@ async fn peer_raw_events_omit_sender_action_facts_but_keep_sanitized_legacy_disp
                     content_hash,
                     endpoint,
                     action,
+                    ..
                 },
             )) => Some((peer, task, bytes, act, content_hash, endpoint, action)),
             _ => None,
@@ -153,6 +156,10 @@ async fn peer_raw_events_omit_sender_action_facts_but_keep_sanitized_legacy_disp
         "legacy event action reference is sanitized"
     );
     let raw_wire = serde_json::to_string(&event_frames).expect("raw events serialize");
+    assert!(
+        !raw_wire.contains("\"authorship\""),
+        "sender-side dispatch provenance stays journal-local"
+    );
     assert!(!raw_wire.contains("sender-only-subject-7f2d"));
     assert!(
         !raw_wire.contains(action.as_str()),

@@ -3,7 +3,7 @@
 
 use crate::domain::models::{
     ActiveSkill, AgentToolRestriction, ApprovalSource, FileOperation, PermissionMode,
-    ProvenanceTag, TaintDecision, ToolPolicy, ToolRestrictionOrigin, ToolRisk,
+    ProvenanceTag, TaintDecision, ToolPolicy, ToolRestrictionOrigin, ToolRisk, TurnRoute,
     is_allowlist_carve_out, risk_for_builtin,
 };
 use crate::domain::ports::{SecurityPort, ToolSetPort};
@@ -148,6 +148,7 @@ pub async fn check_with_source_and_provenance(
         tools_port,
         source,
         provenance,
+        None,
     )
     .await
 }
@@ -164,6 +165,7 @@ pub async fn check_with_source_and_provenance_and_restriction(
     tools_port: &dyn ToolSetPort,
     source: Option<&crate::domain::models::tool_call::ApprovalSource>,
     provenance: ProvenanceTag,
+    route: Option<TurnRoute>,
 ) -> PermissionDecision {
     // Story 19.28 review (P1): canonicalize ONCE, here, so every step below
     // agrees with the executor. `toolset_adapter::execute` dispatches four
@@ -194,6 +196,23 @@ pub async fn check_with_source_and_provenance_and_restriction(
         {
             return PermissionDecision::Deny(
                 "recursion guard: subagent is not allowed to invoke the 'task' tool".to_string(),
+            );
+        }
+    }
+
+    // Proposal raising is available only on an interactive foreground turn.
+    // This is a deny-only guard; normal restrictions below still apply.
+    if tool_name == "propose_team_message" {
+        if route != Some(TurnRoute::Interactive)
+            || !matches!(source, Some(ApprovalSource::ForegroundTurn { .. }))
+        {
+            return PermissionDecision::Deny(
+                "propose_team_message is only available to the operator's own agent".to_string(),
+            );
+        }
+        if security.current_mode() == PermissionMode::Plan {
+            return PermissionDecision::Deny(
+                "propose_team_message is not available in Plan mode".to_string(),
             );
         }
     }

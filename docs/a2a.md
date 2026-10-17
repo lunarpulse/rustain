@@ -206,6 +206,57 @@ Each recipient is journaled independently. A request that may leave the host rec
 
 `/team send` is available in both the interactive TUI and an attached trusted-local writer session. The attached client sends it through the daemon's already-composed A2A runtime; it creates no client egress. Read-only and Peer-tier attachments are refused. There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
 
+### Agent-proposed messages (standalone and attached TUI)
+
+With A2A egress configured, a model's own interactive turn can call
+`propose_team_message` with `recipients`, `type` and `body`. Recipients must be
+distinct configured aliases, the type must be one of the eight send types above,
+and the body must contain 1–131,072 UTF-8 bytes. Control and directional-formatting
+characters that could disguise the reviewed text are refused; tabs and newlines
+remain literal. A refusal performs no peer I/O and records no send action.
+
+Raising a proposal returns immediately. It displays the frozen aliases, type and
+body in a separate approval card; it does not send, start a timer, create a generic
+tool-approval request or insert text into the composer. There is one pending proposal per
+conversation. A second raise cannot replace it. Without an interactive approval
+surface, the tool refuses rather than parking a draft for later delivery.
+
+With an empty composer, **y** sends exactly that snapshot, **r** opens its full,
+delimited Review, and **n** dismisses it. Review supports scrolling and the same
+explicit Send or Dismiss decision. Enter and Escape never send. With text in the
+composer, y/r/n remain text input; higher-priority approval prompts keep their
+keys. Clearing or closing the conversation withdraws its draft without peer I/O.
+Switching to another conversation does not approve or retarget the pending card.
+
+YOLO, AutoEdit, session or saved tool grants, subagent auto-approval and selected
+peer context never authorize this Send decision. Plan mode and carried agent or
+skill restrictions still deny the tool; subagent, background, remote, cron and
+channel routes cannot raise a proposal. The daemon does not carry custom-agent
+selection or restrictions; this adds neither that carrier nor model inference to
+NotifyAndAuto, which remains template-only. The model-facing capability is not a
+new CLI command or a `describe` registry entry.
+
+Human Send enters the same validated operator send path as `/team send`, with
+the exact reviewed body, ordered recipients and type, and no subject or appended
+conversation context. Its sender-local journal records `AgentComposed` as
+`agent-composed`, distinct from typed sends' `human-written`, and `/team log`
+labels those dispatches `[agent-composed]`, never `[auto-sent]`. This provenance is
+not a new peer-wire field and is omitted from raw event projections. Legacy and
+unknown future provenance tokens remain readable as Unknown.
+
+On protocol v7, only the authenticated TrustedLocal read-write attachment receives
+the daemon's proposal card and can decide it. A read-only or Peer-only attachment
+is not an approval surface. Pending proposals remain in memory across writer
+detach or replacement and reappear with the same id on the next trusted writer;
+a conversation reset, close or daemon restart withdraws them without sending.
+They hold no turn lock, so peer turns and subsequent operator prompts can finish.
+If all eight send slots are occupied, Send refuses without consuming the proposal:
+the operator may explicitly retry. A full writer queue terminates that attachment
+with an explicit protocol error while retaining the proposal for the next writer.
+Proposal state and ids are sender-local, never journaled or exposed on the raw
+event bus. These attached proposal semantics do not close the full J10 journey,
+recipient authorship carrier, or AD-1826's separate A2A version boundary.
+
 ### The send action, its record and the action board (Story 19.21)
 
 A typed or untyped `/team send` is also one **send action**. After the whole action validates and **before** any recipient preflight, dispatch or POST, this host journals one sender-local action record: a host-minted id (`sa_…`, at most 16 characters), the addressed aliases in the order typed with the identity each resolved to, the semantic type, the optional label, and the body's hash and byte count — never the body and nothing derived from it. Each recipient's `dispatched` row carries that action's id and its position, and after every row a recipient's delivery path emits, its **typed settlement** (delivered with the item id, declined, unreachable with the complete cause, awaiting approval, accepted without an item, asked a question, no usable answer, not sent) is journaled before its row settles on screen. None of it is ever sent to a peer: no recipient can see or address the action id or the label, and there is no group identity, aggregate outcome or retry. If the record cannot be appended, nothing is sent and every row reads `not sent — this host could not record the attempt`. A settlement whose append fails after the recipient was reached is not shown and is never rewritten as `not sent`; the board reconciles it through the recipient's own item. `/team followup`, retract dispatches and model delegations record no action.
@@ -226,7 +277,7 @@ A typed or untyped `/team send` is also one **send action**. After the whole act
 | `/team board --action <id>` | the board of one recorded action |
 | `/team board --actions` | every recorded action, newest first: id, type, age and addressed count |
 
-An action board is headed by the type, the label (only when one was given) and `attempted <age> · <N> addressed`. `N` is the number of aliases the record froze — not the rows rendered and not how many have settled. Beneath it, one row per addressed alias in the order typed: `✓ acknowledged` (the recipient's own deliberate acknowledgement was reported), `● delivered`, `✗ declined`, `⚠ unreachable` (with the recorded cause on its own line), or a tokenless state in words (`sending…` while this process is still sending, `no outcome recorded` after an interruption or when another process sent it, `awaiting their approval`, `no usable answer`, `not sent — …`). There is no completion count, percentage or list of who has not answered. The recorded send-time outcome always wins; the board then asks each addressed peer that could change the answer (one `x-rustain-items/list` each, never the whole roster) and joins only the items that arrived through **this action's** dispatches, so an earlier send's acknowledgement is never shown as this one's. A recipient that was reached but whose read fails is never `⚠`, and a recipient whose peer binding changed since the send (a changed key, a removed alias) is not read at all and says so. A newer action never hides an older one's declines: `--action <id>` and `--actions` reach them. Refreshing is an explicit command; the board has a 500 ms refresh floor and does not poll. The attached rail is unchanged by this story: `/team send` and `/team board` still refuse aloud there.
+An action board is headed by the type, the label (only when one was given) and `attempted <age> · <N> addressed`. `N` is the number of aliases the record froze — not the rows rendered and not how many have settled. Beneath it, one row per addressed alias in the order typed: `✓ acknowledged` (the recipient's own deliberate acknowledgement was reported), `● delivered`, `✗ declined`, `⚠ unreachable` (with the recorded cause on its own line), or a tokenless state in words (`sending…` while this process is still sending, `no outcome recorded` after an interruption or when another process sent it, `awaiting their approval`, `no usable answer`, `not sent — …`). There is no completion count, percentage or list of who has not answered. The recorded send-time outcome always wins; the board then asks each addressed peer that could change the answer (one `x-rustain-items/list` each, never the whole roster) and joins only the items that arrived through **this action's** dispatches, so an earlier send's acknowledgement is never shown as this one's. A recipient that was reached but whose read fails is never `⚠`, and a recipient whose peer binding changed since the send (a changed key, a removed alias) is not read at all and says so. A newer action never hides an older one's declines: `--action <id>` and `--actions` reach them. Refreshing is an explicit command; the board has a 500 ms refresh floor and does not poll. Attached trusted-local clients read these same daemon-owned action facts; a writer may send and a read-only observer may read the board.
 
 On the receiving host, an opened `story_assignment` item offers `[a] Acknowledge` to an attached writer while the item is `received`. Viewing it, discussing it, or an automatic reply never acknowledges it, and none of them selects the item as model context. An acknowledgement attributes a deliberate receipt to the roster alias — it is not an acceptance and not a statement that a person acted. A received `story_assignment` item proves receipt only; it records no assignment of a story to anyone.
 
@@ -242,7 +293,7 @@ ratified remedies 512) are disclosure bounds, not a width rule, and keep their
 
 ## Live daemon recipient rows
 
-Daemon attachments use protocol **v6**. Continuously attached trusted-local
+Daemon attachments use protocol **v7**. Continuously attached trusted-local
 writers and read-only observers receive revisioned peer-row upserts and removals
 only after successful persistence. Snapshot and live updates use the same row
 identity; duplicate or older updates cannot restore a settled/deleted card.

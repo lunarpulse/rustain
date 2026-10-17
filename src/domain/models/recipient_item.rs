@@ -577,6 +577,12 @@ pub enum ReplyAuthorship {
 }
 
 impl ReplyAuthorship {
+    /// Whether this row carries no known authorship provenance.
+    #[must_use]
+    pub const fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
     /// The wire token the thread read serves.
     #[must_use]
     pub const fn wire_name(self) -> &'static str {

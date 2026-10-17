@@ -639,6 +639,10 @@ pub enum RoomEvent {
         /// which serializes byte-identically to the previous shape.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<SendActionRef>,
+        /// Who authored this dispatch. Older journals and future tokens
+        /// conservatively replay as unknown and keep the legacy JSON shape.
+        #[serde(default, skip_serializing_if = "ReplyAuthorship::is_unknown")]
+        authorship: ReplyAuthorship,
     },
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.

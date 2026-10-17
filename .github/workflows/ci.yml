@@ -24,6 +24,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pinned source-metric parser
+        run: python3 -m pip install -r tools/ci/requirements-metrics.txt
+
+      - name: Run real metric CLI and ratchet signoff behavioral controls
+        run: |
+          python3 - <<'PY'
+          import sys
+          import unittest
+          suites = []
+          for pattern in ("test_event_loop_complexity.py", "test_ratchet_signoff_guard.py"):
+              suite = unittest.defaultTestLoader.discover(".github/scripts", pattern=pattern)
+              if suite.countTestCases() == 0:
+                  raise SystemExit(f"No behavioral controls selected: {pattern}")
+              suites.append(suite)
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(suites))
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
+
       - name: Cross-target compile check (macOS cfg branches)
         if: false
         run: |
@@ -115,6 +136,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # This lane executes tests/conformance.rs, including its fail-closed metric.
+      - name: Install pinned source-metric parser
+        run: python3 -m pip install -r tools/ci/requirements-metrics.txt
+
       # Story 17.4b standing ruling. Before this lane, all nine tests/a2a_*.rs files
       # compiled but NEVER executed: the Check job runs `cargo test --lib` only, so the
       # feature-gated files were cfg'd away and the ungated ones simply were not in the
@@ -165,6 +193,7 @@ jobs:
             --test conformance_19_18e_a2a_task_continuity \
             --test conformance_19_19_a2a_consultation \
             --test conformance_19_21_a2a_distribution \
+            --test conformance_19_21b_agent_proposal \
             --test conformance_a2a_architecture \
             --test conformance_18_3c_response_modes \
             --test conformance_18_3a_c_artifacts \
@@ -174,6 +203,33 @@ jobs:
             --test conformance_18_3a_e_apply_surface \
             --test conformance_18_3a_f_resolution \
             --test conformance_cow_mergeback
+
+      - name: Execute the real cron proposal front-door consumers
+        run: |
+          set -o pipefail
+          cargo test --locked --features a2a,test-instrumentation,cron \
+            --test conformance_19_21_a2a_distribution -- --exact \
+            g_entrypoints::cron_scheduler_job_denies_proposal_with_trusted_writer \
+            g_k06_payload::interleaved_cron_keeps_attached_proposal_on_invoking_conversation \
+            | tee cron-proposal-results.txt
+          python3 - <<'PY'
+          import pathlib, re
+          text = pathlib.Path("cron-proposal-results.txt").read_text()
+          names = [
+              "g_entrypoints::cron_scheduler_job_denies_proposal_with_trusted_writer",
+              "g_k06_payload::interleaved_cron_keeps_attached_proposal_on_invoking_conversation",
+          ]
+          assert re.search(r"^running 2 tests$", text, re.M), "Cron proposal consumers selected zero/wrong tests"
+          for name in names:
+              assert re.search(r"^test " + re.escape(name) + r" \.\.\. ok$", text, re.M), text
+          assert re.search(r"^test result: ok\. 2 passed; 0 failed; 0 ignored;", text, re.M), text
+          PY
+      - name: Retain named cron proposal caller result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: story-19-21g-cron
+          path: cron-proposal-results.txt
 
       # The other half of the contract: the ungated guards assert that A2A is OFF by
       # default and that only config parsing compiles without the feature. Those claims
@@ -363,6 +419,29 @@ jobs:
       - name: Install Python TUI test dependencies
         run: pip install -e "./tests_tui[dev]"
 
+      - name: Execute canonical receipt policy controls without reruns
+        env:
+          RUSTAIN_RECEIPT_EVIDENCE_DIR: ${{ github.workspace }}/receipt-checker-evidence
+        run: |
+          pytest tests_tui/test_receipt_controls.py -m "not a2a_binary" \
+            -p no:rerunfailures -n 0 --timeout=120 --junitxml=receipt-policy-results.xml -v
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("receipt-policy-results.xml").findall(".//testcase")
+          assert len(cases) == 29 and len({case.attrib["name"] for case in cases}) == 29, cases
+          assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required receipt policy control skipped/failed/errored"
+          PY
+      - name: Retain allowlisted receipt policy diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: receipt-policy-controls
+          path: |
+            receipt-policy-results.xml
+            receipt-checker-evidence/**/positive.json
+            receipt-checker-evidence/**/negative.json
+            receipt-checker-evidence/**/restored.json
+
       - name: Run non-API Python TUI tests
         run: pytest tests_tui/ -m "not requires_api and not a2a_binary" -n auto --timeout=120 -v
         env:
@@ -420,6 +499,22 @@ jobs:
           python-version: "3.10"
       - name: Install native TUI capture dependencies
         run: pip install -e "./tests_tui[dev]"
+      - name: Exercise standalone proposal Root-mode guards without reruns
+        env:
+          RUSTAIN_TUI_BINARY: ${{ github.workspace }}/target/release/rustain
+        run: |
+          pytest tests_tui/test_story_19_21b_standalone_modes.py \
+            -p no:rerunfailures -n 0 --timeout=120 --junitxml=proposal-modes-results.xml -v
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("proposal-modes-results.xml").findall(".//testcase")
+          expected = {
+              "test_standalone_auto_mode_still_requires_human_send[yolo]",
+              "test_standalone_auto_mode_still_requires_human_send[autoedit]",
+          }
+          assert {case.attrib["name"] for case in cases} == expected and len(cases) == 2, cases
+          assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required proposal Root-mode case skipped/failed/errored"
+          PY
       - name: Execute named Act 1 viewports and daemon restart without reruns
         env:
           RUSTAIN_TUI_BINARY: ${{ github.workspace }}/target/release/rustain
@@ -443,6 +538,25 @@ jobs:
           assert {case.attrib["name"] for case in cases} == expected and len(cases) == 4, cases
           assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required Act 1 case skipped/failed/errored"
           PY
+      - name: Execute all genuine and policy canonical receipt controls
+        env:
+          RUSTAIN_RECEIPT_EVIDENCE_DIR: ${{ github.workspace }}/receipt-checker-evidence
+        run: |
+          pytest tests_tui/test_receipt_controls.py \
+            -p no:rerunfailures -n 0 --timeout=120 --junitxml=receipt-checker-results.xml -v
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("receipt-checker-results.xml").findall(".//testcase")
+          names = [case.attrib["name"] for case in cases]
+          assert len(cases) == 45 and len(set(names)) == 45, names
+          for prefix, count in [
+              ("test_genuine_receipt_rejects_changed_identity[", 3),
+              ("test_genuine_act1_receipt_rejects_changed_identity[", 9),
+              ("test_genuine_product_only_arbitrary_cwd[", 4),
+          ]:
+              assert sum(name.startswith(prefix) for name in names) == count, (prefix, names)
+          assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required canonical receipt control skipped/failed/errored"
+          PY
       - name: Retain actual Act 1 receipts, evidence, and named-case results
         if: always()
         uses: actions/upload-artifact@v4
@@ -450,4 +564,9 @@ jobs:
           name: story-19-21-act1
           path: |
             act1-results.xml
+            proposal-modes-results.xml
+            receipt-checker-results.xml
+            receipt-checker-evidence/**/positive.json
+            receipt-checker-evidence/**/negative.json
+            receipt-checker-evidence/**/restored.json
             tests_tui/journeys/j10/receipts/evidence/${{ github.run_id }}-${{ github.run_attempt }}/**

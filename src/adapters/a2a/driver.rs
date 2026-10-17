@@ -874,6 +874,7 @@ impl A2aDelegationRuntime {
         task: &str,
         text: &str,
         action: Option<&SendActionRef>,
+        authorship: crate::domain::models::ReplyAuthorship,
     ) -> Result<(), DelegationError> {
         let peer = spec.resolved_identity();
         let task = sanitize_disclosable(task, MAX_PEER_ID_BYTES);
@@ -887,6 +888,7 @@ impl A2aDelegationRuntime {
             content_hash: Some(hash),
             endpoint: endpoint.clone(),
             action: action.cloned(),
+            authorship,
         })
         .await?;
         // Kept current by this path's own appends (`A13`): a send after the
@@ -1243,9 +1245,9 @@ impl A2aDelegationRuntime {
                 item: sanitize_disclosable(item, MAX_PEER_ID_BYTES),
             },
             content_hash: None,
-            // A retract dispatched no task: it never grants a capability.
             endpoint: None,
             action: None,
+            authorship: crate::domain::models::ReplyAuthorship::Unknown,
         })
         .await
     }
@@ -1388,6 +1390,7 @@ impl A2aDelegationRuntime {
             endpoint: endpoint.clone(),
             // The model rail records no operator send action (19.21 `AC1(i)`).
             action: None,
+            authorship: crate::domain::models::ReplyAuthorship::AgentComposed,
         })
         .await?;
         if let Some(task) = submitted_task.clone()
@@ -3543,7 +3546,13 @@ mod tests {
         let peer = spec("marcus", false);
         let asker = runtime();
         asker
-            .journal_send_dispatch(&peer, "task-q", "question", None)
+            .journal_send_dispatch(
+                &peer,
+                "task-q",
+                "question",
+                None,
+                crate::domain::models::ReplyAuthorship::Unknown,
+            )
             .await
             .unwrap();
         let hash = |text: &str| Some(text_content_hash(text));
@@ -3593,7 +3602,13 @@ mod tests {
         );
         // A dispatch AFTER the ledger was seeded is a `you` source too.
         asker
-            .journal_send_dispatch(&peer, "task-f", "and retries?", None)
+            .journal_send_dispatch(
+                &peer,
+                "task-f",
+                "and retries?",
+                None,
+                crate::domain::models::ReplyAuthorship::Unknown,
+            )
             .await
             .unwrap();
         let later = [ObservedTurn::Item {

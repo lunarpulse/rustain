@@ -15,6 +15,13 @@ pub struct ToolDefinition {
     pub parallel_safe: bool,
 }
 
+/// Per-call execution identity supplied by the scheduler.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolInvocation<'a> {
+    pub conversation_id: &'a str,
+    pub route: Option<super::turn::TurnRoute>,
+}
+
 /// Tracking info for an in-progress or completed tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -131,6 +131,21 @@ pub trait ToolSetPort: Send + Sync {
         self.execute(tool_name, input, cancel).await
     }
 
+    /// Execute with route-aware per-call identity. Existing adapters retain
+    /// their established behavior through the `execute_with_id` default.
+    async fn execute_invocation(
+        &self,
+        tool_name: &str,
+        tool_use_id: &str,
+        input: serde_json::Value,
+        cancel: CancellationToken,
+        progress_tx: Option<mpsc::UnboundedSender<ToolProgressEvent>>,
+        _invocation: &crate::domain::models::ToolInvocation<'_>,
+    ) -> Result<ToolResult, ToolError> {
+        self.execute_with_id(tool_name, tool_use_id, input, cancel, progress_tx)
+            .await
+    }
+
     /// Validate tool input against its declared schema.
     /// Default implementation accepts everything; strict validation is deferred
     /// to MCP integration (Story 9-2) where schemas matter.

@@ -601,8 +601,9 @@ const EVENT_LOOP_SOFT_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 75;
 /// Hard ceiling: CI failure. Mary's calibration (baseline+250).
 const EVENT_LOOP_HARD_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 250;
 
-/// Pre-extraction baseline run() cyclomatic complexity (Story 8.0a baseline).
-const EVENT_LOOP_RUN_BASELINE_CCN: u32 = 155;
+/// Complete historical run(), ratified by Lunarpulse on 2026-10-16 (Story 19.21e).
+/// RATCHET-SIGNOFF: EVENT_LOOP_RUN_BASELINE_CCN — ADR-08-01 §D6.6 approval record.
+const EVENT_LOOP_RUN_BASELINE_CCN: u32 = 634;
 
 /// Winston-ratified multiplier × 100 (avoids float arithmetic in const context).
 const COMPLEXITY_MULTIPLIER_PCT: u32 = 120;
@@ -720,76 +721,175 @@ fn test_event_loop_baseline_integrity() {
     }
 }
 
-/// AC-4 cyclomatic-complexity floor for `event_loop.rs::run()`. Per Winston
-/// Decision Gate ratification (2026-05-17), `COMPLEXITY_MULTIPLIER = 1.20`,
-/// so `run()` CCN budget is `155 × 1.20 = 186`.
-///
-/// Shells out to `lizard` (pinned in `tools/ci/requirements-metrics.txt`).
-/// Skipped if lizard is not installed (pre-CI bootstrap).
+/// Complete-function source metric; missing tooling or invalid evidence fails closed.
+/// The pinned CLI defines the ratified legacy token model (ADR-08-01 §D6.6).
 #[test]
 fn test_event_loop_complexity_floor() {
-    let path = "src/infrastructure/runtime/event_loop.rs";
-    let output = std::process::Command::new("lizard").arg(path).output();
+    use serde::Deserialize;
+    use sha2::{Digest, Sha256};
 
-    let stdout = match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
-        Ok(out) => {
-            eprintln!(
-                "test_event_loop_complexity_floor: lizard returned non-zero exit. stderr: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            return;
-        }
-        Err(e) => {
-            eprintln!(
-                "test_event_loop_complexity_floor SKIPPED: `lizard` not installed ({}). \
-                 Install via `pip install -r tools/ci/requirements-metrics.txt`.",
-                e
-            );
-            return;
-        }
-    };
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Versions<'a> {
+        #[serde(rename = "tree-sitter")]
+        tree_sitter: &'a str,
+        #[serde(rename = "tree-sitter-rust")]
+        tree_sitter_rust: &'a str,
+    }
 
-    // Parse lizard output for the run() function line:
-    // Example:  4118    164  13306     23    4323 run@163-4485@...
-    let run_ccn = stdout
-        .lines()
-        .find_map(|line| {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with(|c: char| c.is_ascii_digit()) {
-                return None;
-            }
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if parts.len() >= 6 && parts[5].starts_with("run@") {
-                parts[1].parse::<u32>().ok()
-            } else {
-                None
-            }
-        })
-        .expect("conformance: could not parse run() CCN from lizard output");
+    #[derive(Default, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Decisions {
+        #[serde(rename = "if")]
+        if_count: u32,
+        #[serde(rename = "for")]
+        for_count: u32,
+        #[serde(rename = "while")]
+        while_count: u32,
+        #[serde(rename = "&&")]
+        and_count: u32,
+        #[serde(rename = "||")]
+        or_count: u32,
+        #[serde(rename = "?")]
+        question_count: u32,
+        catch: u32,
+        case: u32,
+        #[serde(rename = "match")]
+        match_count: u32,
+        #[serde(rename = "where")]
+        where_count: u32,
+    }
 
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Report<'a> {
+        schema: u32,
+        algorithm: &'a str,
+        configuration: &'a str,
+        #[serde(borrow)]
+        tool_versions: Versions<'a>,
+        tool_sha256: &'a str,
+        source: &'a str,
+        source_sha256: &'a str,
+        function: &'a str,
+        function_sha256: &'a str,
+        start_byte: usize,
+        end_byte: usize,
+        start_line: usize,
+        end_line: usize,
+        ccn: u32,
+        decisions: Decisions,
+    }
+
+    fn assert_digest(encoded: &str, bytes: &[u8], identity: &str) {
+        let mut decoded = [0; 32];
+        hex::decode_to_slice(encoded, &mut decoded)
+            .unwrap_or_else(|error| panic!("invalid metric output: {identity} digest: {error}"));
+        assert_eq!(
+            decoded[..],
+            Sha256::digest(bytes)[..],
+            "metric identity mismatch: {identity}"
+        );
+    }
+
+    const SOURCE: &str = "src/infrastructure/runtime/event_loop.rs";
+    const SOURCE_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/infrastructure/runtime/event_loop.rs"
+    );
+    const TOOL_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/.github/scripts/event-loop-complexity.py"
+    );
+    let output = std::process::Command::new("python3")
+        .arg(TOOL_PATH)
+        .arg(SOURCE)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("metric tool unavailable: install tools/ci/requirements-metrics.txt");
+    assert!(
+        output.status.success(),
+        "metric command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Report<'_> = serde_json::from_slice(&output.stdout)
+        .expect("invalid metric output: expected complete JSON");
+    assert_eq!(report.schema, 1, "metric schema mismatch");
+    assert_eq!(
+        report.algorithm, "rust-legacy-condition-tokens-v1",
+        "metric algorithm mismatch"
+    );
+    assert_eq!(
+        report.configuration, "unexpanded-source-all-cfg",
+        "metric configuration mismatch"
+    );
+    assert_eq!(report.tool_versions.tree_sitter, "0.25.2");
+    assert_eq!(report.tool_versions.tree_sitter_rust, "0.24.2");
+    assert_eq!(report.source, SOURCE, "metric source mismatch");
+    assert_eq!(report.function, "run", "metric function mismatch");
+    let source = fs::read(SOURCE_PATH).expect("metric source unavailable");
+    assert_digest(report.source_sha256, &source, "source");
+    assert_digest(
+        report.tool_sha256,
+        &fs::read(TOOL_PATH).expect("metric tool unavailable"),
+        "tool",
+    );
+    assert!(
+        report.start_byte < report.end_byte && report.end_byte <= source.len(),
+        "invalid metric output: function byte bounds"
+    );
+    assert_digest(
+        report.function_sha256,
+        &source[report.start_byte..report.end_byte],
+        "function",
+    );
+    assert_eq!(
+        report.start_line,
+        1 + source[..report.start_byte]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count(),
+        "invalid metric output: function start line"
+    );
+    assert_eq!(
+        report.end_line,
+        1 + source[..report.end_byte]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count(),
+        "invalid metric output: function end line"
+    );
+    let d = report.decisions;
+    let counted = [
+        d.if_count,
+        d.for_count,
+        d.while_count,
+        d.and_count,
+        d.or_count,
+        d.question_count,
+        d.catch,
+        d.case,
+        d.match_count,
+        d.where_count,
+    ]
+    .into_iter()
+    .try_fold(1_u32, u32::checked_add)
+    .expect("invalid metric output: decision count overflow");
+    assert_eq!(
+        report.ccn, counted,
+        "invalid metric output: decision count mismatch"
+    );
     let budget = EVENT_LOOP_RUN_BASELINE_CCN * COMPLEXITY_MULTIPLIER_PCT / 100;
     assert!(
-        run_ccn <= budget,
+        report.ccn <= budget,
         "event_loop.rs::run() CCN budget exceeded: {} > {} (baseline {} × {}%). \
-         Per ADR-08-01 §D6.6 + Winston Decision Gate ratification 2026-05-17, the \
-         budget is the architect's tightest ratchet. Either:\n\
-           (a) reduce run() complexity (extract more dispatch logic per Story 8.0a pattern), or\n\
-           (b) re-open ADR-08-01 for a multiplier bump with new architect sign-off.\n\
-         See `_bmad-output/planning-artifacts/architecture/adr/ADR-08-01-handler-extraction-pattern.md` §D6.6.",
-        run_ccn,
+         Reduce state-mutation complexity under ADR-08-01 D5; numeric changes require \
+         explicit ratification and a constant-named RATCHET-SIGNOFF (D6.6).",
+        report.ccn,
         budget,
         EVENT_LOOP_RUN_BASELINE_CCN,
         COMPLEXITY_MULTIPLIER_PCT,
     );
-
-    if run_ccn < EVENT_LOOP_RUN_BASELINE_CCN {
-        eprintln!(
-            "event_loop.rs::run() CCN improved: {} < {} baseline. \
-             Consider lowering EVENT_LOOP_RUN_BASELINE_CCN to lock in the improvement.",
-            run_ccn, EVENT_LOOP_RUN_BASELINE_CCN,
-        );
-    }
 }
 
 /// Story 19.16 AC5 — durable recipient-item names must not imply cryptographic

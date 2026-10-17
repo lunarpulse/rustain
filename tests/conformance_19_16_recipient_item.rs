@@ -107,6 +107,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         content_hash: Some(content_hash),
         endpoint: None,
         action: None,
+        authorship: ReplyAuthorship::Unknown,
     };
     let mut legacy_dispatched =
         serde_json::to_value(&dispatched).expect("serialize outbound dispatch");
@@ -292,6 +293,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
         content_hash: None,
         endpoint: Some("cd".repeat(32)),
         action: None,
+        authorship: ReplyAuthorship::Unknown,
     };
     let encoded = serde_json::to_value(&unpinned).expect("serialize dispatch");
     assert_eq!(encoded["endpoint"], "cd".repeat(32));
@@ -307,6 +309,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
         content_hash: None,
         endpoint: None,
         action: None,
+        authorship: ReplyAuthorship::Unknown,
     };
     let row = serde_json::to_value(&pinned).expect("serialize dispatch");
     assert_eq!(

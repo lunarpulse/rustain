@@ -83,6 +83,10 @@ pub struct CompositeToolsetAdapter {
     /// Story 17.4a — cached AgentCard inventory provider, injected after startup composition.
     #[cfg(feature = "a2a")]
     a2a_provider: std::sync::OnceLock<Arc<dyn CapabilityProvider>>,
+    /// Standalone proposal tool, deliberately outside capability discovery.
+    #[cfg(feature = "a2a")]
+    team_proposal_tool:
+        std::sync::OnceLock<Arc<crate::adapters::a2a::team_proposal_tool::TeamProposalTool>>,
     /// D1 fix: per-turn context stored here, injected into subagent input JSON at dispatch.
     parent_ctx: Arc<
         tokio::sync::RwLock<Option<crate::adapters::subagent::subagent_provider::TaskToolContext>>,
@@ -131,6 +135,8 @@ impl CompositeToolsetAdapter {
             subagent_provider: subagent_provider_cell,
             #[cfg(feature = "a2a")]
             a2a_provider: std::sync::OnceLock::new(),
+            #[cfg(feature = "a2a")]
+            team_proposal_tool: std::sync::OnceLock::new(),
             parent_ctx: Arc::new(tokio::sync::RwLock::new(None)),
             conversation_id: Arc::new(tokio::sync::RwLock::new(String::new())),
         }
@@ -187,6 +193,15 @@ impl CompositeToolsetAdapter {
         } else {
             tracing::warn!("A2A capability registry population requires an async runtime");
         }
+    }
+    /// Install the operator-reviewed proposal capability without adding it to
+    /// the shared capability registry or domain catalog.
+    #[cfg(feature = "a2a")]
+    pub(crate) fn set_team_proposal_tool(
+        &self,
+        tool: Arc<crate::adapters::a2a::team_proposal_tool::TeamProposalTool>,
+    ) {
+        let _ = self.team_proposal_tool.set(tool);
     }
 
     /// Story 9.3b — read the current catalog version (for tests).
@@ -518,6 +533,10 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 }
             }
         }
+        #[cfg(feature = "a2a")]
+        if self.team_proposal_tool.get().is_some() {
+            out.push(crate::adapters::a2a::team_proposal_tool::TeamProposalTool::definition());
+        }
 
         // Story 10.7 — include subagent capabilities from the registry snapshot.
         // The registry holds capabilities discovered from all providers; subagent
@@ -651,6 +670,12 @@ impl ToolSetPort for CompositeToolsetAdapter {
         input: serde_json::Value,
         cancel: CancellationToken,
     ) -> Result<ToolResult, ToolError> {
+        #[cfg(feature = "a2a")]
+        if tool_name == crate::adapters::a2a::team_proposal_tool::TOOL_NAME
+            && self.team_proposal_tool.get().is_some()
+        {
+            return crate::adapters::a2a::team_proposal_tool::missing_invocation("direct execute");
+        }
         if let Some((server_id, tool_name_inner)) =
             crate::adapters::mcp::tool_projection::parse_mcp_tool_name(tool_name)
         {
@@ -734,6 +759,12 @@ impl ToolSetPort for CompositeToolsetAdapter {
         cancel: CancellationToken,
         progress_tx: Option<mpsc::UnboundedSender<ToolProgressEvent>>,
     ) -> Result<ToolResult, ToolError> {
+        #[cfg(feature = "a2a")]
+        if tool_name == crate::adapters::a2a::team_proposal_tool::TOOL_NAME
+            && self.team_proposal_tool.get().is_some()
+        {
+            return crate::adapters::a2a::team_proposal_tool::missing_invocation(tool_use_id);
+        }
         if let Some((server_id, tool_name_inner)) =
             crate::adapters::mcp::tool_projection::parse_mcp_tool_name(tool_name)
         {
@@ -806,6 +837,27 @@ impl ToolSetPort for CompositeToolsetAdapter {
 
         self.builtin
             .execute_with_id(tool_name, tool_use_id, input, cancel, progress_tx)
+            .await
+    }
+    async fn execute_invocation(
+        &self,
+        tool_name: &str,
+        tool_use_id: &str,
+        input: serde_json::Value,
+        cancel: CancellationToken,
+        progress_tx: Option<mpsc::UnboundedSender<ToolProgressEvent>>,
+        invocation: &crate::domain::models::ToolInvocation<'_>,
+    ) -> Result<ToolResult, ToolError> {
+        #[cfg(not(feature = "a2a"))]
+        let _ = invocation;
+        #[cfg(feature = "a2a")]
+        if tool_name == crate::adapters::a2a::team_proposal_tool::TOOL_NAME {
+            if let Some(tool) = self.team_proposal_tool.get() {
+                let _ = (cancel, progress_tx);
+                return tool.execute(tool_use_id, input, invocation).await;
+            }
+        }
+        self.execute_with_id(tool_name, tool_use_id, input, cancel, progress_tx)
             .await
     }
 

@@ -342,6 +342,34 @@ Since 12.2b the daemon is a **headless turn-processing agent**, not just a memor
 process. It holds one per-process conversation and drives turns over a framed,
 versioned wire protocol on its Unix socket.
 
+The [agent-proposed message card](a2a.md#agent-proposed-messages-standalone-and-attached-tui)
+uses the daemon's own A2A egress and a construction-owned, in-memory proposal
+registry. Raising returns immediately without holding the turn lock. Only the
+authenticated TrustedLocal read-write writer receives the exact snapshot and can
+choose Send or Dismiss; Review is local and sends nothing. A generic
+`ApprovalRequest`, YOLO, grants, subagent policy, peer context or elapsed time
+never authorizes a proposal. No writer (including read-only/Peer-only attachments)
+means refusal at raise, not a retained invisible proposal.
+
+Detach or replacement retains a pending proposal and re-emits it to the next
+trusted writer. Conversation reset/close, shutdown and process restart withdraw
+it without peer I/O. A full writer queue produces an explicit terminal protocol
+error and closes the connection, retaining the proposal for the next writer;
+this does not repair legacy `History`/`ApprovalRequest` queue drops. Saturating
+the eight-send limit refuses Send while leaving its proposal pending for an
+explicit human retry. Decisions enter the operator FIFO and stale-writer fence;
+duplicate or unknown decisions cannot create a second send.
+
+An accepted Send retains its deciding response endpoint across connection EOF;
+writer-replacement and decision-identity fences still apply. Disconnecting is not
+a second authorization and cannot retarget a later proposal.
+
+Received-item cards prefer a configured policy label, then the durable bound-ingress
+alias when present, then the original principal label. The alias is display-only:
+it changes neither the policy principal nor consent and does not assert a person's
+identity. When an inline card reduces the transcript area, PageUp/PageDown use the
+remaining painted height so Review text is not skipped between pages.
+
 ### Attaching a client
 
 ```sh
@@ -423,13 +451,14 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v6**; a client speaking another version
+attach handshake negotiates **protocol v7**; a client speaking another version
 receives `VersionMismatch` before registration or other attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
 (`ClientEvent = RawEvent`) — one `AppEvent → wire` mapping, in one place. That
 projection omits sender-local team action/settlement events and strips the
-additive action reference from legacy dispatch events; unrelated raw-event
-behavior is unchanged.
+additive action reference and dispatch authorship from legacy dispatch events.
+Private proposal state is never published to this raw event stream; unrelated
+raw-event behavior is unchanged.
 
 The client speaks `ClientFrame`, including `Attach`, `UserMessage`,
 `HistoryRequest`, `ApprovalResponse`, `Detach`, and the request-keyed team
@@ -446,6 +475,14 @@ fits the 8 MiB `MAX_FRAME_BYTES` limit. Team status uses
 `TeamSendStarted` plus typed, per-recipient `TeamSendSettled` frames. Refusals use a
 `RecipientActionResult` targeted at the originating request key.
 
+`TeamProposal` carries the sender-local proposal id, ordered aliases, semantic type
+and body only to the trusted writer. `TeamProposalDecision` carries Send or Dismiss;
+`TeamProposalClosed` reports dismissal, withdrawal or a correlated refusal.
+Send uses the ordinary daemon send coordinator with the proposal id as its
+request key, no subject, and sender-local `AgentComposed` dispatch provenance.
+The deciding connection alone receives `TeamSendStarted`/`TeamSendSettled`, bound
+to its native send block. Proposal/receipt DTOs remain feature-independent.
+
 Team send and sender-consent revocation require a TrustedLocal read-write
 attachment. Board and status are explicit TrustedLocal reads and are available
 to read-only attachments. Peer-tier connections are refused for all four
@@ -457,8 +494,12 @@ not inherit old results, and a command still queued when its writer is replaced
 is discarded by the stale-writer fence.
 
 The daemon injects the same composed outbound A2A runtime used by its core;
-the attach client composes no provider or egress. Protocol v6 changes only the
+the attach client composes no provider or egress. Protocol v7 changes only the
 local daemon attach protocol. It does **not** discharge the separate A2A
-boundary tracked by AD-1826. Each message also carries its originating
-`ChannelKind` (`terminal` today), persisted on `ChatMessage.origin` so the
-prefix survives restart and crash-recovery replay.
+boundary tracked by AD-1826, add a peer-visible authorship field, or close full
+J10. `/team log` marks approved-proposal dispatches `[agent-composed]`; the journal
+uses `agent-composed`, while typed sends use `human-written`. The daemon still
+carries no custom-agent selection/restriction context, and NotifyAndAuto remains
+conservative template-only, not a model turn. Each message also carries its
+originating `ChannelKind` (`terminal` today), persisted on `ChatMessage.origin`
+so the prefix survives restart and crash-recovery replay.

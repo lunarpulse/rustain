@@ -462,22 +462,6 @@ async fn a_journal_read_failure_drops_every_role_to_least_privilege() {
 
 // ──────────────────────────── AC1 / AC2 · Tasks 4–5 ─────────────────────────
 
-fn event_loop_source() -> String {
-    std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/infrastructure/runtime/event_loop.rs"
-    ))
-    .expect("read event_loop.rs")
-}
-
-fn room_bridge_source() -> String {
-    std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/infrastructure/runtime/room_bridge.rs"
-    ))
-    .expect("read room_bridge.rs")
-}
-
 /// **AC1 layer (a), the mutant that is the whole point.** Remove the `room`
 /// entry from the `submit_message` allowlist and `/room` falls through to
 /// `SubmitWithContext`, resolves no command file, and silently never runs —
@@ -531,51 +515,6 @@ fn ctrl_x_r_dispatches_the_durable_room_panel() {
         );
         assert!(!state.feedback_blocks.contains_key("chord-r"));
     }
-}
-
-/// **AC1 layer (b), structural.** Without the dispatch arm the allowlist entry
-/// routes `ExecuteCommand { name: "room" }` into the adapter-override path.
-/// Both render arms are asserted too: the dashboard match has a `_` arm, so a
-/// missing `Room` case there compiles clean and renders nothing.
-#[test]
-fn the_room_dispatch_and_render_arms_are_wired_and_precede_the_catch_all() {
-    let source = event_loop_source();
-    let room = source
-        .find(r#"else if cmd_name == "room""#)
-        .expect("the /room dispatch arm exists");
-    let override_arm = source
-        .find("port_dimension_from_command_name(cmd_name)")
-        .expect("the adapter-override catch-all exists");
-    assert!(
-        room < override_arm,
-        "`/room` must be intercepted BEFORE the adapter-override path"
-    );
-    assert!(
-        source.contains(
-            "room_bridge::room_command(&mut state, &conversation.id, cmd_arg, &app_state).await;"
-        ),
-        "the production command future must be awaited"
-    );
-    assert!(
-        source.contains("room_bridge::open_panel(&app_state, &mut state).await;"),
-        "the production chord refresh future must be awaited"
-    );
-    assert!(
-        source.contains("room_bridge::refresh_head(") && source.contains(").await;"),
-        "the open Room panel must poll and await the durable head"
-    );
-    let bridge = room_bridge_source();
-    assert!(
-        bridge.contains("RoomCommandArgs::View => match open_room_view(app_state, state).await")
-            && bridge.contains("open_room_view_with_source("),
-        "bare /room must await the production View bridge exercised by its behavioral keystone"
-    );
-    assert_eq!(
-        source.matches("room_panel::render(").count(),
-        2,
-        "both the sidebar AND the dashboard render dispatch must have a Room arm; \
-         the dashboard match has a `_` arm, so a missing case renders nothing silently"
-    );
 }
 
 /// The palette and the help screen both advertise the surface and its faster

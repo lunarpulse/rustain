@@ -1822,6 +1822,7 @@ async fn run_child(
                         None,
                         agent_restriction.as_ref(),
                         provenance,
+                        Some(crate::domain::models::turn::TurnRoute::Subagent),
                     )
                     .await;
 

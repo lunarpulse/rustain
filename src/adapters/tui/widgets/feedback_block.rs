@@ -14,6 +14,18 @@ pub fn render_feedback_lines(
     width: u16,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    render_feedback_lines_with_review(block, width, theme, None)
+}
+
+pub fn render_feedback_lines_with_review(
+    block: &FeedbackBlock,
+    width: u16,
+    theme: &Theme,
+    review: Option<&crate::domain::models::TeamProposal>,
+) -> Vec<Line<'static>> {
+    if let Some(proposal) = review {
+        return super::team_proposal_card::render_review_lines(proposal, width, theme);
+    }
     let (border_char, border_color, symbol, text_color) = match block.level {
         FeedbackLevel::Error => ("┃", theme.colors.error_border, "✗", theme.colors.error),
         FeedbackLevel::Warning => ("│", theme.colors.warning_border, "⚠", theme.colors.warning),

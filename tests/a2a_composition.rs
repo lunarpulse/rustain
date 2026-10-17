@@ -230,7 +230,7 @@ async fn egress_composition_exposes_a_cached_peer_and_its_same_delegation_runtim
     )
     .unwrap();
     let composite = composite();
-    egress.install(&composite);
+    egress.install(&composite, None);
 
     assert!(Arc::ptr_eq(
         egress.runtime(),
@@ -280,7 +280,7 @@ async fn egress_composition_with_no_peers_exposes_no_a2a_capabilities() {
     )
     .unwrap();
     let composite = composite();
-    egress.install(&composite);
+    egress.install(&composite, None);
     composite.populate_registry().await.unwrap();
 
     assert!(composite.capability_registry().snapshot().is_empty());

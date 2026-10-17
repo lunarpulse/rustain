@@ -304,10 +304,15 @@ impl RawEvent {
                 }
                 let mut payload = payload.clone();
                 if let crate::domain::events::DomainEventPayload::Room(
-                    crate::domain::models::RoomEvent::RemoteEnvelopeDispatched { action, .. },
+                    crate::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+                        action,
+                        authorship,
+                        ..
+                    },
                 ) = &mut payload
                 {
                     *action = None;
+                    *authorship = crate::domain::models::ReplyAuthorship::Unknown;
                 }
                 RawEvent {
                     conversation_id: None,
@@ -315,6 +320,8 @@ impl RawEvent {
                     kind: RawEventKind::DomainEvent(payload),
                 }
             }
+            #[cfg(feature = "a2a")]
+            AppEvent::TeamProposalReady { .. } => return None,
             AppEvent::Tick
             | AppEvent::ConfigReload
             | AppEvent::Resize(..)
@@ -562,6 +569,7 @@ mod tests {
                 peer: peer.clone(),
                 task: Some("legacy-task-1".to_owned()),
                 bytes: 19,
+                authorship: crate::domain::models::ReplyAuthorship::Unknown,
                 act: crate::domain::models::DispatchAct::ItemRetract {
                     item: "peer-item-1".to_owned(),
                 },
@@ -580,6 +588,7 @@ mod tests {
                 content_hash,
                 endpoint,
                 action,
+                ..
             },
         )) = raw.kind
         else {

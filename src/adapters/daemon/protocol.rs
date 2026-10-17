@@ -35,14 +35,15 @@ use crate::adapters::rap::AgentSigner;
 use crate::domain::models::tool_call::RequestId;
 use crate::domain::models::{
     AgentEnvelope, ApprovalOutcome, ChannelKind, ChatMessage, Ed25519Sig, ImageAttachment,
-    PeerIdentity, PermissionMode, SemanticMessageType, SendActionId, ToolRisk,
+    PeerIdentity, PermissionMode, SemanticMessageType, SendActionId, TeamProposalDecision,
+    ToolRisk,
 };
 use crate::infrastructure::runtime::event_bus::RawEvent;
 
 /// Current wire protocol version. Bump on ANY breaking frame-shape change so an
 /// older client/daemon is rejected with [`ProtocolError::VersionMismatch`]
 /// rather than mis-parsing (forward-compat for 12.3/12.4).
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -324,6 +325,12 @@ pub enum ClientFrame {
     InspectRecipientContext,
     /// Select/off a daemon-owned received item reference, never a client body.
     SetRecipientContext { item_id: String, selected: bool },
+    /// Decide one daemon-owned proposal snapshot. TrustedLocal + ReadWrite only.
+    /// Send uses the ordinary send coordinator with `request = proposal`.
+    TeamProposalDecision {
+        proposal: String,
+        decision: TeamProposalDecision,
+    },
     /// Story 19.21 `AC4(b)` — one operator `/team send`. `request` is a
     /// client-minted key, unique per connection, echoed by every result and
     /// refusal this command produces. TrustedLocal + ReadWrite only; the
@@ -353,6 +360,16 @@ pub enum ClientFrame {
     RevokeSenderConsent { request: String, alias: String },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
+}
+
+/// A sender-local proposal lifecycle result, never a recipient delivery outcome.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamProposalCloseOutcome {
+    Dismissed,
+    Withdrawn,
+    Refused { reason: String },
 }
 
 /// Which board a [`ClientFrame::TeamBoard`] asks for (Story 19.21 `AC3(a)`).
@@ -594,6 +611,18 @@ pub enum DaemonFrame {
         #[serde(default)]
         show_inventory: bool,
     },
+    /// Exact sender-local snapshot, addressed only to the trusted writer.
+    TeamProposal {
+        proposal: String,
+        recipients: Vec<String>,
+        message_type: SemanticMessageType,
+        body: String,
+    },
+    /// Dismissal, withdrawal or correlated refusal. Not a send settlement.
+    TeamProposalClosed {
+        proposal: String,
+        outcome: TeamProposalCloseOutcome,
+    },
     /// Story 19.21 `AC4(b)` — the send action was durably recorded; `request`
     /// binds the client's stable block to the sender-local action id.
     /// Origin connection only. ⛔ Never sent when the record failed.
@@ -808,6 +837,14 @@ mod tests {
             },
             ClientFrame::DeferRecipientItem {
                 item_id: "ri-1".into(),
+            },
+            ClientFrame::TeamProposalDecision {
+                proposal: "tp_send".into(),
+                decision: TeamProposalDecision::Send,
+            },
+            ClientFrame::TeamProposalDecision {
+                proposal: "tp_dismiss".into(),
+                decision: TeamProposalDecision::Dismiss,
             },
             ClientFrame::TeamSend {
                 request: "send-1".into(),
@@ -1031,6 +1068,26 @@ mod tests {
                 index: 9,
                 outcome: TeamSendOutcome::NotSent,
             },
+            DaemonFrame::TeamProposal {
+                proposal: "tp_send".into(),
+                recipients: vec!["lena-po".into(), "jun-dev".into()],
+                message_type: SemanticMessageType::ArchitectureUpdate,
+                body: "Exact body\n\ttabs and e\u{301}界".into(),
+            },
+            DaemonFrame::TeamProposalClosed {
+                proposal: "tp_dismiss".into(),
+                outcome: TeamProposalCloseOutcome::Dismissed,
+            },
+            DaemonFrame::TeamProposalClosed {
+                proposal: "tp_withdraw".into(),
+                outcome: TeamProposalCloseOutcome::Withdrawn,
+            },
+            DaemonFrame::TeamProposalClosed {
+                proposal: "tp_refused".into(),
+                outcome: TeamProposalCloseOutcome::Refused {
+                    reason: "That proposal is no longer waiting. Nothing was sent.".into(),
+                },
+            },
             DaemonFrame::TeamBoardChunk {
                 request: "board-1".into(),
                 sequence: 0,
@@ -1140,6 +1197,84 @@ mod tests {
         assert_eq!(received.len(), sent.len());
         for (s, r) in sent.iter().zip(received.iter()) {
             assert_eq!(format!("{s:?}"), format!("{r:?}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn v7_proposal_frames_preserve_exact_snapshot_without_a2a_features() {
+        assert_eq!(
+            PROTOCOL_VERSION, 7,
+            "attached proposal frames require protocol v7"
+        );
+        let bytes = br#"{"teamProposal":{"proposal":"tp_exact","recipients":["jun-dev","lena-po"],"message_type":"architecture_update","body":"  exact\n\tbody \u00e9\u754c  "}}"#;
+        let frame: DaemonFrame = serde_json::from_slice(bytes).unwrap();
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        write_frame(&mut writer, &frame).await.unwrap();
+        let decoded = read_frame::<_, DaemonFrame>(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+        let DaemonFrame::TeamProposal {
+            proposal,
+            recipients,
+            message_type,
+            body,
+        } = decoded
+        else {
+            panic!("feature-independent client must decode the v7 proposal snapshot");
+        };
+        assert_eq!(proposal, "tp_exact");
+        assert_eq!(
+            recipients,
+            ["jun-dev", "lena-po"],
+            "proposal recipient order is immutable"
+        );
+        assert_eq!(message_type, SemanticMessageType::ArchitectureUpdate);
+        assert_eq!(
+            body.as_bytes(),
+            "  exact\n\tbody é界  ".as_bytes(),
+            "proposal body bytes must survive the feature-independent frame path"
+        );
+        for (token, expected) in [
+            ("send", TeamProposalDecision::Send),
+            ("dismiss", TeamProposalDecision::Dismiss),
+        ] {
+            let frame: ClientFrame = serde_json::from_value(serde_json::json!({
+                "teamProposalDecision": {"proposal": "tp_exact", "decision": token}
+            }))
+            .unwrap();
+            assert!(
+                matches!(frame, ClientFrame::TeamProposalDecision { proposal, decision }
+                if proposal == "tp_exact" && decision == expected)
+            );
+        }
+        assert!(
+            serde_json::from_value::<ClientFrame>(serde_json::json!({
+                "teamProposalDecision": {"proposal": "tp_exact", "decision": "always"}
+            }))
+            .is_err(),
+            "proposal decisions must never gain an always/grant variant"
+        );
+        for outcome in [
+            TeamProposalCloseOutcome::Dismissed,
+            TeamProposalCloseOutcome::Withdrawn,
+            TeamProposalCloseOutcome::Refused {
+                reason: "Nothing was sent.".into(),
+            },
+        ] {
+            let frame = DaemonFrame::TeamProposalClosed {
+                proposal: "tp_exact".into(),
+                outcome: outcome.clone(),
+            };
+            write_frame(&mut writer, &frame).await.unwrap();
+            assert!(
+                matches!(
+                    read_frame::<_, DaemonFrame>(&mut reader).await.unwrap().unwrap(),
+                    DaemonFrame::TeamProposalClosed { proposal, outcome: decoded }
+                        if proposal == "tp_exact" && decoded == outcome
+                ),
+                "feature-independent clients must decode every proposal close outcome"
+            );
         }
     }
 

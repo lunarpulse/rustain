@@ -537,6 +537,7 @@ pub struct TabRenderState {
     pub height_cache: HeightCache,
     pub cached_width: Option<u16>,
     pub tool_block_states_version: u64,
+    pub team_proposal_reviews: BTreeMap<String, Arc<crate::domain::models::TeamProposal>>,
 }
 
 /// Session-scoped input history buffer for Up/Down navigation and Ctrl+R search.
@@ -2820,6 +2821,15 @@ pub struct TuiState {
     pub pending_peer_add: Option<PendingPeerAdd>,
     /// Story 19.16f `AC4`: the cross-host retract decision card, if raised.
     pub pending_team_retract: Option<PendingTeamRetract>,
+    /// Runtime snapshots are keyed by conversation, never by a mutable toolset binding.
+    pub pending_team_proposals:
+        BTreeMap<String, std::sync::Arc<crate::domain::models::TeamProposal>>,
+    pub team_proposal_conversation_id: Option<String>,
+    pub team_proposal_visible: Option<std::sync::Arc<crate::domain::models::TeamProposal>>,
+    #[cfg(feature = "a2a")]
+    pub team_proposal_surface_tab_count: usize,
+    #[cfg(feature = "a2a")]
+    pub team_proposal_withdrawal_pending: bool,
     /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
     /// when the event arrives while a stream is still active. Dispatched
     /// after the stream completes (TurnComplete handler).
@@ -3189,6 +3199,13 @@ impl TuiState {
             pending_artifact_card: None,
             pending_peer_add: None,
             pending_team_retract: None,
+            pending_team_proposals: BTreeMap::new(),
+            team_proposal_conversation_id: None,
+            team_proposal_visible: None,
+            #[cfg(feature = "a2a")]
+            team_proposal_surface_tab_count: 0,
+            #[cfg(feature = "a2a")]
+            team_proposal_withdrawal_pending: false,
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,

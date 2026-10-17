@@ -468,6 +468,8 @@ fn new_cron_conversation(session_id: &str, job_name: &str, created_at: i64) -> C
         plans: std::collections::HashMap::new(),
         fork_source: None,
         compaction: None,
+        peer_row_controls: Default::default(),
+        peer_row_revision: 0,
     }
 }
 

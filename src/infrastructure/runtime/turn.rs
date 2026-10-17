@@ -531,6 +531,7 @@ pub async fn run_turn(
                                                 active_skills,
                                                 agent_restriction.as_ref(),
                                                 provenance,
+                                                Some(turn_origin.route()),
                                             )
                                             .await
                                     };
@@ -566,6 +567,7 @@ pub async fn run_turn(
                                         active_skills,
                                         agent_restriction.as_ref(),
                                         provenance,
+                                        Some(turn_origin.route()),
                                     )
                                     .await
                             };

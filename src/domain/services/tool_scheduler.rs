@@ -122,6 +122,7 @@ impl ToolScheduler {
             active_skills,
             None,
             crate::domain::models::ProvenanceTag::UserOriginated,
+            None,
         )
         .await
     }
@@ -147,6 +148,7 @@ impl ToolScheduler {
             active_skills,
             None,
             provenance,
+            None,
         )
         .await
     }
@@ -160,6 +162,7 @@ impl ToolScheduler {
         active_skills: Option<&[ActiveSkill]>,
         agent_restriction: Option<&AgentToolRestriction>,
         provenance: crate::domain::models::ProvenanceTag,
+        route: Option<crate::domain::models::turn::TurnRoute>,
     ) -> Vec<ToolCall> {
         let all_parallel = batch
             .iter()
@@ -176,7 +179,8 @@ impl ToolScheduler {
                 let active = active_owned.clone();
                 let agent = agent_owned.clone();
                 futures.push_back(async move {
-                    s.run_one(src, req, c, active, agent, provenance).await
+                    s.run_one(src, req, c, active, agent, provenance, route)
+                        .await
                 });
             }
             let mut out = Vec::with_capacity(futures.len());
@@ -197,6 +201,7 @@ impl ToolScheduler {
                             active_owned.clone(),
                             agent_owned.clone(),
                             provenance,
+                            route,
                         )
                         .await,
                 );
@@ -213,6 +218,7 @@ impl ToolScheduler {
         active_skills: Option<Vec<ActiveSkill>>,
         agent_restriction: Option<AgentToolRestriction>,
         provenance: crate::domain::models::ProvenanceTag,
+        route: Option<crate::domain::models::turn::TurnRoute>,
     ) -> ToolCall {
         let id = req.id.clone();
         let conversation_id = source.conversation_id().to_string();
@@ -265,6 +271,7 @@ impl ToolScheduler {
             self.tools.as_ref(),
             Some(&source),
             provenance,
+            route,
         );
         let decision = tokio::select! {
             d = decision_fut => d,
@@ -409,9 +416,13 @@ impl ToolScheduler {
         };
         self.emit(&conversation_id, &call);
 
+        let invocation = crate::domain::models::ToolInvocation {
+            conversation_id: &conversation_id,
+            route,
+        };
         let progress_tx = self.progress_tx.read().await.clone();
         let exec = tokio::select! {
-            r = self.tools.execute_with_id(&req.tool_name, &req.id, req.input.clone(), cancel.clone(), progress_tx) => r,
+            r = self.tools.execute_invocation(&req.tool_name, &req.id, req.input.clone(), cancel.clone(), progress_tx, &invocation) => r,
             _ = cancel.cancelled() => {
                 return self.terminal(&conversation_id, ToolCall::Cancelled {
                     id, request: req, reason: "cancelled-during-execute".into()
@@ -566,6 +577,7 @@ mod tests {
                 None,
                 None,
                 crate::domain::models::ProvenanceTag::UserOriginated,
+                None,
             )
             .await;
         assert!(result.is_terminal());
@@ -612,6 +624,7 @@ mod tests {
                 None,
                 None,
                 crate::domain::models::ProvenanceTag::UserOriginated,
+                None,
             )
             .await;
         assert!(matches!(result, ToolCall::Cancelled { reason, .. } if reason == "pre-schedule"));
@@ -639,6 +652,7 @@ mod tests {
                     None,
                     None,
                     crate::domain::models::ProvenanceTag::UserOriginated,
+                    None,
                 )
                 .await
         });

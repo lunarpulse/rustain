@@ -138,6 +138,12 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
                             println!("{view}");
                         }
                     }
+                    result @ DaemonFrame::TeamProposal { .. }
+                    | result @ DaemonFrame::TeamProposalClosed { .. } => {
+                        // The line client exposes the exact private frame; only
+                        // the TM-09 TUI key handler constructs send decisions.
+                        print_frame_json(&result)?;
+                    }
                     result @ DaemonFrame::TeamSendStarted { .. }
                     | result @ DaemonFrame::TeamSendSettled { .. }
                     | result @ DaemonFrame::TeamStatusResult { .. }

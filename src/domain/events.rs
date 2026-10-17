@@ -180,6 +180,11 @@ pub enum AppEvent {
         index: usize,
         outcome: crate::domain::models::RecipientOutcome,
     },
+    /// Runtime-only standalone proposal; never projected onto the raw event wire.
+    #[cfg(feature = "a2a")]
+    TeamProposalReady {
+        proposal: std::sync::Arc<crate::domain::models::TeamProposal>,
+    },
 
     /// The confirm-time read behind `/team retract` finished (Story 19.16f
     /// `AC4(c)`): raise the decision card, or render the one sentence that

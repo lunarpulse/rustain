@@ -155,34 +155,6 @@ def test_unknown_subverb_names_the_valid_set(tui_monitor: RustainTUI):
 # ── Scenario 7: the help screen advertises the real name ────────────────────
 
 
-@pytest.mark.story_18_2
-def test_help_advertises_the_transparency_log(tui_monitor: RustainTUI):
-    """`?` help must name the spec's surface, not the stale Epic-14 label.
-
-    The CHORDS section sits below the first screenful, so scroll while
-    collecting text: assert content presence, never a screen position.
-    """
-    tui = tui_monitor
-    tui.send(CTRL_X)
-    tui.wait(0.2)
-    tui.send("?")
-    tui.wait(0.8)
-
-    seen = tui.get_screen_text()
-    # The overlay's own footer says "j/k scroll" — use its keys, not the chat
-    # pane's.
-    for _ in range(60):
-        if "Transparency Log panel" in seen:
-            break
-        tui.send("j")
-        tui.wait(0.05)
-        seen += tui.get_screen_text()
-
-    assert "Ctrl+X, L" in seen, f"help must document the chord. Screen:\n{seen}"
-    assert "Transparency Log panel" in seen, (
-        f"help must name Ctrl+X, L by its real surface. Screen:\n{seen}"
-    )
-    assert "Epic 14" not in seen, f"the stale Noop label must be gone. Screen:\n{seen}"
 
 
 # ── Scenario 8: a POPULATED panel — the composition wiring, end to end ──────

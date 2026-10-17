@@ -86,6 +86,7 @@ mod storage;
 mod subagent_runner;
 mod supervised_nodes;
 mod task_nodes;
+mod team_proposal;
 #[allow(unused_imports)]
 mod tool_exposure;
 #[allow(unused_imports)]
@@ -155,6 +156,7 @@ pub use session_port::SessionPort;
 pub use subagent_runner::SubagentRunner;
 pub use supervised_nodes::{SupervisedNodes, SupervisedNodesError};
 pub use task_nodes::{TaskNodeHandle, TaskNodes, TaskNodesError};
+pub use team_proposal::TeamProposalSink;
 pub use wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
 pub mod search;
 pub use search::{IndexableItem, MetaSearchEngine, MetaSearchError};

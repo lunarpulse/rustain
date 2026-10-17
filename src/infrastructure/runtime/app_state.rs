@@ -120,6 +120,10 @@ pub struct AppState {
     /// the build lacks `a2a` or the workspace configured no peers.
     #[cfg(feature = "a2a")]
     pub a2a_send: Option<std::sync::Arc<crate::adapters::a2a::driver::A2aDelegationRuntime>>,
+    #[cfg(feature = "a2a")]
+    pub team_proposals: Option<
+        Arc<crate::infrastructure::runtime::team_proposal_bridge::StandaloneTeamProposalSink>,
+    >,
 }
 
 impl AppState {
@@ -182,6 +186,8 @@ impl AppState {
                 patch_resolve: None,
                 #[cfg(feature = "a2a")]
                 a2a_send: None,
+                #[cfg(feature = "a2a")]
+                team_proposals: None,
             },
             domain_rx,
         )

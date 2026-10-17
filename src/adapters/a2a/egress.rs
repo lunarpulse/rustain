@@ -113,8 +113,15 @@ impl A2aEgress {
         Ok(Self { provider, runtime })
     }
 
-    pub fn install(&self, composite: &CompositeToolsetAdapter) {
+    pub fn install(
+        &self,
+        composite: &CompositeToolsetAdapter,
+        proposal_sink: Option<Arc<dyn crate::domain::ports::TeamProposalSink>>,
+    ) {
         composite.set_a2a_provider(self.provider.clone() as Arc<dyn CapabilityProvider>);
+        composite.set_team_proposal_tool(Arc::new(
+            super::team_proposal_tool::TeamProposalTool::new(self.runtime.clone(), proposal_sink),
+        ));
     }
 
     pub fn provider(&self) -> &Arc<A2aProvider> {
@@ -661,6 +668,7 @@ mod item_capability_tests {
             content_hash: None,
             endpoint: endpoint.map(str::to_owned),
             action: None,
+            authorship: crate::domain::models::ReplyAuthorship::Unknown,
         }
     }
 
