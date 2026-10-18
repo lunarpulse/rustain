@@ -495,8 +495,11 @@ fn slash_room_is_routed_as_an_execute_command_not_a_missing_custom_command() {
     }
 }
 
-/// The chord is real, not a `Noop`, and it is lower-case so `lookup_chord`
-/// (which lowercases) can actually find it.
+/// Input-routing guard: the chord is real, not a `Noop`, and it is lower-case
+/// so `lookup_chord` (which lowercases) can actually find it. This stops at the
+/// action; `tests_tui/test_story_19_21e_panel_paths.py` drives actual Ctrl+X R
+/// and `/room` through the production root and paints durable rows in both
+/// Monitor/Sidebar and Dashboard configurations.
 #[test]
 fn ctrl_x_r_dispatches_the_durable_room_panel() {
     use rustain::adapters::tui::app::{InputAction, handle_input};
@@ -560,6 +563,10 @@ fn the_room_surface_is_discoverable_with_its_chord_and_every_subverb() {
 /// `WorkspaceJournalReader`, folds it through the production
 /// `room_bridge::fold_room_read`, and renders the real widget into a real
 /// `Buffer`. Then asserts the pixels.
+///
+/// This is fold/widget coverage, not `event_loop::run` coverage. The populated
+/// native controls in `tests_tui/test_story_19_21e_panel_paths.py` separately
+/// exercise root dispatch and both production density-specific render routes.
 ///
 /// **Forbidden bypass, deliberately not used:** constructing an
 /// `OrchestrationRoom` in the test and calling the row renderer directly. That

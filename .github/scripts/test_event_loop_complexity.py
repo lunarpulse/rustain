@@ -60,6 +60,59 @@ fn after() { if true {} }
         self.assertEqual((report["start_line"], report["end_line"]), (3, 22),
                          "lexical function boundary mismatch")
 
+    def test_macro_lifetimes_and_labels_match_direct_rust_decisions(self):
+        definition = "macro_rules! pass { ($($tokens:tt)*) => { $($tokens)* }; }\n"
+        body = "let _: &'case str = value; 'case: loop { break 'case; }"
+        for decisions, extra in [
+            ({}, ""),
+            ({"if": 1, "match": 1}, "if true {} match value { _ => {} }"),
+        ]:
+            for wrapped in [False, True]:
+                with self.subTest(decisions=decisions, wrapped=wrapped):
+                    contents = body + extra
+                    if wrapped:
+                        contents = "pass! { " + contents + " }"
+                    report = self.measure(
+                        definition + "fn run<'case>(value: &'case str) { " + contents + " }")
+                    if report["decisions"] != decisions:
+                        self.fail(f"macro lifetime/label decision count mismatch: "
+                                  f"{report['decisions']} != {decisions}")
+                    self.assertEqual(report["ccn"], 1 + sum(decisions.values()),
+                                     "macro lifetime/label decision count mismatch")
+
+    def test_nested_macro_lifetime_words_do_not_hide_following_decisions(self):
+        source = r'''macro_rules! opaque { ($($tokens:tt)*) => {}; }
+fn run() {
+    opaque! {
+        &'case str;
+        'case: loop { break 'case; }
+        nested! { (&'catch str, &'where str, &'r#case str) }
+        ' /* if */ case: loop { break ' /* match */ case; }
+        &' // while
+        case str;
+        '?' ; '\''; "if for while && || ? catch case match where";
+        r###"if for while && || ? catch case match where"###;
+        r#if; r#case;
+        (&'case str; if true {})
+        [&'case str; for x in values {}]
+        { &'case str; while false {} }
+        &'case match value { _ => {} }
+        &'case catch &'case case &'case where
+        &'case && &'case || &'case ?
+    }
+}
+'''
+        report = self.measure(source)
+        decisions = {
+            "&&": 1, "?": 1, "case": 1, "catch": 1, "for": 1,
+            "if": 1, "match": 1, "where": 1, "while": 1, "||": 1,
+        }
+        if report["decisions"] != decisions:
+            self.fail(f"nested macro lifetime/label decision count mismatch: "
+                      f"{report['decisions']} != {decisions}")
+        self.assertEqual(report["ccn"], 11,
+                         "nested macro lifetime/label decision count mismatch")
+
     def test_multiline_signature_where_and_complete_function_identity(self):
         before = "// Unicode prefix: λ\nfn unrelated() {}\n"
         function = """pub async fn run<

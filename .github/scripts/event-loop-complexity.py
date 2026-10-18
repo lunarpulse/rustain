@@ -6,6 +6,11 @@ written cfg branch and unexpanded macro token tree is included. Closures/async
 blocks belong to run; nested function definitions do not. Literal/comment,
 lifetime and label contents are excluded. For legacy compatibility, an empty
 closure's || counts once, as do the historical reader's where/case/catch tokens.
+Inside macro token trees the pinned parser splits lifetimes/labels into an
+apostrophe and a word (including keyword words). Exclude only that next word,
+ignoring intervening comments, within the same token tree; never carry the
+apostrophe across another token or into a nested tree. This restores the same
+exclusions as structured Rust nodes without dropping following decisions.
 Numeric ratification lives in the architecture/story record, never in this CLI.
 """
 import argparse
@@ -79,7 +84,17 @@ def measure(source_path):
         if node.type == "closure_parameters" and node.text == b"||":
             counts["||"] += 1
             continue
-        if node.child_count:
+        if node.type == "token_tree":
+            after_apostrophe = False
+            for child in node.children:
+                if child.type in {"line_comment", "block_comment"}:
+                    continue
+                if after_apostrophe and child.text.decode("utf-8").removeprefix("r#").isidentifier():
+                    after_apostrophe = False
+                    continue
+                stack.append(child)
+                after_apostrophe = child.type == "'"
+        elif node.child_count:
             stack.extend(node.children)
         else:
             token = node.text.decode("utf-8")

@@ -39,6 +39,26 @@ budget **760**. The independent **11,487-line** hard ceiling remains binding. A 
 change requires its own `RATCHET-SIGNOFF: CONSTANT_NAME — rationale; reviewer`
 in the commit range or PR body; an unrelated or partial approval is insufficient.
 
+Lifetime/label words are excluded both in parsed Rust and inside unexpanded macro
+token trees, where the pinned grammar splits the apostrophe from its identifier.
+The adapter ignores intervening comments and only that identifier; following
+decision tokens still count. Combined macro fixtures protect both exclusions
+and real decisions without changing the ratified algorithm or constants.
+
+The native root-path controls seed a private durable journal, then drive real
+Room/Artifacts chords and slash commands in both Sidebar and Dashboard density:
+
+```sh
+python -m pytest tests_tui/test_story_19_21e_panel_paths.py \
+  -o addopts= -o reruns=0 -p no:rerunfailures
+```
+
+Use the installed `tests_tui` development environment; set `RUSTAIN_TUI_BINARY`
+to exercise a specific build without fallback. The E17/E18 negative controls
+omit each awaited root panel dispatch and must lose the seeded rows, not merely
+fail a title assertion or a setup/build step. These replace the removed
+implementation-text pins.
+
 ---
 
 ## What CI runs vs. what you run locally

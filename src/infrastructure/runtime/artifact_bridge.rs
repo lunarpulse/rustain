@@ -97,10 +97,9 @@ fn acting_principal() -> AgentId {
 
 /// One-call shell for the `/artifacts` dispatch arm.
 ///
-/// `pub` so the front-door keystone drives the exact callee the
-/// `InputAction::ExecuteCommand` dispatch arm calls (event_loop.rs), with a
-/// real `AppState` — the arm line itself stays pinned by the structural
-/// ratchet.
+/// `pub` so the Rust front-door keystone drives this callee with a real
+/// `AppState`. Native `test_story_19_21e_panel_paths.py` controls also drive the
+/// root slash/chord dispatch and populated Sidebar/Dashboard rendering.
 pub async fn artifacts_command(
     state: &mut TuiState,
     conversation_id: &str,

@@ -131,8 +131,8 @@ pub enum PanelType {
     ///
     /// Same reasoning as [`Self::Room`] for being a `PanelType`: the sidebar
     /// render dispatch matches it exhaustively, so a missed site fails to
-    /// compile. ⚠ The **dashboard** dispatch has a `_` arm and does not — that
-    /// site is hand-written and pinned by a structural ratchet.
+    /// compile. The dashboard dispatch has a `_` arm; native panel-path tests
+    /// observe populated rows through both production rendering routes.
     Artifacts,
 }
 

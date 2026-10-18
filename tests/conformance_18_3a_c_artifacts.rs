@@ -5,11 +5,11 @@
 //! (`domain/ports/capability_provider.rs`) fails the **default** lane for an
 //! unlisted `tests/*a2a*.rs`.
 //!
-//! Every visual AC carries two layers, per the peer-policy addendum's
-//! two-layer rule: a behavioural test through the real handler/render state
-//! **and** a structural ratchet pinning the real dispatch arm. A constructed-row
-//! renderer test alone is the false-green that recipe exists to prevent
-//! (`DF-CR-14-3a-1`).
+//! Visual ACs combine handler/fold/widget conformance here with native PTY root
+//! coverage in `tests_tui/test_story_19_21e_panel_paths.py`. The native tests
+//! drive the real chords and slash commands through `event_loop::run`, loading
+//! populated durable journals in Sidebar and Dashboard densities. Constructed
+//! renderer state alone cannot prove that composition path (`DF-CR-14-3a-1`).
 
 use rustain::domain::models::{
     AgentId, ArtifactId, ArtifactKind, ArtifactRef, CapabilityTokenId, ContentHash,
@@ -599,11 +599,12 @@ fn the_artifact_commands_route_as_execute_commands_not_missing_custom_commands()
     }
 }
 
-/// **AC3 fourth mutant's guard.** The chord is real, not a `Noop`, and it is
+/// **AC3 input-routing guard.** The chord is real, not a `Noop`, and it is
 /// lower-case so `lookup_chord` (which lowercases) can find it.
 ///
-/// A command-only keystone is GREEN against a deleted `InputAction::OpenPanel`
-/// arm, so the chord must be driven too.
+/// This test stops at `InputAction::OpenPanel`. The native
+/// `test_artifacts_chord_renders_durable_rows` drives the production binary
+/// through the root awaited dispatch and both density-specific render routes.
 #[test]
 fn ctrl_x_e_dispatches_the_artifacts_panel() {
     use rustain::adapters::tui::app::{InputAction, handle_input};
@@ -675,8 +676,8 @@ fn the_artifact_surface_is_discoverable_with_its_chord_and_every_subverb() {
 /// artifact, its lineage, and the honest "as of" header — in both the sidebar
 /// width and the wide Dashboard width.
 ///
-/// Third mutant (fold with bare `project()`): covered structurally above; the
-/// host line here is what a reader checks.
+/// This fold/widget test checks the host line and lineage. The native PTY
+/// controls separately prove that both production render routes reach it.
 #[test]
 fn the_panel_renders_every_kind_with_real_lineage_at_both_densities() {
     let mut evidence = artifact('a', ArtifactKind::Evidence, "spoke-1");
@@ -745,20 +746,16 @@ fn the_panel_renders_every_kind_with_real_lineage_at_both_densities() {
     );
 }
 
-/// **AC3 keystone (a), behavioural, through the named front door.** Real
-/// input text → real `InputAction::ExecuteCommand` → the exact dispatch-arm
-/// callee (`artifact_bridge::artifacts_command`, the one function the
-/// `event_loop.rs` arm invokes) with a real `AppState` → a painted buffer, at
-/// **both** production densities (the sidebar arm and the Dashboard arm call
-/// the same `artifacts_panel::render`; both call sites are pinned by the
-/// structural ratchet above).
+/// **AC3 bridge/widget keystone.** Real input text → real
+/// `InputAction::ExecuteCommand` → the exact dispatch-arm callee
+/// (`artifact_bridge::artifacts_command`) with a real `AppState` → a painted
+/// buffer at the production Sidebar and Dashboard widths.
 ///
-/// ⛔ What this deliberately still does NOT drive: `event_loop::run` itself.
-/// Its input branch reads a real TTY via `crossterm::EventStream`, and the
-/// end-to-end bus→TUI harness that could feed it does not exist
-/// (`DF-CR-14-4a-6`). The two `else if cmd_name == …` lines inside `run` are
-/// the only code on the path this test cannot execute, and they are covered by
-/// the structural ratchet — everything downstream of them runs here for real.
+/// This deliberately does NOT drive `event_loop::run`: it invokes the bridge
+/// directly and paints the widget, so it cannot detect an omitted root call or
+/// render arm. `tests_tui/test_story_19_21e_panel_paths.py` supplies that native
+/// boundary proof with populated journals, actual Ctrl+X E and `/artifacts`
+/// input, and real Monitor/Sidebar and Dashboard configuration.
 ///
 /// Mutants this turns RED: a broken bridge wiring (journal reader or policy
 /// source detached from `AppState`), a dispatch callee that never folds, and a
@@ -1313,9 +1310,9 @@ async fn the_verdict_verb_appends_durably_and_moves_the_row_on_the_next_fold() {
 /// The seam-level round trip above proves the gated write; this proves the
 /// operator can REACH it — command parsing, `AppState` composition, warning
 /// delivery, and the post-verdict refold all run here for real. Same
-/// `event_loop::run` caveat as the AC3 front-door keystone: the two dispatch
-/// lines inside `run` are TTY-bound (`DF-CR-14-4a-6`) and stay pinned by the
-/// structural ratchet.
+/// `event_loop::run` caveat as the AC3 front-door keystone: this test bypasses
+/// the root `/artifact` dispatch. Native panel-path controls cover populated
+/// `/artifacts` rendering, not the verdict verb's root dispatch.
 #[tokio::test]
 async fn the_verdict_command_reaches_the_journal_through_the_real_dispatch_path() {
     use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
