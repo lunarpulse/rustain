@@ -198,6 +198,15 @@ impl ProposalFixture {
         let paint =
             rustain::adapters::tui::widgets::team_proposal_card::CardView::from_state(&self.state)
                 .prepare(&mut layout, area, &self.state.theme);
+        self.state.team_proposal_scroll_max = paint.as_ref().map_or(0, |card| card.scroll_max());
+        self.state.team_proposal_scroll = self
+            .state
+            .team_proposal_scroll
+            .min(self.state.team_proposal_scroll_max);
+        self.state.team_proposal_viewport_rows =
+            paint.as_ref().map_or(0, |card| card.viewport_rows());
+        self.state.team_proposal_footer_visible =
+            paint.as_ref().is_some_and(|card| card.footer_visible());
         self.state.team_proposal_visible =
             rustain::adapters::tui::widgets::team_proposal_card::render(
                 paint,

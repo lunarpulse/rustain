@@ -91,6 +91,7 @@ pub fn render_to_string_ext(
             liveness,
             None, // open_prose
             None, // current_focus
+            None,
         );
     });
     use ratatui::buffer::Buffer;

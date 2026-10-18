@@ -9357,6 +9357,7 @@ fn render(
                         liveness_ref,
                         open_prose_ref,
                         state.focused_tool_id.as_deref(),
+                        state.active_feedback_id.as_deref(),
                     );
                     content_height = result.total_content_height;
                     block_bounds = result.block_boundaries;
@@ -9466,6 +9467,10 @@ fn render(
                         );
                     }
                 }
+                state.team_proposal_scroll_max = card.as_ref().map_or(0, |card| card.scroll_max());
+                state.team_proposal_scroll = state.team_proposal_scroll.min(state.team_proposal_scroll_max);
+                state.team_proposal_viewport_rows = card.as_ref().map_or(0, |card| card.viewport_rows());
+                state.team_proposal_footer_visible = card.as_ref().is_some_and(|card| card.footer_visible());
                 state.team_proposal_visible = team_proposal_card::render(card, frame.buffer_mut(), theme);
                 // Story 10.5: render delegation suggestion card as a centered popup over chat pane
                 if let Some(ref card) = state.pending_delegation_card {

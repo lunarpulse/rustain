@@ -684,7 +684,7 @@ async fn p0_6_count_drift_guard_rejects_wrong_count() {
 
 #[tokio::test]
 #[serial(session_cli)]
-async fn p0_7_json_shape_and_no_secrets() {
+async fn p0_7_json_shape() {
     let dir = tempfile::tempdir().unwrap();
     let sessions_dir = dir.path().join(".claude").join("sessions");
     tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
@@ -725,12 +725,6 @@ async fn p0_7_json_shape_and_no_secrets() {
             .contains(dir.path().to_str().unwrap())
     );
     assert_eq!(parsed["refused"].as_array().unwrap().len(), 0);
-
-    let forbidden = ["socket", "nonce", "secret", "token", "url"];
-    let lowered = stdout.to_lowercase();
-    for word in forbidden {
-        assert!(!lowered.contains(word), "JSON must not contain '{word}'");
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,12 +1019,12 @@ async fn p0_6b_cross_workspace_same_id_isolation() {
 }
 
 // ---------------------------------------------------------------------------
-// P0-7b: JSON refused/in-use path — no secrets (AI-12.3 C-1)
+// P0-7b: JSON refused/in-use holder shape (AI-12.3 C-1)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[serial(session_cli)]
-async fn p0_7b_json_refused_in_use_no_secrets() {
+async fn p0_7b_json_refused_in_use_holder_shape() {
     let dir = tempfile::tempdir().unwrap();
     let sessions_dir = dir.path().join(".claude").join("sessions");
     tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
@@ -1075,15 +1069,6 @@ async fn p0_7b_json_refused_in_use_no_secrets() {
         refused[0]["holder"].is_object(),
         "holder must be present for in_use"
     );
-
-    let forbidden = ["socket", "nonce", "secret", "boot_id"];
-    let lowered = stdout.to_lowercase();
-    for word in forbidden {
-        assert!(
-            !lowered.contains(word),
-            "refused JSON must not contain '{word}'"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

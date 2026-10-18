@@ -1,0 +1,24 @@
+│   2026-10-18 08:20:06Z ? unknown ✓ item-acknowledged · peer│                  
+│   12200a026e4e3d20b00b28675d78b68a418a42bb026d008e6482dce174438b579ff3 ·│     
+│   task ri_19lCj4YjecB53N8jdJQ6hMv3wOA5oVNR · recipient item acknowledged by│  
+│   lena-po│                                                                    
+│   2026-10-18 08:20:33Z → outbound ↑ dispatched · peer│                        
+│   12200a026e4e3d20b00b28675d78b68a418a42bb026d008e6482dce174438b579ff3 ·│     
+│   task rustain-1792311633265905263-53affd6fa0c0f5ce · task dispatched to│     
+│   peer (542 bytes) [agent-composed]│                                          
+│   2026-10-18 08:20:33Z → outbound ↑ dispatched · peer│                        
+│   122043704f1d5bda02b961f7356b0901510f222b8514e96a9a0cd380337d8b318fb5 ·│     
+│   task rustain-1792311633265933926-00e5ebce61710086 · task dispatched to│     
+│   peer (542 bytes) [agent-composed]│                                          
+│   — append-only, crash-safe, structurally replayable (not payload- or│        
+│   provenance-authenticated); peer attribution is only as strong as the│       
+│   credential scheme that produced it│                                         
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

@@ -111,6 +111,8 @@ pub async fn proposal_ready(
         if state.team_proposal_conversation_id.as_deref() == Some(proposal.conversation_id.as_str())
         {
             state.team_proposal_visible = None;
+            state.team_proposal_scroll = 0;
+            state.team_proposal_scroll_max = 0;
         }
         state
             .pending_team_proposals
@@ -155,6 +157,8 @@ pub async fn synchronize_surface(
             .pending_team_proposals
             .retain(|id, _| open.contains(id.as_str()));
         state.team_proposal_visible = None;
+        state.team_proposal_scroll = 0;
+        state.team_proposal_scroll_max = 0;
         state.team_proposal_conversation_id = active_conversation_id.map(str::to_owned);
         state.team_proposal_surface_tab_count = tabs.tab_count();
         state.needs_redraw = true;
@@ -186,6 +190,8 @@ pub async fn withdraw_conversation(
     if state.team_proposal_conversation_id.as_deref() == Some(conversation_id) {
         state.team_proposal_withdrawal_pending |= retired || cached;
         state.team_proposal_visible = None;
+        state.team_proposal_scroll = 0;
+        state.team_proposal_scroll_max = 0;
         state
             .tab_render_state(state.active_tab_id)
             .team_proposal_reviews
@@ -210,6 +216,8 @@ pub async fn withdraw_all(
     }
     state.pending_team_proposals.clear();
     state.team_proposal_visible = None;
+    state.team_proposal_scroll = 0;
+    state.team_proposal_scroll_max = 0;
     state.team_proposal_surface_tab_count = 0;
     for render in state.tab_render_states.values_mut() {
         render.team_proposal_reviews.clear();
@@ -255,6 +263,17 @@ pub async fn proposal_action(
             stale(state);
             return;
         };
+        // Review belongs to the chat feedback surface, not the task/agent
+        // detail surface. Preserve unrelated confirmation state.
+        state.task_panel_state.drill_down_task = None;
+        state.task_panel_state.expanded_detail = false;
+        state.task_panel_state.detail_scroll_offset = 0;
+        state.agent_panel_state.drill_down_agent = None;
+        state.agent_panel_state.inspector_scroll_offset = 0;
+        state.focus = crate::domain::models::FocusState::Chat;
+        state.team_proposal_scroll = 0;
+        state.team_proposal_scroll_max = 0;
+        state.team_proposal_footer_visible = false;
         let block_id = format!("team-proposal-review-{proposal_id}");
         show_info(
             state,
@@ -271,12 +290,24 @@ pub async fn proposal_action(
         state.auto_snapshot = true;
         return;
     }
+    if decision == Some(crate::domain::models::TeamProposalDecision::Send)
+        && !state.team_proposal_footer_visible
+    {
+        show_info(
+            state,
+            "team-proposal-status",
+            "Scroll to the proposal decision footer before sending. Nothing was sent.".to_owned(),
+        );
+        return;
+    }
     let Some(proposal) = sink.take(conversation_id, proposal_id).await else {
         stale(state);
         return;
     };
     state.pending_team_proposals.remove(conversation_id);
     state.team_proposal_visible = None;
+    state.team_proposal_scroll = 0;
+    state.team_proposal_scroll_max = 0;
     state.needs_redraw = true;
     match decision.expect("review returned above") {
         crate::domain::models::TeamProposalDecision::Send => {

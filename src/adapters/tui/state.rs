@@ -2826,6 +2826,12 @@ pub struct TuiState {
         BTreeMap<String, std::sync::Arc<crate::domain::models::TeamProposal>>,
     pub team_proposal_conversation_id: Option<String>,
     pub team_proposal_visible: Option<std::sync::Arc<crate::domain::models::TeamProposal>>,
+    /// Top row of an overflowing proposal card; decisions stay behind its footer.
+    pub team_proposal_scroll: usize,
+    pub team_proposal_scroll_max: usize,
+    pub team_proposal_viewport_rows: usize,
+    /// Send is armed only by a paint of the decision footer.
+    pub team_proposal_footer_visible: bool,
     #[cfg(feature = "a2a")]
     pub team_proposal_surface_tab_count: usize,
     #[cfg(feature = "a2a")]
@@ -3202,6 +3208,10 @@ impl TuiState {
             pending_team_proposals: BTreeMap::new(),
             team_proposal_conversation_id: None,
             team_proposal_visible: None,
+            team_proposal_scroll: 0,
+            team_proposal_scroll_max: 0,
+            team_proposal_viewport_rows: 0,
+            team_proposal_footer_visible: false,
             #[cfg(feature = "a2a")]
             team_proposal_surface_tab_count: 0,
             #[cfg(feature = "a2a")]

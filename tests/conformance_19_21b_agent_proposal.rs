@@ -17,10 +17,16 @@ mod k02_matrix;
 mod k02_peer_context;
 #[path = "conformance_19_21b/k02_subagent.rs"]
 mod k02_subagent;
+#[path = "conformance_19_21b/k03_card_layout.rs"]
+mod k03_card_layout;
 #[path = "conformance_19_21b/k03_conversation.rs"]
 mod k03_conversation;
+#[path = "conformance_19_21b/k03_key_ownership.rs"]
+mod k03_key_ownership;
 #[path = "conformance_19_21b/k03_lifecycle.rs"]
 mod k03_lifecycle;
+#[path = "conformance_19_21b/k03_review.rs"]
+mod k03_review;
 #[path = "conformance_19_21b/k06_authorship.rs"]
 mod k06_authorship;
 #[path = "conformance_19_21b/k06_payload.rs"]

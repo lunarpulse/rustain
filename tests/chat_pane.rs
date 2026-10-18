@@ -806,6 +806,7 @@ fn focus_probe_with_view(
                 None, // liveness
                 None, // open_prose
                 current_focus,
+                None,
             );
             *out.borrow_mut() = (
                 result.focused_tool_id,

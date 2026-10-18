@@ -1409,6 +1409,26 @@ fn attached_display_input<'a>(state: &'a TuiState, input: &'a str) -> &'a str {
     crate::adapters::tui::handlers::recipient_actions::pending_composition(state).unwrap_or(input)
 }
 
+fn scroll_attached_transcript(
+    earlier: bool,
+    rows: u16,
+    streaming: bool,
+    offset: &mut usize,
+    auto_scroll: &mut bool,
+) {
+    let readable = rows.saturating_sub(u16::from(streaming)).max(1);
+    let step = usize::from(readable).min(5);
+    if earlier {
+        *offset = offset.saturating_add(step);
+        *auto_scroll = false;
+    } else {
+        *offset = offset.saturating_sub(step);
+        if *offset == 0 {
+            *auto_scroll = true;
+        }
+    }
+}
+
 /// Nearest production-path key seam: called before recipient/composer dispatch.
 /// Only a painted snapshot can decide; a nonempty composer owns its letters.
 #[allow(clippy::too_many_arguments)] // Attached loop owns separate composer/tab/socket state.
@@ -1452,6 +1472,36 @@ fn attached_proposal_key(
     if key.code == KeyCode::Enter {
         return true; // Enter is never a proposal decision.
     }
+    if state.team_proposal_scroll_max > 0
+        && key.kind == KeyEventKind::Press
+        && key.modifiers.is_empty()
+        && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+    {
+        let reviewing = tab
+            .team_proposal_reviews
+            .values()
+            .any(|review| Arc::ptr_eq(review, &proposal));
+        let at_boundary = if key.code == KeyCode::PageUp {
+            state.team_proposal_scroll == 0
+        } else {
+            state.team_proposal_scroll == state.team_proposal_scroll_max
+        };
+        if reviewing && at_boundary {
+            return false;
+        }
+        let step = state.team_proposal_viewport_rows.saturating_sub(1).max(1);
+        state.team_proposal_scroll = if key.code == KeyCode::PageUp {
+            state.team_proposal_scroll.saturating_sub(step)
+        } else {
+            state
+                .team_proposal_scroll
+                .saturating_add(step)
+                .min(state.team_proposal_scroll_max)
+        };
+        state.team_proposal_footer_visible = false;
+        state.needs_redraw = true;
+        return true;
+    }
     if !matches!(key.code, KeyCode::Char('y' | 'r' | 'n')) {
         return false;
     }
@@ -1459,6 +1509,9 @@ fn attached_proposal_key(
         return true;
     }
     if key.code == KeyCode::Char('r') {
+        state.team_proposal_scroll = 0;
+        state.team_proposal_scroll_max = 0;
+        state.team_proposal_footer_visible = false;
         let id = format!("team-proposal-review-{}", proposal.id);
         crate::adapters::tui::handlers::team_command::show_team_send(
             state,
@@ -1470,6 +1523,9 @@ fn attached_proposal_key(
         );
         tab.team_proposal_reviews.insert(id, proposal);
         state.needs_redraw = true;
+        return true;
+    }
+    if key.code == KeyCode::Char('y') && !state.team_proposal_footer_visible {
         return true;
     }
     let decision = if key.code == KeyCode::Char('y') {
@@ -1532,6 +1588,7 @@ fn prepare_attached_proposal(
         attached_display_input(state, input).is_empty(),
         reviewing,
     )
+    .with_scroll(state.team_proposal_scroll)
     .prepare(layout, area, &state.theme)
 }
 
@@ -1565,6 +1622,8 @@ fn apply_attached_proposal_frame(
                 }),
             );
             state.team_proposal_visible = None;
+            state.team_proposal_scroll = 0;
+            state.team_proposal_scroll_max = 0;
         }
         DaemonFrame::TeamProposalClosed { proposal, outcome } => {
             state
@@ -1576,6 +1635,8 @@ fn apply_attached_proposal_frame(
                 .is_some_and(|pending| pending.id == proposal)
             {
                 state.team_proposal_visible = None;
+                state.team_proposal_scroll = 0;
+                state.team_proposal_scroll_max = 0;
             }
             if outcome == TeamProposalCloseOutcome::Withdrawn {
                 tab.team_proposal_reviews
@@ -2208,6 +2269,10 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     layout.chat_pane,
                 );
             }
+            state.team_proposal_scroll_max = proposal_card.as_ref().map_or(0, |card| card.scroll_max());
+            state.team_proposal_scroll = state.team_proposal_scroll.min(state.team_proposal_scroll_max);
+            state.team_proposal_viewport_rows = proposal_card.as_ref().map_or(0, |card| card.viewport_rows());
+            state.team_proposal_footer_visible = proposal_card.as_ref().is_some_and(|card| card.footer_visible());
             visible_proposal = crate::adapters::tui::widgets::team_proposal_card::render(
                 proposal_card, f.buffer_mut(), &state.theme,
             );
@@ -2482,15 +2547,14 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                     auto_scroll = true;
                                 }
                             }
-                            (KeyCode::PageUp, _) => {
-                                scroll_offset = scroll_offset.saturating_add(usize::from(state.viewport_height).clamp(1, 5));
-                                auto_scroll = false;
-                            }
-                            (KeyCode::PageDown, _) => {
-                                scroll_offset = scroll_offset.saturating_sub(usize::from(state.viewport_height).clamp(1, 5));
-                                if scroll_offset == 0 {
-                                    auto_scroll = true;
-                                }
+                            (KeyCode::PageUp | KeyCode::PageDown, _) => {
+                                scroll_attached_transcript(
+                                    key.code == KeyCode::PageUp,
+                                    state.viewport_height,
+                                    streaming.is_streaming,
+                                    &mut scroll_offset,
+                                    &mut auto_scroll,
+                                );
                             }
                             (KeyCode::Char(_), m) if !m.contains(KeyModifiers::CONTROL) => {
                                 if state.recipient_surface.is_some() {
@@ -2726,6 +2790,9 @@ mod tests {
             input: String,
             tx: mpsc::UnboundedSender<ClientFrame>,
             rx: mpsc::UnboundedReceiver<ClientFrame>,
+            scroll_offset: usize,
+            auto_scroll: bool,
+            streaming: StreamingState,
         }
 
         impl Surface {
@@ -2738,6 +2805,9 @@ mod tests {
                     input: String::new(),
                     tx,
                     rx,
+                    scroll_offset: 0,
+                    auto_scroll: true,
+                    streaming: StreamingState::default(),
                 };
                 surface.frame(DaemonFrame::TeamProposal {
                     proposal: "tp_attached".into(),
@@ -2759,7 +2829,7 @@ mod tests {
             }
 
             fn key(&mut self, code: KeyCode, higher: bool, read_only: bool) -> bool {
-                attached_proposal_key(
+                let consumed = attached_proposal_key(
                     KeyEvent::new(code, KeyModifiers::NONE),
                     higher,
                     read_only,
@@ -2768,7 +2838,18 @@ mod tests {
                     &mut self.tab,
                     &mut self.requests,
                     &self.tx,
-                )
+                );
+                if !consumed && matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
+                    scroll_attached_transcript(
+                        code == KeyCode::PageUp,
+                        self.state.viewport_height,
+                        self.streaming.is_streaming,
+                        &mut self.scroll_offset,
+                        &mut self.auto_scroll,
+                    );
+                    return true;
+                }
+                consumed
             }
 
             fn paint(&mut self, width: u16, height: u16, higher: bool, read_only: bool) -> String {
@@ -2804,9 +2885,9 @@ mod tests {
                             frame,
                             layout.chat_pane,
                             &Conversation::default(),
-                            &StreamingState::default(),
-                            0,
-                            true,
+                            &self.streaming,
+                            self.scroll_offset,
+                            self.auto_scroll,
                             &self.state.theme,
                             &mut self.tab,
                             &HashMap::new(),
@@ -2824,6 +2905,17 @@ mod tests {
                             0,
                             None,
                         );
+                        self.state.viewport_height = layout.chat_pane.height;
+                        self.state.team_proposal_scroll_max =
+                            card.as_ref().map_or(0, |card| card.scroll_max());
+                        self.state.team_proposal_scroll = self
+                            .state
+                            .team_proposal_scroll
+                            .min(self.state.team_proposal_scroll_max);
+                        self.state.team_proposal_viewport_rows =
+                            card.as_ref().map_or(0, |card| card.viewport_rows());
+                        self.state.team_proposal_footer_visible =
+                            card.as_ref().is_some_and(|card| card.footer_visible());
                         visible = crate::adapters::tui::widgets::team_proposal_card::render(
                             card,
                             frame.buffer_mut(),
@@ -2926,6 +3018,92 @@ mod tests {
                     self.input.is_empty(),
                     "successful reply settlement must leave the composer genuinely empty"
                 );
+            }
+        }
+
+        #[test]
+        fn attached_overflow_proposal_pages_before_authorizing_send() {
+            let mut surface = Surface::new("body");
+            surface.frame(DaemonFrame::TeamProposal {
+                proposal: "tp_attached".into(),
+                recipients: (0..12)
+                    .map(|index| format!("member-{index:02}-dev"))
+                    .collect(),
+                message_type: SemanticMessageType::ArchitectureUpdate,
+                body: "Exact attached overflow body.".into(),
+            });
+            let first = surface.paint(60, 16, false, false);
+            assert!(first.contains("PgUp/PgDn"), "{first}");
+            assert!(surface.key(KeyCode::Char('y'), false, false));
+            assert!(
+                surface.rx.try_recv().is_err(),
+                "hidden footer must not authorize Send"
+            );
+            while surface.state.team_proposal_scroll < surface.state.team_proposal_scroll_max {
+                assert!(surface.key(KeyCode::PageDown, false, false));
+                if surface.state.team_proposal_scroll == surface.state.team_proposal_scroll_max {
+                    assert!(surface.key(KeyCode::Char('y'), false, false));
+                    assert!(
+                        surface.rx.try_recv().is_err(),
+                        "paging must paint the footer before Send"
+                    );
+                }
+                surface.paint(60, 16, false, false);
+            }
+            let last = surface.paint(60, 16, false, false);
+            assert!(last.contains("[n] Dismiss"), "{last}");
+            surface.assert_send();
+        }
+
+        #[test]
+        fn attached_overflow_review_paging_reaches_the_complete_body() {
+            let live_text = (0..60)
+                .map(|index| format!("LIVE_STREAM_{index}"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            for stream in [None, Some(String::new()), Some(live_text)] {
+                let body = (0..30)
+                    .map(|index| format!("REVIEW_ROW_{index:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut surface = Surface::new(&body);
+                surface.streaming.is_streaming = stream.is_some();
+                surface.streaming.current_text_buffer = stream.unwrap_or_default();
+                surface.frame(DaemonFrame::TeamProposal {
+                    proposal: "tp_attached".into(),
+                    recipients: (0..12)
+                        .map(|index| format!("member-{index:02}-dev"))
+                        .collect(),
+                    message_type: SemanticMessageType::ArchitectureUpdate,
+                    body,
+                });
+                surface.paint(60, 16, false, false);
+                assert!(surface.key(KeyCode::Char('r'), false, false));
+                let mut pages = vec![surface.paint(60, 16, false, false)];
+                for _ in 0..20 {
+                    assert!(surface.key(KeyCode::PageUp, false, false));
+                    pages.push(surface.paint(60, 16, false, false));
+                }
+                for index in 0..30 {
+                    assert!(
+                        pages
+                            .iter()
+                            .any(|page| page.contains(&format!("REVIEW_ROW_{index:02}"))),
+                        "full Review row {index} is inaccessible: {pages:#?}"
+                    );
+                }
+                assert!(
+                    surface.rx.try_recv().is_err(),
+                    "Review paging must never send"
+                );
+                assert!(surface.key(KeyCode::Char('n'), false, false));
+                assert!(matches!(
+                    surface.rx.try_recv().unwrap(),
+                    ClientFrame::TeamProposalDecision {
+                        decision: TeamProposalDecision::Dismiss,
+                        ..
+                    }
+                ));
             }
         }
 

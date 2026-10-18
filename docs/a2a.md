@@ -221,12 +221,21 @@ tool-approval request or insert text into the composer. There is one pending pro
 conversation. A second raise cannot replace it. Without an interactive approval
 surface, the tool refuses rather than parking a draft for later delivery.
 
-With an empty composer, **y** sends exactly that snapshot, **r** opens its full,
-delimited Review, and **n** dismisses it. Review supports scrolling and the same
-explicit Send or Dismiss decision. Enter and Escape never send. With text in the
-composer, y/r/n remain text input; higher-priority approval prompts keep their
-keys. Clearing or closing the conversation withdraws its draft without peer I/O.
-Switching to another conversation does not approve or retarget the pending card.
+With an empty composer, **y** sends exactly that snapshot once its decision footer
+has been painted, **r** opens its full, delimited Review, and **n** dismisses it.
+Enter and Escape never send. With text in the composer, y/r/n remain text input;
+higher-priority approval prompts and large-image confirmations keep their keys.
+A tool peek takes its dismissing key before any proposal decision; Ctrl+R still
+opens composer history search. Clearing or closing the conversation withdraws its
+draft without peer I/O. Switching conversations never approves or retargets it.
+
+Long recipient lists remain complete and scrollable, including at 60×16. Use
+**PgUp/PgDn** to page an overflowing card; Send stays disabled until the decision
+footer is in view. In Review, paging at a card boundary continues through the
+full transcript body. Review selects the current proposal even when older Review
+blocks remain, returns from task/agent detail to the conversation, and preserves
+the tab bar and readable transcript space. It sends nothing. After reviewing in
+Chat focus, **i** returns to the composer.
 
 YOLO, AutoEdit, session or saved tool grants, subagent auto-approval and selected
 peer context never authorize this Send decision. Plan mode and carried agent or

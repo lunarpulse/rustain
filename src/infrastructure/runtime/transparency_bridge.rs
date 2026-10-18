@@ -3322,8 +3322,14 @@ mod credential_tests {
     #[tokio::test]
     async fn a_send_to_a_closed_port_settles_unreachable_without_a_cause_line() {
         let fixture = PeerFixture::plaintext().await;
+        // Keep discovery live while the advertised POST port stays exclusively
+        // bound but non-listening; cancelling a server is not a closed-port fence.
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved.bind(([127, 0, 0, 1], 0).into()).unwrap();
+        fixture
+            .serve_endpoint(&format!("http://{}/", reserved.local_addr().unwrap()))
+            .await;
         let harness = Harness::compose(vec![peer("gone", &fixture.origin)]).await;
-        drop(fixture);
 
         let outcome = harness.send("gone", "hello").await;
         assert_eq!(outcome, RecipientOutcome::Unreachable { cause: None });

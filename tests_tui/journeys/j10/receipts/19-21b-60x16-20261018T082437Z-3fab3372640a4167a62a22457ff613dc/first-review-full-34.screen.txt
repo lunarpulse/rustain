@@ -1,0 +1,16 @@
+│   not select it│                                          
+│ ⚠ ← inbound ✓ accepted · peer│                            
+│   12203355eda4aea8472908ac9b9ae7ff987433a7666d8ab81b507e│ 
+╔══════════════════════════════════════════════════════════╗
+║Your agent proposes a message. Nothing has been sent. Aw  ║
+║aiting your decision.                                     ║
+║To: lena-po, jun-dev                                      ║
+║Type: architecture_update                                 ║
+║… more not shown — [r] Review first                       ║
+║[y] Send to lena-po, jun-dev   [r] Review first   [n] Di  ║
+║smiss                                                     ║
+╚══════════════════════════════════════════════════════════╝
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready  log: 5
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -386,7 +386,7 @@ pub enum InputAction {
     ScrollToTop,
     /// `G` — jump to bottom (Following mode) or no-op when Pinned. AC3
     ScrollToBottom,
-    /// Mouse wheel scroll event. AC4
+    /// Explicit line-count scrolling from mouse input or a compact proposal Review.
     MouseScroll(crate::domain::models::view_state::ScrollDelta),
     /// Legacy `j` — scroll one line down. Migrated from direct mutation. AC7
     ScrollLineDown,
@@ -501,6 +501,8 @@ pub(crate) fn proposal_higher_confirmation_active(state: &TuiState) -> bool {
         || state.pending_skill_trust.is_some()
         || state.pending_plan_approval.is_some()
         || state.pending_spawn_gate.is_some()
+        || state.pending_large_image.is_some()
+        || state.tool_block_states.values().any(|tbs| tbs.peek_active)
         || matches!(state.focus, FocusState::Overlay(_))
 }
 
@@ -549,7 +551,9 @@ pub(crate) fn recipient_surface_ignores_raw_key(
         && let Event::Key(key) = event
         && matches!(key.code, KeyCode::Char('y' | 'r' | 'n'))
     {
-        return key.kind != KeyEventKind::Press || !key.modifiers.is_empty();
+        return key.kind != KeyEventKind::Press
+            || (!key.modifiers.is_empty()
+                && !(key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('r')));
     }
     if recipient_higher_confirmation_active(state) {
         return false;
@@ -1148,6 +1152,9 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         && let Some(proposal) = visible_team_proposal(state)
     {
         use crate::domain::models::TeamProposalDecision;
+        if c == 'y' && !state.team_proposal_footer_visible {
+            return InputAction::Consumed;
+        }
         let decision = match c {
             'y' => Some(TeamProposalDecision::Send),
             'r' => None,
@@ -2037,6 +2044,47 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             for tbs in state.tool_block_states.values_mut() {
                 tbs.peek_active = false;
             }
+            state.needs_redraw = true;
+            return InputAction::Consumed;
+        }
+    }
+
+    #[cfg(feature = "a2a")]
+    if matches!(key, DomainKey::PageUp | DomainKey::PageDown)
+        && state.input_buffer.is_empty()
+        && let Some(proposal) = visible_team_proposal(state)
+    {
+        let reviewing = state
+            .tab_render_states
+            .get(&state.active_tab_id)
+            .is_some_and(|tab| {
+                tab.team_proposal_reviews
+                    .values()
+                    .any(|review| std::sync::Arc::ptr_eq(review, proposal))
+            });
+        let at_boundary = if key == DomainKey::PageUp {
+            state.team_proposal_scroll == 0
+        } else {
+            state.team_proposal_scroll == state.team_proposal_scroll_max
+        };
+        if reviewing && at_boundary {
+            let step = state.viewport_height.saturating_sub(1).max(1);
+            let delta = if key == DomainKey::PageUp {
+                crate::domain::models::view_state::ScrollDelta::WheelUp(step)
+            } else {
+                crate::domain::models::view_state::ScrollDelta::WheelDown(step)
+            };
+            return InputAction::MouseScroll(delta);
+        }
+        if state.team_proposal_scroll_max > 0 {
+            let step = state.team_proposal_viewport_rows.saturating_sub(1).max(1);
+            state.team_proposal_scroll = if key == DomainKey::PageUp {
+                state.team_proposal_scroll.saturating_sub(step)
+            } else {
+                state.team_proposal_scroll.saturating_add(step)
+            }
+            .min(state.team_proposal_scroll_max);
+            state.team_proposal_footer_visible = false;
             state.needs_redraw = true;
             return InputAction::Consumed;
         }

@@ -49,6 +49,51 @@ fn feedback_lines(
     feedback_block::render_feedback_lines(block, width, theme)
 }
 
+fn legacy_streaming_lines(
+    streaming: &StreamingState,
+    width: usize,
+    theme: &Theme,
+) -> ([Option<Line<'static>>; 2], Vec<Line<'static>>) {
+    let has_error = streaming.current_blocks.contains(&ContentBlockType::Error);
+    let mut prefix = [None, None];
+    if streaming.current_text_buffer.is_empty() && !has_error {
+        prefix[0] = Some(Line::from(Span::styled(
+            "···",
+            Style::default().fg(theme.colors.fg_muted),
+        )));
+        return (prefix, Vec::new());
+    }
+    prefix[0] = Some(Line::from(Span::styled(
+        "Assistant:",
+        Style::default()
+            .fg(theme.colors.fg_secondary)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let prose = if streaming.current_text_buffer.is_empty() {
+        prefix[1] = Some(Line::from(Span::styled(
+            "Error occurred during streaming",
+            Style::default().fg(theme.colors.error),
+        )));
+        Vec::new()
+    } else {
+        let mut prose = markdown::render(
+            &streaming.current_text_buffer,
+            width,
+            theme,
+            &markdown::RenderOptions::default(),
+        );
+        if has_error {
+            for line in &mut prose {
+                for span in &mut line.spans {
+                    span.style = Style::default().fg(theme.colors.error);
+                }
+            }
+        }
+        prose
+    };
+    (prefix, prose)
+}
+
 /// Result of rendering the chat pane, including boundary data for navigation.
 pub struct RenderResult {
     pub total_content_height: usize,
@@ -1423,6 +1468,7 @@ pub fn render(
         None, // liveness
         None, // open_prose
         None, // current_focus (test-only wrapper; keystones use render_with_search)
+        None, // active_feedback_id
     )
 }
 
@@ -1514,6 +1560,7 @@ pub fn render_with_search(
     // Story 19.9 A3: `state.focused_tool_id` from the caller. See
     // `find_focused_tool_id` for the rule this feeds.
     current_focus: Option<&str>,
+    active_feedback_id: Option<&str>,
 ) -> RenderResult {
     render_with_search_impl(
         frame,
@@ -1538,7 +1585,7 @@ pub fn render_with_search(
         open_prose,
         current_focus,
         false,
-        None,
+        active_feedback_id,
     )
 }
 
@@ -1872,6 +1919,20 @@ fn render_with_search_impl(
         }
     }
 
+    // Attached streaming belongs to the same height model and clipped range as feedback.
+    let (legacy_prefix, legacy_body) = if open_turn.is_none() && streaming.is_streaming {
+        legacy_streaming_lines(streaming, width, theme)
+    } else {
+        ([None, None], Vec::new())
+    };
+    let legacy_height = legacy_prefix.iter().flatten().count() + legacy_body.len();
+    if legacy_height > 0 {
+        if cumulative_offset > 0 {
+            cumulative_offset += spacing;
+        }
+        cumulative_offset += legacy_height;
+    }
+
     // Feedback block contribution
     let feedback_pre_height: usize = if !feedback_blocks.is_empty() {
         let pre_spacing = if cumulative_offset > 0 { spacing } else { 0 };
@@ -2188,82 +2249,27 @@ fn render_with_search_impl(
         }
     }
 
-    // Legacy streaming fallback: when open_turn is None but streaming is
-    // active, render the old streaming indicator so pre-S16.4 tests and
-    // edge-case render-without-turns calls keep working.
-    // TODO(S16.10-cleanup): delete this block alongside StreamingState.
-    if open_turn.is_none() && streaming.is_streaming {
-        if !conversation.messages.is_empty() {
+    if legacy_height > 0 {
+        if line_offset > 0 {
             let spacing_end = line_offset + spacing;
             if spacing_end > visible_start && line_offset < visible_end {
-                let start = if line_offset >= visible_start {
-                    0
-                } else {
-                    visible_start - line_offset
-                };
+                let start = visible_start.saturating_sub(line_offset);
                 let end = spacing.min(visible_end.saturating_sub(line_offset));
-                for _ in start..end {
-                    lines.push(Line::from(""));
-                }
+                lines.extend((start..end).map(|_| Line::from("")));
             }
             line_offset += spacing;
         }
-        if streaming.current_text_buffer.is_empty() {
-            if streaming.current_blocks.contains(&ContentBlockType::Error) {
-                lines.push(Line::from(Span::styled(
-                    "Assistant:",
-                    Style::default()
-                        .fg(theme.colors.fg_secondary)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::from(Span::styled(
-                    "Error occurred during streaming",
-                    Style::default().fg(theme.colors.error),
-                )));
-            } else {
-                lines.push(Line::from(Span::styled(
-                    "···",
-                    Style::default().fg(theme.colors.fg_muted),
-                )));
-            }
-        } else {
-            lines.push(Line::from(Span::styled(
-                "Assistant:",
-                Style::default()
-                    .fg(theme.colors.fg_secondary)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            let has_error = streaming.current_blocks.contains(&ContentBlockType::Error);
-            if has_error {
-                let content_lines = crate::adapters::tui::markdown::render(
-                    &streaming.current_text_buffer,
-                    width,
-                    theme,
-                    &crate::adapters::tui::markdown::RenderOptions::default(),
-                );
-                for text_line in content_lines {
-                    let styled: Vec<Span<'_>> = text_line
-                        .spans
-                        .into_iter()
-                        .map(|s| {
-                            Span::styled(
-                                s.content.to_string(),
-                                Style::default().fg(theme.colors.error),
-                            )
-                        })
-                        .collect();
-                    lines.push(Line::from(styled));
-                }
-            } else {
-                let parsed_lines = crate::adapters::tui::markdown::render(
-                    &streaming.current_text_buffer,
-                    width,
-                    theme,
-                    &crate::adapters::tui::markdown::RenderOptions::default(),
-                );
-                lines.extend(parsed_lines);
-            }
-        }
+        let start = visible_start.saturating_sub(line_offset).min(legacy_height);
+        let end = visible_end.saturating_sub(line_offset).min(legacy_height);
+        lines.extend(
+            legacy_prefix
+                .into_iter()
+                .flatten()
+                .chain(legacy_body)
+                .skip(start)
+                .take(end.saturating_sub(start)),
+        );
+        line_offset += legacy_height;
     }
 
     // Feedback blocks at bottom
@@ -3495,6 +3501,7 @@ mod parts_aware_tests {
                     None, // liveness
                     None, // open_prose
                     None, // current_focus
+                    None, // active_feedback_id
                 );
             })
             .unwrap();
@@ -3531,6 +3538,7 @@ mod parts_aware_tests {
                     None, // liveness
                     None, // open_prose
                     None, // current_focus
+                    None, // active_feedback_id
                 );
             })
             .unwrap();
@@ -3569,6 +3577,7 @@ mod parts_aware_tests {
                     None, // liveness
                     None, // open_prose
                     None, // current_focus
+                    None, // active_feedback_id
                 );
             })
             .unwrap();
