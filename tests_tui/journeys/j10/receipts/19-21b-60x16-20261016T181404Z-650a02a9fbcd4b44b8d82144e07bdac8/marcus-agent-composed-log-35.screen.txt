@@ -1,0 +1,16 @@
+│   t-cnVzdGFpbi0xNzkyMTc0NDQ1Nzc0OTMyMTc2LTcxMmYxYmY5NDM4│ 
+│   Y2U3Zjc · peer interaction recorded · notification│     
+│   immediate│                                              
+│     response: notify-and-wait · via individual —│         
+│   a2a-interaction.toml│                                   
+│     notification: immediate · via individual —│           
+│   a2a-interaction.toml│                                   
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

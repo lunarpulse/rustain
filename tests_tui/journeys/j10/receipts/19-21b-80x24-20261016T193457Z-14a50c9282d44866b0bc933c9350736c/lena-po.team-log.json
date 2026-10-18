@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "structural_replay": "append-only, crash-safe, structurally replayable (not payload- or provenance-authenticated)",
+  "attribution": "peer attribution is only as strong as the credential scheme that produced it",
+  "structurally_consistent": true,
+  "divergence": null,
+  "export_path": null,
+  "export_rows": null,
+  "rows": [
+    {
+      "seq": 2,
+      "recorded_at_ms": 1792179299199,
+      "direction": "outbound",
+      "kind": "dispatched",
+      "peer": "122017e7de3fa2c5ec719f5246677a9a958a0819227a10574040f5207af699c0ae99",
+      "task": "rustain-1792179299199410331-d93a3a38e2d96018",
+      "summary": "task dispatched to peer (254 bytes)",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 9,
+      "recorded_at_ms": 1792179328603,
+      "direction": "inbound",
+      "kind": "awaiting-approval",
+      "peer": "122017e7de3fa2c5ec719f5246677a9a958a0819227a10574040f5207af699c0ae99",
+      "task": "rustain-1792179328548890148-b76c5e37eda942c7",
+      "summary": "task parked awaiting operator approval",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 10,
+      "recorded_at_ms": 1792179328794,
+      "direction": "inbound",
+      "kind": "item-received",
+      "peer": "122017e7de3fa2c5ec719f5246677a9a958a0819227a10574040f5207af699c0ae99",
+      "task": "ri_epxg9GMYt72ARQFKBPkFhV1FIPGPa7do",
+      "summary": "recipient item received",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 11,
+      "recorded_at_ms": 1792179328805,
+      "direction": "inbound",
+      "kind": "accepted",
+      "peer": "122017e7de3fa2c5ec719f5246677a9a958a0819227a10574040f5207af699c0ae99",
+      "task": "rustain-1792179328548890148-b76c5e37eda942c7",
+      "summary": "task accepted and executing",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 12,
+      "recorded_at_ms": 1792179328811,
+      "direction": "inbound",
+      "kind": "surfaced",
+      "peer": "122017e7de3fa2c5ec719f5246677a9a958a0819227a10574040f5207af699c0ae99",
+      "task": "a2a-in/p-cGVlcjoxMjIwMTdlN2RlM2ZhMmM1ZWM3MTlmNTI0NjY3N2E5YTk1OGEwODE5MjI3YTEwNTc0MDQwZjUyMDdhZjY5OWMwYWU5OQ/t-cnVzdGFpbi0xNzkyMTc5MzI4NTQ4ODkwMTQ4LWI3NmM1ZTM3ZWRhOTQyYzc",
+      "summary": "peer interaction recorded · notification immediate",
+      "response_clause": "response: notify-and-wait · via individual — a2a-interaction.toml",
+      "notification_clause": "notification: immediate · via individual — a2a-interaction.toml"
+    }
+  ]
+}

@@ -82,6 +82,93 @@ retained historical scene bytes versus latest drift and the two exact historical
 stamp exceptions plus adjacent nonexceptions; fixtures are not runtime evidence.
 The checker asserts internal consistency, not authenticated-journal provenance.
 
+### Executing conflict-flag capture (Story 19.21h)
+
+The original `19-21b` scene names are retained. Run from the product checkout with
+an explicit four-feature release; the driver uses that same binary for every host
+and client, with `build=False` and short per-run `/tmp` workspaces. The existing
+`openssl` executable is required for ephemeral local TLS and synthetic pinned
+Ed25519 identities. Certificate verification stays enabled; each observing proxy
+has its own trusted-CA context. No provider account or sibling checkout is needed.
+
+```sh
+openssl version
+cargo build --locked --release --features self-update,relay-server,a2a,p2p
+# Supply a new manifest path and an independent intended-run token for each
+# native invocation; preserve both unchanged for the subsequent controls.
+export RUSTAIN_TUI_BINARY="$PWD/target/release/rustain"
+export RUSTAIN_CONFLICT_CAPTURE_RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+export RUSTAIN_CONFLICT_RECEIPT_MANIFEST="$PWD/conflict-run-manifests/$RUSTAIN_CONFLICT_CAPTURE_RUN_ID.json"
+env -u RUSTAIN_TUI_CLIENT_BINARY \
+  RUSTAIN_CAPTURE_EVIDENCE_DIR="$PWD/conflict-capture-evidence" \
+  python3 -m pytest \
+  'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[80x24]' \
+  'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[130x30]' \
+  'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[60x16]' \
+  -p no:rerunfailures -n 0 --timeout=420 --junitxml=conflict-native-results.xml -v
+
+RUSTAIN_RECEIPT_EVIDENCE_DIR="$PWD/conflict-receipt-evidence" \
+  python3 -m pytest tests_tui/test_story_19_21b_receipt_controls.py \
+  -p no:rerunfailures -n 0 --timeout=120 --junitxml=conflict-integrity-results.xml -v
+```
+
+Require exactly three native viewports and nine independent scene/source/stamp
+controls, with no skip/failure/error. Each integrity leg checks its current genuine
+receipt, a corrupted copy and the byte-restored original through the canonical
+command above. Successful native runs alone mint
+`journeys/j10/receipts/<run>/story-19-21b-conflict-flag-<stamp>.transcript.txt`;
+failed runs retain diagnostics without a success transcript.
+
+The manifest path and intended-run token above are mandatory, not hints. The
+native session creates the path exclusively and records the exact selected width
+scope, actual binary SHA256, and every runtime source path/hash (all `src/**`
+files, Cargo manifest/lock, optional `build.rs`, native driver, scene, shared
+manifest helper, imported Act1 journal/navigation helpers, standalone HTTP
+observer, terminal harness and its keys, pytest setup, and the scene-provider
+package/implementation). Changes to an imported observation oracle invalidate
+earlier captures just like Rust source changes; additions, deletions and byte
+drift invalidate selection.
+The canonical checker is deliberately outside this runtime-source fingerprint so
+semantic checker mutations reach the real consumer.
+Source symlinks are refused because the full mutation snapshot omits them.
+
+Only after each capture's required teardown and retention succeeds do its
+original and optional exported staged copies become finalized receipts. The
+exported bytes must match the original, and both final names must be published
+before the run index is committed with the contained product-relative path and
+byte hash. Export or index publication failure rolls back this run's final
+names, never another run's receipt. CI's transcript allowlist therefore retains
+the finalized export rather than an unuploaded `.staged` file.
+A partial native selection may finish its own manifest,
+but cannot supply the controls: they require all three widths from one complete
+explicitly selected run, the independently intended token, unchanged source and
+binary bytes, and every indexed finalized receipt. Missing, stale, partial,
+drifted or uncontained evidence is a prerequisite failure; historical files are
+never searched or substituted.
+
+For a mutation freeze, the selected manifest, finalized receipts and an identical
+copy of the captured binary must be inside the product tree in snapshot-included
+paths (not `target`, `.git`, `.venv` or another executor-excluded directory).
+Point `RUSTAIN_TUI_BINARY` at that identical contained copy before loading the
+mutation specs. M38 validates these real inputs while authoring its frozen
+command and translates the manifest and binary to `{repo}`-relative paths; it
+never inherits the owner's absolute paths. M37 creates a fresh phase-local
+manifest and independent token from its unique `{junit}` path.
+
+The real sequence covers arrival, explicit View/Acknowledge/context, an
+operator-started model ToolUse, full Review, human Send, both attributed recipient
+cards, a fresh board and sender-local `[agent-composed]` log, then a second
+spoof-body proposal dismissed with zero peer/journal effects. Painted Unicode is
+compared by equivalent graphemes; HTTP and journal text remain byte-exact. Raw
+UTF-8 SHA256 and the product's canonical-JSON-string content hash are distinct.
+This capture does not close J10 or add recipient authorship or policy authority.
+
+The dedicated CI job selects those exact case IDs, rejects zero/skip/failure/error
+and always uploads only named JUnit files, identity/checkpoint/HTTP/scene ledgers,
+painted screens, public team logs, genuine transcripts, the exact selected run
+manifest and the three integrity JSON diagnostics. It never uploads fixture keys,
+homes, environment or a whole temporary/repository tree.
+
 ## Architecture
 
 ```

@@ -1,0 +1,30 @@
+│   attempted just now · 2 addressed│                                                                                             
+│     ● lena-po  delivered│                                                                                                       
+│       item ri_rBt_BOBdiXYwu7siRUz3lMR3l1uvjMx- · arrival 1 · task rustain-1792179458799211127-bec64680b9eda958 · received│      
+│     ● jun-dev  delivered│                                                                                                       
+│       item ri_m7MdNgQ22hZMP2u4fvUmbSaLI98voHv7 · arrival 1 · task rustain-1792179458799234711-c053533c0b9325cd · received│      
+│ ℹ 2026-10-16 19:37:07Z ← inbound ⏸ awaiting-approval · peer│                                                                    
+│   12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 · task rustain-1792179427889994790-b28a8016f521054b ·│   
+│   task parked awaiting operator approval│                                                                                       
+│   2026-10-16 19:37:08Z ← inbound ↓ item-received · peer 12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 ·│ 
+│   task ri_uET7MdJE1brxSkXN2S69OJO-tAHo6ITU · recipient item received│                                                           
+│   2026-10-16 19:37:08Z ← inbound ✓ accepted · peer 12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 · task│ 
+│   rustain-1792179427889994790-b28a8016f521054b · task accepted and executing│                                                   
+│   2026-10-16 19:37:08Z ← inbound ! surfaced · peer 12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 · task│ 
+│   a2a-in/p-cGVlcjoxMjIwN2VhMDA2Zjc3YzI4M2NmYTUyNTE2ZTNkNGE0OTBmYTM3MmU4YTE0MzBhNDI0Y2NiZDBkNjI4Zjg1NzVhYmVjMQ/t-cnVzdGFpbi0xNz│ 
+│   kyMTc5NDI3ODg5OTk0NzkwLWIyOGE4MDE2ZjUyMTA1NGI · peer interaction recorded · notification immediate│                           
+│     response: notify-and-wait · via individual — a2a-interaction.toml│                                                          
+│     notification: immediate · via individual — a2a-interaction.toml│                                                            
+│   2026-10-16 19:37:09Z ? unknown ✓ item-acknowledged · peer│                                                                    
+                             ╔══════════════════════════════════════════════════════════════════════╗                             
+                             ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+                             ║decision.                                                             ║                             
+                             ║To: lena-po, jun-dev                                                  ║                             
+                             ║Type: architecture_update                                             ║                             
+                             ║… more not shown — [r] Review first                                   ║                             
+                             ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║                             
+                             ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,17 @@
+[
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 1
+  },
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 2
+  },
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 3
+  }
+]

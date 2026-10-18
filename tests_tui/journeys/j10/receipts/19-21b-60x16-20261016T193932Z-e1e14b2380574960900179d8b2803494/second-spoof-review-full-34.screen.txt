@@ -1,0 +1,16 @@
+│   - jun-dev│                                              
+│   (122027339e78a38fc060c363f52222dabc0d7ddc5cc7f35b75195│ 
+│   f84eaa8c40c06dd): not granted│                          
+╔══════════════════════════════════════════════════════════╗
+║Your agent proposes a message. Nothing has been sent. Aw  ║
+║aiting your decision.                                     ║
+║To: lena-po, jun-dev                                      ║
+║Type: architecture_update                                 ║
+║… more not shown — [r] Review first                       ║
+║[y] Send to lena-po, jun-dev   [r] Review first   [n] Di  ║
+║smiss                                                     ║
+╚══════════════════════════════════════════════════════════╝
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,30 @@
+│ Retain the peer-tainted context boundary.                                                                                       
+│ Review is local; only an operator may Send.                                                                                     
+│ Preserve ordered recipients and exact UTF-8 bytes.                                                                              
+│ Résumé: preserve naïve input and é.                                                                                             
+│ Decision: persist the row before showing its card.                                                                              
+│ ℹ     lena-po  awaiting their approval│                                                                                         
+│       jun-dev  awaiting their approval│                                                                                         
+│ ℹ Team interaction policy│                                                                                                      
+│   Response mode: notify-and-wait│                                                                                               
+│   Notification urgency: immediate│                                                                                              
+│   Peers:│                                                                                                                       
+│   - jun-dev (1220362e44fd19f4d0260aa6aee0c69ce1de4f65ac3e32d9424d8cda4b43bb27249f): not granted│                                
+│   - lena-po (122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a): not granted│                                
+│ ⚠ ← inbound ✓ accepted · peer 122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a · task│                      
+│   rustain-1792175033813660984-2146eacb275c7833 · task accepted and executing│                                                   
+Proposed message (not sent) · architecture_update                                                                                 
+To: lena-po, jun-dev                                                                                                              
+│ To: spoof-recipient                                                                                                             
+                             ╔══════════════════════════════════════════════════════════════════════╗                             
+                             ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+                             ║decision.                                                             ║                             
+                             ║To: lena-po, jun-dev                                                  ║                             
+                             ║Type: architecture_update                                             ║                             
+                             ║… more not shown — [r] Review first                                   ║                             
+                             ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║                             
+                             ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

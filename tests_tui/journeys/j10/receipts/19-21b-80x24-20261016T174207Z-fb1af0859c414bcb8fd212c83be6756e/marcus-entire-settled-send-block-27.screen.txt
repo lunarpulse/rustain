@@ -1,0 +1,24 @@
+[terminal] ⤷ System:                                                            
+— session start — · Earlier sessions not loaded                                 
+                                                                                
+                                                                                
+                                                                                
+[terminal] You:                                                                 
+┆  story_assignment ·                                                           
+┆  1220c2757eedec54298e347af443bfe699767d79053349f7c5adc0705d112bc602b0         
+┆  STORY-047: publish the received card before persisting its row.              
+┆  Jun owns implementation; Marcus checks the architecture.                     
+┆  Acceptance: an arriving item is visible before its durable append.           
+┆  Please identify conflicts with ADR-047; do not send automatically.           
+┆  response: notify-and-wait · via individual — a2a-interaction.toml            
+┆  notification: immediate · via individual — a2a-interaction.toml              
+                                                                                
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                      log: 7
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

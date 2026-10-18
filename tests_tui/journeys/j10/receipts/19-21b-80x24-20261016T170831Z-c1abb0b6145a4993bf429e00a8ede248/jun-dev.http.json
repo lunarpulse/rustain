@@ -1,0 +1,7 @@
+[
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 1
+  }
+]

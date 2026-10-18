@@ -1,0 +1,24 @@
+                                                                                
+                                                                                
+│ ℹ item ri_94_8OZ4B-_M6PBawVBxZwDkxt2ZeE9Qr selected as peer context for this│ 
+│   daemon conversation — clears on /clear or daemon restart; view and│         
+│   acknowledgement do not select it│                                           
+│ ⚠ ← inbound ✓ accepted · peer│                                                
+│   1220c2757eedec54298e347af443bfe699767d79053349f7c5adc0705d112bc602b0 ·│     
+│   task rustain-1792172529052451572-507a65d627feb68a · task accepted and│      
+Proposed message (not sent) · architecture_update                               
+To: lena-po, jun-dev                                                            
+│ ADR-047 conflict: publication races persistence.                              
+│ The assignment publishes before durable append.                               
+    ╔══════════════════════════════════════════════════════════════════════╗    
+    ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║    
+    ║decision.                                                             ║    
+    ║To: lena-po, jun-dev                                                  ║    
+    ║Type: architecture_update                                             ║    
+    ║… more not shown — [r] Review first                                   ║    
+    ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║    
+    ╚══════════════════════════════════════════════════════════════════════╝    
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                      log: 5
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

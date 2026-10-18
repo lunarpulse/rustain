@@ -1,0 +1,16 @@
+│   · received│                                             
+│     ● jun-dev  delivered│                                 
+│       item ri_eTPRbnfZ3GwzPhDOBjlM0gE7o4oHr2yo · arrival│ 
+│   1 · task rustain-1792175199871446274-dc9c26ce121d31e1│  
+│   · received│                                             
+Proposed message (not sent) · architecture_update           
+To: lena-po, jun-dev                                        
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

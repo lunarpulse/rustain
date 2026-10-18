@@ -1,0 +1,30 @@
+│     ● jun-dev  delivered│                                                                                                       
+│       item ri_FucFDxHbFKCuDXwBoDXjybiR1QUlWK62 · arrival 1 · task rustain-1792175064604362372-6aeb08cd5a7c852f · received│      
+│ ℹ 2026-10-16 18:23:53Z ← inbound ⏸ awaiting-approval · peer│                                                                    
+│   122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a · task rustain-1792175033813660984-2146eacb275c7833 ·│   
+│   task parked awaiting operator approval│                                                                                       
+│   2026-10-16 18:23:54Z ← inbound ↓ item-received · peer 122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a ·│ 
+│   task ri_KT5SGRnsAFtCNMnt6U2hCYSEpVoE1UTH · recipient item received│                                                           
+│   2026-10-16 18:23:54Z ← inbound ✓ accepted · peer 122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a · task│ 
+│   rustain-1792175033813660984-2146eacb275c7833 · task accepted and executing│                                                   
+│   2026-10-16 18:23:54Z ← inbound ! surfaced · peer 122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a · task│ 
+│   a2a-in/p-cGVlcjoxMjIwNTVhM2FlMjI2YmMyMzBjNzBjNGVhMzI2MWUxYmU0NTdhODI0ZGJlYmFkYzJhOWU0NjAwODhhZmQyMTA0NDIwYQ/t-cnVzdGFpbi0xNz│ 
+│   kyMTc1MDMzODEzNjYwOTg0LTIxNDZlYWNiMjc1Yzc4MzM · peer interaction recorded · notification immediate│                           
+│     response: notify-and-wait · via individual — a2a-interaction.toml│                                                          
+│     notification: immediate · via individual — a2a-interaction.toml│                                                            
+│   2026-10-16 18:23:55Z ? unknown ✓ item-acknowledged · peer│                                                                    
+│   122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a · task ri_KT5SGRnsAFtCNMnt6U2hCYSEpVoE1UTH · recipient│  
+│   item acknowledged by lena-po│                                                                                                 
+│   2026-10-16 18:24:24Z → outbound ↑ dispatched · peer 122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a ·│   
+│   task rustain-1792175064604319142-c7ed0b84226db050 · task dispatched to peer (542 bytes) [agent-composed]│                     
+│   2026-10-16 18:24:24Z → outbound ↑ dispatched · peer 1220362e44fd19f4d0260aa6aee0c69ce1de4f65ac3e32d9424d8cda4b43bb27249f ·│   
+│   task rustain-1792175064604362372-6aeb08cd5a7c852f · task dispatched to peer (542 bytes) [agent-composed]│                     
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                                                                      │
+│Peer is waiting for your response.                                                                                              │
+│[Tab] Item actions                                                                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

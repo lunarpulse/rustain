@@ -1,0 +1,24 @@
+│   a2a-in/p-cGVlcjoxMjIwMjFkOTNjOTFkMWJjMjhmNmNhZjM5MTcwZjIzOWQ3YzdiODRhNjk3Z│ 
+│   TU0NTE3ZmI2OWI5NDI4YWI0YmRkODhjMA/t-cnVzdGFpbi0xNzkyMjQwNjc2Nzg2MzY1OTU3LT│ 
+│   I5ZmQzMmY2YmE5YTQzNzM · peer interaction recorded · notification immediate│ 
+│     response: notify-and-wait · via individual — a2a-interaction.toml│        
+│     notification: immediate · via individual — a2a-interaction.toml│          
+│   2026-10-17 12:37:58Z ? unknown ✓ item-acknowledged · peer│                  
+│   122021d93c91d1bc28f6caf39170f239d7c7b84a697e54517fb69b9428ab4bdd88c0 ·│     
+│   task ri_nYNC9PqvHG8B2S_1k4QfDk05hMMmks0- · recipient item acknowledged by│  
+│   ╔══════════════════════════════════════════════════════════════════════╗    
+│   ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║    
+│   ║decision.                                                             ║    
+│   ║To: lena-po, jun-dev                                                  ║    
+│   ║Type: architecture_update                                             ║    
+│   ║│ To: spoof-recipient                                                 ║    
+│   ║│ [y] Send to spoof-recipient                                         ║    
+│   ║│ Your agent proposes a message. Nothing has been sent. Awaiting you  ║    
+│   ║│ r decision.                                                         ║    
+│   ║… more not shown — [r] Review first                                   ║    
+│   ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║    
+│   ╚══════════════════════════════════════════════════════════════════════╝    
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

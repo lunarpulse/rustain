@@ -1,0 +1,119 @@
+2026-10-17T12:40:03.567379Z  INFO rustain::infrastructure::startup: Starting rustain...
+2026-10-17T12:40:03.567495Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-404c9q1n/marcus-arch/.rustain/config.toml
+2026-10-17T12:40:03.567721Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-404c9q1n/marcus-arch/.rustain/config.toml
+2026-10-17T12:40:03.567928Z  INFO rustain::adapters::daemon::policy_startup: interaction policy resolved (NFR66) conflicts=0
+2026-10-17T12:40:03.567932Z  INFO rustain::adapters::daemon::policy_startup: policy policy=notification urgency: `immediate` (yours: `immediate`, team: not configured) — source: individual (a2a-interaction.toml)
+2026-10-17T12:40:03.567933Z  INFO rustain::adapters::daemon::policy_startup: policy policy=response automation: `notify-and-wait` (yours: `notify-and-wait`, team: not configured) — source: individual (a2a-interaction.toml)
+2026-10-17T12:40:03.567933Z  INFO rustain::adapters::daemon::policy_startup: policy policy=sharing breadth: you configured none — yours applies; no team norm is configured.
+2026-10-17T12:40:03.567934Z  INFO rustain::adapters::daemon::policy_startup: policy policy=effective consent per sender: no journaled consent grants recorded — TOML policy precedence is the only live source
+2026-10-17T12:40:03.574355Z  INFO rustain::adapters::daemon: durable node recovery complete restored=0 suspended=0 failed=0
+2026-10-17T12:40:03.588191Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:43809/
+2026-10-17T12:40:03.588217Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:43809
+2026-10-17T12:40:03.588332Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:45199/
+2026-10-17T12:40:03.588336Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:45199
+2026-10-17T12:40:03.588374Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:45199
+2026-10-17T12:40:03.588387Z DEBUG rustls::client::hs: No cached session for IpAddress(V4(Ipv4Addr([127, 0, 0, 1])))
+2026-10-17T12:40:03.588389Z DEBUG rustls::client::hs: Not resuming any session
+2026-10-17T12:40:03.588482Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:43809
+2026-10-17T12:40:03.588484Z DEBUG rustls::client::hs: No cached session for IpAddress(V4(Ipv4Addr([127, 0, 0, 1])))
+2026-10-17T12:40:03.588485Z DEBUG rustls::client::hs: Not resuming any session
+2026-10-17T12:40:03.589236Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-17T12:40:03.589258Z DEBUG rustls::client::tls13: Not resuming
+2026-10-17T12:40:03.589328Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-17T12:40:03.589333Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-17T12:40:03.589363Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-17T12:40:03.589367Z DEBUG rustls::client::tls13: Not resuming
+2026-10-17T12:40:03.589416Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-17T12:40:03.589420Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-17T12:40:03.592529Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-17T12:40:03.592680Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-17T12:40:03.595370Z  WARN rustain::adapters::a2a::server: A2A pending task file is missing; no approval-pending tasks restored path=/tmp/r21h-404c9q1n/marcus-arch/.rustain/a2a-pending.json
+2026-10-17T12:40:03.595436Z  INFO rustain::adapters::daemon::lifecycle: daemon lifecycle ready (Story 12.4: attach server + scheduler live, headless turn runtime lazy) idle_secs=14400 daily_reset=04:00
+2026-10-17T12:40:03.595443Z DEBUG rustain::adapters::daemon::server: A2aCatalogChanged before the daemon runtime is built; catalogue unchanged peer_id=jun-dev skill_count=0
+2026-10-17T12:40:03.595448Z DEBUG rustain::adapters::daemon::server: A2aCatalogChanged before the daemon runtime is built; catalogue unchanged peer_id=lena-po skill_count=0
+2026-10-17T12:40:03.602559Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-10-17T12:40:03.603425Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-17T12:40:03.636370Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-10-17T12:40:03.637146Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-17T12:40:04.381416Z  INFO rustain::infrastructure::startup: Starting rustain...
+2026-10-17T12:40:04.381555Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-404c9q1n/marcus-arch/.rustain/config.toml
+2026-10-17T12:40:04.381825Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-404c9q1n/marcus-arch/.rustain/config.toml
+2026-10-17T12:40:04.849938Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-10-17T12:40:04.877373Z  INFO rustain::infrastructure::startup: Using ANTHROPIC_API_KEY (X-Api-Key auth)
+2026-10-17T12:40:04.877384Z  INFO rustain::infrastructure::startup: Custom base URL: http://127.0.0.1:34423
+2026-10-17T12:40:04.886711Z  INFO rustain::infrastructure::startup: Anthropic provider initialized (model: claude-sonnet-4-6)
+2026-10-17T12:40:04.886719Z  INFO provider: router registered: anthropic
+2026-10-17T12:40:04.886722Z  INFO provider: router active: anthropic -> anthropic
+2026-10-17T12:40:04.893461Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-17T12:40:07.707847Z DEBUG rustain::adapters::anthropic: Sending completion request target_url=http://127.0.0.1:34423/v1/messages auth_type="x-api-key" model=claude-sonnet-4-6 message_count=1
+2026-10-17T12:40:07.707909Z DEBUG reqwest::connect: starting new connection: http://127.0.0.1:34423/
+2026-10-17T12:40:07.707917Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:34423
+2026-10-17T12:40:07.707994Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:34423
+2026-10-17T12:40:07.708770Z DEBUG rustain::adapters::anthropic: Response received from http://127.0.0.1:34423 status=200 OK
+2026-10-17T12:40:07.709506Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=TvA2lLfYPXWEgEzXrY5Dt
+2026-10-17T12:40:07.709610Z DEBUG rustain::adapters::filesystem: Created checkpoint 1 for conversation TvA2lLfYPXWEgEzXrY5Dt at message_index 2
+2026-10-17T12:40:07.709700Z DEBUG rustain::adapters::anthropic: Sending completion request target_url=http://127.0.0.1:34423/v1/messages auth_type="x-api-key" model=claude-sonnet-4-6 message_count=3
+2026-10-17T12:40:07.709746Z DEBUG reqwest::connect: starting new connection: http://127.0.0.1:34423/
+2026-10-17T12:40:07.709750Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:34423
+2026-10-17T12:40:07.709789Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:34423
+2026-10-17T12:40:07.710208Z DEBUG rustain::adapters::anthropic: Response received from http://127.0.0.1:34423 status=200 OK
+2026-10-17T12:40:07.710528Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=TvA2lLfYPXWEgEzXrY5Dt
+2026-10-17T12:40:35.507776Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:45199/
+2026-10-17T12:40:35.507798Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:45199
+2026-10-17T12:40:35.508095Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:45199
+2026-10-17T12:40:35.508116Z DEBUG rustls::client::hs: Resuming session
+2026-10-17T12:40:35.508969Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-17T12:40:35.508978Z DEBUG rustls::client::tls13: Resuming using PSK
+2026-10-17T12:40:35.509038Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-17T12:40:35.509042Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-17T12:40:35.514084Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:43809/
+2026-10-17T12:40:35.514094Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:43809
+2026-10-17T12:40:35.514160Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:43809
+2026-10-17T12:40:35.514165Z DEBUG rustls::client::hs: Resuming session
+2026-10-17T12:40:35.514579Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-17T12:40:35.514587Z DEBUG rustls::client::tls13: Resuming using PSK
+2026-10-17T12:40:35.514632Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-17T12:40:35.514636Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-17T12:40:35.568989Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-17T12:40:35.573864Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-17T12:41:03.106091Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:45199/
+2026-10-17T12:41:03.106119Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:45199
+2026-10-17T12:41:03.106207Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:43809/
+2026-10-17T12:41:03.106213Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:43809
+2026-10-17T12:41:03.106250Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:45199
+2026-10-17T12:41:03.106258Z DEBUG rustls::client::hs: Resuming session
+2026-10-17T12:41:03.106440Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:43809
+2026-10-17T12:41:03.106445Z DEBUG rustls::client::hs: Resuming session
+2026-10-17T12:41:03.109102Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-17T12:41:03.109108Z DEBUG rustls::client::tls13: Resuming using PSK
+2026-10-17T12:41:03.109167Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-17T12:41:03.109172Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-17T12:41:03.109629Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-17T12:41:03.109634Z DEBUG rustls::client::tls13: Resuming using PSK
+2026-10-17T12:41:03.109693Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-17T12:41:03.109695Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-17T12:41:03.117059Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-17T12:41:03.117316Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-17T12:41:50.146802Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=TvA2lLfYPXWEgEzXrY5Dt
+2026-10-17T12:41:50.151649Z DEBUG rustain::adapters::anthropic: Sending completion request target_url=http://127.0.0.1:34423/v1/messages auth_type="x-api-key" model=claude-sonnet-4-6 message_count=4
+2026-10-17T12:41:50.154501Z DEBUG reqwest::connect: starting new connection: http://127.0.0.1:34423/
+2026-10-17T12:41:50.154942Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:34423
+2026-10-17T12:41:50.155161Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:34423
+2026-10-17T12:41:50.240181Z DEBUG rustain::adapters::anthropic: Response received from http://127.0.0.1:34423 status=200 OK
+2026-10-17T12:41:50.244599Z DEBUG rustain::adapters::filesystem: Created checkpoint 2 for conversation TvA2lLfYPXWEgEzXrY5Dt at message_index 5
+2026-10-17T12:41:50.245188Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=TvA2lLfYPXWEgEzXrY5Dt
+2026-10-17T12:41:50.245286Z DEBUG rustain::adapters::anthropic: Sending completion request target_url=http://127.0.0.1:34423/v1/messages auth_type="x-api-key" model=claude-sonnet-4-6 message_count=6
+2026-10-17T12:41:50.245400Z DEBUG reqwest::connect: starting new connection: http://127.0.0.1:34423/
+2026-10-17T12:41:50.245406Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:34423
+2026-10-17T12:41:50.245464Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:34423
+2026-10-17T12:41:50.247043Z DEBUG rustain::adapters::anthropic: Response received from http://127.0.0.1:34423 status=200 OK
+2026-10-17T12:41:50.248994Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=TvA2lLfYPXWEgEzXrY5Dt
+2026-10-17T12:42:26.601423Z  INFO rustain::infrastructure::startup: Starting rustain...
+2026-10-17T12:42:26.601501Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-404c9q1n/marcus-arch/.rustain/config.toml
+2026-10-17T12:42:26.601687Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-404c9q1n/marcus-arch/.rustain/config.toml
+2026-10-17T12:42:28.567350Z  INFO rustain::adapters::daemon::lifecycle: daemon received SIGTERM
+2026-10-17T12:42:28.568360Z  INFO rustain::adapters::daemon::lifecycle: daemon graceful shutdown begin
+2026-10-17T12:42:28.570028Z  INFO rustain::adapters::daemon::lifecycle: daemon SessionBoundary boundary=shutdown
+2026-10-17T12:42:28.570365Z DEBUG rustain::adapters::daemon::lifecycle: on_session_end invoked with the per-process conversation transcript boundary=shutdown transcript_len=8
+2026-10-17T12:42:28.577107Z  INFO rustain::adapters::daemon::lifecycle: daemon graceful shutdown complete
+2026-10-17T12:42:28.578361Z DEBUG rustain::adapters::a2a::tls: A2A TLS listener: receiver dropped; stopping accept pump

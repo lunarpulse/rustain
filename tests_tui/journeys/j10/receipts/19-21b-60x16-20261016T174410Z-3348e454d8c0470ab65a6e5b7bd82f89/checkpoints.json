@@ -1,0 +1,50 @@
+[
+  {
+    "name": "boot-discovery-and-attachment-complete",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 0
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 0
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 0
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 0
+    }
+  }
+]

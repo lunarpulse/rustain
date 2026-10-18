@@ -1,0 +1,24 @@
+│   Notification urgency: immediate│                                            
+│   Peers:│                                                                     
+│   - jun-dev│                                                                  
+│   (1220edf5392e0ef58645b788cc296d3217c0a87b8287268db59f0c8322b502432b46):│    
+│   not granted│                                                                
+│   - lena-po│                                                                  
+│   (12207583b39d93e2ed1f5eb5886b7bbbb1c7706becce58cbc20493c2915b13cd7605):│    
+│   not granted│                                                                
+│ ⚠ ← inbound ✓ accepted · peer│                                                
+│   12207583b39d93e2ed1f5eb5886b7bbbb1c7706becce58cbc20493c2915b13cd7605 ·│     
+│   task rustain-1792174905834184677-9b2c2509f6d34d8a · task accepted and│      
+│ ℹ 2026-10-16 18:21:45Z ← inbound ⏸ awaiting-approval · peer│                  
+│   12207583b39d93e2ed1f5eb5886b7bbbb1c7706becce58cbc20493c2915b13cd7605 ·│     
+│   task rustain-1792174905834184677-9b2c2509f6d34d8a · task parked awaiting│   
+│   operator approval│                                                          
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

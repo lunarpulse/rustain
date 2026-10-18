@@ -1,0 +1,16 @@
+│   parked awaiting operator approval│                      
+│   2026-10-17 12:42:31Z ← inbound ↓ item-received · peer│  
+│   12208318f53e54a040062d7d810e54240148d13dde5441044521b2│ 
+│   1d5316547caca0 · task│                                  
+│   ri_aS70EM65VP78flov77ML4oV0F8DCKmCH · recipient item│   
+│   received│                                               
+│   2026-10-17 12:42:31Z ← inbound ✓ accepted · peer│       
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

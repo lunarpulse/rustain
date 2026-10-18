@@ -1,0 +1,52 @@
+[
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 1
+  },
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 2
+  },
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 3
+  },
+  {
+    "method": "POST",
+    "path": "/",
+    "rpc_method": "message/send",
+    "request_sha256": "f1575ddab24bc03b0091230f00eb4bb0148d6760796e7a0c641fe5821b9dc854",
+    "message_id": "rustain-1792175064604362372-6aeb08cd5a7c852f",
+    "text_parts": [
+      "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card."
+    ],
+    "text_sha256": [
+      "ff9ae51b70d787d8bc86a10a41ed721b93a781e1ad8142e4e41acfdf88a2f607"
+    ],
+    "text_bytes": [
+      542
+    ],
+    "message_type": "architecture_update",
+    "metadata_keys": [
+      "x-rustain-item-capability",
+      "x-rustain-message-type"
+    ],
+    "sequence": 4
+  },
+  {
+    "method": "POST",
+    "path": "/",
+    "rpc_method": "x-rustain-items/list",
+    "request_sha256": "1796cfde4d176d7735f1a1694f36bad2ac2a1807f486f9e774e4598b31677e0f",
+    "message_id": null,
+    "text_parts": [],
+    "text_sha256": [],
+    "text_bytes": [],
+    "message_type": null,
+    "metadata_keys": [],
+    "sequence": 5
+  }
+]

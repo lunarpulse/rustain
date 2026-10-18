@@ -570,3 +570,85 @@ jobs:
             receipt-checker-evidence/**/negative.json
             receipt-checker-evidence/**/restored.json
             tests_tui/journeys/j10/receipts/evidence/${{ github.run_id }}-${{ github.run_attempt }}/**
+
+  tui-conflict-flag:
+    name: Story 19.21h Executing Conflict Flag
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTAIN_TUI_BINARY: ${{ github.workspace }}/target/release/rustain
+      RUSTAIN_CONFLICT_RECEIPT_MANIFEST: ${{ github.workspace }}/conflict-run-manifests/${{ github.run_id }}-${{ github.run_attempt }}.json
+      RUSTAIN_CONFLICT_CAPTURE_RUN_ID: conflict-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build four-feature release capture binary
+        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install native TUI capture dependencies
+        run: pip install -e "./tests_tui[dev]"
+      - name: Verify existing ephemeral TLS fixture tool
+        run: openssl version
+      - name: Execute exact conflict viewports without reruns
+        env:
+          RUSTAIN_CAPTURE_EVIDENCE_DIR: ${{ github.workspace }}/conflict-capture-evidence/${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          env -u RUSTAIN_TUI_CLIENT_BINARY pytest \
+            'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[80x24]' \
+            'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[130x30]' \
+            'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[60x16]' \
+            -p no:rerunfailures -n 0 --timeout=420 --junitxml=conflict-native-results.xml -v
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("conflict-native-results.xml").findall(".//testcase")
+          expected = {f"test_conflict_flag_capture[{viewport}]" for viewport in ("80x24", "130x30", "60x16")}
+          assert len(cases) == 3 and {case.attrib["name"] for case in cases} == expected, cases
+          assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required conflict viewport skipped/failed/errored"
+          PY
+      - name: Execute exact nine current conflict receipt controls
+        env:
+          RUSTAIN_RECEIPT_EVIDENCE_DIR: ${{ github.workspace }}/conflict-receipt-evidence
+        run: |
+          pytest \
+            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[80x24-scene]' \
+            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[80x24-source]' \
+            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[80x24-stamp]' \
+            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[130x30-scene]' \
+            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[130x30-source]' \
+            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[130x30-stamp]' \
+            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[60x16-scene]' \
+            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[60x16-source]' \
+            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[60x16-stamp]' \
+            -p no:rerunfailures -n 0 --timeout=120 --junitxml=conflict-integrity-results.xml -v
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse("conflict-integrity-results.xml").findall(".//testcase")
+          expected = {
+              f"test_current_conflict_receipt_rejects_independent_corruption[{viewport}-{leg}]"
+              for viewport in ("80x24", "130x30", "60x16") for leg in ("scene", "source", "stamp")
+          }
+          assert len(cases) == 9 and {case.attrib["name"] for case in cases} == expected, cases
+          assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required conflict integrity control skipped/failed/errored"
+          PY
+      - name: Retain allowlisted conflict capture and integrity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: story-19-21b-conflict-flag
+          path: |
+            conflict-native-results.xml
+            conflict-integrity-results.xml
+            conflict-run-manifests/${{ github.run_id }}-${{ github.run_attempt }}.json
+            conflict-capture-evidence/${{ github.run_id }}-${{ github.run_attempt }}/**/identity.json
+            conflict-capture-evidence/${{ github.run_id }}-${{ github.run_attempt }}/**/checkpoints.json
+            conflict-capture-evidence/${{ github.run_id }}-${{ github.run_attempt }}/**/*.http.json
+            conflict-capture-evidence/${{ github.run_id }}-${{ github.run_attempt }}/**/requests.jsonl
+            conflict-capture-evidence/${{ github.run_id }}-${{ github.run_attempt }}/**/*.screen.txt
+            conflict-capture-evidence/${{ github.run_id }}-${{ github.run_attempt }}/**/*.team-log.json
+            conflict-capture-evidence/${{ github.run_id }}-${{ github.run_attempt }}/**/story-19-21b-conflict-flag-*.transcript.txt
+            conflict-receipt-evidence/**/positive.json
+            conflict-receipt-evidence/**/negative.json
+            conflict-receipt-evidence/**/restored.json

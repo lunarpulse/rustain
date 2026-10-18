@@ -1,0 +1,16 @@
+[terminal] ⤷ System:                                        
+— session start — · Earlier sessions not loaded             
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+ (daemon) [F] │ attached │ Normal │ Ready                   
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

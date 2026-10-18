@@ -1,0 +1,24 @@
+│   attempted just now · 2 addressed│                                           
+│     ● lena-po  delivered│                                                     
+│       item ri_8ZzI93aLsf_sKIkeIdEoqO9xZ7fTLheW · arrival 1 · task│            
+│   rustain-1792181667479804457-82d35a63bb95657e · received│                    
+│     ● jun-dev  delivered│                                                     
+│       item ri_2ZadJ8hKJJBHZ67TFE90aH1TxXnu29sS · arrival 1 · task│            
+│   rustain-1792181667479836647-0c07e5feff6bcf2a · received│                    
+Proposed message (not sent) · architecture_update                               
+To: lena-po, jun-dev                                                            
+│ ADR-047 conflict: publication races persistence.                              
+│ The assignment publishes before durable append.                               
+│ ADR-047 requires persist, then publish.                                       
+│ A crash between those steps loses the item.                                   
+│ Lena: amend the story acceptance order.                                       
+│ Jun: keep the owner lock through publication.                                 
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

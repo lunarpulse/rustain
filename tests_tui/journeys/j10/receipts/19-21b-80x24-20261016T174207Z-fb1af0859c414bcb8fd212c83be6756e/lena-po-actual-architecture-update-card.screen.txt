@@ -1,0 +1,24 @@
+┆  Résumé: preserve naïve input and é.                                          
+┆  Decision: persist the row before showing its card.                           
+┆  response: notify-and-wait · via individual — a2a-interaction.toml            
+┆  notification: immediate · via individual — a2a-interaction.toml              
+                                                                                
+                                                                                
+[terminal] ⤷ Assistant:                                                         
+[awaiting your response]                                                        
+                                                                                
+                                                                                
+                                                                                
+│ ⚠ ← inbound ✓ accepted · peer│                                                
+│   1220e39720d822e4b895af829fd1e4e9685754ff84865968beeac2df1536f1702bbf ·│     
+│   task rustain-1792172558287022659-bfabe563d791fccc · task accepted and│      
+│ ℹ     marcus-arch  awaiting their approval│                                   
+┌──────────────────────────────────────────────────────────────────────────────┐
+│architecture_update · marcus-arch                                             │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ Ready        Esc/Ctrl+D/Ctrl+C detach log: 1
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

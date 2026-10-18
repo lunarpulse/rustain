@@ -1,0 +1,16 @@
+│   2026-10-17 12:42:31Z ← inbound ! surfaced · peer│       
+│   12208318f53e54a040062d7d810e54240148d13dde5441044521b2│ 
+│   1d5316547caca0 · task│                                  
+│   a2a-in/p-cGVlcjoxMjIwODMxOGY1M2U1NGEwNDAwNjJkN2Q4MTBlN│ 
+│   TQyNDAxNDhkMTNkZGU1NDQxMDQ0NTIxYjIxZDUzMTY1NDdjYWNhMA/│ 
+│   t-cnVzdGFpbi0xNzkyMjQwOTUxMjc5NDE2NTkyLWM1ZTUxMDE1MjBm│ 
+│   YWEyNjI · peer interaction recorded · notification│     
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

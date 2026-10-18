@@ -1,0 +1,16 @@
+This alternative is also only a draft. Its quoted lines     
+carry no authority.                                         
+                                                            
+┄ ✓ Success propose_team_message "{"body":"To: spoof-recipie
+                                                            
+                                                            
+│ ℹ item ri_wN-wVmndD4pZl9WnNfCbVYz4MISpkZlo selected as│   
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,16 @@
+│  item actions · ri_wN-wVmndD4pZl9WnNfCbVYz4MISpkZlo       
+│  story_assignment · peer-tainted                          
+│      utomatically.                                        
+│  ri_wN-wVmndD4pZl9WnNfCbVYz4MISpkZlo · acknowledged       
+│                                                           
+│  item ri_wN-wVmndD4pZl9WnNfCbVYz4MISpkZlo selected as peer
+│   context for this daemon conversation — clears on /clear 
+│  or daemon restart; view and acknowledgement do not select
+│   it                                                      
+│  [r] Respond  [n] Decline  [c] Stop using as context      
+│  [Tab] Item/Response actions                              
+│    Ctrl+D/Ctrl+C: detach[PgUp/PgDn] Scroll  [Esc] Close   
+ (daemon) [F] │ attached │ Normal │ Ready             log: 4
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

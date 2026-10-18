@@ -1,0 +1,30 @@
+│  item actions · ri_uET7MdJE1brxSkXN2S69OJO-tAHo6ITU                                                                             
+│  story_assignment                                                                                                               
+│  story_assignment · 12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1                                        
+│  received thread · 12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 · ri_uET7MdJE1brxSkXN2S69OJO-tAHo6ITU   
+│  Context received: 1 text body · 254 bytes                                                                                      
+│      STORY-047: publish the received card before persisting its row.                                                            
+│      Jun owns implementation; Marcus checks the architecture.                                                                   
+│      Acceptance: an arriving item is visible before its durable append.                                                         
+│      Please identify conflicts with ADR-047; do not send automatically.                                                         
+│  ri_uET7MdJE1brxSkXN2S69OJO-tAHo6ITU · received                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│  [r] Respond  [a] Acknowledge  [n] Decline  [c] Use as context                                                                  
+│  [Tab] Item/Response actions                                                                                                    
+│    Ctrl+D/Ctrl+C: detach[PgUp/PgDn] Scroll  [Esc] Close                                                                         
+ (daemon) [F] │ attached │ Normal │ Ready                                                                                   log: 4
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

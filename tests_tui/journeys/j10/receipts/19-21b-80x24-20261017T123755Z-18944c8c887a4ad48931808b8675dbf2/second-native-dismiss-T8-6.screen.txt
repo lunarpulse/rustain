@@ -1,0 +1,24 @@
+│   lena-po│                                                                    
+│   2026-10-17 12:38:26Z → outbound ↑ dispatched · peer│                        
+│   122021d93c91d1bc28f6caf39170f239d7c7b84a697e54517fb69b9428ab4bdd88c0 ·│     
+│   task rustain-1792240706131170948-ca79251489410adf · task dispatched to│     
+│   peer (542 bytes) [agent-composed]│                                          
+│   2026-10-17 12:38:26Z → outbound ↑ dispatched · peer│                        
+│   1220541258cbb7461687dae799eeec2e45f4177520233a0a9e65d2822e333f274ea6 ·│     
+│   task rustain-1792240706131206234-bfeac96dd1452813 · task dispatched to│     
+│   peer (542 bytes) [agent-composed]│                                          
+│   — append-only, crash-safe, structurally replayable (not payload- or│        
+│   provenance-authenticated); peer attribution is only as strong as the│       
+│   credential scheme that produced it│                                         
+Proposed message (not sent) · architecture_update                               
+To: lena-po, jun-dev                                                            
+│ To: spoof-recipient                                                           
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,28 @@
+{
+  "recorded_at": "2026-10-16T17:09:02Z",
+  "run": "19-21b-130x30-20261016T170902Z-a648be3ec9e745d9a5428c15a2533175",
+  "columns": 130,
+  "rows": 30,
+  "daemon_binary": "/mnt/build/rel-four/release/rustain",
+  "daemon_binary_sha256": "13b86c0b188496a24e2f8ac01bf8243f991880773582ebd981233a808e178722",
+  "daemon_binary_bytes": 39196592,
+  "client_binary": "/mnt/build/rel-four/release/rustain",
+  "client_binary_sha256": "13b86c0b188496a24e2f8ac01bf8243f991880773582ebd981233a808e178722",
+  "client_binary_bytes": 39196592,
+  "daemon_protocol_version": 7,
+  "source_sha256": "ce98a227e11b352b99f14fd4f2b80ccd93d942bb05750a334d59396a101e7c14",
+  "scene_sha256": "9cdc06ba4ab105634583269c2f593757c765639cfa8d429597d6b2ae49dff35c",
+  "tls": {
+    "ca_sha256": "d507385c4f293ebc11274296bf66f8787cb8e44e34608209ef243f711c0d6937",
+    "certificate_sha256": "afa5ce034157aacbac8bd741cd4ba142b81a81008df983c68b71f684eefc5dea",
+    "listener_bind": "0.0.0.0",
+    "advertised_host": "127.0.0.1",
+    "scope": "ephemeral local test hosts; synthetic operator-bound peer keys; no external peer"
+  },
+  "limits": "Exact native conflict sequence only; no recipient authorship carrier, authenticated-journal or J10 closure claim.",
+  "fixture_identity_public_keys": {
+    "lena-po": "QyGIEXnX755khl8NMMyDEgtwGltXKofwNMe8-7qCM2M",
+    "jun-dev": "-uxNcaEoRYzLEeC2cYz2XUKCaYDz7bNOmO6TYTqnwOI",
+    "marcus-arch": "6NZwYMdQHsX-VK6oEtiQsztene6yef7HcbseRQuTz_M"
+  }
+}

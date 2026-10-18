@@ -1,0 +1,99 @@
+2026-10-16T17:35:20.359224Z  INFO rustain::infrastructure::startup: Starting rustain...
+2026-10-16T17:35:20.359380Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-kvvc31dp/lena-po/.rustain/config.toml
+2026-10-16T17:35:20.359653Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-kvvc31dp/lena-po/.rustain/config.toml
+2026-10-16T17:35:20.359855Z  INFO rustain::adapters::daemon::policy_startup: interaction policy resolved (NFR66) conflicts=0
+2026-10-16T17:35:20.359858Z  INFO rustain::adapters::daemon::policy_startup: policy policy=notification urgency: `immediate` (yours: `immediate`, team: not configured) — source: individual (a2a-interaction.toml)
+2026-10-16T17:35:20.359859Z  INFO rustain::adapters::daemon::policy_startup: policy policy=response automation: `notify-and-wait` (yours: `notify-and-wait`, team: not configured) — source: individual (a2a-interaction.toml)
+2026-10-16T17:35:20.359859Z  INFO rustain::adapters::daemon::policy_startup: policy policy=sharing breadth: you configured none — yours applies; no team norm is configured.
+2026-10-16T17:35:20.359859Z  INFO rustain::adapters::daemon::policy_startup: policy policy=effective consent per sender: no journaled consent grants recorded — TOML policy precedence is the only live source
+2026-10-16T17:35:20.365202Z  INFO rustain::adapters::daemon: durable node recovery complete restored=0 suspended=0 failed=0
+2026-10-16T17:35:20.375846Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:37497/
+2026-10-16T17:35:20.375851Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:41759/
+2026-10-16T17:35:20.375863Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:37497
+2026-10-16T17:35:20.375867Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:41759
+2026-10-16T17:35:20.375924Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:37497
+2026-10-16T17:35:20.375932Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:41759
+2026-10-16T17:35:20.375935Z DEBUG rustls::client::hs: No cached session for IpAddress(V4(Ipv4Addr([127, 0, 0, 1])))
+2026-10-16T17:35:20.375937Z DEBUG rustls::client::hs: Not resuming any session
+2026-10-16T17:35:20.375939Z DEBUG rustls::client::hs: No cached session for IpAddress(V4(Ipv4Addr([127, 0, 0, 1])))
+2026-10-16T17:35:20.375941Z DEBUG rustls::client::hs: Not resuming any session
+2026-10-16T17:35:20.376850Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-16T17:35:20.376862Z DEBUG rustls::client::tls13: Not resuming
+2026-10-16T17:35:20.376905Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-16T17:35:20.376913Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-16T17:35:20.377029Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-16T17:35:20.377032Z DEBUG rustls::client::tls13: Not resuming
+2026-10-16T17:35:20.377065Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-16T17:35:20.377068Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-16T17:35:20.381294Z  WARN rustain::adapters::a2a::server: A2A pending task file is missing; no approval-pending tasks restored path=/tmp/r21h-kvvc31dp/lena-po/.rustain/a2a-pending.json
+2026-10-16T17:35:20.381383Z  INFO rustain::adapters::daemon::lifecycle: daemon lifecycle ready (Story 12.4: attach server + scheduler live, headless turn runtime lazy) idle_secs=14400 daily_reset=04:00
+2026-10-16T17:35:20.382662Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-16T17:35:20.382708Z  WARN rustain::adapters::a2a::egress: A2A AgentCard refresh failed peer_id=jun-dev error=A2A request failed: error sending request for url (https://127.0.0.1:37497/.well-known/agent-card.json)
+2026-10-16T17:35:20.382729Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-16T17:35:20.382748Z  WARN rustain::adapters::a2a::egress: A2A AgentCard refresh failed peer_id=marcus-arch error=A2A request failed: error sending request for url (https://127.0.0.1:41759/.well-known/agent-card.json)
+2026-10-16T17:35:20.395831Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-10-16T17:35:20.396708Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-16T17:35:20.419681Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-10-16T17:35:20.420416Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-16T17:35:20.460723Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-10-16T17:35:20.461440Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-16T17:35:20.480488Z  INFO rustain::adapters::daemon::lifecycle: daemon received SIGTERM
+2026-10-16T17:35:20.480496Z  INFO rustain::adapters::daemon::lifecycle: daemon graceful shutdown begin
+2026-10-16T17:35:20.480498Z  INFO rustain::adapters::daemon::lifecycle: daemon SessionBoundary boundary=shutdown
+2026-10-16T17:35:20.480507Z DEBUG rustain::adapters::daemon::lifecycle: on_session_end invoked with the per-process conversation transcript boundary=shutdown transcript_len=0
+2026-10-16T17:35:20.485555Z  INFO rustain::adapters::daemon::lifecycle: daemon graceful shutdown complete
+2026-10-16T17:35:20.485606Z DEBUG rustain::adapters::a2a::tls: A2A TLS listener: receiver dropped; stopping accept pump
+2026-10-16T17:35:20.491863Z  INFO rustain::infrastructure::startup: Starting rustain...
+2026-10-16T17:35:20.492019Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-kvvc31dp/lena-po/.rustain/config.toml
+2026-10-16T17:35:20.492272Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-kvvc31dp/lena-po/.rustain/config.toml
+2026-10-16T17:35:20.492478Z  INFO rustain::adapters::daemon::policy_startup: interaction policy resolved (NFR66) conflicts=0
+2026-10-16T17:35:20.492481Z  INFO rustain::adapters::daemon::policy_startup: policy policy=notification urgency: `immediate` (yours: `immediate`, team: not configured) — source: individual (a2a-interaction.toml)
+2026-10-16T17:35:20.492482Z  INFO rustain::adapters::daemon::policy_startup: policy policy=response automation: `notify-and-wait` (yours: `notify-and-wait`, team: not configured) — source: individual (a2a-interaction.toml)
+2026-10-16T17:35:20.492483Z  INFO rustain::adapters::daemon::policy_startup: policy policy=sharing breadth: you configured none — yours applies; no team norm is configured.
+2026-10-16T17:35:20.492483Z  INFO rustain::adapters::daemon::policy_startup: policy policy=effective consent per sender: no journaled consent grants recorded — TOML policy precedence is the only live source
+2026-10-16T17:35:20.497507Z  INFO rustain::adapters::daemon: durable node recovery complete restored=0 suspended=0 failed=0
+2026-10-16T17:35:20.498541Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:41759/
+2026-10-16T17:35:20.498541Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:37497/
+2026-10-16T17:35:20.498553Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:41759
+2026-10-16T17:35:20.498557Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:37497
+2026-10-16T17:35:20.498603Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:41759
+2026-10-16T17:35:20.498619Z DEBUG rustls::client::hs: No cached session for IpAddress(V4(Ipv4Addr([127, 0, 0, 1])))
+2026-10-16T17:35:20.498621Z DEBUG rustls::client::hs: Not resuming any session
+2026-10-16T17:35:20.498641Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:37497
+2026-10-16T17:35:20.498647Z DEBUG rustls::client::hs: No cached session for IpAddress(V4(Ipv4Addr([127, 0, 0, 1])))
+2026-10-16T17:35:20.498649Z DEBUG rustls::client::hs: Not resuming any session
+2026-10-16T17:35:20.498681Z  INFO rustain::adapters::daemon: daemon: restored per-process conversation id=wB025FUVArbFhYABHGtWQ
+2026-10-16T17:35:20.498932Z  WARN rustain::adapters::a2a::server: A2A pending task file is missing; no approval-pending tasks restored path=/tmp/r21h-kvvc31dp/lena-po/.rustain/a2a-pending.json
+2026-10-16T17:35:20.499026Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-16T17:35:20.499034Z DEBUG rustls::client::tls13: Not resuming
+2026-10-16T17:35:20.499078Z  INFO rustain::adapters::daemon::lifecycle: daemon lifecycle ready (Story 12.4: attach server + scheduler live, headless turn runtime lazy) idle_secs=14400 daily_reset=04:00
+2026-10-16T17:35:20.499079Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-16T17:35:20.499083Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-16T17:35:20.499125Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-16T17:35:20.499130Z DEBUG rustls::client::tls13: Not resuming
+2026-10-16T17:35:20.499172Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-16T17:35:20.499176Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-16T17:35:20.500919Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-16T17:35:20.501034Z DEBUG rustain::adapters::daemon::server: A2aCatalogChanged before the daemon runtime is built; catalogue unchanged peer_id=jun-dev skill_count=0
+2026-10-16T17:35:20.501050Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-16T17:35:20.501144Z DEBUG rustain::adapters::daemon::server: A2aCatalogChanged before the daemon runtime is built; catalogue unchanged peer_id=marcus-arch skill_count=0
+2026-10-16T17:35:20.528550Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-10-16T17:35:20.529448Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-16T17:35:20.537429Z  INFO rustain::infrastructure::startup: Starting rustain...
+2026-10-16T17:35:20.537568Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-kvvc31dp/lena-po/.rustain/config.toml
+2026-10-16T17:35:20.537832Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-kvvc31dp/lena-po/.rustain/config.toml
+2026-10-16T17:35:21.697146Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:41759/
+2026-10-16T17:35:21.697160Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:41759
+2026-10-16T17:35:21.697225Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:41759
+2026-10-16T17:35:21.697236Z DEBUG rustls::client::hs: Resuming session
+2026-10-16T17:35:21.697603Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-10-16T17:35:21.697609Z DEBUG rustls::client::tls13: Resuming using PSK
+2026-10-16T17:35:21.697656Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-10-16T17:35:21.697660Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-10-16T17:35:21.726214Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-10-16T17:35:52.542267Z  INFO rustain::adapters::daemon::lifecycle: daemon received SIGTERM
+2026-10-16T17:35:52.542281Z  INFO rustain::adapters::daemon::lifecycle: daemon graceful shutdown begin
+2026-10-16T17:35:52.542284Z  INFO rustain::adapters::daemon::lifecycle: daemon SessionBoundary boundary=shutdown
+2026-10-16T17:35:52.542290Z DEBUG rustain::adapters::daemon::lifecycle: on_session_end invoked with the per-process conversation transcript boundary=shutdown transcript_len=0
+2026-10-16T17:35:52.553088Z  INFO rustain::adapters::daemon::lifecycle: daemon graceful shutdown complete
+2026-10-16T17:35:52.553144Z DEBUG rustain::adapters::a2a::tls: A2A TLS listener: receiver dropped; stopping accept pump

@@ -1,0 +1,16 @@
+│   received│                                               
+│   2026-10-17 12:42:31Z ← inbound ✓ accepted · peer│       
+│   12208318f53e54a040062d7d810e54240148d13dde5441044521b2│ 
+│   1d5316547caca0 · task│                                  
+│   rustain-1792240951279416592-c5e5101520faa262 · task│    
+│   accepted and executing│                                 
+│   2026-10-17 12:42:31Z ← inbound ! surfaced · peer│       
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

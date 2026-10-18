@@ -1,0 +1,30 @@
+│   2026-10-16 18:23:54Z ← inbound ✓ accepted · peer 122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a · task│ 
+│   rustain-1792175033813660984-2146eacb275c7833 · task accepted and executing│                                                   
+│   2026-10-16 18:23:54Z ← inbound ! surfaced · peer 122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a · task│ 
+│   a2a-in/p-cGVlcjoxMjIwNTVhM2FlMjI2YmMyMzBjNzBjNGVhMzI2MWUxYmU0NTdhODI0ZGJlYmFkYzJhOWU0NjAwODhhZmQyMTA0NDIwYQ/t-cnVzdGFpbi0xNz│ 
+│   kyMTc1MDMzODEzNjYwOTg0LTIxNDZlYWNiMjc1Yzc4MzM · peer interaction recorded · notification immediate│                           
+│     response: notify-and-wait · via individual — a2a-interaction.toml│                                                          
+│     notification: immediate · via individual — a2a-interaction.toml│                                                            
+│   2026-10-16 18:23:55Z ? unknown ✓ item-acknowledged · peer│                                                                    
+│   122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a · task ri_KT5SGRnsAFtCNMnt6U2hCYSEpVoE1UTH · recipient│  
+│   item acknowledged by lena-po│                                                                                                 
+│   2026-10-16 18:24:24Z → outbound ↑ dispatched · peer 122055a3ae226bc230c70c4ea3261e1be457a824dbebadc2a9e460088afd2104420a ·│   
+│   task rustain-1792175064604319142-c7ed0b84226db050 · task dispatched to peer (542 bytes) [agent-composed]│                     
+│   2026-10-16 18:24:24Z → outbound ↑ dispatched · peer 1220362e44fd19f4d0260aa6aee0c69ce1de4f65ac3e32d9424d8cda4b43bb27249f ·│   
+│   task rustain-1792175064604362372-6aeb08cd5a7c852f · task dispatched to peer (542 bytes) [agent-composed]│                     
+│   — append-only, crash-safe, structurally replayable (not payload- or provenance-authenticated); peer attribution is only as│   
+│   strong as the credential scheme that produced it│                                                                             
+Proposed message (not sent) · architecture_update                                                                                 
+To: lena-po, jun-dev                                                                                                              
+                             ╔══════════════════════════════════════════════════════════════════════╗                             
+                             ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+                             ║decision.                                                             ║                             
+                             ║To: lena-po, jun-dev                                                  ║                             
+                             ║Type: architecture_update                                             ║                             
+                             ║… more not shown — [r] Review first                                   ║                             
+                             ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║                             
+                             ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

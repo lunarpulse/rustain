@@ -1,0 +1,30 @@
+│   Peers:│                                                                                                                       
+│   - jun-dev (1220a6c4aadb66a06e063d27b2e84fb6735a799574ba2d8f11f0fededf8d89b323f7): not granted│                                
+│   - lena-po (12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1): not granted│                                
+│ ⚠ ← inbound ✓ accepted · peer 12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 · task│                      
+│   rustain-1792179427889994790-b28a8016f521054b · task accepted and executing│                                                   
+│ ℹ 2026-10-16 19:37:07Z ← inbound ⏸ awaiting-approval · peer│                                                                    
+│   12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 · task rustain-1792179427889994790-b28a8016f521054b ·│   
+│   task parked awaiting operator approval│                                                                                       
+│   2026-10-16 19:37:08Z ← inbound ↓ item-received · peer 12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 ·│ 
+│   task ri_uET7MdJE1brxSkXN2S69OJO-tAHo6ITU · recipient item received│                                                           
+│   2026-10-16 19:37:08Z ← inbound ✓ accepted · peer 12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 · task│ 
+│   rustain-1792179427889994790-b28a8016f521054b · task accepted and executing│                                                   
+│   2026-10-16 19:37:08Z ← inbound ! surfaced · peer 12207ea006f77c283cfa52516e3d4a490fa372e8a1430a424ccbd0d628f8575abec1 · task│ 
+│   a2a-in/p-cGVlcjoxMjIwN2VhMDA2Zjc3YzI4M2NmYTUyNTE2ZTNkNGE0OTBmYTM3MmU4YTE0MzBhNDI0Y2NiZDBkNjI4Zjg1NzVhYmVjMQ/t-cnVzdGFpbi0xNz│ 
+│   kyMTc5NDI3ODg5OTk0NzkwLWI╔══════════════════════════════════════════════════════════════════════╗e│                           
+│     response: notify-and-wa║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+│     notification: immediate║decision.                                                             ║                             
+│   2026-10-16 19:37:09Z ? un║To: lena-po, jun-dev                                                  ║                             
+│   12207ea006f77c283cfa52516║Type: architecture_update                                             ║69OJO-tAHo6ITU · recipient│  
+│   item acknowledged by lena║│ To: spoof-recipient                                                 ║                             
+│   2026-10-16 19:37:38Z → ou║│ [y] Send to spoof-recipient                                         ║a424ccbd0d628f8575abec1 ·│   
+│   task rustain-179217945879║│ Your agent proposes a message. Nothing has been sent. Awaiting you  ║mposed]│                     
+│   2026-10-16 19:37:38Z → ou║│ r decision.                                                         ║d8f11f0fededf8d89b323f7 ·│   
+│   task rustain-179217945879║… more not shown — [r] Review first                                   ║mposed]│                     
+│   — append-only, crash-safe║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║er attribution is only as│   
+│   strong as the credential ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

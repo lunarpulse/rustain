@@ -1,0 +1,16 @@
+┆  story_assignment ·                                       
+┆  1220937a75eaef151334a94ee2f6152b4b248be7cd31a329fb94bca6c
+┆  0d74d69c64f                                              
+┆  STORY-047: publish the received card before persisting   
+┆  its row.                                                 
+┆  Jun owns implementation; Marcus checks the architecture. 
+┆  Acceptance: an arriving item is visible before its       
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready  log: 7
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

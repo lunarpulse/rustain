@@ -1,0 +1,30 @@
+│ ADR-047 requires persist, then publish.                                                                                         
+│ A crash between those steps loses the item.                                                                                     
+│ Lena: amend the story acceptance order.                                                                                         
+│ Jun: keep the owner lock through publication.                                                                                   
+│ Do not acknowledge on arrival or passive View.                                                                                  
+│ Retain the peer-tainted context boundary.                                                                                       
+│ Review is local; only an operator may Send.                                                                                     
+│ Preserve ordered recipients and exact UTF-8 bytes.                                                                              
+│ Résumé: preserve naïve input and é.                                                                                             
+│ Decision: persist the row before showing its card.                                                                              
+│ ℹ     lena-po  awaiting their approval│                                                                                         
+│       jun-dev  awaiting their approval│                                                                                         
+│ ℹ Team interaction policy│                                                                                                      
+│   Response mode: notify-and-wait│                                                                                               
+│   Notification urgency: immediate│                                                                                              
+│   Peers:│                                                                                                                       
+│   - jun-dev (122063f6f4d4690f7b6bd685c72d48e6e4feb0c74943aaef4ea95ee1152134eb4307): not granted│                                
+│   - lena-po (1220e6c34fd34fef801a9990bd23de965fc30c4699028d3b69ecf70e16c416c4561b): not granted│                                
+                             ╔══════════════════════════════════════════════════════════════════════╗                             
+                             ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+                             ║decision.                                                             ║                             
+                             ║To: lena-po, jun-dev                                                  ║                             
+                             ║Type: architecture_update                                             ║                             
+                             ║… more not shown — [r] Review first                                   ║                             
+                             ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║                             
+                             ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
