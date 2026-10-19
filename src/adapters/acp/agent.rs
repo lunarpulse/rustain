@@ -892,7 +892,7 @@ impl RustainAcpAgent {
                                         id,
                                         content,
                                         is_error,
-                                        diff: _,
+                                        ..
                                     } => {
                                         let result = ToolResultInfo {
                                             content: content.clone(),

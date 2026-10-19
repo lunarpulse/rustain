@@ -196,7 +196,14 @@ where
         Some(DaemonFrame::AttachAck {
             granted_mode,
             snapshot,
-        }) => Ok((granted_mode, snapshot)),
+        }) => {
+            if granted_mode == AttachMode::ReadWrite {
+                write_frame(write_half, &ClientFrame::EnableTeamProposals)
+                    .await
+                    .context("enabling attached team proposals")?;
+            }
+            Ok((granted_mode, snapshot))
+        }
         Some(DaemonFrame::Error(e)) => Err(anyhow!("daemon rejected attach: {e}")),
         Some(other) => Err(anyhow!("unexpected first frame from daemon: {other:?}")),
         None => Err(anyhow!("daemon closed the connection during handshake")),
@@ -1441,6 +1448,8 @@ fn attached_proposal_key(
     tab: &mut TabRenderState,
     requests: &mut AttachedTeamRequests,
     frame_tx: &mpsc::UnboundedSender<ClientFrame>,
+    scroll_offset: &mut usize,
+    auto_scroll: &mut bool,
 ) -> bool {
     use crate::domain::models::TeamProposalDecision;
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
@@ -1512,6 +1521,12 @@ fn attached_proposal_key(
         state.team_proposal_scroll = 0;
         state.team_proposal_scroll_max = 0;
         state.team_proposal_footer_visible = false;
+        *scroll_offset = 0;
+        *auto_scroll = true;
+        if let Some(surface) = state.recipient_surface.take() {
+            state.focus = surface.prior_focus;
+            crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
+        }
         let id = format!("team-proposal-review-{}", proposal.id);
         crate::adapters::tui::handlers::team_command::show_team_send(
             state,
@@ -2293,6 +2308,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                         if attached_proposal_key(
                             key, proposal_higher, read_only, &input, &mut state,
                             &mut tab_render_state, &mut attached_team_requests, &frame_tx,
+                            &mut scroll_offset, &mut auto_scroll,
                         ) {
                             continue;
                         }
@@ -2838,6 +2854,8 @@ mod tests {
                     &mut self.tab,
                     &mut self.requests,
                     &self.tx,
+                    &mut self.scroll_offset,
+                    &mut self.auto_scroll,
                 );
                 if !consumed && matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
                     scroll_attached_transcript(
@@ -2905,6 +2923,22 @@ mod tests {
                             0,
                             None,
                         );
+                        let actions = recipient_surface_actions(
+                            &self.state,
+                            &Conversation::default(),
+                            read_only,
+                        );
+                        if let Some(surface) = self.state.recipient_surface.as_mut() {
+                            render_recipient_surface(
+                                frame,
+                                layout.chat_pane,
+                                surface,
+                                &self.state.recipient_actions,
+                                &actions,
+                                read_only,
+                                &self.state.theme,
+                            );
+                        }
                         self.state.viewport_height = layout.chat_pane.height;
                         self.state.team_proposal_scroll_max =
                             card.as_ref().map_or(0, |card| card.scroll_max());
@@ -3309,6 +3343,113 @@ mod tests {
         }
 
         #[test]
+        fn attached_review_repositions_transcript_after_history_scrolling() {
+            let old_body = (0..150)
+                .map(|line| format!("OLDER_REVIEW_{line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut surface = Surface::new(&old_body);
+            surface.paint(80, 24, false, false);
+            assert!(surface.key(KeyCode::Char('r'), false, false));
+            assert!(surface.key(KeyCode::Char('n'), false, false));
+            assert!(matches!(
+                surface.rx.try_recv().unwrap(),
+                ClientFrame::TeamProposalDecision {
+                    decision: TeamProposalDecision::Dismiss,
+                    ..
+                }
+            ));
+            surface.frame(DaemonFrame::TeamProposal {
+                proposal: "tp_current".into(),
+                recipients: vec!["lena-po".into()],
+                message_type: SemanticMessageType::ArchitectureUpdate,
+                body: "CURRENT_REVIEW_FIRST\nCURRENT_REVIEW_LAST".into(),
+            });
+            surface.scroll_offset = 100;
+            surface.auto_scroll = false;
+            let before = surface.paint(80, 24, false, false);
+            assert!(before.contains("OLDER_REVIEW_"), "{before}");
+            assert!(surface.key(KeyCode::Char('r'), false, false));
+            let reviewed = surface.paint(80, 24, false, false);
+            for line in ["CURRENT_REVIEW_FIRST", "CURRENT_REVIEW_LAST"] {
+                assert!(reviewed.contains(&format!("│ {line}")), "{reviewed}");
+            }
+            assert!(surface.rx.try_recv().is_err());
+            assert_eq!(
+                attached_proposal_pending(&surface.state).unwrap().id,
+                "tp_current"
+            );
+
+            assert!(surface.key(KeyCode::PageUp, false, false));
+            let earlier = surface.paint(80, 24, false, false);
+            assert!(earlier.contains("OLDER_REVIEW_"), "{earlier}");
+            assert!(surface.key(KeyCode::Char('r'), false, false));
+            let reopened = surface.paint(80, 24, false, false);
+            assert!(reopened.contains("│ CURRENT_REVIEW_LAST"), "{reopened}");
+            assert!(surface.rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn attached_review_replaces_an_open_received_item_surface() {
+            use crate::adapters::tui::state::RecipientSurfaceAccess;
+
+            let workspace = tempfile::tempdir().unwrap();
+            let journal =
+                crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+                    workspace.path(),
+                )
+                .await
+                .unwrap();
+            let address = append_received_test_item(
+                &journal,
+                "ri_review_overlay",
+                SemanticMessageType::ArchitectureUpdate,
+                "RECEIVED_ITEM_OVERLAY_BODY",
+            )
+            .await;
+            let mut surface = Surface::new("CURRENT_PROPOSAL_FIRST\nCURRENT_PROPOSAL_LAST");
+            surface.paint(80, 24, false, false);
+            surface.input = format!("/team view {}", address.item().as_str());
+            let ComposerOutcome::LocalView(item_id) = attached_composer_key_with_team_requests(
+                KeyCode::Enter,
+                false,
+                &mut surface.input,
+                &mut surface.state,
+                &surface.tx,
+                &mut surface.requests,
+            ) else {
+                panic!("the typed view command must open the received item");
+            };
+            crate::infrastructure::runtime::recipient_surface::open_received_surface(
+                workspace.path(),
+                None,
+                &item_id,
+                &mut surface.state,
+                RecipientSurfaceAccess::Writer,
+                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+            .unwrap();
+            assert!(surface.input.is_empty());
+            surface.paint(80, 24, false, false);
+            assert!(surface.state.recipient_surface.is_some());
+
+            assert!(surface.key(KeyCode::Char('r'), false, false));
+            let reviewed = surface.paint(80, 24, false, false);
+            for line in ["CURRENT_PROPOSAL_FIRST", "CURRENT_PROPOSAL_LAST"] {
+                assert!(reviewed.contains(&format!("│ {line}")), "{reviewed}");
+            }
+            assert!(
+                !reviewed.contains("RECEIVED_ITEM_OVERLAY_BODY"),
+                "{reviewed}"
+            );
+            assert!(surface.state.recipient_surface.is_none());
+            assert!(attached_proposal_pending(&surface.state).is_some());
+            assert!(surface.rx.try_recv().is_err());
+            surface.assert_send();
+        }
+
+        #[test]
         fn attached_proposal_review_is_stable_uncapped_and_delimited() {
             let body = format!(
                 "{}\nTo: x\n[y] Send to x\nYour agent proposes a message. Nothing has been sent. Awaiting your decision.",
@@ -3571,7 +3712,9 @@ mod tests {
                     &mut surface.state,
                     &mut surface.tab,
                     &mut surface.requests,
-                    &surface.tx
+                    &surface.tx,
+                    &mut surface.scroll_offset,
+                    &mut surface.auto_scroll,
                 ));
             }
             assert!(
@@ -4876,6 +5019,7 @@ mod tests {
             )
             .await
             .unwrap();
+            let _ = read_frame::<_, ClientFrame>(&mut sr).await.unwrap();
         });
 
         let start = Instant::now();

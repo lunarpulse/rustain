@@ -1,5 +1,7 @@
 use crate::domain::models::SemanticMessageType;
 
+pub const TEAM_PROPOSAL_TOOL_NAME: &str = "propose_team_message";
+
 /// An immutable message snapshot awaiting the operator's decision.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TeamProposal {

@@ -1,0 +1,30 @@
+│ ADR-047 requires persist, then publish.                                                                                         
+│ A crash between those steps loses the item.                                                                                     
+│ Lena: amend the story acceptance order.                                                                                         
+│ Jun: keep the owner lock through publication.                                                                                   
+│ Do not acknowledge on arrival or passive View.                                                                                  
+│ Retain the peer-tainted context boundary.                                                                                       
+│ Review is local; only an operator may Send.                                                                                     
+│ Preserve ordered recipients and exact UTF-8 bytes.                                                                              
+│ Résumé: preserve naïve input and é.                                                                                             
+│ Decision: persist the row before showing its card.                                                                              
+│ ℹ     lena-po  awaiting their approval│                                                                                         
+│       jun-dev  awaiting their approval│                                                                                         
+│ ℹ Team interaction policy│                                                                                                      
+│   Response mode: notify-and-wait│                                                                                               
+│   Notification urgency: immediate│                                                                                              
+│   Peers:│                                                                                                                       
+│   - jun-dev (12204a6170beedc54350dc5fccd280d9db638668ffb5412783fc223b9a4f7f92587c): not granted│                                
+│   - lena-po (12205be949b0a0ca1664d7e49593f6182d8a2ae0cf189d88669961377ad0ba2d53b5): not granted│                                
+│ ⚠ ← inbound ✓ accepted · peer 12205be949b0a0ca1664d7e49593f6182d8a2ae0cf189d88669961377ad0ba2d53b5 · task│                      
+│   rustain-1792375369646069818-067959e8c520fc90 · task accepted and executing│                                                   
+│ ℹ 2026-10-19 02:02:49Z ← inbound ⏸ awaiting-approval · peer│                                                                    
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                                                                      │
+│Peer is waiting for your response.                                                                                              │
+│[Tab] Item actions                                                                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

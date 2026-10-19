@@ -1,0 +1,16 @@
+│   Notification urgency: immediate│                        
+│   Peers:│                                                 
+│   - jun-dev│                                              
+│   (1220e3b662d3ffd790e5e840ba7d459a4b76ac9bb8cacaa2be0e4│ 
+│   caeb8417caf0ed0): not granted│                          
+│   - lena-po│                                              
+│   (1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e│ 
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

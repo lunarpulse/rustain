@@ -1,0 +1,16 @@
+│   62a0caf8b5f100 · task│                                  
+│   rustain-1792375541428920072-8936f84eb2149d92 · task│    
+│   dispatched to peer (542 bytes) [agent-composed]│        
+│   2026-10-19 02:05:41Z → outbound ↑ dispatched · peer│    
+│   1220e3b662d3ffd790e5e840ba7d459a4b76ac9bb8cacaa2be0e4c│ 
+│   aeb8417caf0ed0 · task│                                  
+│   rustain-1792375541428961669-dce7b6f0efe6e77f · task│    
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

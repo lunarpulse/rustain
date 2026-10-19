@@ -1,0 +1,16 @@
+│   1220e3b662d3ffd790e5e840ba7d459a4b76ac9bb8cacaa2be0e4c│ 
+│   aeb8417caf0ed0 · task│                                  
+│   rustain-1792375541428961669-dce7b6f0efe6e77f · task│    
+│   dispatched to peer (542 bytes) [agent-composed]│        
+│   — append-only, crash-safe, structurally replayable│     
+│   (not payload- or provenance-authenticated); peer│       
+│   attribution is only as strong as the credential scheme│ 
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,24 @@
+│  item actions · ri_z_GT-aFgDLvB25TekAyax40BlDJ2VvpB                           
+│  story_assignment · peer-tainted                                              
+│  story_assignment · 1220fc0c99e8761e4460b149d9803954333d162160b470febd3cddfe44
+│  db43124dbb                                                                   
+│  received thread · 1220fc0c99e8761e4460b149d9803954333d162160b470febd3cddfe44d
+│  b43124dbb · ri_z_GT-aFgDLvB25TekAyax40BlDJ2VvpB                              
+│  Context received: 1 text body · 254 bytes                                    
+│      STORY-047: publish the received card before persisting its row.          
+│      Jun owns implementation; Marcus checks the architecture.                 
+│      Acceptance: an arriving item is visible before its durable append.       
+│      Please identify conflicts with ADR-047; do not send automatically.       
+│  ri_z_GT-aFgDLvB25TekAyax40BlDJ2VvpB · acknowledged                           
+│                                                                               
+│  item ri_z_GT-aFgDLvB25TekAyax40BlDJ2VvpB selected as peer context for this da
+│  emon conversation — clears on /clear or daemon restart; view and acknowledgem
+│  ent do not select it                                                         
+│                                                                               
+│  [r] Respond  [n] Decline  [c] Stop using as context                          
+│  [Tab] Item/Response actions                                                  
+│    Ctrl+D/Ctrl+C: detach[PgUp/PgDn] Scroll  [Esc] Close                       
+ (daemon) [F] │ attached │ Normal │ Ready                                 log: 4
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

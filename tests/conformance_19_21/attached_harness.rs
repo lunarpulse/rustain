@@ -63,18 +63,18 @@ pub struct ToolScript {
     exchanges: parking_lot::Mutex<std::collections::VecDeque<Vec<StreamChunk>>>,
 }
 impl ToolScript {
-    /// Queue one provider response without a continuation, for interleaved turns.
-    /// Only the cron-enabled interleaving consumer uses it.
-    #[cfg(feature = "cron")]
+    /// Queue one response without a continuation for interleaving or interruption.
+    #[cfg(any(feature = "cron", feature = "test-instrumentation"))]
     pub fn exchange(&self, chunks: Vec<StreamChunk>) {
         self.exchanges.lock().push_back(chunks);
     }
 
-    pub fn tool(&self, name: &str, input: serde_json::Value) {
+    pub fn tool(&self, name: &str, input: serde_json::Value) -> String {
         let mut exchanges = self.exchanges.lock();
+        let id = RequestId::new().0;
         exchanges.push_back(vec![
             StreamChunk::ToolUse {
-                id: RequestId::new().0,
+                id: id.clone(),
                 name: name.into(),
                 input,
             },
@@ -91,6 +91,7 @@ impl ToolScript {
                 stop_reason: StopReason::EndTurn,
             },
         ]);
+        id
     }
 }
 
@@ -1281,6 +1282,18 @@ pub struct AttachedClient {
 }
 impl AttachedClient {
     pub async fn attach(path: &Path, tier: ConnectionTier, read_only_ok: bool) -> Self {
+        let mut client = Self::attach_without_proposals(path, tier, read_only_ok).await;
+        if tier == ConnectionTier::TrustedLocal && client.granted == AttachMode::ReadWrite {
+            client.enable_team_proposals().await;
+        }
+        client
+    }
+    /// Authenticated line-client connection: ordinary turns, no decision surface.
+    pub async fn attach_without_proposals(
+        path: &Path,
+        tier: ConnectionTier,
+        read_only_ok: bool,
+    ) -> Self {
         let mut stream = tokio::time::timeout(FIXTURE_TIMEOUT, UnixStream::connect(path))
             .await
             .expect("connect deadline")
@@ -1307,16 +1320,29 @@ impl AttachedClient {
         )
         .await
         .expect("signed attach");
-        let granted = match read_socket_frame(&mut stream).await {
-            DaemonFrame::AttachAck { granted_mode, .. } => granted_mode,
+        let ack = read_socket_frame(&mut stream).await;
+        let granted = match &ack {
+            DaemonFrame::AttachAck { granted_mode, .. } => *granted_mode,
             other => panic!("attach ack expected, got {other:?}"),
         };
         Self {
             stream,
             granted,
-            received: Vec::new(),
+            received: vec![ack],
             consumed_frames: HashSet::new(),
         }
+    }
+    pub async fn enable_team_proposals(&mut self) {
+        self.send_frame(ClientFrame::EnableTeamProposals).await;
+        // History shares the operator FIFO: return only after the grant and any
+        // retained snapshot publication, including for direct runtime callers.
+        self.send_frame(ClientFrame::HistoryRequest {
+            before_index: Some(0),
+            count: 1,
+        })
+        .await;
+        self.wait_for(|frame| matches!(frame, DaemonFrame::History { .. }))
+            .await;
     }
     /// EOF is the cleanup fence: server removes this signed writer before
     /// dropping its outbound half, so replacement tests never race `drop()`.

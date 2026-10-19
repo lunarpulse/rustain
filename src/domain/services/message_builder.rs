@@ -64,15 +64,17 @@ pub fn build_command_context_prefix(command: &ResolvedCommandContext) -> String 
 /// (and would cause the model to silently ignore the second User message).
 pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
     let mut messages = Vec::new();
-    // Buffered tool results that need to be attached to the *next* User message.
+    // Merge results into an immediately following User message, otherwise flush
+    // them before the next assistant/system message to preserve tool adjacency.
     let mut pending_tool_results: Vec<ToolResultMessage> = Vec::new();
 
     for cm in &conversation.messages {
         // For assistant messages with tool calls, include tool_use blocks
         // so the Anthropic API can match tool_results to their originating calls.
-        let tool_uses = if cm.role == MessageRole::Assistant {
+        let tool_uses: Vec<ToolUseMessage> = if cm.role == MessageRole::Assistant {
             cm.tool_calls
                 .iter()
+                .filter(|tc| tc.result.is_some())
                 .map(|tc| ToolUseMessage {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
@@ -91,6 +93,17 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
                 _ => None,
             });
 
+            // Interrupted calls remain in the audit history, but an unmatched
+            // invocation (or its otherwise empty row) is not a valid API message.
+            if cm.content.is_empty() && tool_uses.is_empty() && reasoning_content.is_none() {
+                continue;
+            }
+            if !pending_tool_results.is_empty() {
+                messages.push(tool_results_message(std::mem::take(
+                    &mut pending_tool_results,
+                )));
+            }
+
             messages.push(Message {
                 role: cm.role,
                 content: cm.content.clone(),
@@ -101,25 +114,19 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
                 reasoning_content,
             });
 
-            // Collect tool results — buffer them for the next User message
-            if !cm.tool_calls.is_empty() {
-                let results: Vec<ToolResultMessage> = cm
-                    .tool_calls
-                    .iter()
-                    .filter_map(|tc| {
-                        tc.result.as_ref().map(|r| ToolResultMessage {
-                            tool_use_id: tc.id.clone(),
-                            content: r.content.clone(),
-                            is_error: r.is_error,
-                        })
-                    })
-                    .collect();
-
-                if !results.is_empty() {
-                    pending_tool_results.extend(results);
-                }
-            }
+            pending_tool_results.extend(cm.tool_calls.iter().filter_map(|tc| {
+                tc.result.as_ref().map(|r| ToolResultMessage {
+                    tool_use_id: tc.id.clone(),
+                    content: r.content.clone(),
+                    is_error: r.is_error,
+                })
+            }));
         } else {
+            if cm.role != MessageRole::User && !pending_tool_results.is_empty() {
+                messages.push(tool_results_message(std::mem::take(
+                    &mut pending_tool_results,
+                )));
+            }
             // User (or System) message: attach any buffered tool results
             let tool_results = std::mem::take(&mut pending_tool_results);
             messages.push(Message {
@@ -136,16 +143,20 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
 
     // Flush any remaining pending tool results (edge case: last message was Assistant)
     if !pending_tool_results.is_empty() {
-        messages.push(Message {
-            role: MessageRole::User,
-            content: String::new(),
-            images: vec![],
-            tool_results: pending_tool_results,
-            tool_uses: vec![],
-            context_prefix: None,
-            reasoning_content: None,
-        });
+        messages.push(tool_results_message(pending_tool_results));
     }
 
     messages
+}
+
+fn tool_results_message(tool_results: Vec<ToolResultMessage>) -> Message {
+    Message {
+        role: MessageRole::User,
+        content: String::new(),
+        images: vec![],
+        tool_results,
+        tool_uses: vec![],
+        context_prefix: None,
+        reasoning_content: None,
+    }
 }

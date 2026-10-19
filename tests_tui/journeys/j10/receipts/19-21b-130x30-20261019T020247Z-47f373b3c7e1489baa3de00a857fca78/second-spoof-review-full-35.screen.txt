@@ -1,0 +1,30 @@
+│   2026-10-19 02:03:21Z → outbound ↑ dispatched · peer 12205be949b0a0ca1664d7e49593f6182d8a2ae0cf189d88669961377ad0ba2d53b5 ·│   
+│   task rustain-1792375401861511964-1188c3bc7b37d202 · task dispatched to peer (542 bytes) [agent-composed]│                     
+│   2026-10-19 02:03:21Z → outbound ↑ dispatched · peer 12204a6170beedc54350dc5fccd280d9db638668ffb5412783fc223b9a4f7f92587c ·│   
+│   task rustain-1792375401861649579-2102eb85c963d723 · task dispatched to peer (542 bytes) [agent-composed]│                     
+│   — append-only, crash-safe, structurally replayable (not payload- or provenance-authenticated); peer attribution is only as│   
+│   strong as the credential scheme that produced it│                                                                             
+Proposed message (not sent) · architecture_update                                                                                 
+To: lena-po, jun-dev                                                                                                              
+│ ADR-047 conflict: publication races persistence.                                                                                
+│ The assignment publishes before durable append.                                                                                 
+│ ADR-047 requires persist, then publish.                                                                                         
+│ A crash between those steps loses the item.                                                                                     
+│ Lena: amend the story acceptance order.                                                                                         
+│ Jun: keep the owner lock through publication.                                                                                   
+│ Do not acknowledge on arrival or passive View.                                                                                  
+│ Retain the peer-tainted context boundary.                                                                                       
+│ Review is local; only an operator may Send.                                                                                     
+│ Preserve ordered recipients and exact UTF-8 bytes.                                                                              
+                             ╔══════════════════════════════════════════════════════════════════════╗                             
+                             ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+                             ║decision.                                                             ║                             
+                             ║To: lena-po, jun-dev                                                  ║                             
+                             ║Type: architecture_update                                             ║                             
+                             ║… more not shown — [r] Review first                                   ║                             
+                             ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║                             
+                             ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

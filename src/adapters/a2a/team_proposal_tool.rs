@@ -14,7 +14,7 @@ use crate::domain::ports::TeamProposalSink;
 use super::driver::A2aDelegationRuntime;
 use super::send::{SendRequest, validate_send_request};
 
-pub(crate) const TOOL_NAME: &str = "propose_team_message";
+use crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME;
 const MAX_BODY_BYTES: usize = 131_072;
 const NO_SURFACE: &str =
     "Not proposed: no operator surface is attached to approve it. Nothing was sent.";
@@ -38,7 +38,7 @@ impl TeamProposalTool {
     pub(crate) fn definition() -> ToolDefinition {
         static DEFINITION: std::sync::LazyLock<ToolDefinition> =
             std::sync::LazyLock::new(|| ToolDefinition {
-                name: TOOL_NAME.to_owned(),
+                name: TEAM_PROPOSAL_TOOL_NAME.to_owned(),
                 description: "Propose a team message for operator approval; this does not send it."
                     .to_owned(),
                 input_schema: serde_json::json!({
@@ -235,6 +235,6 @@ fn invalid_message_type() -> ToolError {
 /// a proposal with a binding from mutable composite state.
 pub(crate) fn missing_invocation(tool_use_id: &str) -> Result<ToolResult, ToolError> {
     Err(ToolError::InvalidInput(format!(
-        "{TOOL_NAME} requires call-scoped invocation context (tool use {tool_use_id})"
+        "{TEAM_PROPOSAL_TOOL_NAME} requires call-scoped invocation context (tool use {tool_use_id})"
     )))
 }

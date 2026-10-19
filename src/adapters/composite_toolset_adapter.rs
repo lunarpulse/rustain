@@ -671,7 +671,7 @@ impl ToolSetPort for CompositeToolsetAdapter {
         cancel: CancellationToken,
     ) -> Result<ToolResult, ToolError> {
         #[cfg(feature = "a2a")]
-        if tool_name == crate::adapters::a2a::team_proposal_tool::TOOL_NAME
+        if tool_name == crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME
             && self.team_proposal_tool.get().is_some()
         {
             return crate::adapters::a2a::team_proposal_tool::missing_invocation("direct execute");
@@ -760,7 +760,7 @@ impl ToolSetPort for CompositeToolsetAdapter {
         progress_tx: Option<mpsc::UnboundedSender<ToolProgressEvent>>,
     ) -> Result<ToolResult, ToolError> {
         #[cfg(feature = "a2a")]
-        if tool_name == crate::adapters::a2a::team_proposal_tool::TOOL_NAME
+        if tool_name == crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME
             && self.team_proposal_tool.get().is_some()
         {
             return crate::adapters::a2a::team_proposal_tool::missing_invocation(tool_use_id);
@@ -851,7 +851,7 @@ impl ToolSetPort for CompositeToolsetAdapter {
         #[cfg(not(feature = "a2a"))]
         let _ = invocation;
         #[cfg(feature = "a2a")]
-        if tool_name == crate::adapters::a2a::team_proposal_tool::TOOL_NAME {
+        if tool_name == crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME {
             if let Some(tool) = self.team_proposal_tool.get() {
                 let _ = (cancel, progress_tx);
                 return tool.execute(tool_use_id, input, invocation).await;

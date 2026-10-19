@@ -1,0 +1,16 @@
+│   · received│                                             
+│     ● jun-dev  delivered│                                 
+│       item ri_-6d3u41KbpGeseIoXfgoSyajhYYXk3BB · arrival│ 
+│   1 · task rustain-1792375541428961669-dce7b6f0efe6e77f│  
+│   · received│                                             
+│ ℹ 2026-10-19 02:05:20Z ← inbound ⏸ awaiting-approval ·│   
+│   peer│                                                   
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

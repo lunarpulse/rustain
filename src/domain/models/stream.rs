@@ -36,6 +36,10 @@ pub enum StreamChunk {
         id: String,
         content: String,
         is_error: bool,
+        /// Runtime-only visibility, bound by the scheduler's named request.
+        /// Internal consumers retain the exact result; public projections omit it.
+        #[serde(skip)]
+        operator_private: bool,
         /// UI-only display-diff state for completed Write calls (Story 19.1
         /// A3 — populated at the one infrastructure site, turn.rs, by reading
         /// the pre-write snapshot back through `StoragePort::read_snapshot`).
@@ -63,6 +67,20 @@ pub enum StreamChunk {
     // SdkUserSent { uuid: String },
     // SdkAssistantUuid { uuid: String },
     // ContextWindowUpdate { context_window: u32 },
+}
+
+impl StreamChunk {
+    /// Proposal arguments and results belong to the operator review surface,
+    /// not the tier-agnostic observer stream.
+    pub fn is_operator_private(&self) -> bool {
+        match self {
+            Self::ToolUse { name, .. } => name == super::team_proposal::TEAM_PROPOSAL_TOOL_NAME,
+            Self::ToolResult {
+                operator_private, ..
+            } => *operator_private,
+            _ => false,
+        }
+    }
 }
 
 /// State machine tracking where we are in the streaming process.

@@ -1,0 +1,16 @@
+│       jun-dev  awaiting their approval│                   
+│ ℹ Team interaction policy│                                
+│   Response mode: notify-and-wait│                         
+│   Notification urgency: immediate│                        
+│   Peers:│                                                 
+│   - jun-dev│                                              
+│   (1220e3b662d3ffd790e5e840ba7d459a4b76ac9bb8cacaa2be0e4│ 
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

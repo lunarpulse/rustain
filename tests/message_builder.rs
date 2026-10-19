@@ -332,3 +332,159 @@ fn test_file_context_multiple_mentions_payload() {
     assert!(full_message.contains("<file path=\"src/main.rs\">"));
     assert!(full_message.contains("explain @src/main.rs vs @src/lib.rs"));
 }
+
+fn retained_proposal_call(id: &str, result: Option<&str>) -> ToolCallInfo {
+    ToolCallInfo {
+        id: id.into(),
+        name: "propose_team_message".into(),
+        input: serde_json::json!({"recipients":["lena-po"],"type":"architecture_update","body":"private retained body"}),
+        result: result.map(|content| ToolResultInfo {
+            content: content.into(),
+            is_error: false,
+            diff: rustain::domain::models::WriteDiffState::NotAWrite,
+        }),
+        started_at_ms: None,
+        completed_at_ms: None,
+        status: None,
+    }
+}
+
+#[test]
+fn retained_proposal_result_precedes_later_assistant_prose() {
+    let conversation = make_conversation(vec![
+        ChatMessage {
+            role: MessageRole::User,
+            content: "Propose the message.".into(),
+            ..Default::default()
+        },
+        ChatMessage {
+            tool_calls: vec![retained_proposal_call(
+                "proposal-call",
+                Some("Nothing has been sent."),
+            )],
+            ..Default::default()
+        },
+        ChatMessage {
+            content: "Waiting for your decision.".into(),
+            ..Default::default()
+        },
+        ChatMessage {
+            role: MessageRole::User,
+            content: "Continue the conversation.".into(),
+            ..Default::default()
+        },
+    ]);
+    let messages = build_api_messages(&conversation);
+    let call = messages
+        .iter()
+        .position(|message| {
+            message
+                .tool_uses
+                .iter()
+                .any(|tool| tool.id == "proposal-call")
+        })
+        .unwrap();
+    assert_eq!(
+        messages[call + 1].tool_results[0].tool_use_id,
+        "proposal-call"
+    );
+    assert_eq!(
+        messages[call + 1].tool_results[0].content,
+        "Nothing has been sent."
+    );
+    assert_eq!(messages[call + 2].content, "Waiting for your decision.");
+
+    #[cfg(feature = "openai")]
+    {
+        let options = rustain::domain::models::CompletionOptions {
+            model: "history-contract".into(),
+            max_tokens: 128,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: Vec::new(),
+        };
+        let request =
+            rustain::adapters::openai::types::OpenAiRequest::from((messages.as_slice(), &options));
+        let call = request
+            .messages
+            .iter()
+            .position(|message| {
+                message
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|tools| tools.iter().any(|tool| tool.id == "proposal-call"))
+            })
+            .unwrap();
+        assert_eq!(request.messages[call + 1].role, "tool");
+        assert_eq!(
+            request.messages[call + 1].tool_call_id.as_deref(),
+            Some("proposal-call")
+        );
+        assert_eq!(
+            request.messages[call + 2].content,
+            "Waiting for your decision."
+        );
+    }
+}
+
+#[test]
+fn interrupted_proposal_remains_auditable_without_unmatched_model_calls() {
+    for completed_sibling in [false, true] {
+        let mut calls = vec![retained_proposal_call("interrupted-call", None)];
+        if completed_sibling {
+            calls.push(retained_proposal_call(
+                "completed-call",
+                Some("Completed sibling."),
+            ));
+        }
+        let conversation = make_conversation(vec![
+            ChatMessage {
+                role: MessageRole::User,
+                content: "Original request.".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                tool_calls: calls,
+                ..Default::default()
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: "Retry after the interruption.".into(),
+                ..Default::default()
+            },
+        ]);
+        let messages = build_api_messages(&conversation);
+        assert!(messages.iter().all(|message| {
+            message
+                .tool_uses
+                .iter()
+                .all(|tool| tool.id != "interrupted-call")
+        }));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content == "Retry after the interruption.")
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.role != MessageRole::Assistant
+                    || !message.content.is_empty()
+                    || !message.tool_uses.is_empty()
+                    || message.reasoning_content.is_some())
+        );
+        let completed = messages
+            .iter()
+            .flat_map(|message| &message.tool_results)
+            .find(|result| result.tool_use_id == "completed-call");
+        assert_eq!(
+            completed.map(|result| result.content.as_str()),
+            completed_sibling.then_some("Completed sibling.")
+        );
+        assert_eq!(
+            conversation.messages[1].tool_calls[0].input["body"],
+            "private retained body"
+        );
+        assert!(conversation.messages[1].tool_calls[0].result.is_none());
+    }
+}

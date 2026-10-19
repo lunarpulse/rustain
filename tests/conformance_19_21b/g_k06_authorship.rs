@@ -108,9 +108,178 @@ async fn approved_dispatch_authorship_stays_out_of_raw_frames() {
     let mut peer = AttachedClient::attach(&daemon.path, ConnectionTier::Peer, true).await;
     let mut readonly =
         AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, true).await;
-    submit(&daemon, &mut writer, input()).await;
-    let id = proposal(&mut writer).await;
+    use rustain::domain::events::AppEvent;
+    use rustain::domain::models::{StreamChunk, ToolCall};
+    use rustain::infrastructure::runtime::event_bus::RawEventKind;
+    const SECRET: &str = "R1-undecided-body-private-marker-9e4f";
+    const PUBLIC: &str = "R1-unrelated-tool-public-control";
+    let body = format!("{SECRET}\n{BODY}");
+    let mut scheduler = daemon.runtime.tool_scheduler.subscribe();
+    let model_result = submit(
+        &daemon,
+        &mut writer,
+        json!({"recipients":["lena-po"],"type":"architecture_update","body":body}),
+    )
+    .await;
+    assert_eq!(
+        model_result,
+        "Proposal shown to the operator. Nothing has been sent; the operator decides whether to send it to lena-po.",
+        "private raw projection must not alter the model-facing result"
+    );
+    let id = match writer
+        .wait_for(|frame| matches!(frame, DaemonFrame::TeamProposal { .. }))
+        .await
+    {
+        DaemonFrame::TeamProposal {
+            proposal,
+            recipients,
+            message_type,
+            body: snapshot,
+            ..
+        } => {
+            assert_eq!(
+                recipients,
+                ["lena-po"],
+                "writer keeps exact recipient order"
+            );
+            assert_eq!(
+                message_type,
+                rustain::domain::models::SemanticMessageType::ArchitectureUpdate
+            );
+            assert_eq!(
+                snapshot.as_bytes(),
+                body.as_bytes(),
+                "writer keeps exact proposal bytes"
+            );
+            proposal
+        }
+        _ => unreachable!(),
+    };
+    let mut terminal = false;
+    while let Ok(transition) = scheduler.try_recv() {
+        assert_eq!(
+            transition.call.request().input["body"],
+            body,
+            "scheduler trace must originate from the real private tool invocation"
+        );
+        terminal |= matches!(&transition.call, ToolCall::Success { result, .. }
+            if result.output == model_result);
+        // Exercise the same canonical bridge carrier used by standalone turns
+        // with genuine attached scheduler transitions, not fabricated payloads.
+        daemon
+            .domain_tx
+            .send(AppEvent::ToolCallTransitionBridged {
+                conversation_id: transition.conversation_id.clone(),
+                transition,
+            })
+            .unwrap();
+    }
+    assert!(
+        terminal,
+        "production attached scheduler must finish the proposal call"
+    );
+    daemon.runtime.security.set_mode(PermissionMode::Yolo);
+    let public_path = daemon
+        .journal
+        .workspace
+        .path()
+        .join("raw-observer-control.txt");
+    std::fs::write(&public_path, PUBLIC).unwrap();
+    daemon.script.tool("Read", json!({"file_path":public_path}));
+    writer
+        .send_frame(ClientFrame::UserMessage {
+            text: "Read the observer positive-control file.".into(),
+            images: vec![],
+        })
+        .await;
+    completed(&mut writer).await;
+    for observer in [&mut readonly, &mut peer] {
+        completed(observer).await;
+        completed(observer).await;
+    }
+    {
+        let requests = daemon.requests.lock();
+        for (messages, _) in requests.iter() {
+            for (index, message) in messages.iter().enumerate() {
+                for call in &message.tool_uses {
+                    assert!(
+                        messages.get(index + 1).is_some_and(|next| next
+                            .tool_results
+                            .iter()
+                            .any(|result| result.tool_use_id == call.id)),
+                        "retained proposal history must keep tool responses adjacent on the next real model turn"
+                    );
+                }
+            }
+        }
+    }
+    let private_tool = {
+        let conversation = daemon.conversation.lock().await;
+        conversation
+            .messages
+            .iter()
+            .flat_map(|message| &message.tool_calls)
+            .find(|tool| tool.name == "propose_team_message")
+            .cloned()
+            .expect("A6 internal transcript retains private tool call")
+    };
+    assert_eq!(private_tool.input["body"], body);
+    assert_eq!(
+        private_tool.result.as_ref().unwrap().content,
+        model_result,
+        "A6 internal transcript retains exact private tool result"
+    );
+    for tier in [ConnectionTier::Peer, ConnectionTier::TrustedLocal] {
+        let mut late = AttachedClient::attach(&daemon.path, tier, true).await;
+        let snapshot = late
+            .received
+            .iter()
+            .find_map(|frame| match frame {
+                DaemonFrame::AttachAck { snapshot, .. } => Some(snapshot),
+                _ => None,
+            })
+            .expect("late observer must inspect actual signed-socket attach snapshot");
+        let encoded = serde_json::to_string(&snapshot.transcript).unwrap();
+        assert!(
+            !encoded.contains(SECRET) && !encoded.contains("lena-po") && !encoded.contains(&id),
+            "late public transcript must not disclose retained private tool arguments/results"
+        );
+        assert!(
+            encoded.contains(PUBLIC),
+            "late transcript retains unrelated tool evidence"
+        );
+        late.send_frame(ClientFrame::HistoryRequest {
+            before_index: None,
+            count: usize::MAX,
+        })
+        .await;
+        let history = late
+            .wait_for(|frame| matches!(frame, DaemonFrame::History { .. }))
+            .await;
+        let encoded = serde_json::to_string(&history).unwrap();
+        assert!(
+            !encoded.contains(SECRET) && !encoded.contains("lena-po") && !encoded.contains(&id),
+            "public history pages must not disclose retained private tool arguments/results"
+        );
+        assert!(
+            encoded.contains(PUBLIC),
+            "history pages retain unrelated tool evidence"
+        );
+    }
     send_once(&daemon, &mut writer, &host, &id).await;
+    let posts = host.posts();
+    let sent: Value = serde_json::from_slice(posts[0].body()).unwrap();
+    assert_eq!(
+        sent.pointer("/params/message/parts/0/text")
+            .and_then(Value::as_str),
+        Some(body.as_str()),
+        "approved send remains byte-exact"
+    );
+    assert_eq!(
+        sent.pointer("/params/message/metadata/x-rustain-message-type")
+            .and_then(Value::as_str),
+        Some("architecture_update")
+    );
     for observer in [&mut writer, &mut readonly, &mut peer] {
         let dispatch=observer.wait_for(|frame|matches!(frame,DaemonFrame::Event(event)
             if matches!(&event.kind,rustain::infrastructure::runtime::event_bus::RawEventKind::DomainEvent(
@@ -146,6 +315,23 @@ async fn approved_dispatch_authorship_stays_out_of_raw_frames() {
         if let DaemonFrame::Event(event) = frame {
             let raw = serde_json::to_string(event).unwrap();
             assert!(
+                !raw.contains(SECRET) && !raw.contains(&id),
+                "M50 attached privacy: no raw carrier may disclose undecided proposal body or id"
+            );
+            if matches!(
+                &event.kind,
+                RawEventKind::Provider(
+                    StreamChunk::ToolUse { .. } | StreamChunk::ToolResult { .. }
+                ) | RawEventKind::PeerProvider(
+                    StreamChunk::ToolUse { .. } | StreamChunk::ToolResult { .. }
+                ) | RawEventKind::Tool(_)
+            ) {
+                assert!(
+                    !raw.contains("lena-po"),
+                    "M50 attached privacy: private tool inputs/results/transitions hide proposal aliases"
+                );
+            }
+            assert!(
                 !raw.contains("agent-composed"),
                 "M49 attached: journal-only dispatch authorship must not leak on raw frames"
             );
@@ -158,9 +344,96 @@ async fn approved_dispatch_authorship_stays_out_of_raw_frames() {
             .any(|frame| matches!(frame, DaemonFrame::TeamProposal { .. })),
         "M50 attached privacy: daemon registry must not publish proposal to Peer"
     );
+    for observer in [&writer, &readonly, &peer] {
+        assert!(
+            observer.received.iter().any(|frame| matches!(frame,
+            DaemonFrame::Event(event) if matches!(&event.kind,
+                RawEventKind::Provider(StreamChunk::ToolUse { name, .. }) if name == "Read"))),
+            "unrelated tool invocation must remain observable on every attachment"
+        );
+        assert!(
+            observer.received.iter().any(|frame| matches!(frame,
+            DaemonFrame::Event(event) if matches!(&event.kind,
+                RawEventKind::Provider(StreamChunk::ToolResult { content, .. })
+                    if content.contains(PUBLIC)))),
+            "unrelated tool result must remain observable on every attachment"
+        );
+    }
+    assert!(
+        !readonly
+            .received
+            .iter()
+            .any(|frame| matches!(frame, DaemonFrame::TeamProposal { .. })),
+        "M50 attached privacy: read-only clients must not receive proposal DTOs"
+    );
     daemon.stop().await;
     host.stop().await;
 }
+#[tokio::test]
+async fn interrupted_proposal_history_does_not_poison_the_next_model_turn() {
+    use rustain::domain::models::StreamChunk;
+
+    let (daemon, mut writer, host) = fixture().await;
+    daemon.script.exchange(vec![StreamChunk::ToolUse {
+        id: "interrupted-proposal-call".into(),
+        name: "propose_team_message".into(),
+        input: json!({
+            "recipients":["lena-po"], "type":"architecture_update",
+            "body":"interrupted-private-body"
+        }),
+    }]);
+    writer
+        .send_frame(ClientFrame::UserMessage {
+            text: "A provider stream will disconnect before this call can execute.".into(),
+            images: vec![],
+        })
+        .await;
+    completed(&mut writer).await;
+    assert!(daemon.proposals.pending().await.is_empty());
+    zero(
+        &daemon,
+        &[&host],
+        "an interrupted tool stream cannot raise or send",
+    )
+    .await;
+    {
+        let conversation = daemon.conversation.lock().await;
+        let interrupted = conversation
+            .messages
+            .iter()
+            .flat_map(|message| &message.tool_calls)
+            .find(|tool| tool.id == "interrupted-proposal-call")
+            .expect("interrupted invocation remains internal audit evidence");
+        assert!(interrupted.result.is_none());
+        assert_eq!(interrupted.input["body"], "interrupted-private-body");
+    }
+
+    assert!(
+        submit(&daemon, &mut writer, input())
+            .await
+            .starts_with("Proposal shown")
+    );
+    let id = proposal(&mut writer).await;
+    {
+        let requests = daemon.requests.lock();
+        let (messages, _) = requests.last().unwrap();
+        assert!(
+            messages.iter().all(|message| message
+                .tool_uses
+                .iter()
+                .all(|call| call.id != "interrupted-proposal-call")
+                && message
+                    .tool_results
+                    .iter()
+                    .all(|result| result.tool_use_id != "interrupted-proposal-call")),
+            "the next real model request must not contain an unmatched interrupted invocation"
+        );
+    }
+    send_once(&daemon, &mut writer, &host, &id).await;
+    daemon.stop().await;
+    host.stop().await;
+}
+
 #[tokio::test]
 async fn future_dispatch_authorship_replays_into_attached_board() {
     let (daemon, mut writer, host) = fixture().await;

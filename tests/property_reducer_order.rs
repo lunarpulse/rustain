@@ -32,6 +32,7 @@ fn chunk(v: &V) -> StreamChunk {
             id: "t0".into(),
             content: "r".into(),
             is_error: false,
+            operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
         },
         V::H => StreamChunk::Thinking {

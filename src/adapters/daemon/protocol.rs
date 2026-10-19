@@ -325,6 +325,9 @@ pub enum ClientFrame {
     InspectRecipientContext,
     /// Select/off a daemon-owned received item reference, never a client body.
     SetRecipientContext { item_id: String, selected: bool },
+    /// Opt in to the proposal decision surface after a successful attach.
+    /// Only a capable TrustedLocal + ReadWrite client may enable publication.
+    EnableTeamProposals,
     /// Decide one daemon-owned proposal snapshot. TrustedLocal + ReadWrite only.
     /// Send uses the ordinary send coordinator with `request = proposal`.
     TeamProposalDecision {
@@ -838,6 +841,7 @@ mod tests {
             ClientFrame::DeferRecipientItem {
                 item_id: "ri-1".into(),
             },
+            ClientFrame::EnableTeamProposals,
             ClientFrame::TeamProposalDecision {
                 proposal: "tp_send".into(),
                 decision: TeamProposalDecision::Send,
@@ -1235,6 +1239,14 @@ mod tests {
             "  exact\n\tbody é界  ".as_bytes(),
             "proposal body bytes must survive the feature-independent frame path"
         );
+        assert_eq!(PROTOCOL_VERSION, 7, "proposal opt-in is additive to v7");
+        write_frame(&mut writer, &ClientFrame::EnableTeamProposals)
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_frame::<_, ClientFrame>(&mut reader).await.unwrap(),
+            Some(ClientFrame::EnableTeamProposals)
+        ));
         for (token, expected) in [
             ("send", TeamProposalDecision::Send),
             ("dismiss", TeamProposalDecision::Dismiss),

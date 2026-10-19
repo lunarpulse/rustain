@@ -345,14 +345,17 @@ versioned wire protocol on its Unix socket.
 The [agent-proposed message card](a2a.md#agent-proposed-messages-standalone-and-attached-tui)
 uses the daemon's own A2A egress and a construction-owned, in-memory proposal
 registry. Raising returns immediately without holding the turn lock. Only the
-authenticated TrustedLocal read-write writer receives the exact snapshot and can
-choose Send or Dismiss; Review is local and sends nothing. A generic
-`ApprovalRequest`, YOLO, grants, subagent policy, peer context or elapsed time
-never authorizes a proposal. No writer (including read-only/Peer-only attachments)
-means refusal at raise, not a retained invisible proposal.
+authenticated TrustedLocal read-write writer that opts in to proposal decisions
+receives the exact snapshot and can choose Send or Dismiss. The rich TUI opts in
+after `AttachAck`; `--plain` does not. Review is local and sends nothing; it
+closes any received-item overlay and returns a scrolled transcript to the current
+proposal. A generic `ApprovalRequest`, YOLO, grants, subagent policy, peer context
+or elapsed time never authorizes a proposal. No capable writer (including plain,
+read-only or Peer-only attachments) means refusal at raise, not a retained
+invisible proposal.
 
-Detach or replacement retains a pending proposal and re-emits it to the next
-trusted writer. Conversation reset/close, shutdown and process restart withdraw
+Detach or replacement retains a pending proposal and re-emits it when the next
+trusted writer opts in. Conversation reset/close, shutdown and process restart withdraw
 it without peer I/O. A full writer queue produces an explicit terminal protocol
 error and closes the connection, retaining the proposal for the next writer;
 this does not repair legacy `History`/`ApprovalRequest` queue drops. Saturating
@@ -423,7 +426,9 @@ proposal so that lands client-side with no protocol change.
 
 `--plain` selects the minimal line-based stdin/stdout client (Story 12.2b
 `run_attach`) for scripting / non-TTY contexts: it prints the conversation as it
-streams and submits a turn per line; Ctrl-D detaches.
+streams and submits a turn per line; Ctrl-D detaches. It remains an ordinary
+authenticated writer, but cannot submit proposal decisions. A model's proposal
+therefore receives the no-surface refusal rather than creating a new pending card.
 
 ### Lazy runtime (NFR46)
 
@@ -457,12 +462,19 @@ Forwarded turn events reuse the existing `RawEvent` projection
 (`ClientEvent = RawEvent`) — one `AppEvent → wire` mapping, in one place. That
 projection omits sender-local team action/settlement events and strips the
 additive action reference and dispatch authorship from legacy dispatch events.
-Private proposal state is never published to this raw event stream; unrelated
-raw-event behavior is unchanged.
+Proposal inputs, results and scheduler transitions are omitted from this public
+event stream. The daemon retains their structured internal conversation history,
+but omits their private tool-call data from attach snapshots, history pages and
+peer-row projections; unrelated tools remain visible. Completed tool responses
+precede later assistant messages when model history is rebuilt. Interrupted
+calls remain internally retained but are not replayed as unmatched invocations.
 
 The client speaks `ClientFrame`, including `Attach`, `UserMessage`,
 `HistoryRequest`, `ApprovalResponse`, `Detach`, and the request-keyed team
 commands `TeamSend`, `TeamBoard`, `TeamStatus`, and `RevokeSenderConsent`.
+`EnableTeamProposals` is an additive v7 opt-in sent by a capable rich client after
+its authenticated writer acknowledgement. It enters the same operator FIFO and
+stale-writer fence as decisions; read-only and Peer connections cannot enable it.
 The daemon answers team boards with request-correlated `TeamBoardChunk` frames
 (sequence numbers start at zero) and a `TeamBoardDone` frame naming the complete
 chunk count; clients reassemble only the matching request and publish the board

@@ -159,8 +159,51 @@ impl EventBus {
     }
 }
 
+/// Keep the retained transcript intact while projecting only public tools.
+pub(crate) fn public_transcript_message(
+    message: &crate::domain::models::ChatMessage,
+) -> crate::domain::models::ChatMessage {
+    crate::domain::models::ChatMessage {
+        id: message.id.clone(),
+        role: message.role,
+        content: message.content.clone(),
+        content_blocks: message.content_blocks.clone(),
+        tool_calls: message
+            .tool_calls
+            .iter()
+            .filter(|tool| {
+                tool.name != crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME
+            })
+            .cloned()
+            .collect(),
+        created_at: message.created_at,
+        token_count: message.token_count,
+        history_source: message.history_source,
+        stop_reason: message.stop_reason.clone(),
+        synthetic: message.synthetic,
+        images: message.images.clone(),
+        origin: message.origin,
+        authorship: message.authorship,
+        retracted_at_ms: message.retracted_at_ms,
+    }
+}
+
 impl RawEvent {
     pub fn from_app_event(ev: &AppEvent) -> Option<Self> {
+        match ev {
+            AppEvent::ProviderChunk { chunk, .. } | AppEvent::PeerProviderChunk { chunk, .. }
+                if chunk.is_operator_private() =>
+            {
+                return None;
+            }
+            AppEvent::ToolCallTransitionBridged { transition, .. }
+                if transition.call.request().tool_name
+                    == crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME =>
+            {
+                return None;
+            }
+            _ => {}
+        }
         let now = chrono::Utc::now().timestamp_millis();
         Some(match ev {
             AppEvent::ProviderChunk {
@@ -606,5 +649,183 @@ mod tests {
         assert_eq!(content_hash, None);
         assert_eq!(endpoint.as_deref(), Some("sha256:origin-digest"));
         assert_eq!(action, None, "sender-local action correlation is stripped");
+    }
+
+    #[tokio::test]
+    async fn proposal_chunks_stay_on_domain_channel_only() {
+        use crate::domain::models::{AgentId, WriteDiffState};
+        let (bus, mut domain) = EventBus::new(16);
+        let mut raw = bus.subscribe_raw();
+        for chunk in [
+            StreamChunk::ToolUse {
+                id: "private-tool".into(),
+                name: crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME.into(),
+                input: serde_json::json!({"body":"secret","recipients":["private-alias"]}),
+            },
+            StreamChunk::ToolResult {
+                id: "private-tool".into(),
+                content: "Proposal for private-alias".into(),
+                is_error: false,
+                operator_private: true,
+                diff: WriteDiffState::NotAWrite,
+            },
+        ] {
+            for event in [
+                AppEvent::ProviderChunk {
+                    conversation_id: "conv".into(),
+                    chunk: chunk.clone(),
+                },
+                AppEvent::PeerProviderChunk {
+                    node: std::sync::Arc::new(AgentId::new()),
+                    conversation_id: "conv".into(),
+                    chunk: chunk.clone(),
+                },
+            ] {
+                bus.emit_domain(event).unwrap();
+                let retained = domain.try_recv().expect("private domain event retained");
+                let retained_chunk = match retained {
+                    AppEvent::ProviderChunk { chunk, .. }
+                    | AppEvent::PeerProviderChunk { chunk, .. } => chunk,
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    serde_json::to_value(retained_chunk).unwrap(),
+                    serde_json::to_value(&chunk).unwrap(),
+                    "domain payload must stay byte-equivalent"
+                );
+                assert!(matches!(
+                    raw.try_recv(),
+                    Err(broadcast::error::TryRecvError::Empty)
+                ));
+            }
+        }
+        let public = StreamChunk::ToolResult {
+            id: "read-tool".into(),
+            content: "ordinary tool result".into(),
+            is_error: false,
+            operator_private: false,
+            diff: WriteDiffState::NotAWrite,
+        };
+        let encoded = serde_json::to_string(&public).unwrap();
+        assert!(!encoded.contains("operator_private"));
+        let decoded: StreamChunk = serde_json::from_str(&encoded).unwrap();
+        assert!(
+            !decoded.is_operator_private(),
+            "historical results default public"
+        );
+        bus.emit_domain(AppEvent::ProviderChunk {
+            conversation_id: "conv".into(),
+            chunk: public,
+        })
+        .unwrap();
+        assert!(
+            serde_json::to_string(&raw.try_recv().unwrap())
+                .unwrap()
+                .contains("ordinary tool result"),
+            "unrelated results remain observable"
+        );
+    }
+
+    #[test]
+    fn every_proposal_scheduler_transition_is_private() {
+        use crate::domain::models::{RequestId, ToolCall, ToolCallRequest, ToolCallResult};
+        let request = ToolCallRequest {
+            id: "private-tool".into(),
+            tool_name: crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME.into(),
+            input: serde_json::json!({"body":"secret","recipients":["private-alias"]}),
+        };
+        for call in [
+            ToolCall::Validating {
+                id: request.id.clone(),
+                request: request.clone(),
+                started_at: 0,
+            },
+            ToolCall::Scheduled {
+                id: request.id.clone(),
+                request: request.clone(),
+            },
+            ToolCall::AwaitingApproval {
+                id: request.id.clone(),
+                request: request.clone(),
+                approval_id: RequestId::new(),
+            },
+            ToolCall::Executing {
+                id: request.id.clone(),
+                request: request.clone(),
+                started_at: 0,
+            },
+            ToolCall::Success {
+                id: request.id.clone(),
+                request: request.clone(),
+                result: ToolCallResult {
+                    output: "private-alias".into(),
+                    is_error: false,
+                    duration_ms: 0,
+                },
+            },
+            ToolCall::Error {
+                id: request.id.clone(),
+                request: request.clone(),
+                error: "private-alias".into(),
+            },
+            ToolCall::Cancelled {
+                id: request.id.clone(),
+                request: request.clone(),
+                reason: "private-alias".into(),
+            },
+        ] {
+            assert!(
+                RawEvent::from_app_event(&AppEvent::ToolCallTransitionBridged {
+                    conversation_id: "conv".into(),
+                    transition: ToolCallTransition {
+                        conversation_id: "conv".into(),
+                        call
+                    },
+                })
+                .is_none(),
+                "no scheduler state may expose proposal arguments or output"
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_projection_removes_only_proposal_tools() {
+        use crate::domain::models::{ChatMessage, ToolCallInfo, ToolResultInfo, WriteDiffState};
+        let private = ToolCallInfo {
+            id: "private-call".into(),
+            name: crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME.into(),
+            input: serde_json::json!({"body":"private-body","recipients":["private-alias"]}),
+            result: Some(ToolResultInfo {
+                content: "Proposal shown for private-alias".into(),
+                is_error: false,
+                diff: WriteDiffState::NotAWrite,
+            }),
+            started_at_ms: None,
+            completed_at_ms: None,
+            status: None,
+        };
+        let mut public = private.clone();
+        public.name = "Read".into();
+        public.input = serde_json::json!({"file_path":"public-path"});
+        public.result.as_mut().unwrap().content = "public-result".into();
+        let retained = ChatMessage {
+            tool_calls: vec![private, public],
+            content: "public prose".into(),
+            ..Default::default()
+        };
+        let projected = public_transcript_message(&retained);
+        let encoded = serde_json::to_string(&projected).unwrap();
+        assert!(!encoded.contains("private-body") && !encoded.contains("private-alias"));
+        assert!(
+            encoded.contains("public-path")
+                && encoded.contains("public-result")
+                && encoded.contains("public prose")
+        );
+        assert_eq!(
+            retained.tool_calls.len(),
+            2,
+            "A6 stored transcript is unchanged"
+        );
+        assert_eq!(projected.tool_calls.len(), 1);
     }
 }

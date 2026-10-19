@@ -87,6 +87,8 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
         Some(DaemonFrame::Error(e)) => anyhow::bail!("daemon rejected attach: {e}"),
         other => anyhow::bail!("unexpected first frame from daemon: {other:?}"),
     };
+    // This line client has no TeamProposalDecision input surface. Keep ordinary
+    // writer turns usable, but never opt in with EnableTeamProposals.
 
     let mut board_chunks = std::collections::HashMap::<String, (u32, String)>::new();
     let mut reader = tokio::spawn(async move {

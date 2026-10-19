@@ -31,7 +31,7 @@ pub async fn completed(client: &mut AttachedClient) {
 }
 pub async fn submit(daemon: &AttachedDaemon, writer: &mut AttachedClient, input: Value) -> String {
     let before = daemon.provider_request_count();
-    daemon.script.tool("propose_team_message", input);
+    let tool_use_id = daemon.script.tool("propose_team_message", input);
     writer
         .send_frame(ClientFrame::UserMessage {
             text: "Please propose the exact supplied message; never send it.".into(),
@@ -50,9 +50,10 @@ pub async fn submit(daemon: &AttachedDaemon, writer: &mut AttachedClient, input:
         .iter()
         .flat_map(|(messages, _)| messages.iter())
         .flat_map(|message| message.tool_results.iter())
-        .map(|result| result.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .find(|result| result.tool_use_id == tool_use_id)
+        .expect("the current scripted proposal must reach its model continuation")
+        .content
+        .clone()
 }
 pub async fn proposal(writer: &mut AttachedClient) -> String {
     match writer

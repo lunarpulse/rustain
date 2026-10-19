@@ -446,6 +446,7 @@ pub async fn run_turn(
                                             id: tc.id.clone(),
                                             content: "Tool execution cancelled".to_string(),
                                             is_error: true,
+                                            operator_private: false,
                                             diff: crate::domain::models::WriteDiffState::NotAWrite,
                                         },
                                     });
@@ -469,6 +470,7 @@ pub async fn run_turn(
                                     id: result.tool_use_id.clone(),
                                     content: result.content.clone(),
                                     is_error: result.is_error,
+                                    operator_private: false,
                                     // AskUserQuestion answer — not a file write.
                                     diff: crate::domain::models::WriteDiffState::NotAWrite,
                                 },
@@ -649,6 +651,8 @@ pub async fn run_turn(
                                         id: id.clone(),
                                         content: content.clone(),
                                         is_error,
+                                        operator_private: batch_with_idx[i].1.tool_name
+                                            == crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME,
                                         diff,
                                     },
                                 });

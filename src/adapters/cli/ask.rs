@@ -384,7 +384,7 @@ impl<'a> AskRenderer<'a> {
                 id,
                 content,
                 is_error,
-                diff: _,
+                ..
             } => StreamEvent {
                 schema_version: SCHEMA_VERSION,
                 event_type: "tool_result",
@@ -959,7 +959,7 @@ pub async fn run_ask_core(
                     id,
                     content,
                     is_error,
-                    diff: _,
+                    ..
                 } => {
                     if !turn_complete {
                         last_block_start = assistant_text.len();

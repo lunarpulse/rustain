@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "structural_replay": "append-only, crash-safe, structurally replayable (not payload- or provenance-authenticated)",
+  "attribution": "peer attribution is only as strong as the credential scheme that produced it",
+  "structurally_consistent": true,
+  "divergence": null,
+  "export_path": null,
+  "export_rows": null,
+  "rows": [
+    {
+      "seq": 6,
+      "recorded_at_ms": 1792375520041,
+      "direction": "inbound",
+      "kind": "awaiting-approval",
+      "peer": "1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e462a0caf8b5f100",
+      "task": "rustain-1792375519996006870-8fc80d564e2fd0f3",
+      "summary": "task parked awaiting operator approval",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 7,
+      "recorded_at_ms": 1792375520294,
+      "direction": "inbound",
+      "kind": "item-received",
+      "peer": "1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e462a0caf8b5f100",
+      "task": "ri_7x4z5E253BGToMwwzUutESli8tnfUNA9",
+      "summary": "recipient item received",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 8,
+      "recorded_at_ms": 1792375520302,
+      "direction": "inbound",
+      "kind": "accepted",
+      "peer": "1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e462a0caf8b5f100",
+      "task": "rustain-1792375519996006870-8fc80d564e2fd0f3",
+      "summary": "task accepted and executing",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 9,
+      "recorded_at_ms": 1792375520308,
+      "direction": "inbound",
+      "kind": "surfaced",
+      "peer": "1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e462a0caf8b5f100",
+      "task": "a2a-in/p-cGVlcjoxMjIwNzExMzgxOTE0NDIyYmZhMmQ1YjI1MjllMmI3M2U2NGRhNjNkOTRmZDFkZTVmOGU0ZTQ2MmEwY2FmOGI1ZjEwMA/t-cnVzdGFpbi0xNzkyMzc1NTE5OTk2MDA2ODcwLThmYzgwZDU2NGUyZmQwZjM",
+      "summary": "peer interaction recorded · notification immediate",
+      "response_clause": "response: notify-and-wait · via individual — a2a-interaction.toml",
+      "notification_clause": "notification: immediate · via individual — a2a-interaction.toml"
+    },
+    {
+      "seq": 13,
+      "recorded_at_ms": 1792375522575,
+      "direction": "unknown",
+      "kind": "item-acknowledged",
+      "peer": "1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e462a0caf8b5f100",
+      "task": "ri_7x4z5E253BGToMwwzUutESli8tnfUNA9",
+      "summary": "recipient item acknowledged by lena-po",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 15,
+      "recorded_at_ms": 1792375541429,
+      "direction": "outbound",
+      "kind": "dispatched",
+      "peer": "1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e462a0caf8b5f100",
+      "task": "rustain-1792375541428920072-8936f84eb2149d92",
+      "summary": "task dispatched to peer (542 bytes) [agent-composed]",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 16,
+      "recorded_at_ms": 1792375541439,
+      "direction": "outbound",
+      "kind": "dispatched",
+      "peer": "1220e3b662d3ffd790e5e840ba7d459a4b76ac9bb8cacaa2be0e4caeb8417caf0ed0",
+      "task": "rustain-1792375541428961669-dce7b6f0efe6e77f",
+      "summary": "task dispatched to peer (542 bytes) [agent-composed]",
+      "response_clause": null,
+      "notification_clause": null
+    }
+  ]
+}

@@ -100,6 +100,62 @@ async fn readonly_decision_is_refused() {
 async fn peer_decision_is_refused() {
     unauthorized(ConnectionTier::Peer, "M24: Peer decision was not refused").await;
 }
+async fn unauthorized_opt_in(tier: ConnectionTier) {
+    let (daemon, mut writer, host) = fixture().await;
+    submit(&daemon, &mut writer, input()).await;
+    let id = proposal(&mut writer).await;
+    let mut observer = AttachedClient::attach_without_proposals(&daemon.path, tier, true).await;
+    observer.send_frame(ClientFrame::EnableTeamProposals).await;
+    let error = observer
+        .wait_for(|frame| matches!(frame, DaemonFrame::Error(_)))
+        .await;
+    assert!(
+        matches!(&error, DaemonFrame::Error(ProtocolError::ReadOnly))
+            && tier == ConnectionTier::TrustedLocal
+            || matches!(
+                &error,
+                DaemonFrame::Error(ProtocolError::PeerVerification(_))
+            ) && tier == ConnectionTier::Peer,
+        "unauthorized capability opt-in must use the standard refusal: {error:?}"
+    );
+    observer
+        .send_frame(ClientFrame::HistoryRequest {
+            before_index: Some(0),
+            count: 1,
+        })
+        .await;
+    observer
+        .wait_for(|frame| matches!(frame, DaemonFrame::History { .. }))
+        .await;
+    assert!(
+        !observer
+            .received
+            .iter()
+            .any(|frame| matches!(frame, DaemonFrame::TeamProposal { .. })),
+        "unauthorized opt-in must neither grant nor reemit a private snapshot"
+    );
+    assert_eq!(daemon.proposals.pending().await[0].id, id);
+    zero(
+        &daemon,
+        &[&host],
+        "unauthorized opt-in must have zero effects",
+    )
+    .await;
+    send_once(&daemon, &mut writer, &host, &id).await;
+    daemon.stop().await;
+    host.stop().await;
+}
+
+#[tokio::test]
+async fn readonly_proposal_opt_in_is_refused() {
+    unauthorized_opt_in(ConnectionTier::TrustedLocal).await;
+}
+
+#[tokio::test]
+async fn peer_proposal_opt_in_is_refused() {
+    unauthorized_opt_in(ConnectionTier::Peer).await;
+}
+
 #[tokio::test]
 async fn dismiss_and_unknown_decision_have_zero_effect() {
     let (daemon, mut writer, host) = fixture().await;
@@ -144,14 +200,46 @@ async fn replacement_reemits_same_snapshot_and_sends_once() {
     let id = proposal(&mut writer).await;
     writer.detach().await;
     let mut replacement =
-        AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
-    fence(&mut replacement, "replacement-reemit-fence").await;
+        AttachedClient::attach_without_proposals(&daemon.path, ConnectionTier::TrustedLocal, false)
+            .await;
+    replacement
+        .send_frame(ClientFrame::HistoryRequest {
+            before_index: Some(0),
+            count: 1,
+        })
+        .await;
+    replacement
+        .wait_for(|frame| matches!(frame, DaemonFrame::History { .. }))
+        .await;
+    assert!(
+        !replacement
+            .received
+            .iter()
+            .any(|frame| matches!(frame, DaemonFrame::TeamProposal { .. })),
+        "replacement writer must not receive the retained snapshot before opt-in"
+    );
+    replacement.enable_team_proposals().await;
     assert!(
         replacement
             .received
             .iter()
             .any(|f| matches!(f,DaemonFrame::TeamProposal {proposal,..} if proposal==&id)),
         "M28: replacement must reemit same pending proposal"
+    );
+    let reemitted = replacement
+        .received
+        .iter()
+        .find(
+            |frame| matches!(frame, DaemonFrame::TeamProposal { proposal, .. } if proposal == &id),
+        )
+        .expect("opt-in reemits retained proposal");
+    let pending = daemon.proposals.pending().await;
+    assert!(
+        matches!(reemitted, DaemonFrame::TeamProposal { recipients, message_type, body, .. }
+        if recipients == &pending[0].recipients
+            && message_type == &pending[0].message_type
+            && body == &pending[0].body),
+        "opt-in must reemit the exact retained body, type and recipient order"
     );
     zero(
         &daemon,
@@ -411,6 +499,9 @@ async fn replaced_writer_queued_decision_is_discarded() {
     // Only send/decision frames count toward the deterministic worker gate.
     decide(&mut writer, &id, TeamProposalDecision::Send).await;
     daemon.team_send_hooks.wait_for_worker_gate_count(1).await;
+    // Capability requests queued behind the held decision obey the same stale
+    // writer fence; they cannot reclaim the replacement's proposal surface.
+    writer.send_frame(ClientFrame::EnableTeamProposals).await;
     writer.detach().await;
     let mut replacement =
         AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
@@ -506,6 +597,105 @@ async fn replaced_writer_queued_decision_is_discarded() {
         Some(fresh_body),
         "replacement positive control must send only its fresh snapshot"
     );
+    daemon.stop().await;
+    host.stop().await;
+}
+#[tokio::test]
+async fn opt_in_waits_for_operator_fifo_and_cannot_outlive_its_writer() {
+    let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
+    let daemon = AttachedDaemon::start_with_test_hooks(
+        vec![host.peer("lena-po")],
+        TeamSendTestHooks::new(Some(1), None, false),
+    )
+    .await;
+    let mut plain =
+        AttachedClient::attach_without_proposals(&daemon.path, ConnectionTier::TrustedLocal, false)
+            .await;
+    host.reset_counts();
+    plain
+        .send_team(
+            "hold-before-capability",
+            vec!["lena-po".into()],
+            BODY,
+            Some(SemanticMessageType::ArchitectureUpdate),
+            None,
+        )
+        .await;
+    daemon.team_send_hooks.wait_for_worker_gate_count(1).await;
+    plain.send_frame(ClientFrame::EnableTeamProposals).await;
+    plain
+        .send_team(
+            "after-capability-read-fence",
+            vec!["lena-po".into()],
+            BODY,
+            Some(SemanticMessageType::ArchitectureUpdate),
+            None,
+        )
+        .await;
+    loop {
+        let event = daemon.team_send_hooks.next_fifo_event().await.unwrap();
+        if event.request == "after-capability-read-fence" {
+            assert_eq!(event.kind, TeamSendFifoEventKind::Enqueued);
+            break;
+        }
+    }
+    // The reader has accepted the opt-in but its FIFO predecessor is held.
+    // A real operator-origin turn must still observe no decision surface.
+    let before = daemon.provider_request_count();
+    daemon.script.tool("propose_team_message", input());
+    let mut conversation = daemon.conversation.lock().await;
+    let task = daemon
+        .runtime
+        .drive_turn(
+            "Propose while the capability grant is still queued.".into(),
+            rustain::domain::models::ChannelKind::Terminal,
+            &mut conversation,
+            &daemon.domain_tx,
+            rustain::domain::models::TurnOrigin::Interactive,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+    drop(conversation);
+    task.await.expect("operator turn completes before grant");
+    assert!(
+        daemon.requests.lock()[before..]
+            .iter()
+            .flat_map(|(messages, _)| messages.iter())
+            .flat_map(|message| message.tool_results.iter())
+            .any(|result| result.content.contains("no operator surface is attached")),
+        "capability must not bypass the held operator FIFO"
+    );
+    assert!(daemon.proposals.pending().await.is_empty());
+    zero(
+        &daemon,
+        &[&host],
+        "queued capability must have zero effects",
+    )
+    .await;
+    plain.detach().await;
+    let mut replacement =
+        AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
+    daemon.team_send_hooks.release_worker();
+    loop {
+        let event = daemon.team_send_hooks.next_fifo_event().await.unwrap();
+        if event.request == "after-capability-read-fence" {
+            assert_eq!(
+                event.kind,
+                TeamSendFifoEventKind::Discarded,
+                "stale writer's capability and following send must be fenced"
+            );
+            break;
+        }
+    }
+    submit(&daemon, &mut replacement, input()).await;
+    let id = proposal(&mut replacement).await;
+    zero(
+        &daemon,
+        &[&host],
+        "stale opt-in must not dispatch old sends",
+    )
+    .await;
+    send_once(&daemon, &mut replacement, &host, &id).await;
     daemon.stop().await;
     host.stop().await;
 }
@@ -622,7 +812,11 @@ async fn full_writer_queue_closes_explicitly_and_reemits_retained_proposal() {
     )
     .await;
     let mut writer =
-        AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
+        AttachedClient::attach_without_proposals(&daemon.path, ConnectionTier::TrustedLocal, false)
+            .await;
+    // This writer is deliberately held before draining: opt in without a
+    // response fence. The following UserMessage shares its grant's FIFO.
+    writer.send_frame(ClientFrame::EnableTeamProposals).await;
     host.reset_counts();
     // Fill the bounded socket queue through a real command before the raise.
     writer.team_status("fill-writer-queue").await;

@@ -736,13 +736,14 @@ async fn commit_peer_rows_serialized(
                 control,
             } => {
                 message.history_source = crate::domain::models::HistorySource::PeerDisplay;
+                let public_index = old_index.unwrap_or(conversation.messages.len());
                 let old_message = if let Some(index) = old_index {
                     Some((
                         index,
-                        std::mem::replace(&mut conversation.messages[index], message.clone()),
+                        std::mem::replace(&mut conversation.messages[index], message),
                     ))
                 } else {
-                    conversation.messages.push(message.clone());
+                    conversation.messages.push(message);
                     None
                 };
                 if let Some(control) = &control {
@@ -752,7 +753,9 @@ async fn commit_peer_rows_serialized(
                 }
                 operations.push(PeerRowOperation::Upsert {
                     revision,
-                    message,
+                    message: crate::infrastructure::runtime::event_bus::public_transcript_message(
+                        &conversation.messages[public_index],
+                    ),
                     control,
                 });
                 old_message
@@ -1969,6 +1972,7 @@ impl AttachServer {
                 content,
                 is_error,
                 diff,
+                operator_private,
             } => {
                 let buffer = buffers.entry(node.clone()).or_default();
                 if let Some(tool) = buffer.tools.iter_mut().find(|tool| tool.id == *id) {
@@ -1977,7 +1981,7 @@ impl AttachServer {
                         is_error: *is_error,
                         diff: diff.clone(),
                     });
-                } else {
+                } else if !*operator_private {
                     // Retain unexpected result evidence without inventing a call.
                     buffer.text.push_str(content);
                 }
@@ -2028,6 +2032,63 @@ impl AttachServer {
         }
     }
 
+    /// Retain exact proposal evidence without folding its private arguments or
+    /// result into the public prose transcript. Snapshots project these tools
+    /// out; the stored conversation and model continuation remain complete.
+    async fn retain_operator_private_chunk(&self, chunk: &StreamChunk) {
+        use crate::domain::models::{ToolCallInfo, ToolResultInfo};
+        let mut conversation = self.conversation.lock().await;
+        match chunk {
+            StreamChunk::ToolUse { id, name, input } => {
+                conversation.messages.push(ChatMessage {
+                    id: generate_message_id(),
+                    role: MessageRole::Assistant,
+                    tool_calls: vec![ToolCallInfo {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        result: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                        status: None,
+                    }],
+                    created_at: crate::domain::models::session_meta::now_unix(),
+                    ..Default::default()
+                });
+            }
+            StreamChunk::ToolResult {
+                id,
+                content,
+                is_error,
+                diff,
+                ..
+            } => {
+                if let Some(tool) = conversation
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .flat_map(|message| message.tool_calls.iter_mut())
+                    .find(|tool| {
+                        tool.id == *id
+                            && tool.name
+                                == crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME
+                    })
+                {
+                    tool.result = Some(ToolResultInfo {
+                        content: content.clone(),
+                        is_error: *is_error,
+                        diff: diff.clone(),
+                    });
+                }
+            }
+            _ => return,
+        }
+        conversation.updated_at = crate::domain::models::session_meta::now_unix();
+        if let Err(error) = self.core.storage.save_conversation(&conversation).await {
+            tracing::warn!(%error, "persisting operator-private tool evidence failed");
+        }
+    }
+
     /// Fold an assistant turn into the conversation (persist on completion) and
     /// fan the projected event out to all attachments.
     async fn handle_bus_event(&self, event: &AppEvent, assistant_buf: &mut String) {
@@ -2047,6 +2108,11 @@ impl AttachServer {
             _ => {}
         }
         if let AppEvent::ProviderChunk { chunk, .. } = event {
+            if chunk.is_operator_private() {
+                self.retain_operator_private_chunk(chunk).await;
+                self.operator_turn_active.store(true, Ordering::Release);
+                return;
+            }
             match chunk {
                 StreamChunk::Text { content, .. } => {
                     self.operator_turn_active.store(true, Ordering::Release);
@@ -2352,7 +2418,11 @@ impl AttachServer {
             let trusted_local = tier == ConnectionTier::TrustedLocal;
             AttachSnapshot {
                 conversation_id: conv.id.clone(),
-                transcript: conv.messages.clone(),
+                transcript: conv
+                    .messages
+                    .iter()
+                    .map(crate::infrastructure::runtime::event_bus::public_transcript_message)
+                    .collect(),
                 permission_mode: self.core.security.current_mode(),
                 channels: vec![ChannelKind::Terminal],
                 blocked_actions_waiting: self.blocked_waiting.load(Ordering::SeqCst),
@@ -2452,9 +2522,6 @@ impl AttachServer {
         if granted_mode == AttachMode::ReadWrite {
             self.emit_session_queue_notices(conn_id).await;
             self.emit_pending_consent_cards(conn_id).await;
-            if tier == ConnectionTier::TrustedLocal {
-                self.grant_team_proposal_writer(conn_id).await;
-            }
         }
 
         // Turns, History fences and context commands share a bounded writer-side FIFO.
@@ -2598,6 +2665,7 @@ impl AttachServer {
                                 | ClientFrame::InspectRecipientContext
                                 | ClientFrame::SetRecipientContext { .. }
                                 | ClientFrame::TeamSend { .. }
+                                | ClientFrame::EnableTeamProposals
                                 | ClientFrame::TeamProposalDecision { .. }
                                 | ClientFrame::RevokeSenderConsent { .. }
                         )
@@ -3813,7 +3881,7 @@ impl AttachServer {
 
     /// The authenticated grant and isolated lifecycle tests enter this same
     /// targeted publication seam. It owns no timer or automatic decision.
-    async fn grant_team_proposal_writer(self: &Arc<Self>, conn_id: u64) {
+    async fn grant_team_proposal_writer(&self, conn_id: u64) {
         if let Some((tx, terminal)) = self.team_connection(conn_id).await {
             self.team_proposals
                 .grant_writer(
@@ -4719,7 +4787,12 @@ impl AttachServer {
                     let end = before_index.unwrap_or(conv.messages.len());
                     let end = end.min(conv.messages.len());
                     let start = end.saturating_sub(count);
-                    (conv.messages[start..end].to_vec(), start > 0)
+                    (
+                        conv.messages[start..end].iter()
+                            .map(crate::infrastructure::runtime::event_bus::public_transcript_message)
+                            .collect(),
+                        start > 0,
+                    )
                 };
                 self.send_to(conn_id, DaemonFrame::History { messages, has_more })
                     .await;
@@ -5204,6 +5277,13 @@ impl AttachServer {
                     None,
                 )
                 .await;
+            }
+            ClientFrame::EnableTeamProposals => {
+                if let Some(error) = Self::team_request_error(tier, mode, true) {
+                    self.send_to(conn_id, DaemonFrame::Error(error)).await;
+                    return false;
+                }
+                self.grant_team_proposal_writer(conn_id).await;
             }
             ClientFrame::TeamProposalDecision { proposal, decision } => {
                 if let Some(error) = Self::team_request_error(tier, mode, true) {

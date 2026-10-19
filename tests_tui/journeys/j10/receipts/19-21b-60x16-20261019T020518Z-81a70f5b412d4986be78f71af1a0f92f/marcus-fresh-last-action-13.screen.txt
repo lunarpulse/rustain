@@ -1,0 +1,16 @@
+[terminal] You:                                             
+┆  story_assignment ·                                       
+┆  1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e462a
+┆  0caf8b5f100                                              
+┆  STORY-047: publish the received card before persisting   
+┆  its row.                                                 
+┆  Jun owns implementation; Marcus checks the architecture. 
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready  log: 7
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

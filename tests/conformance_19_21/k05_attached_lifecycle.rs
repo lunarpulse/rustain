@@ -487,7 +487,11 @@ async fn full_targeted_queue_emits_terminal_error_then_eof_and_never_reroutes() 
     let daemon =
         AttachedDaemon::start_with_test_hooks(vec![recipient.peer("recipient")], hooks).await;
     let mut origin =
-        AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
+        AttachedClient::attach_without_proposals(&daemon.path, ConnectionTier::TrustedLocal, false)
+            .await;
+    // The deliberate writer-drain gate cannot answer a readiness History.
+    // Opt-in and the following send still share the operator FIFO.
+    origin.send_frame(ClientFrame::EnableTeamProposals).await;
     origin
         .send_frame(send_frame("queue-full", "recipient", "fill then overflow"))
         .await;

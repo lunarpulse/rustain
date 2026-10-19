@@ -503,7 +503,25 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
             _assert_card(save(marcus, name + "-card-complete-turn"), expected_body)
 
         def review(expected_body, name):
+            last_body_row = next(
+                row for row in reversed(_painted_rows(expected_body, columns - 2)) if row.strip()
+            )
+            if name == "first":
+                _command(marcus, f"/team view {item}")
+                save(marcus, name + "-recipient-surface-before-review")
+            else:
+                marcus.send("r")
+                _wait(
+                    lambda: "│ " + last_body_row in unicodedata.normalize("NFC", marcus.get_screen_text()),
+                    marcus.get_screen_text,
+                )
+                for _ in range(12):
+                    marcus.send("\x1b[5~")
             marcus.send("r")
+            _wait(
+                lambda: "│ " + last_body_row in unicodedata.normalize("NFC", marcus.get_screen_text()),
+                marcus.get_screen_text,
+            )
             _wait_for_marker(marcus, "Proposed message (not sent)", marcus.get_screen_text)
             save(marcus, name + "-review-open")
             rendered = _chat_pages(marcus, name + "-review-full", snapshots)

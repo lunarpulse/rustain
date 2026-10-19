@@ -26,7 +26,7 @@ use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, FeedbackBlock, FocusState, Message, MessageRole,
     PermissionMode, StatusState, StopReason, StreamChunk, StreamingPhase, StreamingState,
-    ToolCallInfo, generate_conversation_id,
+    generate_conversation_id,
 };
 use rustain::domain::ports::StreamingProvider;
 use rustain::domain::services::message_builder;
@@ -930,6 +930,7 @@ fn test_e2e_tool_use_conversation_state() {
         id: "toolu_abc123".to_string(),
         content: "file contents here".to_string(),
         is_error: false,
+        operator_private: false,
         diff: rustain::domain::models::WriteDiffState::NotAWrite,
     });
 
@@ -952,72 +953,6 @@ fn test_e2e_tool_use_conversation_state() {
             .any(|tc| tc.result.is_some()),
         "Tool result should be recorded"
     );
-}
-
-// Covers: FR23 (tool execution), NFR19 (API message integrity)
-#[test]
-fn test_e2e_api_messages_valid_after_tool_use() {
-    let mut h = TestHarness::new();
-
-    // Simulate a complete tool-use turn
-    h.send_message("Read file.txt");
-
-    h.process_chunk(StreamChunk::Text {
-        content: "Reading file.".to_string(),
-        parent_tool_use_id: None,
-    });
-    h.process_chunk(StreamChunk::ToolUse {
-        id: "toolu_001".to_string(),
-        name: "Read".to_string(),
-        input: serde_json::json!({"file_path": "file.txt"}),
-    });
-    h.process_chunk(StreamChunk::TurnComplete {
-        stop_reason: StopReason::ToolUse,
-    });
-
-    // Finalize the assistant message (simulate what event loop does)
-    let content = std::mem::take(&mut h.streaming.current_text_buffer);
-    let blocks = std::mem::take(&mut h.streaming.current_blocks);
-    let tool_calls: Vec<ToolCallInfo> = h
-        .streaming
-        .active_tool_calls
-        .drain()
-        .map(|(_, v)| v)
-        .collect();
-    h.conversation.messages.push(ChatMessage {
-        synthetic: false,
-        id: rustain::domain::models::generate_conversation_id(),
-        role: MessageRole::Assistant,
-        content,
-        content_blocks: blocks,
-        tool_calls,
-        created_at: 0,
-        token_count: None,
-        stop_reason: Some(StopReason::ToolUse),
-        images: vec![],
-        origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
-        retracted_at_ms: None,
-        history_source: Default::default(),
-    });
-
-    // Validate API messages — this is the critical regression test
-    // The P0 bug caused empty text blocks here
-    h.validate_api_messages()
-        .expect("API messages must be valid after tool-use turn");
-
-    // Verify the assistant message includes tool_use blocks in API format
-    let api_msgs = h.build_api_messages();
-    let assistant = api_msgs
-        .iter()
-        .find(|m| m.role == MessageRole::Assistant)
-        .expect("Should have assistant message");
-    assert!(
-        !assistant.tool_uses.is_empty(),
-        "Assistant API message should include tool_use blocks"
-    );
-    assert_eq!(assistant.tool_uses[0].id, "toolu_001");
-    assert_eq!(assistant.tool_uses[0].name, "Read");
 }
 
 // Covers: FR13 (auto-scroll), FR22 (vim keybindings)

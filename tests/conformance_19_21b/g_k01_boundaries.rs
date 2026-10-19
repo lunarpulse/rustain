@@ -1,6 +1,6 @@
 use crate::attached_harness::{AttachedClient, AttachedDaemon};
 use crate::g_harness::*;
-use rustain::adapters::daemon::protocol::{ConnectionTier, DaemonFrame};
+use rustain::adapters::daemon::protocol::{AttachMode, ClientFrame, ConnectionTier, DaemonFrame};
 use rustain::adapters::daemon::server::TeamSendTestHooks;
 use rustain::domain::models::{AppConfig, PermissionMode};
 use serde_json::json;
@@ -29,6 +29,73 @@ async fn refused(input_value: serde_json::Value, diagnostic: &str) {
     );
     let id = proposal(&mut writer).await;
     send_once(&daemon, &mut writer, &host, &id).await;
+    daemon.stop().await;
+    host.stop().await;
+}
+#[tokio::test]
+async fn plain_writer_refuses_at_raise_then_same_connection_can_opt_in() {
+    let (daemon, writer, host) = fixture().await;
+    writer.detach().await;
+    let mut plain =
+        AttachedClient::attach_without_proposals(&daemon.path, ConnectionTier::TrustedLocal, false)
+            .await;
+    assert_eq!(
+        plain.granted,
+        AttachMode::ReadWrite,
+        "plain attach remains an authenticated ordinary writer"
+    );
+    let result = submit(&daemon, &mut plain, input()).await;
+    assert!(
+        result.contains(
+            "Not proposed: no operator surface is attached to approve it. Nothing was sent."
+        ),
+        "plain writer must receive R2 at raise, not a wedged pending approval: {result}"
+    );
+    plain
+        .send_frame(ClientFrame::HistoryRequest {
+            before_index: None,
+            count: 1,
+        })
+        .await;
+    plain
+        .wait_for(|frame| matches!(frame, DaemonFrame::History { .. }))
+        .await;
+    assert!(daemon.proposals.pending().await.is_empty());
+    assert!(
+        !plain.received.iter().any(|frame| matches!(
+            frame,
+            DaemonFrame::TeamProposal { .. } | DaemonFrame::TeamProposalClosed { .. }
+        )),
+        "plain writer must receive zero proposal lifecycle frames"
+    );
+    zero(
+        &daemon,
+        &[&host],
+        "plain refusal must have zero send effects",
+    )
+    .await;
+
+    let before = daemon.provider_request_count();
+    plain
+        .send_frame(ClientFrame::UserMessage {
+            text: "Continue an ordinary stdin turn without proposals.".into(),
+            images: vec![],
+        })
+        .await;
+    completed(&mut plain).await;
+    assert!(
+        daemon.provider_request_count() > before,
+        "R2 must not stop subsequent ordinary stdin turns"
+    );
+    plain.enable_team_proposals().await;
+    assert!(
+        submit(&daemon, &mut plain, input())
+            .await
+            .contains("Proposal shown to the operator."),
+        "same authenticated socket must become capable only after explicit opt-in"
+    );
+    let id = proposal(&mut plain).await;
+    send_once(&daemon, &mut plain, &host, &id).await;
     daemon.stop().await;
     host.stop().await;
 }

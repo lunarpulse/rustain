@@ -1,0 +1,16 @@
+│   462a0caf8b5f100): not granted│                          
+│ ⚠ ← inbound ✓ accepted · peer│                            
+│   1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e4│ 
+│   62a0caf8b5f100 · task│                                  
+│ ℹ 2026-10-19 02:05:20Z ← inbound ⏸ awaiting-approval ·│   
+│   peer│                                                   
+│   1220711381914422bfa2d5b2529e2b73e64da63d94fd1de5f8e4e4│ 
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

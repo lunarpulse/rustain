@@ -234,8 +234,10 @@ Long recipient lists remain complete and scrollable, including at 60×16. Use
 footer is in view. In Review, paging at a card boundary continues through the
 full transcript body. Review selects the current proposal even when older Review
 blocks remain, returns from task/agent detail to the conversation, and preserves
-the tab bar and readable transcript space. It sends nothing. After reviewing in
-Chat focus, **i** returns to the composer.
+the tab bar and readable transcript space. Attached Review also closes an open
+received-item view and returns the transcript from history scrolling to the
+current proposal. It sends nothing. After reviewing in standalone Chat focus,
+**i** returns to the composer.
 
 YOLO, AutoEdit, session or saved tool grants, subagent auto-approval and selected
 peer context never authorize this Send decision. Plan mode and carried agent or
@@ -253,17 +255,22 @@ labels those dispatches `[agent-composed]`, never `[auto-sent]`. This provenance
 not a new peer-wire field and is omitted from raw event projections. Legacy and
 unknown future provenance tokens remain readable as Unknown.
 
-On protocol v7, only the authenticated TrustedLocal read-write attachment receives
-the daemon's proposal card and can decide it. A read-only or Peer-only attachment
-is not an approval surface. Pending proposals remain in memory across writer
-detach or replacement and reappear with the same id on the next trusted writer;
+On protocol v7, only an authenticated TrustedLocal read-write attachment that
+opts in to proposal decisions receives the daemon's card. The rich TUI opts in
+after its attach acknowledgement; the line-based `--plain` client does not.
+Read-only, Peer-only and plain attachments are not approval surfaces: a valid
+raise without a capable writer returns the no-surface refusal without retaining
+a new proposal. Pending proposals remain in memory across writer detach or
+replacement and reappear with the same id when the next capable writer opts in;
 a conversation reset, close or daemon restart withdraws them without sending.
 They hold no turn lock, so peer turns and subsequent operator prompts can finish.
 If all eight send slots are occupied, Send refuses without consuming the proposal:
 the operator may explicitly retry. A full writer queue terminates that attachment
 with an explicit protocol error while retaining the proposal for the next writer.
 Proposal state and ids are sender-local, never journaled or exposed on the raw
-event bus. These attached proposal semantics do not close the full J10 journey,
+event bus. Proposal tool arguments and results remain in internal conversation
+history but are omitted from public event and transcript projections. These
+attached proposal semantics do not close the full J10 journey,
 recipient authorship carrier, or AD-1826's separate A2A version boundary.
 
 ### The send action, its record and the action board (Story 19.21)
