@@ -212,6 +212,8 @@ pub enum AppEvent {
     /// channel and should be forwarded to the event loop for TUI/state updates.
     ApprovalRuntimeEventBridged {
         event: crate::domain::services::approval_runtime::ApprovalRuntimeEvent,
+        /// Exact input is private to the local deciding surface, never raw fanout.
+        review: Option<crate::domain::services::approval_runtime::PendingReview>,
     },
 
     /// Story 7.6 AC8 — fired by the discovery background task on successful catalog refresh.

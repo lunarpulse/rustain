@@ -8,8 +8,8 @@
 //!   conversation (the daemon has no `reduce()` loop) and **fanning out** each
 //!   projected [`ClientEvent`] to every attached connection's bounded queue
 //!   (drop a slow connection, never the turn — AC3);
-//! - the **headless approval gate** (AC6): attached-writer → forward; timeout →
-//!   conservative deny; unattended → deny-by-default (Safe auto-proceeds);
+//! - the **headless approval gate** (AC6): attached-writer → exact review;
+//!   retain and reissue without a deadline; unattended → Safe once, otherwise deny;
 //!   denied-while-unattended is a durable, visible, resumable transcript record +
 //!   a waiting-count.
 //!
@@ -32,9 +32,10 @@ use crate::adapters::scheduler::cron::CronCompletion;
 #[cfg(not(feature = "cron"))]
 pub struct CronCompletion;
 use super::protocol::{
-    AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, MAX_FRAME_BYTES,
-    PROTOCOL_VERSION, ProposalToken, ProtocolError, RecipientAction, RecipientActionOutcome,
-    RecipientActionTarget, RecipientReplyReceipt, read_frame, write_frame,
+    AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, FrameError,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, ProposalToken, ProtocolError, RecipientAction,
+    RecipientActionOutcome, RecipientActionTarget, RecipientReplyReceipt, ToolInputWithheld,
+    WithheldToolInput, read_frame, write_frame,
 };
 use super::runtime::DaemonCore;
 use crate::adapters::rap::{
@@ -61,10 +62,6 @@ const OPERATOR_QUEUE_DEPTH: usize = 64;
 pub const MAX_IN_FLIGHT_TEAM_SENDS: usize = 8;
 /// Leave a small, bounded request key so even a refusal frame is serializable.
 const MAX_TEAM_BOARD_REQUEST_BYTES: usize = 128;
-
-/// How long an attached-but-unresponsive writer has to answer an approval before
-/// the daemon falls back to the conservative unattended path (deny) (AC6 #2).
-const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 const CHANNEL_TURN_FAILED_REPLY: &str =
     "Sorry, processing failed before the agent produced a response. Please try again.";
@@ -513,9 +510,15 @@ impl TeamSendTestHooks {
             | DaemonFrame::AttachChallenge { .. }
             | DaemonFrame::AttachAck { .. }
             | DaemonFrame::Event(_)
+            | DaemonFrame::ToolEventWithheld { .. }
+            | DaemonFrame::FrameTooLarge { .. }
             | DaemonFrame::PeerRowOperation(_)
             | DaemonFrame::History { .. }
             | DaemonFrame::ApprovalRequest { .. }
+            | DaemonFrame::ApprovalInputChunk { .. }
+            | DaemonFrame::ApprovalInputComplete { .. }
+            | DaemonFrame::ApprovalRefused { .. }
+            | DaemonFrame::ApprovalClosed { .. }
             | DaemonFrame::ConsolidationProposed { .. }
             | DaemonFrame::TeamProposal { .. }
             | DaemonFrame::TeamProposalClosed { .. }
@@ -570,6 +573,239 @@ pub(crate) fn publish_team_frame_to_connection(
     }
 }
 
+/// Story 19.20c: reserve 1/128 of a frame for identifiers and the event envelope.
+/// The final serialized frame is checked too; this is not an executable-input cap.
+const TOOL_INPUT_FRAME_BUDGET: usize = MAX_FRAME_BYTES as usize - MAX_FRAME_BYTES as usize / 128;
+
+#[derive(Default)]
+struct JsonByteCount(usize);
+
+impl std::io::Write for JsonByteCount {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_bytes(value: &impl serde::Serialize) -> usize {
+    let mut count = JsonByteCount::default();
+    // All callers are JSON-compatible domain values, not arbitrary serializers.
+    serde_json::to_writer(&mut count, value).expect("attach projection serializes domain values");
+    count.0
+}
+
+fn event_tool_input(event: &mut RawEvent) -> Option<&mut serde_json::Value> {
+    use crate::domain::models::ToolCall;
+    match &mut event.kind {
+        RawEventKind::Provider(StreamChunk::ToolUse { input, .. })
+        | RawEventKind::PeerProvider(StreamChunk::ToolUse { input, .. }) => Some(input),
+        RawEventKind::Tool(transition) => {
+            let request = match &mut transition.call {
+                ToolCall::Validating { request, .. }
+                | ToolCall::Scheduled { request, .. }
+                | ToolCall::AwaitingApproval { request, .. }
+                | ToolCall::Executing { request, .. }
+                | ToolCall::Success { request, .. }
+                | ToolCall::Error { request, .. }
+                | ToolCall::Cancelled { request, .. } => request,
+            };
+            Some(&mut request.input)
+        }
+        _ => None,
+    }
+}
+
+fn withheld_reason(tier: ConnectionTier, bytes: usize) -> Option<ToolInputWithheld> {
+    if tier == ConnectionTier::Peer {
+        Some(ToolInputWithheld::PeerTier)
+    } else if bytes > TOOL_INPUT_FRAME_BUDGET {
+        Some(ToolInputWithheld::TooLarge {
+            bytes: bytes as u64,
+        })
+    } else {
+        None
+    }
+}
+
+fn transcript_parts(
+    frame: &mut DaemonFrame,
+) -> Option<(&mut Vec<ChatMessage>, &mut Vec<WithheldToolInput>)> {
+    match frame {
+        DaemonFrame::AttachAck { snapshot, .. } => {
+            Some((&mut snapshot.transcript, &mut snapshot.withheld_tool_inputs))
+        }
+        DaemonFrame::History {
+            messages,
+            withheld_tool_inputs,
+            ..
+        } => Some((messages, withheld_tool_inputs)),
+        _ => None,
+    }
+}
+
+fn withhold_transcript_input(
+    message: &mut ChatMessage,
+    call_index: usize,
+    withheld: ToolInputWithheld,
+    entries: &mut Vec<WithheldToolInput>,
+) {
+    let call = &mut message.tool_calls[call_index];
+    call.input = serde_json::Value::Null;
+    entries.push(WithheldToolInput {
+        message_id: message.id.clone(),
+        tool_call_id: call.id.clone(),
+        withheld,
+    });
+}
+
+/// The attach audience boundary. Does not modify runtime events or retained history.
+/// Exact-review frames are deliberately outside this projection.
+fn project_attach_frame(mut frame: DaemonFrame, tier: ConnectionTier) -> DaemonFrame {
+    if let DaemonFrame::Event(event) = &mut frame
+        && let Some(input) = event_tool_input(event)
+    {
+        let bytes = serialized_bytes(input);
+        if let Some(withheld) = withheld_reason(tier, bytes) {
+            *input = serde_json::Value::Null;
+            let DaemonFrame::Event(event) = frame else {
+                unreachable!()
+            };
+            return DaemonFrame::ToolEventWithheld { event, withheld };
+        }
+    }
+    let mut remaining = Vec::new();
+    if let Some((messages, entries)) = transcript_parts(&mut frame) {
+        for (message_index, message) in messages.iter_mut().enumerate() {
+            for call_index in 0..message.tool_calls.len() {
+                let call = &message.tool_calls[call_index];
+                if entries
+                    .iter()
+                    .any(|entry| entry.message_id == message.id && entry.tool_call_id == call.id)
+                {
+                    continue;
+                }
+                let bytes = serialized_bytes(&call.input);
+                if let Some(withheld) = withheld_reason(tier, bytes) {
+                    withhold_transcript_input(message, call_index, withheld, entries);
+                } else if !call.input.is_null() {
+                    remaining.push((bytes, message_index, call_index));
+                }
+            }
+        }
+    }
+    // Several individually fitting inputs can overflow a snapshot/page together.
+    // Remove the largest first, retaining every other transcript field.
+    if !remaining.is_empty() && serialized_bytes(&frame) > MAX_FRAME_BYTES as usize {
+        remaining.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
+        for (bytes, message_index, call_index) in remaining {
+            let (messages, entries) = transcript_parts(&mut frame).expect("transcript frame");
+            withhold_transcript_input(
+                &mut messages[message_index],
+                call_index,
+                ToolInputWithheld::TooLarge {
+                    bytes: bytes as u64,
+                },
+                entries,
+            );
+            if serialized_bytes(&frame) <= MAX_FRAME_BYTES as usize {
+                break;
+            }
+        }
+    }
+    frame
+}
+
+fn frame_variant_name(frame: &DaemonFrame) -> &'static str {
+    match frame {
+        DaemonFrame::AttachChallenge { .. } => "AttachChallenge",
+        DaemonFrame::AttachAck { .. } => "AttachAck",
+        DaemonFrame::Event(_) => "Event",
+        DaemonFrame::ToolEventWithheld { .. } => "ToolEventWithheld",
+        DaemonFrame::FrameTooLarge { .. } => "FrameTooLarge",
+        DaemonFrame::PeerRowOperation(_) => "PeerRowOperation",
+        DaemonFrame::History { .. } => "History",
+        DaemonFrame::ApprovalRequest { .. } => "ApprovalRequest",
+        DaemonFrame::ApprovalInputChunk { .. } => "ApprovalInputChunk",
+        DaemonFrame::ApprovalInputComplete { .. } => "ApprovalInputComplete",
+        DaemonFrame::ApprovalRefused { .. } => "ApprovalRefused",
+        DaemonFrame::ApprovalClosed { .. } => "ApprovalClosed",
+        DaemonFrame::ConsolidationProposed { .. } => "ConsolidationProposed",
+        DaemonFrame::PeerAccepted { .. } => "PeerAccepted",
+        DaemonFrame::PeerShareResult { .. } => "PeerShareResult",
+        DaemonFrame::RecipientActionResult { .. } => "RecipientActionResult",
+        DaemonFrame::RecipientContextState { .. } => "RecipientContextState",
+        DaemonFrame::TeamProposal { .. } => "TeamProposal",
+        DaemonFrame::TeamProposalClosed { .. } => "TeamProposalClosed",
+        DaemonFrame::TeamSendStarted { .. } => "TeamSendStarted",
+        DaemonFrame::TeamSendSettled { .. } => "TeamSendSettled",
+        DaemonFrame::TeamBoardChunk { .. } => "TeamBoardChunk",
+        DaemonFrame::TeamBoardDone { .. } => "TeamBoardDone",
+        DaemonFrame::TeamStatusResult { .. } => "TeamStatusResult",
+        DaemonFrame::SenderConsentRevoked { .. } => "SenderConsentRevoked",
+        DaemonFrame::Detached => "Detached",
+        DaemonFrame::Error(_) => "Error",
+    }
+}
+
+/// Bound only the attach copy, preserving complete messages and all metadata.
+/// An oversized envelope must fail explicitly, not masquerade as an AttachAck.
+fn bound_attach_snapshot(frame: &mut DaemonFrame) -> Option<u64> {
+    let original_bytes = serialized_bytes(frame);
+    if original_bytes <= MAX_FRAME_BYTES as usize {
+        return None;
+    }
+    let DaemonFrame::AttachAck { snapshot, .. } = frame else {
+        return None;
+    };
+    let mut estimated_bytes = original_bytes;
+    let mut remove = 0;
+    for message in &snapshot.transcript {
+        if estimated_bytes <= MAX_FRAME_BYTES as usize {
+            break;
+        }
+        // Excluding commas and withheld entries makes the estimate conservative.
+        let omitted_inputs = message
+            .tool_calls
+            .iter()
+            .filter(|call| call.input.is_null())
+            .count();
+        let message_bytes = serialized_bytes(message).saturating_sub(omitted_inputs * 13);
+        estimated_bytes = estimated_bytes.saturating_sub(message_bytes);
+        remove += 1;
+    }
+    snapshot.transcript.drain(..remove);
+    snapshot.withheld_tool_inputs.retain(|entry| {
+        snapshot
+            .transcript
+            .iter()
+            .any(|message| message.id == entry.message_id)
+    });
+    Some(original_bytes as u64)
+}
+
+async fn write_attach_frame<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    frame: &DaemonFrame,
+) -> Result<(), FrameError> {
+    match write_frame(writer, frame).await {
+        Err(FrameError::TooLarge(bytes, _)) => {
+            write_frame(
+                writer,
+                &DaemonFrame::FrameTooLarge {
+                    frame: frame_variant_name(frame).to_owned(),
+                    bytes: u64::from(bytes),
+                },
+            )
+            .await
+        }
+        result => result,
+    }
+}
+
 /// One attached connection's outbound handle + grant.
 struct Conn {
     id: u64,
@@ -577,6 +813,8 @@ struct Conn {
     terminal_tx: watch::Sender<Option<ProtocolError>>,
     mode: AttachMode,
     tier: ConnectionTier,
+    /// Exact approvals may be replayed only after this connection's AttachAck.
+    approval_ready: bool,
 }
 
 /// The set of live attachments. The writer slot is held by the first `ReadWrite`
@@ -599,8 +837,15 @@ impl ConnRegistry {
             .map(|c| c.tx.clone())
     }
 
+    fn approval_writer(&self) -> Option<&Conn> {
+        self.conns.iter().find(|conn| {
+            conn.mode == AttachMode::ReadWrite
+                && conn.tier == ConnectionTier::TrustedLocal
+                && conn.terminal_tx.borrow().is_none()
+        })
+    }
+
     /// Fan a committed peer-row operation only to trusted-local attachments.
-    /// Legacy `Event` fanout deliberately remains tier-agnostic.
     fn fanout_peer_row(&self, frame: &DaemonFrame) -> Vec<u64> {
         let mut dead = Vec::new();
         for conn in self
@@ -617,14 +862,25 @@ impl ConnRegistry {
         dead
     }
 
-    /// Preserve the pre-existing tier-agnostic Event/transcript stream.
+    /// Project once per audience, preserving the existing slow/closed queue policy.
     fn fanout(&self, frame: &DaemonFrame) -> Vec<u64> {
         let mut dead = Vec::new();
-        for conn in &self.conns {
-            match conn.tx.try_send(frame.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_))
-                | Err(mpsc::error::TrySendError::Closed(_)) => dead.push(conn.id),
+        for tier in [ConnectionTier::TrustedLocal, ConnectionTier::Peer] {
+            let mut connections = self
+                .conns
+                .iter()
+                .filter(|conn| conn.tier == tier)
+                .peekable();
+            if connections.peek().is_none() {
+                continue;
+            }
+            let projected = project_attach_frame(frame.clone(), tier);
+            for conn in connections {
+                match conn.tx.try_send(projected.clone()) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_))
+                    | Err(mpsc::error::TrySendError::Closed(_)) => dead.push(conn.id),
+                }
             }
         }
         dead
@@ -1085,8 +1341,7 @@ pub struct AttachServer {
     next_conn_id: AtomicU64,
     /// Connection id of the most recently granted ReadWrite attachment.
     last_writer_conn_id: AtomicU64,
-    /// Guards single-spawn of the approval gate (started on first runtime build).
-    approval_gate_started: Arc<std::sync::atomic::AtomicBool>,
+    approval_gate: Arc<ApprovalGate>,
     turn_serial: Arc<Mutex<()>>,
     turn_complete: Arc<Notify>,
     /// A private fence for peer display persistence, separate from the public
@@ -1218,6 +1473,9 @@ impl crate::adapters::rap::VerifiedPeerConsumer for DaemonPeerConsumer {
             Ok(crate::domain::ports::InboundApprovalDecision::Decline) | Err(_) => {
                 Ok(crate::adapters::rap::VerifiedPeerConsent::Decline)
             }
+            Ok(crate::domain::ports::InboundApprovalDecision::RuntimeShutdown) => {
+                Err("daemon peer consumer is shutting down".to_owned())
+            }
         }
     }
 
@@ -1258,13 +1516,143 @@ impl crate::adapters::rap::VerifiedPeerConsumer for DaemonPeerConsumer {
     }
 }
 
+/// Story 19.20c: every gate and its runtime are daemon-owned, including gates
+/// first armed by an inbound turn. Exact transfers use nonblocking queue writes
+/// inside the gate, so joining the gate also joins all input delivery.
+struct ApprovalGate {
+    tasks: Mutex<Vec<(Arc<ApprovalRuntime>, tokio::task::JoinHandle<()>)>>,
+    shutdown: CancellationToken,
+    replay: watch::Sender<u64>,
+    issues: Mutex<ApprovalIssues>,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    active: AtomicUsize,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    replay_hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    replay_entered: Semaphore,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    replay_completed: Semaphore,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    transfer_attempts: Semaphore,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    exit_hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    exit_entered: Semaphore,
+}
+
+#[derive(Default)]
+struct ApprovalIssues {
+    /// None means retained; Some names the connection that received the card.
+    issued: std::collections::HashMap<crate::domain::models::RequestId, Option<u64>>,
+    deciding: std::collections::HashSet<crate::domain::models::RequestId>,
+    /// Sender-consent replies retain their legacy idempotent/no-reply behavior,
+    /// even after the card retires. Keep only identity, never its input or card.
+    consent_ids: std::collections::HashSet<crate::domain::models::RequestId>,
+}
+
+impl Default for ApprovalGate {
+    fn default() -> Self {
+        Self {
+            tasks: Mutex::new(Vec::new()),
+            shutdown: CancellationToken::new(),
+            replay: watch::channel(0).0,
+            issues: Mutex::new(ApprovalIssues::default()),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            active: AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            replay_hold: Mutex::new(None),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            replay_entered: Semaphore::new(0),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            replay_completed: Semaphore::new(0),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            transfer_attempts: Semaphore::new(0),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            exit_hold: Mutex::new(None),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            exit_entered: Semaphore::new(0),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+struct ApprovalGateRunGuard<'a>(&'a AtomicUsize);
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+impl Drop for ApprovalGateRunGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+struct ApprovalTransferAttempt<'a>(&'a Semaphore);
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+impl Drop for ApprovalTransferAttempt<'_> {
+    fn drop(&mut self) {
+        self.0.add_permits(1);
+    }
+}
+
+impl ApprovalGate {
+    async fn shutdown(&self, registry: &Mutex<ConnRegistry>) {
+        let tasks = {
+            let mut tasks = self.tasks.lock().await;
+            self.shutdown.cancel();
+            std::mem::take(&mut *tasks)
+        };
+        for (runtime, _) in &tasks {
+            runtime
+                .cancel_all(
+                    crate::domain::services::approval_runtime::CancelReason::RuntimeShutdown,
+                )
+                .await;
+        }
+        for (_, task) in tasks {
+            let _ = task.await;
+        }
+        let ids: Vec<_> = self.issues.lock().await.issued.keys().cloned().collect();
+        for id in ids {
+            close_tool_approval(self, registry, &id).await;
+        }
+        self.issues.lock().await.consent_ids.clear();
+    }
+
+    async fn runtimes(&self) -> Vec<Arc<ApprovalRuntime>> {
+        self.tasks
+            .lock()
+            .await
+            .iter()
+            .map(|(runtime, _)| runtime.clone())
+            .collect()
+    }
+
+    async fn pending_tool_ids(
+        &self,
+    ) -> std::collections::HashSet<crate::domain::models::RequestId> {
+        let mut ids = std::collections::HashSet::new();
+        for runtime in self.runtimes().await {
+            ids.extend(
+                runtime
+                    .pending_tool_requests(
+                        crate::domain::services::approval_runtime::ReviewScope::AllTools,
+                    )
+                    .await
+                    .into_iter()
+                    .map(|request| request.id),
+            );
+        }
+        ids
+    }
+}
+
 /// Subscribe and publish the approval gate as one ordered operation.
 ///
-/// A broadcast receiver only receives requests emitted after it exists. Create
-/// it before publishing the once-only flag so a concurrent caller can never
-/// observe "started" while no receiver has been installed yet.
-fn ensure_approval_gate_once(
-    approval_gate_started: &std::sync::atomic::AtomicBool,
+/// Install the receiver and owned handle under one per-runtime registration
+/// lock. Concurrent first callers cannot miss a request or spawn duplicate
+/// subscribers; shutdown closes this same registration boundary.
+async fn ensure_approval_gate_once(
     approval: Arc<ApprovalRuntime>,
     registry: Arc<Mutex<ConnRegistry>>,
     blocked: Arc<AtomicUsize>,
@@ -1274,24 +1662,39 @@ fn ensure_approval_gate_once(
     pending_consent_cards: Arc<
         Mutex<std::collections::HashMap<crate::domain::models::RequestId, DaemonFrame>>,
     >,
+    gate: Arc<ApprovalGate>,
 ) {
-    let events = approval.subscribe();
-    if approval_gate_started.swap(true, Ordering::SeqCst) {
+    let mut tasks = gate.tasks.lock().await;
+    if gate.shutdown.is_cancelled() {
+        // Shutdown owns registered runtimes only. A late caller must close its
+        // runtime itself, outside the task-registry lock.
+        drop(tasks);
+        approval
+            .cancel_all(crate::domain::services::approval_runtime::CancelReason::RuntimeShutdown)
+            .await;
         return;
     }
-    tokio::spawn(async move {
-        run_approval_gate(
-            events,
-            approval,
-            registry,
-            blocked,
-            conversation,
-            storage,
-            domain_tx,
-            pending_consent_cards,
-        )
-        .await;
-    });
+    if tasks
+        .iter()
+        .any(|(runtime, _)| Arc::ptr_eq(runtime, &approval))
+    {
+        return;
+    }
+    let events = approval.subscribe();
+    let replay = gate.replay.subscribe();
+    let task = tokio::spawn(run_approval_gate(
+        events,
+        approval.clone(),
+        registry,
+        blocked,
+        conversation,
+        storage,
+        domain_tx,
+        pending_consent_cards,
+        gate.clone(),
+        replay,
+    ));
+    tasks.push((approval, task));
 }
 
 /// The daemon's single `AgentMessageBus` slot: one atomically swappable pointer
@@ -1623,7 +2026,7 @@ impl AttachServer {
             blocked_waiting: Arc::new(AtomicUsize::new(0)),
             next_conn_id: AtomicU64::new(1),
             last_writer_conn_id: AtomicU64::new(0),
-            approval_gate_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            approval_gate: Arc::new(ApprovalGate::default()),
             turn_serial: Arc::new(Mutex::new(())),
             turn_complete: Arc::new(Notify::new()),
             peer_turn_closed: Arc::new(Notify::new()),
@@ -1839,6 +2242,7 @@ impl AttachServer {
             let _ = task.await;
         }
         self.team_proposals.shutdown().await;
+        self.approval_gate.shutdown(&self.registry).await;
         forwarder.abort();
     }
     async fn surface_queued_interactions(
@@ -2407,6 +2811,7 @@ impl AttachServer {
                 terminal_tx: terminal_tx.clone(),
                 mode: granted,
                 tier,
+                approval_ready: false,
             });
             granted
         };
@@ -2427,6 +2832,7 @@ impl AttachServer {
                 channels: vec![ChannelKind::Terminal],
                 blocked_actions_waiting: self.blocked_waiting.load(Ordering::SeqCst),
                 pending_consent_cards: pending_consent_count,
+                retained_approvals: self.retained_approval_count().await,
                 peer_row_controls: if trusted_local {
                     snapshot_peer_row_controls(&conv, &self.pending_drafts).await
                 } else {
@@ -2442,23 +2848,53 @@ impl AttachServer {
                 } else {
                     Vec::new()
                 },
+                withheld_tool_inputs: Vec::new(),
             }
         };
         drop(row_guard);
 
-        if write_frame(
-            &mut write_half,
-            &DaemonFrame::AttachAck {
+        let mut acknowledgement = project_attach_frame(
+            DaemonFrame::AttachAck {
                 granted_mode,
                 snapshot,
             },
-        )
-        .await
-        .is_err()
-        {
-            let mut reg = self.registry.lock().await;
-            reg.remove(conn_id);
+            tier,
+        );
+        let omitted_bytes = bound_attach_snapshot(&mut acknowledgement);
+        // Never substitute a notice for the mandatory first AttachAck. Metadata
+        // that cannot fit is not safe to truncate (IDs and controls are exact).
+        if serialized_bytes(&acknowledgement) > MAX_FRAME_BYTES as usize {
+            let _ = write_frame(
+                &mut write_half,
+                &DaemonFrame::Error(ProtocolError::Internal(
+                    "attach metadata exceeds the frame limit".to_owned(),
+                )),
+            )
+            .await;
+            self.registry.lock().await.remove(conn_id);
             return;
+        }
+        if write_frame(&mut write_half, &acknowledgement)
+            .await
+            .is_err()
+        {
+            self.registry.lock().await.remove(conn_id);
+            return;
+        }
+        if let Some(bytes) = omitted_bytes {
+            if write_frame(
+                &mut write_half,
+                &DaemonFrame::FrameTooLarge {
+                    frame: "AttachAck".to_owned(),
+                    bytes,
+                },
+            )
+            .await
+            .is_err()
+            {
+                self.registry.lock().await.remove(conn_id);
+                return;
+            }
         }
 
         // Reset blocked-waiting after the writer sees the attach snapshot count.
@@ -2506,7 +2942,7 @@ impl AttachServer {
                     }
                     frame = rx.recv() => {
                         let Some(frame) = frame else { break };
-                        if write_frame(&mut write_half, &frame).await.is_err() {
+                        if write_attach_frame(&mut write_half, &frame).await.is_err() {
                             break;
                         }
                     }
@@ -2522,6 +2958,16 @@ impl AttachServer {
         if granted_mode == AttachMode::ReadWrite {
             self.emit_session_queue_notices(conn_id).await;
             self.emit_pending_consent_cards(conn_id).await;
+            self.registry
+                .lock()
+                .await
+                .conns
+                .iter_mut()
+                .filter(|conn| conn.id == conn_id)
+                .for_each(|conn| conn.approval_ready = true);
+            self.approval_gate
+                .replay
+                .send_modify(|generation| *generation += 1);
         }
 
         // Turns, History fences and context commands share a bounded writer-side FIFO.
@@ -4673,6 +5119,24 @@ impl AttachServer {
                 request_id,
                 outcome,
             } => {
+                let is_consent = self
+                    .pending_consent_cards
+                    .lock()
+                    .await
+                    .contains_key(&request_id);
+                let is_consent = is_consent
+                    || self
+                        .approval_gate
+                        .issues
+                        .lock()
+                        .await
+                        .consent_ids
+                        .contains(&request_id);
+                if !is_consent {
+                    self.resolve_tool_approval(request_id, outcome, mode, tier, conn_id)
+                        .await;
+                    return false;
+                }
                 if mode != AttachMode::ReadWrite {
                     self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
                         .await;
@@ -4794,8 +5258,18 @@ impl AttachServer {
                         start > 0,
                     )
                 };
-                self.send_to(conn_id, DaemonFrame::History { messages, has_more })
-                    .await;
+                self.send_to(
+                    conn_id,
+                    project_attach_frame(
+                        DaemonFrame::History {
+                            messages,
+                            has_more,
+                            withheld_tool_inputs: Vec::new(),
+                        },
+                        tier,
+                    ),
+                )
+                .await;
             }
             ClientFrame::PeerEnvelope(envelope) => {
                 if tier != ConnectionTier::Peer {
@@ -5590,7 +6064,7 @@ impl AttachServer {
                             return;
                         }
                     };
-                    server.ensure_approval_gate(rt.approval.clone());
+                    server.ensure_approval_gate(rt.approval.clone()).await;
 
                     let conversation_id = server.conversation.lock().await.id.clone();
                     let peer_turn_closed = server.peer_turn_closed.notified();
@@ -5822,7 +6296,7 @@ impl AttachServer {
                 return Err(e.to_string());
             }
         };
-        self.ensure_approval_gate(rt.approval.clone());
+        self.ensure_approval_gate(rt.approval.clone()).await;
 
         let turn_complete = self.turn_complete.notified();
         let handle = {
@@ -5870,13 +6344,12 @@ impl AttachServer {
     /// The subscription is taken **here**, synchronously, not inside the spawned
     /// task: `broadcast` only delivers to receivers that already exist, so a
     /// `request()` issued between the spawn and the task's first poll would be
-    /// broadcast into the void and its approval would hang until its own
-    /// timeout. Story 18.1b made that reachable — an inbound A2A admission
+    /// broadcast into the void. Story 18.1b made that reachable — an inbound
+    /// A2A admission
     /// approval is raised immediately after the gate is armed, with no turn in
     /// between to absorb the gap.
-    fn ensure_approval_gate(&self, approval: Arc<ApprovalRuntime>) {
+    async fn ensure_approval_gate(&self, approval: Arc<ApprovalRuntime>) {
         ensure_approval_gate_once(
-            self.approval_gate_started.as_ref(),
             approval,
             self.registry.clone(),
             self.blocked_waiting.clone(),
@@ -5884,7 +6357,99 @@ impl AttachServer {
             self.core.storage.clone(),
             self.domain_tx.clone(),
             self.pending_consent_cards.clone(),
-        );
+            self.approval_gate.clone(),
+        )
+        .await;
+    }
+
+    /// Admission is independent of the operator FIFO: the waiting turn owns
+    /// turn_serial. Claim the issue before resolving so duplicate socket frames
+    /// are refused even while durable Always persistence is in flight.
+    async fn resolve_tool_approval(
+        &self,
+        request_id: crate::domain::models::RequestId,
+        outcome: crate::domain::models::ApprovalOutcome,
+        mode: AttachMode,
+        tier: ConnectionTier,
+        conn_id: u64,
+    ) {
+        use super::protocol::ApprovalRefusal;
+        use crate::domain::services::approval_runtime::ReviewScope;
+        // Decisions never create a provider/runtime. Reject the connection
+        // boundary before even looking up pending work.
+        let authorized = mode == AttachMode::ReadWrite
+            && tier == ConnectionTier::TrustedLocal
+            && self
+                .registry
+                .lock()
+                .await
+                .approval_writer()
+                .is_some_and(|conn| conn.id == conn_id);
+        let runtime = if authorized {
+            self.core.built_runtime()
+        } else {
+            None
+        };
+        let pending = match &runtime {
+            Some(runtime) => runtime
+                .approval
+                .pending_review(&request_id, ReviewScope::AllTools)
+                .await
+                .is_some(),
+            None => false,
+        };
+        let refusal = {
+            let mut issues = self.approval_gate.issues.lock().await;
+            let registry = self.registry.lock().await;
+            if mode != AttachMode::ReadWrite
+                || tier != ConnectionTier::TrustedLocal
+                || !registry
+                    .approval_writer()
+                    .is_some_and(|conn| conn.id == conn_id)
+            {
+                Some(ApprovalRefusal::WriterOnly)
+            } else if self.approval_gate.shutdown.is_cancelled()
+                || !pending
+                || issues.deciding.contains(&request_id)
+            {
+                Some(ApprovalRefusal::NoLongerPending)
+            } else if issues.issued.get(&request_id) != Some(&Some(conn_id)) {
+                Some(ApprovalRefusal::IssuedElsewhere)
+            } else {
+                issues.deciding.insert(request_id.clone());
+                None
+            }
+        };
+        if let Some(reason) = refusal {
+            let mut registry = self.registry.lock().await;
+            if let Some(conn) = registry.conns.iter().find(|conn| conn.id == conn_id) {
+                if try_publish_team_frame(
+                    &conn.tx,
+                    &conn.terminal_tx,
+                    DaemonFrame::ApprovalRefused { request_id, reason },
+                ) != TeamFramePublishResult::Published
+                {
+                    registry.remove(conn_id);
+                }
+            }
+        } else if let Some(runtime) = runtime {
+            runtime.approval.resolve(&request_id, outcome).await;
+        }
+    }
+
+    async fn retained_approval_count(&self) -> usize {
+        let pending = self.approval_gate.pending_tool_ids().await;
+        let issues = self.approval_gate.issues.lock().await;
+        let registry = self.registry.lock().await;
+        pending
+            .iter()
+            .filter(|id| {
+                !issues.deciding.contains(*id)
+                    && !issues.issued.get(*id).copied().flatten().is_some_and(|id| {
+                        registry.approval_writer().is_some_and(|conn| conn.id == id)
+                    })
+            })
+            .count()
     }
 
     async fn emit_pending_consent_cards(&self, conn_id: u64) {
@@ -6227,10 +6792,156 @@ impl AttachServer {
     }
 }
 
-/// The headless approval policy loop (AC6). Subscribes to the approval runtime
-/// and resolves each request: forward to an attached writer (with a
-/// timeout→deny), or — unattended — auto-proceed read-only/`Safe` tools and
-/// **deny** anything mutating, recording a durable, resumable transcript record.
+/// Issue from the private pending snapshot. Only nonblocking queue writes run
+/// inside this gate, so delivery cannot outlive its gate or follow its close.
+async fn issue_tool_approval(
+    approval: &ApprovalRuntime,
+    registry: &Mutex<ConnRegistry>,
+    gate: &ApprovalGate,
+    id: &crate::domain::models::RequestId,
+) -> Option<crate::domain::services::approval_runtime::PendingReview> {
+    use crate::domain::services::approval_runtime::ReviewScope;
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    let _attempt = ApprovalTransferAttempt(&gate.transfer_attempts);
+    let review = approval.pending_review(id, ReviewScope::AllTools).await?;
+    let writer_id = {
+        let mut issues = gate.issues.lock().await;
+        let registry = registry.lock().await;
+        if gate.shutdown.is_cancelled() || issues.deciding.contains(id) {
+            return None;
+        }
+        let prior = issues.issued.get(id).copied();
+        let Some(writer) = registry.approval_writer() else {
+            issues.issued.insert(id.clone(), None);
+            return prior.is_none().then_some(review);
+        };
+        if prior == Some(Some(writer.id)) {
+            return None;
+        }
+        issues.issued.insert(id.clone(), None);
+        if !writer.approval_ready {
+            return None;
+        }
+        writer.id
+    };
+    let serialized =
+        serde_json::to_string(&*review.input).expect("a pending JSON value always serializes");
+    let chunks = super::protocol::exact_input_chunks(&serialized);
+    let frame = DaemonFrame::ApprovalRequest {
+        request_id: id.clone(),
+        tool: review.tool.clone(),
+        source: review.source.clone(),
+        risk: review.risk,
+        summary: super::protocol::bounded_wire_summary(
+            crate::domain::services::approval_presentation::summary(
+                &review.tool,
+                &review.input,
+                true,
+            ),
+        ),
+        input_bytes: Some(serialized.len() as u64),
+    };
+    let mut issues = gate.issues.lock().await;
+    let mut registry = registry.lock().await;
+    if gate.shutdown.is_cancelled() || issues.deciding.contains(id) {
+        return None;
+    }
+    let writer = registry
+        .approval_writer()
+        .filter(|writer| writer.id == writer_id && writer.approval_ready)?;
+    issues.issued.insert(id.clone(), Some(writer_id));
+    let tx = writer.tx.clone();
+    let terminal_tx = writer.terminal_tx.clone();
+    let frames =
+        std::iter::once(frame)
+            .chain(chunks.iter().enumerate().map(|(sequence, data)| {
+                DaemonFrame::ApprovalInputChunk {
+                    request_id: id.clone(),
+                    sequence: sequence as u32,
+                    data: (*data).to_owned(),
+                }
+            }))
+            .chain(std::iter::once(DaemonFrame::ApprovalInputComplete {
+                request_id: id.clone(),
+                chunks: chunks.len() as u32,
+            }));
+    for frame in frames {
+        if gate.shutdown.is_cancelled() {
+            break;
+        }
+        if try_publish_team_frame(&tx, &terminal_tx, frame) != TeamFramePublishResult::Published {
+            // Proposal rule, not consent's reject-and-record rule. Removal is
+            // immediate so another attach can claim the writer slot.
+            registry.remove(writer_id);
+            issues.issued.insert(id.clone(), None);
+            break;
+        }
+    }
+    None
+}
+
+async fn apply_unattended_tool_policy(
+    approval: &ApprovalRuntime,
+    review: crate::domain::services::approval_runtime::PendingReview,
+    blocked: &AtomicUsize,
+    conversation: &Arc<Mutex<Conversation>>,
+    storage: &Arc<dyn crate::domain::ports::StoragePort>,
+) {
+    if review.risk == ToolRisk::Safe {
+        approval
+            .resolve(&review.id, crate::domain::models::ApprovalOutcome::Once)
+            .await;
+    } else {
+        approval
+            .resolve(
+                &review.id,
+                crate::domain::models::ApprovalOutcome::Reject {
+                    feedback: Some(
+                        "denied: a side-effecting tool needs approval but no client is attached"
+                            .into(),
+                    ),
+                },
+            )
+            .await;
+        blocked.fetch_add(1, Ordering::SeqCst);
+        let history_source = if matches!(
+            review.source,
+            crate::domain::models::tool_call::ApprovalSource::RemotePeer { .. }
+        ) {
+            crate::domain::models::HistorySource::PeerDisplay
+        } else {
+            crate::domain::models::HistorySource::Local
+        };
+        record_blocked_action(conversation, storage, &review.tool, history_source).await;
+    }
+}
+
+async fn close_tool_approval(
+    gate: &ApprovalGate,
+    registry: &Mutex<ConnRegistry>,
+    id: &crate::domain::models::RequestId,
+) {
+    let mut issues = gate.issues.lock().await;
+    issues.deciding.remove(id);
+    if let Some(Some(conn_id)) = issues.issued.remove(id) {
+        let mut registry = registry.lock().await;
+        if let Some(conn) = registry.conns.iter().find(|conn| conn.id == conn_id) {
+            if try_publish_team_frame(
+                &conn.tx,
+                &conn.terminal_tx,
+                DaemonFrame::ApprovalClosed {
+                    request_id: id.clone(),
+                },
+            ) != TeamFramePublishResult::Published
+            {
+                registry.remove(conn_id);
+            }
+        }
+    }
+}
+
+/// Story 19.20c: tool approvals have no reading deadline; sender consent keeps
+/// its independent admission and replay semantics.
 async fn run_approval_gate(
     mut rx: tokio::sync::broadcast::Receiver<ApprovalRuntimeEvent>,
     approval: Arc<ApprovalRuntime>,
@@ -6242,17 +6953,66 @@ async fn run_approval_gate(
     pending_consent_cards: Arc<
         Mutex<std::collections::HashMap<crate::domain::models::RequestId, DaemonFrame>>,
     >,
+    gate: Arc<ApprovalGate>,
+    mut replay: watch::Receiver<u64>,
 ) {
+    use crate::domain::services::approval_runtime::ReviewScope;
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    let _active_guard = {
+        gate.active.fetch_add(1, Ordering::SeqCst);
+        ApprovalGateRunGuard(&gate.active)
+    };
     let event_emitter = crate::infrastructure::runtime::event_bus::ChannelEmitter::new(domain_tx);
     loop {
-        match rx.recv().await {
+        let event = tokio::select! {
+            biased;
+            _ = gate.shutdown.cancelled() => break,
+            changed = replay.changed() => {
+                if changed.is_err() { break; }
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                if let Some(mut release) = gate.replay_hold.lock().await.take() {
+                    gate.replay_entered.add_permits(1);
+                    tokio::select! {
+                        _ = gate.shutdown.cancelled() => break,
+                        _ = &mut release => {}
+                    }
+                }
+                for request in approval.pending_tool_requests(ReviewScope::AllTools).await {
+                    if gate.shutdown.is_cancelled() { break; }
+                    if let Some(review) = issue_tool_approval(&approval, &registry, &gate, &request.id).await {
+                        apply_unattended_tool_policy(&approval, review, &blocked, &conversation, &storage).await;
+                    }
+                }
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                gate.replay_completed.add_permits(1);
+                continue;
+            }
+            event = rx.recv() => event,
+        };
+        match event {
             Ok(ApprovalRuntimeEvent::Requested {
                 id,
                 tool,
-                input_preview,
                 risk,
                 source,
+                consent_card,
             }) => {
+                if tool != "a2a/sender-consent" {
+                    if let Some(review) =
+                        issue_tool_approval(&approval, &registry, &gate, &id).await
+                    {
+                        apply_unattended_tool_policy(
+                            &approval,
+                            review,
+                            &blocked,
+                            &conversation,
+                            &storage,
+                        )
+                        .await;
+                    }
+                    continue;
+                }
+                gate.issues.lock().await.consent_ids.insert(id.clone());
                 let history_source = if matches!(
                     source,
                     crate::domain::models::tool_call::ApprovalSource::RemotePeer { .. }
@@ -6265,112 +7025,92 @@ async fn run_approval_gate(
                 let frame = DaemonFrame::ApprovalRequest {
                     request_id: id.clone(),
                     tool: tool.clone(),
-                    input_preview,
+                    source,
                     risk,
+                    summary: consent_card.unwrap_or_default(),
+                    input_bytes: None,
                 };
-                if tool == "a2a/sender-consent" {
-                    pending_consent_cards
-                        .lock()
-                        .await
-                        .insert(id.clone(), frame.clone());
-                    if let Some(tx) = writer {
-                        if let Err(error) = tx.try_send(frame) {
-                            pending_consent_cards.lock().await.remove(&id);
-                            approval
-                                .resolve(
-                                    &id,
-                                    crate::domain::models::ApprovalOutcome::Reject {
-                                        feedback: Some(
-                                            "sender consent failed: attached writer queue is full"
-                                                .to_owned(),
-                                        ),
-                                    },
-                                )
-                                .await;
-                            blocked.fetch_add(1, Ordering::SeqCst);
-                            record_blocked_action(&conversation, &storage, &tool, history_source)
-                                .await;
-                            crate::domain::ports::EventEmitter::emit(
-                                &event_emitter,
-                                AppEvent::SystemNotice {
-                                    conversation_id: None,
-                                    level: crate::domain::models::NoticeLevel::Warning,
-                                    message: "Sender consent card admission failed: the attached writer queue is full."
-                                        .to_owned(),
+                pending_consent_cards
+                    .lock()
+                    .await
+                    .insert(id.clone(), frame.clone());
+                if let Some(tx) = writer {
+                    if let Err(error) = tx.try_send(frame) {
+                        pending_consent_cards.lock().await.remove(&id);
+                        approval
+                            .resolve(
+                                &id,
+                                crate::domain::models::ApprovalOutcome::Reject {
+                                    feedback: Some(
+                                        "sender consent failed: attached writer queue is full"
+                                            .to_owned(),
+                                    ),
                                 },
-                            );
-                            tracing::warn!(?error, "sender consent failed: writer queue full");
-                        }
-                    } else {
-                        tracing::info!(
-                            request_id = ?id,
-                            "sender consent remains pending for the next designated writer"
+                            )
+                            .await;
+                        blocked.fetch_add(1, Ordering::SeqCst);
+                        record_blocked_action(&conversation, &storage, &tool, history_source).await;
+                        crate::domain::ports::EventEmitter::emit(
+                            &event_emitter,
+                            AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: crate::domain::models::NoticeLevel::Warning,
+                                message: "Sender consent card admission failed: the attached writer queue is full.".to_owned(),
+                            },
                         );
+                        tracing::warn!(?error, "sender consent failed: writer queue full");
                     }
-                    continue;
-                }
-
-                match writer {
-                    Some(tx) => {
-                        // Generic tool approvals retain the existing timeout.
-                        if let Err(error) = tx.try_send(frame) {
-                            tracing::warn!(?error, "approval request dropped: writer queue full");
-                        }
-                        let approval2 = approval.clone();
-                        let id2 = id.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(APPROVAL_TIMEOUT).await;
-                            approval2
-                                .resolve(
-                                    &id2,
-                                    crate::domain::models::ApprovalOutcome::Reject {
-                                        feedback: Some(
-                                            "approval timed out — no response from the attached client".into(),
-                                        ),
-                                    },
-                                )
-                                .await;
-                        });
-                    }
-                    None => {
-                        if risk == ToolRisk::Safe {
-                            approval
-                                .resolve(&id, crate::domain::models::ApprovalOutcome::Once)
-                                .await;
-                        } else {
-                            approval
-                                .resolve(
-                                    &id,
-                                    crate::domain::models::ApprovalOutcome::Reject {
-                                        feedback: Some(
-                                            "denied: a side-effecting tool needs approval but no client is attached".into(),
-                                        ),
-                                    },
-                                )
-                                .await;
-                            blocked.fetch_add(1, Ordering::SeqCst);
-                            record_blocked_action(&conversation, &storage, &tool, history_source)
-                                .await;
-                        }
-                    }
+                } else {
+                    tracing::info!(request_id = ?id, "sender consent remains pending for the next designated writer");
                 }
             }
             Ok(ApprovalRuntimeEvent::Resolved { id, .. })
             | Ok(ApprovalRuntimeEvent::Cancelled { id, .. }) => {
                 pending_consent_cards.lock().await.remove(&id);
+                close_tool_approval(&gate, &registry, &id).await;
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!(
                     missed = n,
-                    "approval gate lagged — re-scanning pending consent cards"
+                    "approval gate lagged — re-scanning pending approvals"
                 );
-                // F10: a missed `Requested` leaves a never-expiring consent card
-                // unrendered, so the peer hangs on auth-required with no card.
-                // Re-insert + re-send any pending consent request the broadcast
-                // dropped; cards already tracked are left as-is.
-                // Story 19.18d `P22`: the preview is the request's stored one,
-                // never re-derived here, so a bound card stays a bound card.
-                for (id, input_preview, risk) in approval.pending_sender_consent().await {
+                let pending = approval.pending_tool_requests(ReviewScope::AllTools).await;
+                let pending_ids = gate.pending_tool_ids().await;
+                let stale: Vec<_> = gate
+                    .issues
+                    .lock()
+                    .await
+                    .issued
+                    .keys()
+                    .filter(|id| !pending_ids.contains(*id))
+                    .cloned()
+                    .collect();
+                for id in stale {
+                    close_tool_approval(&gate, &registry, &id).await;
+                }
+                for request in pending {
+                    if gate.shutdown.is_cancelled() {
+                        break;
+                    }
+                    if let Some(review) =
+                        issue_tool_approval(&approval, &registry, &gate, &request.id).await
+                    {
+                        apply_unattended_tool_policy(
+                            &approval,
+                            review,
+                            &blocked,
+                            &conversation,
+                            &storage,
+                        )
+                        .await;
+                    }
+                }
+                // Sender consent deliberately retains its existing rescan.
+                for (id, card, risk) in approval.pending_sender_consent().await {
+                    let Some(source) = approval.pending_source(&id).await else {
+                        continue;
+                    };
+                    gate.issues.lock().await.consent_ids.insert(id.clone());
                     let mut cards = pending_consent_cards.lock().await;
                     if cards.contains_key(&id) {
                         continue;
@@ -6378,22 +7118,28 @@ async fn run_approval_gate(
                     let frame = DaemonFrame::ApprovalRequest {
                         request_id: id.clone(),
                         tool: "a2a/sender-consent".to_owned(),
-                        input_preview,
+                        source,
                         risk,
+                        summary: card,
+                        input_bytes: None,
                     };
-                    cards.insert(id.clone(), frame.clone());
+                    cards.insert(id, frame.clone());
                     drop(cards);
                     let writer = { registry.lock().await.writer_tx() };
                     if let Some(tx) = writer {
                         let _ = tx.try_send(frame);
                     }
-                    // No writer → the card stays pending for the next attach,
-                    // identical to the Requested path's no-writer branch.
                 }
-                continue;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
+    }
+    // Rule 4: a shutdown keystone can hold the real task at its exit boundary
+    // and prove the server waits for its JoinHandle, without a scheduling race.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if let Some(release) = gate.exit_hold.lock().await.take() {
+        gate.exit_entered.add_permits(1);
+        let _ = release.await;
     }
 }
 
@@ -6450,7 +7196,7 @@ struct InboundTurnContext {
     peer_reply_serial: Arc<Mutex<()>>,
     registry: Arc<Mutex<ConnRegistry>>,
     blocked_waiting: Arc<AtomicUsize>,
-    approval_gate_started: Arc<std::sync::atomic::AtomicBool>,
+    approval_gate: Arc<ApprovalGate>,
     pending_consent_cards:
         Arc<Mutex<std::collections::HashMap<crate::domain::models::RequestId, DaemonFrame>>>,
     peer_turn_closed: Arc<Notify>,
@@ -6544,9 +7290,8 @@ fn spawn_turn_collector(
 }
 
 impl InboundTurnContext {
-    fn ensure_approval_gate(&self, approval: Arc<ApprovalRuntime>) {
+    async fn ensure_approval_gate(&self, approval: Arc<ApprovalRuntime>) {
         ensure_approval_gate_once(
-            self.approval_gate_started.as_ref(),
             approval,
             self.registry.clone(),
             self.blocked_waiting.clone(),
@@ -6554,7 +7299,9 @@ impl InboundTurnContext {
             self.core.storage.clone(),
             self.domain_tx.clone(),
             self.pending_consent_cards.clone(),
-        );
+            self.approval_gate.clone(),
+        )
+        .await;
     }
 
     async fn cleanup_pending_response(&self, node_id: &AgentId) {
@@ -6607,7 +7354,7 @@ impl InboundTurnContext {
                 return;
             }
         };
-        self.ensure_approval_gate(runtime.approval.clone());
+        self.ensure_approval_gate(runtime.approval.clone()).await;
 
         // Serialize on the same mutex every other daemon turn uses. Taken AFTER
         // registration so the node — and therefore `tasks/get` — is live and
@@ -7373,7 +8120,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
             node_tree: self.node_tree.clone(),
             registry: self.registry.clone(),
             blocked_waiting: self.blocked_waiting.clone(),
-            approval_gate_started: self.approval_gate_started.clone(),
+            approval_gate: self.approval_gate.clone(),
             pending_consent_cards: self.pending_consent_cards.clone(),
             turn_serial: self.turn_serial.clone(),
             peer_turn_closed: self.peer_turn_closed.clone(),
@@ -7407,7 +8154,17 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
             InboundApprovalDecision, InboundApprovalTicket, InboundPeerError,
         };
 
-        let resolve_outcome = |outcome: Result<
+        if self.approval_gate.shutdown.is_cancelled() {
+            let (decision_tx, decision) = tokio::sync::oneshot::channel();
+            let _ = decision_tx.send(InboundApprovalDecision::RuntimeShutdown);
+            return Ok(InboundApprovalTicket {
+                pending: false,
+                decision,
+            });
+        }
+
+        let approval_shutdown = self.approval_gate.shutdown.clone();
+        let resolve_outcome = move |outcome: Result<
             crate::domain::services::approval_runtime::ResolvedApproval,
             tokio::sync::oneshot::error::RecvError,
         >| match outcome.map(|resolved| resolved.outcome) {
@@ -7417,6 +8174,9 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 | ApprovalOutcome::AlwaysServer { .. }
                 | ApprovalOutcome::AlwaysAndSave { .. },
             ) => InboundApprovalDecision::AllowOnce,
+            Ok(ApprovalOutcome::Cancel) if approval_shutdown.is_cancelled() => {
+                InboundApprovalDecision::RuntimeShutdown
+            }
             _ => InboundApprovalDecision::Decline,
         };
 
@@ -7446,7 +8206,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                     return Err(InboundPeerError::Unavailable(error.to_string()));
                 }
             };
-            self.ensure_approval_gate(runtime.approval.clone());
+            self.ensure_approval_gate(runtime.approval.clone()).await;
             let conversation_id = self.conversation.lock().await.id.clone();
             let card = manager
                 .card_text(principal)
@@ -7477,6 +8237,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 let mut decision = resolve_outcome(resolved.await);
                 if let Some(request_id) = consent_request_id
                     && manager.take_granted(&request_id).await
+                    && decision == InboundApprovalDecision::AllowOnce
                 {
                     decision = InboundApprovalDecision::AllowAlways;
                 }
@@ -7493,7 +8254,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
             .ensure_runtime()
             .await
             .map_err(|error| InboundPeerError::Unavailable(error.to_string()))?;
-        self.ensure_approval_gate(runtime.approval.clone());
+        self.ensure_approval_gate(runtime.approval.clone()).await;
         let conversation_id = self.conversation.lock().await.id.clone();
         let (request_id, resolved) = runtime
             .approval
@@ -7514,11 +8275,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
             .await;
         let (decision_tx, decision) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let legacy_decision = match resolve_outcome(resolved.await) {
-                InboundApprovalDecision::Decline => InboundApprovalDecision::Decline,
-                _ => InboundApprovalDecision::AllowOnce,
-            };
-            let _ = decision_tx.send(legacy_decision);
+            let _ = decision_tx.send(resolve_outcome(resolved.await));
         });
         Ok(InboundApprovalTicket {
             pending: request_id.is_some(),
@@ -7598,6 +8355,780 @@ mod tests {
     use futures::stream::BoxStream;
     use std::path::Path;
     use tokio::net::UnixStream;
+
+    struct ProjectionProvider {
+        delegate: ToolThenTextProvider,
+        input: serde_json::Value,
+        tool: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for ProjectionProvider {
+        async fn stream_completion(
+            &self,
+            messages: Vec<Message>,
+            options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+            use futures::StreamExt;
+            let input = self.input.clone();
+            let tool = self.tool;
+            Ok(self
+                .delegate
+                .stream_completion(messages, options)
+                .await?
+                .map(move |chunk| match chunk {
+                    StreamChunk::ToolUse { id, .. } => StreamChunk::ToolUse {
+                        id,
+                        name: tool.to_owned(),
+                        input: input.clone(),
+                    },
+                    other => other,
+                })
+                .boxed())
+        }
+        async fn abort(&self) -> Result<(), ProviderError> {
+            self.delegate.abort().await
+        }
+        fn provider_id(&self) -> String {
+            "projection-tools".to_owned()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+            self.delegate.connectivity_probe().await
+        }
+    }
+
+    async fn projection_socket(
+        socket: &Path,
+        tier: ConnectionTier,
+        signer: u8,
+    ) -> (UnixStream, DaemonFrame) {
+        let mut stream = UnixStream::connect(socket).await.unwrap();
+        let ack = attach_with_proof(&mut stream, false, tier, &test_signer(signer))
+            .await
+            .expect("signed attach acknowledgement");
+        (stream, ack)
+    }
+
+    async fn projection_read(stream: &mut UnixStream) -> DaemonFrame {
+        read_frame::<_, DaemonFrame>(stream)
+            .await
+            .unwrap()
+            .expect("connection stays open")
+    }
+
+    async fn projection_history(stream: &mut UnixStream) -> DaemonFrame {
+        write_frame(
+            stream,
+            &ClientFrame::HistoryRequest {
+                before_index: None,
+                count: usize::MAX,
+            },
+        )
+        .await
+        .unwrap();
+        loop {
+            let frame = projection_read(stream).await;
+            if matches!(frame, DaemonFrame::History { .. }) {
+                return frame;
+            }
+        }
+    }
+
+    fn projection_tool_core(
+        workspace: &Path,
+        tool: &'static str,
+        input: serde_json::Value,
+    ) -> Arc<DaemonCore> {
+        let provider = Arc::new(ProjectionProvider {
+            delegate: ToolThenTextProvider {
+                calls: AtomicUsize::new(0),
+            },
+            input,
+            tool,
+        });
+        let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+            crate::infrastructure::paths::sessions_dir(workspace),
+            workspace.to_owned(),
+        ));
+        let ws = workspace.to_owned();
+        let factory_storage = storage.clone();
+        Arc::new(DaemonCore::new(
+            ws.clone(),
+            Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(NoOpMemory),
+            storage,
+            Arc::new(NoOpSecurity),
+            Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            Box::new(move || {
+                let mut runtime =
+                    Arc::try_unwrap(mock_runtime(provider.clone(), factory_storage.clone(), &ws))
+                        .ok()
+                        .expect("new unshared runtime");
+                let tools: Arc<dyn ToolSetPort> =
+                    Arc::new(crate::adapters::toolset_adapter::ToolSetAdapter::new(
+                        ws.clone(),
+                        runtime.fs_storage.clone(),
+                        Arc::new(ArcSwap::from_pointee(Arc::new(
+                            crate::adapters::sandbox::NoOpSandbox,
+                        )
+                            as Arc<dyn crate::domain::ports::SandboxManager>)),
+                        Arc::new(tokio::sync::RwLock::new(
+                            crate::domain::models::SandboxPolicy::Permissive,
+                        )),
+                    ));
+                runtime.tool_scheduler =
+                    crate::domain::services::tool_scheduler::ToolScheduler::new(
+                        runtime.security.clone(),
+                        tools.clone(),
+                        runtime.approval.clone(),
+                        64,
+                    );
+                runtime.tools = tools;
+                Ok(Arc::new(runtime))
+            }),
+        ))
+    }
+
+    fn assert_projection_transcript(frame: &DaemonFrame, input: &serde_json::Value, peer: bool) {
+        let (messages, entries) = match frame {
+            DaemonFrame::AttachAck { snapshot, .. } => {
+                (&snapshot.transcript, &snapshot.withheld_tool_inputs)
+            }
+            DaemonFrame::History {
+                messages,
+                withheld_tool_inputs,
+                ..
+            } => (messages, withheld_tool_inputs),
+            other => panic!("expected transcript, got {other:?}"),
+        };
+        let calls: Vec<_> = messages
+            .iter()
+            .flat_map(|message| &message.tool_calls)
+            .collect();
+        assert!(
+            !calls.is_empty(),
+            "transcript positive control has a real invocation"
+        );
+        for call in calls {
+            if peer {
+                assert!(call.input.is_null());
+                assert!(entries.iter().any(|entry| entry.tool_call_id == call.id
+                    && entry.withheld == ToolInputWithheld::PeerTier));
+            } else {
+                assert_eq!(
+                    &call.input, input,
+                    "TrustedLocal mirror/writer retains exact input"
+                );
+            }
+        }
+        if !peer {
+            assert!(entries.is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn story19_20c_projection_k04_real_turn_tier_privacy() {
+        projection_k04_scenario(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn story19_20c_projection_k04_operator_live_tier_privacy() {
+        projection_k04_scenario(false).await;
+    }
+
+    /// K04 enters signed sockets and the real turn, scheduler and Bash executor.
+    /// Operator ToolUse is prose-folded in retained daemon history; the peer
+    /// turn supplies structured ToolCallInfo for AttachAck/History coverage.
+    async fn projection_k04_scenario(peer_turn: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let workspace = tempfile::tempdir().unwrap();
+            let marker = "LATE_SECRET_19_20C_NEVER_A_PEER_ARGUMENT";
+            let content = format!("{}{} \nUnicode 🧪\t", "prefix ".repeat(80), marker);
+            let path = workspace.path().join("exact-write.txt");
+            // Bash writes the marker without echoing it into tool output. Output
+            // and prose secrecy are not an attach-input projection responsibility.
+            let input = serde_json::json!({"command": format!("printf '%s' '{content}' > '{}'", path.display())});
+            let core = projection_tool_core(workspace.path(), "Bash", input.clone());
+            let runtime = core.ensure_runtime().await.unwrap();
+            let mut approvals = runtime.approval.subscribe();
+            let mut scheduler_events = runtime.tool_scheduler.subscribe();
+            let conversation = Arc::new(Mutex::new(Conversation {
+                id: "projection-k04".to_owned(),
+                ..Default::default()
+            }));
+            let (bus, domain_rx) = EventBus::new(256);
+            let socket = workspace.path().join("projection.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = AttachServer::new(core, conversation.clone(), bus.domain_tx);
+            let shutdown = CancellationToken::new();
+            let service = {
+                let server = server.clone();
+                let shutdown = shutdown.clone();
+                tokio::spawn(async move {
+                    server.run(listener, domain_rx, None, None, shutdown).await;
+                })
+            };
+            let (mut writer, ack) =
+                projection_socket(&socket, ConnectionTier::TrustedLocal, 101).await;
+            assert!(matches!(
+                ack,
+                DaemonFrame::AttachAck {
+                    granted_mode: AttachMode::ReadWrite,
+                    ..
+                }
+            ));
+            let (mut mirror, ack) =
+                projection_socket(&socket, ConnectionTier::TrustedLocal, 102).await;
+            assert!(matches!(
+                ack,
+                DaemonFrame::AttachAck {
+                    granted_mode: AttachMode::ReadOnly,
+                    ..
+                }
+            ));
+            let (mut peer, ack) = projection_socket(&socket, ConnectionTier::Peer, 103).await;
+            assert!(matches!(
+                ack,
+                DaemonFrame::AttachAck {
+                    granted_mode: AttachMode::ReadOnly,
+                    ..
+                }
+            ));
+            if peer_turn {
+                let mut task = inbound_task(test_signer(113).identity().peer_id.clone(), "write the supplied content");
+                task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
+                server.start(task, CancellationToken::new()).await.unwrap();
+            } else {
+                write_frame(&mut writer, &ClientFrame::UserMessage {
+                    text: "write the supplied content".to_owned(), images: vec![],
+                }).await.unwrap();
+            }
+            let mut writer_phases = std::collections::BTreeSet::new();
+            let mut approval_count = 0;
+            let mut writer_uses = 0;
+            let mut writer_results = 0;
+            loop {
+                let frame = projection_read(&mut writer).await;
+                match &frame {
+                    DaemonFrame::ApprovalRequest { request_id, .. } => {
+                        approval_count += 1;
+                        write_frame(
+                            &mut writer,
+                            &ClientFrame::ApprovalResponse {
+                                request_id: request_id.clone(),
+                                outcome: crate::domain::models::ApprovalOutcome::Once,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    DaemonFrame::Event(RawEvent {
+                        kind: RawEventKind::Provider(StreamChunk::ToolUse { input: actual, .. })
+                            | RawEventKind::PeerProvider(StreamChunk::ToolUse { input: actual, .. }),
+                        ..
+                    }) => {
+                        assert_eq!(actual, &input);
+                        writer_uses += 1;
+                    }
+                    DaemonFrame::Event(RawEvent {
+                        kind: RawEventKind::Tool(transition),
+                        ..
+                    }) => {
+                        let value = serde_json::to_value(&transition.call).unwrap();
+                        assert_eq!(value["request"]["input"], input);
+                        writer_phases.insert(value["status"].as_str().unwrap().to_owned());
+                    }
+                    DaemonFrame::Event(RawEvent {
+                        kind: RawEventKind::Provider(StreamChunk::ToolResult { is_error, .. })
+                            | RawEventKind::PeerProvider(StreamChunk::ToolResult { is_error, .. }), ..
+                    }) => {
+                        assert!(!is_error);
+                        writer_results += 1;
+                    }
+                    DaemonFrame::Event(RawEvent {
+                        kind:
+                            RawEventKind::Provider(StreamChunk::TurnComplete { stop_reason: StopReason::EndTurn })
+                            | RawEventKind::PeerProvider(StreamChunk::TurnComplete { stop_reason: StopReason::EndTurn }),
+                        ..
+                    }) => break,
+                    _ => {}
+                }
+            }
+            assert_eq!(approval_count, 1);
+            assert_eq!(writer_uses, 1);
+            assert_eq!(writer_results, 1, "writer retains successful tool-result activity");
+            // Rule 1: daemon has no producer forwarding scheduler transitions to
+            // attach clients. Observe the real scheduler directly; the Tool
+            // projection arm is guard-only, covered by supporting bus evidence.
+            let mut scheduler_phases = std::collections::BTreeSet::new();
+            while let Ok(transition) = scheduler_events.try_recv() {
+                assert_eq!(transition.call.request().input, input);
+                let value = serde_json::to_value(&transition.call).unwrap();
+                scheduler_phases.insert(value["status"].as_str().unwrap().to_owned());
+            }
+            for phase in [
+                "validating",
+                "scheduled",
+                "awaiting_approval",
+                "executing",
+                "success",
+            ] {
+                assert!(
+                    scheduler_phases.contains(phase),
+                    "real turn traverses scheduler phase {phase}"
+                );
+            }
+            let mut requested = 0;
+            while let Ok(event) = approvals.try_recv() {
+                assert!(
+                    !serde_json::to_string(&event).unwrap().contains(marker),
+                    "runtime Requested must never broadcast input values"
+                );
+                if matches!(event, ApprovalRuntimeEvent::Requested { .. }) {
+                    requested += 1;
+                }
+            }
+            assert_eq!(requested, 1, "runtime subscription is a nonvacuous control");
+            for (stream, peer_tier) in [(&mut mirror, false), (&mut peer, true)] {
+                let mut uses = 0;
+                let mut results = 0;
+                let mut phases = std::collections::BTreeSet::new();
+                loop {
+                    let frame = projection_read(stream).await;
+                    assert!(
+                        !matches!(
+                            frame,
+                            DaemonFrame::ApprovalRequest { .. }
+                                | DaemonFrame::ApprovalInputChunk { .. }
+                                | DaemonFrame::ApprovalInputComplete { .. }
+                        ),
+                        "observer never receives exact-review channel"
+                    );
+                    if peer_tier {
+                        assert!(
+                            !serde_json::to_string(&frame).unwrap().contains(marker),
+                            "peer wire privacy"
+                        );
+                    }
+                    let event = match &frame {
+                        DaemonFrame::ToolEventWithheld { event, withheld } => {
+                            assert!(peer_tier);
+                            assert_eq!(withheld, &ToolInputWithheld::PeerTier);
+                            Some(event)
+                        }
+                        DaemonFrame::Event(event) => Some(event),
+                        _ => None,
+                    };
+                    if let Some(event) = event {
+                        match &event.kind {
+                            RawEventKind::Provider(StreamChunk::ToolUse { input: actual, .. })
+                            | RawEventKind::PeerProvider(StreamChunk::ToolUse { input: actual, .. }) => {
+                                if peer_tier {
+                                    assert!(actual.is_null());
+                                } else {
+                                    assert_eq!(actual, &input);
+                                }
+                                uses += 1;
+                            }
+                            RawEventKind::Tool(transition) => {
+                                let value = serde_json::to_value(&transition.call).unwrap();
+                                if peer_tier {
+                                    assert!(value["request"]["input"].is_null());
+                                } else {
+                                    assert_eq!(value["request"]["input"], input);
+                                }
+                                phases.insert(value["status"].as_str().unwrap().to_owned());
+                            }
+                            RawEventKind::Provider(StreamChunk::ToolResult { is_error, .. })
+                            | RawEventKind::PeerProvider(StreamChunk::ToolResult { is_error, .. }) => {
+                                assert!(!is_error);
+                                results += 1;
+                            }
+                            RawEventKind::Provider(StreamChunk::TurnComplete { stop_reason: StopReason::EndTurn })
+                            | RawEventKind::PeerProvider(StreamChunk::TurnComplete { stop_reason: StopReason::EndTurn }) => break,
+                            _ => {}
+                        }
+                    }
+                }
+                assert_eq!(uses, 1);
+                assert_eq!(results, 1, "Peer and mirror retain successful tool results");
+                assert_eq!(
+                    phases, writer_phases,
+                    "observer and writer share the same transition forwarding policy"
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                content,
+                "real executor keeps exact value"
+            );
+            if !peer_turn {
+                shutdown.cancel();
+                drop((writer, mirror, peer));
+                service.await.unwrap();
+                return;
+            }
+            assert!(
+                conversation
+                    .lock()
+                    .await
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.tool_calls)
+                    .any(|call| call.input == input),
+                "retained conversation keeps exact input"
+            );
+            for (stream, peer_tier) in [
+                (&mut writer, false),
+                (&mut mirror, false),
+                (&mut peer, true),
+            ] {
+                let frame = projection_history(stream).await;
+                assert_projection_transcript(&frame, &input, peer_tier);
+                if peer_tier {
+                    assert!(!serde_json::to_string(&frame).unwrap().contains(marker));
+                }
+            }
+            // Reattach through the signed front door to inspect fresh AttachAck snapshots.
+            for (tier, signer) in [
+                (ConnectionTier::TrustedLocal, 104),
+                (ConnectionTier::Peer, 105),
+            ] {
+                let (stream, frame) = projection_socket(&socket, tier, signer).await;
+                assert_projection_transcript(&frame, &input, tier == ConnectionTier::Peer);
+                if tier == ConnectionTier::Peer {
+                    assert!(!serde_json::to_string(&frame).unwrap().contains(marker));
+                }
+                drop(stream);
+            }
+            shutdown.cancel();
+            drop((writer, mirror, peer));
+            service.await.unwrap();
+        })
+        .await
+        .expect("K04 signed socket real turn completes");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn story19_20c_projection_k07_cap_keeps_attached_connections_alive() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let workspace = tempfile::tempdir().unwrap();
+            let path = workspace.path().join("large-write.txt");
+            let input = serde_json::json!({"file_path": path, "content": "x".repeat(MAX_FRAME_BYTES as usize)});
+            let bytes = serialized_bytes(&input) as u64;
+            let core = projection_tool_core(workspace.path(), "Write", input);
+            let conversation = Arc::new(Mutex::new(Conversation { id: "cap".into(), ..Default::default() }));
+            let (bus, domain_rx) = EventBus::new(256);
+            let socket = workspace.path().join("cap.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = AttachServer::new(core, conversation, bus.domain_tx);
+            let shutdown = CancellationToken::new();
+            let service = {
+                let server = server.clone(); let shutdown = shutdown.clone();
+                tokio::spawn(async move { server.run(listener, domain_rx, None, None, shutdown).await; })
+            };
+            let (mut writer, _) = projection_socket(&socket, ConnectionTier::TrustedLocal, 106).await;
+            let (mut mirror, _) = projection_socket(&socket, ConnectionTier::TrustedLocal, 107).await;
+            let (mut peer, _) = projection_socket(&socket, ConnectionTier::Peer, 108).await;
+            write_frame(&mut writer, &ClientFrame::UserMessage {
+                text: "write the large input".into(), images: vec![],
+            }).await.unwrap();
+            for (stream, tier) in [(&mut writer, ConnectionTier::TrustedLocal),
+                (&mut mirror, ConnectionTier::TrustedLocal), (&mut peer, ConnectionTier::Peer)] {
+                loop {
+                    let frame = projection_read(stream).await;
+                    if let DaemonFrame::ToolEventWithheld { event, withheld } = frame {
+                        assert_eq!(withheld, if tier == ConnectionTier::Peer {
+                            ToolInputWithheld::PeerTier
+                        } else { ToolInputWithheld::TooLarge { bytes } });
+                        assert!(matches!(event.kind, RawEventKind::Provider(StreamChunk::ToolUse { input, .. }) if input.is_null()));
+                        break;
+                    }
+                    assert!(!matches!(frame, DaemonFrame::FrameTooLarge { .. }), "tool input must use typed withholding");
+                }
+            }
+            let mut approved = false;
+            loop {
+                match projection_read(&mut writer).await {
+                    DaemonFrame::ApprovalRequest { request_id, .. } => {
+                        approved = true;
+                        write_frame(&mut writer, &ClientFrame::ApprovalResponse {
+                            request_id, outcome: crate::domain::models::ApprovalOutcome::Once,
+                        }).await.unwrap();
+                    }
+                    DaemonFrame::Event(RawEvent { kind: RawEventKind::Provider(StreamChunk::TurnComplete { stop_reason: StopReason::EndTurn }), .. }) => break,
+                    _ => {}
+                }
+            }
+            assert!(approved);
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), u64::from(MAX_FRAME_BYTES),
+                "real scheduler/executor keeps the over-cap input exact");
+            // Non-input prose cannot be stripped: exercise the universal writer guard.
+            server.fanout(DaemonFrame::TeamStatusResult {
+                request: "oversize".into(), message: "p".repeat(MAX_FRAME_BYTES as usize),
+            }).await;
+            server.fanout(DaemonFrame::PeerAccepted { sequence: 992 }).await;
+            for stream in [&mut writer, &mut mirror, &mut peer] {
+                loop {
+                    if let DaemonFrame::FrameTooLarge { frame, bytes } = projection_read(stream).await {
+                        assert_eq!(frame, "TeamStatusResult");
+                        assert!(bytes > u64::from(MAX_FRAME_BYTES)); break;
+                    }
+                }
+                assert!(matches!(projection_read(stream).await, DaemonFrame::PeerAccepted { sequence: 992 }));
+            }
+            shutdown.cancel(); drop((writer, mirror, peer)); service.await.unwrap();
+        }).await.expect("K07 cap guard keeps sockets connected");
+    }
+
+    /// Supporting M16 evidence, not K04: no production daemon transition
+    /// producer exists today. Feed the event at the real bus-consumer seam.
+    #[tokio::test]
+    async fn story19_20c_projection_supporting_bus_transition_privacy() {
+        use crate::domain::models::{ToolCall, ToolCallRequest, ToolCallTransition};
+        let workspace = tempfile::tempdir().unwrap();
+        let (core, _) = mock_core(workspace.path(), vec![]);
+        let (bus, _) = EventBus::new(64);
+        let server = AttachServer::new(
+            core,
+            Arc::new(Mutex::new(Conversation::default())),
+            bus.domain_tx,
+        );
+        let mut sockets = Vec::new();
+        let mut connections = Vec::new();
+        for tier in [
+            ConnectionTier::TrustedLocal,
+            ConnectionTier::TrustedLocal,
+            ConnectionTier::Peer,
+        ] {
+            let (mut socket, daemon) = UnixStream::pair().unwrap();
+            let owner = server.clone();
+            connections.push(tokio::spawn(async move {
+                owner.handle_connection(daemon).await;
+            }));
+            assert!(matches!(
+                attach_with_proof(
+                    &mut socket,
+                    false,
+                    tier,
+                    &test_signer(109 + sockets.len() as u8)
+                )
+                .await,
+                Some(DaemonFrame::AttachAck { .. })
+            ));
+            sockets.push(socket);
+        }
+        let input = serde_json::json!({"secret": "M16-transition-marker"});
+        server
+            .handle_bus_event(
+                &AppEvent::ToolCallTransitionBridged {
+                    conversation_id: "c".into(),
+                    transition: ToolCallTransition {
+                        conversation_id: "c".into(),
+                        call: ToolCall::Scheduled {
+                            id: "guard-only".into(),
+                            request: ToolCallRequest {
+                                id: "guard-only".into(),
+                                tool_name: "unknown".into(),
+                                input: input.clone(),
+                            },
+                        },
+                    },
+                },
+                &mut String::new(),
+            )
+            .await;
+        for (index, socket) in sockets.iter_mut().enumerate() {
+            loop {
+                let frame = projection_read(socket).await;
+                match frame {
+                    DaemonFrame::Event(mut event)
+                        if matches!(event.kind, RawEventKind::Tool(_)) =>
+                    {
+                        assert!(index < 2, "Peer never receives an unprojected transition");
+                        assert_eq!(event_tool_input(&mut event).unwrap(), &input);
+                        break;
+                    }
+                    DaemonFrame::ToolEventWithheld {
+                        mut event,
+                        withheld,
+                    } => {
+                        assert_eq!(index, 2);
+                        assert_eq!(withheld, ToolInputWithheld::PeerTier);
+                        assert!(event_tool_input(&mut event).unwrap().is_null());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for socket in &mut sockets {
+            write_frame(socket, &ClientFrame::Detach).await.unwrap();
+        }
+        drop(sockets);
+        for connection in connections {
+            connection.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn story19_20c_projection_peer_provider_and_all_transition_shapes() {
+        use crate::domain::models::{
+            ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
+        };
+        let input = serde_json::json!(["arbitrary", {"secret": "exact scalar/array values"}]);
+        let request = ToolCallRequest {
+            id: "call".into(),
+            tool_name: "unknown".into(),
+            input: input.clone(),
+        };
+        let id = "call".to_owned();
+        let calls = vec![
+            ToolCall::Validating {
+                id: id.clone(),
+                request: request.clone(),
+                started_at: 1,
+            },
+            ToolCall::Scheduled {
+                id: id.clone(),
+                request: request.clone(),
+            },
+            ToolCall::AwaitingApproval {
+                id: id.clone(),
+                request: request.clone(),
+                approval_id: Default::default(),
+            },
+            ToolCall::Executing {
+                id: id.clone(),
+                request: request.clone(),
+                started_at: 1,
+            },
+            ToolCall::Success {
+                id: id.clone(),
+                request: request.clone(),
+                result: ToolCallResult {
+                    output: "visible output".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                },
+            },
+            ToolCall::Error {
+                id: id.clone(),
+                request: request.clone(),
+                error: "visible error".into(),
+            },
+            ToolCall::Cancelled {
+                id: id.clone(),
+                request,
+                reason: "visible cancellation".into(),
+            },
+        ];
+        let mut kinds = vec![RawEventKind::PeerProvider(StreamChunk::ToolUse {
+            id,
+            name: "unknown".into(),
+            input: input.clone(),
+        })];
+        kinds.extend(calls.into_iter().map(|call| {
+            RawEventKind::Tool(ToolCallTransition {
+                conversation_id: "c".into(),
+                call,
+            })
+        }));
+        for kind in kinds {
+            let frame = DaemonFrame::Event(RawEvent {
+                conversation_id: Some("c".into()),
+                timestamp_ms: 1,
+                kind,
+            });
+            let original = serde_json::to_value(&frame).unwrap();
+            assert_eq!(
+                serde_json::to_value(project_attach_frame(
+                    frame.clone(),
+                    ConnectionTier::TrustedLocal
+                ))
+                .unwrap(),
+                original
+            );
+            let projected = project_attach_frame(frame, ConnectionTier::Peer);
+            let DaemonFrame::ToolEventWithheld {
+                mut event,
+                withheld,
+            } = projected
+            else {
+                panic!("every tool event has typed Peer withholding");
+            };
+            assert_eq!(withheld, ToolInputWithheld::PeerTier);
+            assert!(event_tool_input(&mut event).unwrap().is_null());
+            *event_tool_input(&mut event).unwrap() = input.clone();
+            assert_eq!(
+                serde_json::to_value(DaemonFrame::Event(event)).unwrap(),
+                original,
+                "only the input changes; identity/status/results/prose remain"
+            );
+        }
+    }
+
+    #[test]
+    fn story19_20c_projection_history_aggregate_withholds_largest_first() {
+        use crate::domain::models::ToolCallInfo;
+        let large = serde_json::json!({"content": "x".repeat(MAX_FRAME_BYTES as usize / 2)});
+        let small = serde_json::json!({"path": "keep/me"});
+        let call = |id: &str, input| ToolCallInfo {
+            id: id.to_owned(),
+            name: "Write".into(),
+            input,
+            result: None,
+            started_at_ms: None,
+            completed_at_ms: None,
+            status: None,
+        };
+        let message = ChatMessage {
+            id: "m".into(),
+            tool_calls: vec![
+                call("large-a", large.clone()),
+                call("small", small.clone()),
+                call("large-b", large),
+            ],
+            ..Default::default()
+        };
+        let frame = project_attach_frame(
+            DaemonFrame::History {
+                messages: vec![message],
+                has_more: true,
+                withheld_tool_inputs: vec![],
+            },
+            ConnectionTier::TrustedLocal,
+        );
+        assert!(serialized_bytes(&frame) <= MAX_FRAME_BYTES as usize);
+        let DaemonFrame::History {
+            messages,
+            has_more,
+            withheld_tool_inputs,
+        } = frame
+        else {
+            unreachable!()
+        };
+        assert!(has_more);
+        assert_eq!(messages[0].tool_calls[1].input, small);
+        assert_eq!(
+            withheld_tool_inputs.len(),
+            1,
+            "only one largest input needs withholding"
+        );
+        assert!(matches!(
+            withheld_tool_inputs[0].withheld,
+            ToolInputWithheld::TooLarge { .. }
+        ));
+    }
 
     #[test]
     fn team_request_gates_cover_trusted_and_peer_authority() {
@@ -9201,6 +10732,7 @@ mod tests {
             terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
 
         server
@@ -9305,6 +10837,7 @@ mod tests {
             terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
         (server, journal, addresses, writer_rx)
     }
@@ -10104,6 +11637,7 @@ mod tests {
             terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
         let sender = PolicyPrincipal::rap(test_signer(100).identity().peer_id.clone());
 
@@ -10280,6 +11814,7 @@ mod tests {
             terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
         let pseudo =
             crate::adapters::a2a::exec::SubmitterKey::from_api_key("d0-k02").policy_principal();
@@ -10477,11 +12012,11 @@ mod tests {
             DaemonFrame::ApprovalRequest {
                 request_id,
                 tool,
-                input_preview,
+                summary,
                 ..
             } => {
                 assert_eq!(tool, "a2a/sender-consent");
-                (request_id, input_preview)
+                (request_id, summary)
             }
             frame => panic!("expected consent card, got {frame:?}"),
         }
@@ -10547,6 +12082,7 @@ mod tests {
                 terminal_tx: watch::channel(None).0,
                 mode: AttachMode::ReadWrite,
                 tier: ConnectionTier::TrustedLocal,
+                approval_ready: true,
             });
             if rap_ingest {
                 let consumer = DaemonPeerConsumer {
@@ -10695,6 +12231,7 @@ mod tests {
             terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
         let sender = PolicyPrincipal::rap(test_signer(200).identity().peer_id.clone());
 
@@ -10822,15 +12359,16 @@ mod tests {
             terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
         server.emit_pending_consent_cards(9).await;
         let request_id = match writer_rx.recv().await.unwrap() {
             DaemonFrame::ApprovalRequest {
                 request_id,
-                input_preview,
+                summary,
                 ..
             } => {
-                assert!(input_preview.contains(sender.peer().as_str()));
+                assert!(summary.contains(sender.peer().as_str()));
                 request_id
             }
             frame => panic!("expected retained sender consent card, got {frame:?}"),
@@ -10878,6 +12416,7 @@ mod tests {
             terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
 
         let ticket = server
@@ -12030,8 +13569,7 @@ mod tests {
         shutdown.cancel();
         handle.abort();
     }
-    /// Story 19.21: a previous daemon protocol version is rejected before proof
-    /// validation, with the named version-mismatch error.
+    /// Story 19.20c: v7 is rejected before proof validation or registration at v8.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn previous_protocol_version_is_rejected_before_proof() {
         let tmp = tempfile::tempdir().unwrap();
@@ -12058,7 +13596,7 @@ mod tests {
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: 4,
+                protocol_version: 7,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -12071,12 +13609,15 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, 4);
+                assert_eq!(client, 7);
+                assert_eq!(daemon, 8);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }
+        assert!(server.registry.lock().await.conns.is_empty());
+        assert_eq!(server.next_conn_id.load(Ordering::SeqCst), 1);
         shutdown.cancel();
-        h.abort();
+        h.await.unwrap();
     }
 
     /// AC4: an in-flight turn completes + persists even if the client detaches
@@ -12141,11 +13682,12 @@ mod tests {
         panic!("turn did not survive client detach");
     }
 
+    include!("approval_lifecycle_tests.rs");
+
     /// AC6: unattended (no writer) — a side-effecting (`Standard`) tool is
     /// denied-by-default and recorded; a read-only (`Safe`) tool auto-proceeds.
     /// No `PermissionMode` ever resolves to `Yolo`.
-    #[ignore = "flaky under CI parallelism; gated by nightly daemon L3"]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn unattended_approval_denies_mutating_and_auto_allows_safe() {
         use crate::domain::models::tool_call::ApprovalSource;
         use crate::domain::models::{ApprovalOutcome, ToolRisk};
@@ -12170,6 +13712,8 @@ mod tests {
         let c = conversation.clone();
         let s = storage.clone();
         let events = a.subscribe();
+        let owner = Arc::new(ApprovalGate::default());
+        let replay = owner.replay.subscribe();
         let gate = tokio::spawn(async move {
             run_approval_gate(
                 events,
@@ -12180,6 +13724,8 @@ mod tests {
                 s,
                 mpsc::unbounded_channel().0,
                 Arc::new(Mutex::new(std::collections::HashMap::new())),
+                owner,
+                replay,
             )
             .await
         });
@@ -12235,223 +13781,6 @@ mod tests {
                 && m.content.contains("Write")),
             "denied-while-unattended recorded a resumable transcript event"
         );
-        gate.abort();
-    }
-    /// AC6 #2: writer-connected approval forwards the request and the
-    /// timeout-reject path works when the writer never responds.
-    ///
-    /// Uses a real `tokio::time::sleep` with a 10ms mock timeout (via direct
-    /// `resolve`) since `tokio::time::pause` requires `current_thread` runtime
-    /// but this crate's tests run on `multi_thread`.
-    #[ignore = "flaky under CI parallelism; gated by nightly daemon L3"]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn approval_timeout_deny_when_writer_silent() {
-        use crate::domain::models::ApprovalOutcome;
-        use crate::domain::models::tool_call::ApprovalSource;
-
-        let approval = ApprovalRuntime::new(64, Arc::new(NoOpApprovalPersistence));
-        let registry = Arc::new(Mutex::new(ConnRegistry::default()));
-        let blocked = Arc::new(AtomicUsize::new(0));
-        let conversation = Arc::new(Mutex::new(Conversation {
-            id: "timeout-conv".into(),
-            ..Default::default()
-        }));
-        let storage: Arc<dyn crate::domain::ports::StoragePort> =
-            Arc::new(FileSystemStorage::with_workspace_root(
-                crate::infrastructure::paths::sessions_dir(tempfile::tempdir().unwrap().path()),
-                tempfile::tempdir().unwrap().path().to_path_buf(),
-            ));
-
-        let a = approval.clone();
-        let r = registry.clone();
-        let b = blocked.clone();
-        let c = conversation.clone();
-        let s = storage.clone();
-        let events = a.subscribe();
-        let gate = tokio::spawn(async move {
-            run_approval_gate(
-                events,
-                a,
-                r,
-                b,
-                c,
-                s,
-                mpsc::unbounded_channel().0,
-                Arc::new(Mutex::new(std::collections::HashMap::new())),
-            )
-            .await
-        });
-
-        // Register a writer connection.
-        let (tx, mut rx) = mpsc::channel::<DaemonFrame>(1);
-        registry.lock().await.conns.push(Conn {
-            id: 1,
-            tx,
-            terminal_tx: watch::channel(None).0,
-            mode: AttachMode::ReadWrite,
-            tier: ConnectionTier::TrustedLocal,
-        });
-
-        // Request approval — forwarded to writer.
-        let source = ApprovalSource::ForegroundTurn {
-            conversation_id: "timeout-conv".into(),
-        };
-        let (id, recv) = approval
-            .request(
-                source,
-                "Write".into(),
-                serde_json::json!({"file_path": "/tmp/x"}),
-                ToolRisk::Standard,
-                None,
-                None,
-            )
-            .await;
-        let request_id = id.expect("slow-path should return an id");
-
-        // Verify ApprovalRequest was forwarded to the writer queue.
-        match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
-            Ok(Some(DaemonFrame::ApprovalRequest {
-                request_id: rid,
-                tool,
-                ..
-            })) => {
-                assert_eq!(rid, request_id);
-                assert_eq!(tool, "Write");
-            }
-            other => panic!("expected ApprovalRequest on writer queue, got {other:?}"),
-        }
-
-        // Simulate the timeout path: the writer never responds, and the
-        // timeout task fires `resolve(Reject)`. We replicate that here.
-        approval
-            .resolve(
-                &request_id,
-                ApprovalOutcome::Reject {
-                    feedback: Some(
-                        "approval timed out — no response from the attached client".into(),
-                    ),
-                },
-            )
-            .await;
-
-        // The original caller receives the Reject.
-        let result = tokio::time::timeout(std::time::Duration::from_millis(200), recv).await;
-        match &result {
-            Ok(Ok(resolved)) => assert!(
-                matches!(resolved.outcome, ApprovalOutcome::Reject { .. }),
-                "silent-writer timeout should resolve to Reject, got {:?}",
-                resolved.outcome
-            ),
-            other => panic!("silent-writer timeout should resolve to Reject, got {other:?}"),
-        }
-        assert_eq!(
-            blocked.load(Ordering::SeqCst),
-            0,
-            "blocked count unchanged (writer attached)"
-        );
-
-        gate.abort();
-    }
-
-    /// AC6 #1: approval forward-to-attached-writer round-trip.
-    #[ignore = "flaky under CI parallelism; gated by nightly daemon L3"]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn approval_forward_to_writer_roundtrip() {
-        use crate::domain::models::ApprovalOutcome;
-        use crate::domain::models::tool_call::{ApprovalSource, RequestId};
-
-        let approval = ApprovalRuntime::new(64, Arc::new(NoOpApprovalPersistence));
-        let registry = Arc::new(Mutex::new(ConnRegistry::default()));
-        let blocked = Arc::new(AtomicUsize::new(0));
-        let conversation = Arc::new(Mutex::new(Conversation {
-            id: "rt-conv".into(),
-            ..Default::default()
-        }));
-        let storage: Arc<dyn crate::domain::ports::StoragePort> =
-            Arc::new(FileSystemStorage::with_workspace_root(
-                crate::infrastructure::paths::sessions_dir(tempfile::tempdir().unwrap().path()),
-                tempfile::tempdir().unwrap().path().to_path_buf(),
-            ));
-
-        let a = approval.clone();
-        let r = registry.clone();
-        let b = blocked.clone();
-        let c = conversation.clone();
-        let s = storage.clone();
-        let events = a.subscribe();
-        let gate = tokio::spawn(async move {
-            run_approval_gate(
-                events,
-                a,
-                r,
-                b,
-                c,
-                s,
-                mpsc::unbounded_channel().0,
-                Arc::new(Mutex::new(std::collections::HashMap::new())),
-            )
-            .await
-        });
-
-        // Ensure the spawned approval gate has subscribed before issuing the
-        // request; otherwise the broadcast event can be missed under full-suite
-        // scheduler contention.
-        tokio::task::yield_now().await;
-
-        // Register a writer connection.
-        let (tx, mut rx) = mpsc::channel::<DaemonFrame>(1);
-        registry.lock().await.conns.push(Conn {
-            id: 1,
-            tx,
-            terminal_tx: watch::channel(None).0,
-            mode: AttachMode::ReadWrite,
-            tier: ConnectionTier::TrustedLocal,
-        });
-
-        // Request approval.
-        let source = ApprovalSource::ForegroundTurn {
-            conversation_id: "rt-conv".into(),
-        };
-        let (id, recv) = approval
-            .request(
-                source,
-                "Write".into(),
-                serde_json::json!({"file_path": "/tmp/y"}),
-                ToolRisk::Standard,
-                None,
-                None,
-            )
-            .await;
-        let request_id = id.expect("slow-path should return an id");
-
-        // Writer receives ApprovalRequest.
-        match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
-            Ok(Some(DaemonFrame::ApprovalRequest {
-                request_id: rid,
-                tool,
-                ..
-            })) => {
-                assert_eq!(rid, request_id);
-                assert_eq!(tool, "Write");
-            }
-            other => panic!("expected ApprovalRequest, got {other:?}"),
-        }
-
-        // Writer approves.
-        approval.resolve(&request_id, ApprovalOutcome::Once).await;
-
-        // Original caller receives the approval.
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), recv).await;
-        match &outcome {
-            Ok(Ok(resolved)) => assert_eq!(
-                resolved.outcome,
-                ApprovalOutcome::Once,
-                "round-trip should deliver Once"
-            ),
-            other => panic!("round-trip should deliver Once, got {other:?}"),
-        }
-        assert_eq!(blocked.load(Ordering::SeqCst), 0, "no blocks");
-
         gate.abort();
     }
 
@@ -12676,6 +14005,7 @@ mod tests {
                 terminal_tx: watch::channel(None).0,
                 mode: AttachMode::ReadWrite,
                 tier: ConnectionTier::TrustedLocal,
+                approval_ready: true,
             });
         }
         (server, rx, conn_id)
@@ -12950,6 +14280,7 @@ mod tests {
                 terminal_tx: watch::channel(None).0,
                 mode: AttachMode::ReadOnly,
                 tier: ConnectionTier::TrustedLocal,
+                approval_ready: true,
             });
         }
 
@@ -14014,6 +15345,7 @@ mod tests {
             terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
 
         const CALLERS: usize = 8;
@@ -14025,14 +15357,14 @@ mod tests {
             let barrier = barrier.clone();
             callers.push(tokio::spawn(async move {
                 barrier.wait().await;
-                server.ensure_approval_gate(approval);
+                server.ensure_approval_gate(approval).await;
             }));
         }
         barrier.wait().await;
         for caller in callers {
             caller.await.unwrap();
         }
-        assert!(server.approval_gate_started.load(Ordering::SeqCst));
+        assert_eq!(server.approval_gate.tasks.lock().await.len(), 1);
 
         let (request_id, decision) = approval
             .request(
@@ -14058,11 +15390,17 @@ mod tests {
             } => assert_eq!(received_id, request_id),
             other => panic!("expected approval request, got {other:?}"),
         }
+        assert!(matches!(
+            writer_rx.recv().await,
+            Some(DaemonFrame::ApprovalInputChunk { sequence: 0, .. })
+        ));
+        assert!(matches!(
+            writer_rx.recv().await,
+            Some(DaemonFrame::ApprovalInputComplete { chunks: 1, .. })
+        ));
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), writer_rx.recv())
-                .await
-                .is_err(),
-            "only the winning gate may forward the request"
+            writer_rx.try_recv().is_err(),
+            "only the winning gate sends a transfer"
         );
         approval.resolve(&request_id, ApprovalOutcome::Once).await;
         assert!(matches!(
@@ -14191,6 +15529,7 @@ mod tests {
             terminal_tx: watch::channel(None).0,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
 
         let mut assistant_buf = String::new();
@@ -14654,6 +15993,7 @@ mod tests {
                 terminal_tx: watch::channel(None).0,
                 mode: AttachMode::ReadWrite,
                 tier: ConnectionTier::TrustedLocal,
+                approval_ready: true,
             }],
         });
 
@@ -14801,6 +16141,7 @@ mod tests {
             terminal_tx,
             mode: AttachMode::ReadWrite,
             tier: ConnectionTier::TrustedLocal,
+            approval_ready: true,
         });
         server.last_writer_conn_id.store(1, Ordering::SeqCst);
         server.grant_team_proposal_writer(1).await;

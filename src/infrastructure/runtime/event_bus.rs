@@ -270,17 +270,7 @@ impl RawEvent {
                 timestamp_ms: now,
                 kind: RawEventKind::Tool(transition.clone()),
             },
-            AppEvent::ApprovalRuntimeEventBridged { event } => {
-                let conv_id = match event {
-                    crate::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { source, .. } => Some(source.conversation_id().to_string()),
-                    _ => None,
-                };
-                RawEvent {
-                    conversation_id: conv_id,
-                    timestamp_ms: now,
-                    kind: RawEventKind::Approval(event.clone()),
-                }
-            }
+            AppEvent::ApprovalRuntimeEventBridged { .. } => return None,
             AppEvent::ConfigReloaded { success, error } => RawEvent {
                 conversation_id: None,
                 timestamp_ms: now,

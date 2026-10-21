@@ -8,7 +8,8 @@ use crate::domain::models::{
     ApprovalOutcome, ChatMessage, McpServerSource, McpServerSpec, McpTransport, MessageRole,
     StopReason, StreamChunk,
 };
-use crate::domain::services::approval_runtime::ApprovalRuntimeEvent;
+use crate::domain::services::approval_presentation;
+use crate::domain::services::approval_runtime::PendingReview;
 
 pub const PERMISSION_ALLOW_ONCE: &str = "allow_once";
 pub const PERMISSION_ALLOW_ALWAYS_TOOL: &str = "allow_always_tool";
@@ -354,28 +355,46 @@ pub fn message_to_replay_updates(message: &ChatMessage, cwd: &Path) -> Vec<acp::
     updates
 }
 
+/// The complete readable presentation of an exact pending input for ACP
+/// `content` (Story 19.20c `A8`): every `A2` line, sanitized per line, inside
+/// a fence longer than any backtick run in it so no value can escape into the
+/// client's markdown.
+#[must_use]
+pub fn approval_content_text(review: &PendingReview) -> String {
+    let lines: Vec<String> = approval_presentation::body_lines(&review.tool, &review.input)
+        .iter()
+        .map(approval_presentation::PresentedLine::joined)
+        .collect();
+    let longest_run = lines
+        .iter()
+        .flat_map(|line| line.split(|ch| ch != '`'))
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest_run.max(2) + 1);
+    format!("{fence}text\n{}\n{fence}", lines.join("\n"))
+}
+
+/// Story 19.20c `A8` — the ACP permission request for one pending tool
+/// approval: `title` = `<tool>: <summary>`, `rawInput` = the exact pending
+/// value, `content` = its complete readable presentation. Built from the
+/// scoped pending snapshot, never from an event preview.
 pub fn approval_request_to_acp(
     session_id: acp::SessionId,
-    event: &ApprovalRuntimeEvent,
-) -> Option<acp::RequestPermissionRequest> {
-    let ApprovalRuntimeEvent::Requested {
-        id,
-        tool,
-        input_preview,
-        ..
-    } = event
-    else {
-        return None;
-    };
-
+    review: &PendingReview,
+) -> acp::RequestPermissionRequest {
+    let summary = approval_presentation::summary(&review.tool, &review.input, true);
     let tool_update = acp::ToolCallUpdate::new(
-        id.0.clone(),
+        review.id.0.clone(),
         acp::ToolCallUpdateFields::new()
-            .title(format!("Approve {tool}"))
-            .raw_input(serde_json::json!({ "preview": input_preview })),
+            .title(format!("{}: {summary}", review.tool))
+            .raw_input((*review.input).clone())
+            .content(vec![acp::ToolCallContent::from(approval_content_text(
+                review,
+            ))]),
     );
 
-    Some(acp::RequestPermissionRequest::new(
+    acp::RequestPermissionRequest::new(
         session_id,
         tool_update,
         vec![
@@ -395,7 +414,7 @@ pub fn approval_request_to_acp(
                 acp::PermissionOptionKind::RejectOnce,
             ),
         ],
-    ))
+    )
 }
 
 pub fn skill_trust_request_to_acp(

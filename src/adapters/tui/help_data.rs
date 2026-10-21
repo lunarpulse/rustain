@@ -484,6 +484,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
+                    key: "r",
+                    description: "Review",
+                    available: true,
+                },
+                HelpBinding {
                     key: "/mode",
                     description: "Switch permission mode (plan, normal, autoedit, yolo)",
                     available: true,

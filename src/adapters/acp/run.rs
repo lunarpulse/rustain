@@ -21,6 +21,63 @@ use super::agent::{
     AcpCoreFactory, CoreFactory, PermissionAsk, RustainAcpAgent, SessionNotify, SharedSessions,
 };
 
+/// Deterministic checkpoints for the real session bridge and SDK pump.
+/// Entirely absent from ordinary builds; no production timers or telemetry.
+#[cfg(feature = "test-instrumentation")]
+pub mod permission_test_probe {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use tokio::sync::{broadcast, mpsc, oneshot};
+
+    type Fence = mpsc::UnboundedSender<oneshot::Sender<usize>>;
+    thread_local! {
+        static BRIDGE: broadcast::Sender<(String, bool)> = broadcast::channel(64).0;
+        static PUMP: RefCell<Option<Fence>> = const { RefCell::new(None) };
+    }
+
+    pub fn subscribe_bridge() -> broadcast::Receiver<(String, bool)> {
+        BRIDGE.with(|bridge| bridge.subscribe())
+    }
+
+    pub(crate) fn reviewed(session: &str, forwarded: bool) {
+        BRIDGE.with(|bridge| {
+            let _ = bridge.send((session.to_owned(), forwarded));
+        });
+    }
+
+    pub async fn pump_fence() -> usize {
+        let sender = PUMP.with(|pump| pump.borrow().as_ref().expect("SDK pump registered").clone());
+        let (tx, rx) = oneshot::channel();
+        sender.send(tx).expect("SDK pump alive");
+        rx.await.expect("SDK pump fence response")
+    }
+
+    pub(super) async fn instrument(
+        pump: impl std::future::Future<Output = ()>,
+        completed: Rc<Cell<usize>>,
+    ) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<oneshot::Sender<usize>>();
+        PUMP.with(|pump| *pump.borrow_mut() = Some(tx));
+        tokio::pin!(pump);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut pump => break,
+                Some(ack) = rx.recv() => {
+                    // Poll the actual pump after receiver cancellation. This is
+                    // a readiness fence, not a sleep or a scheduling heuristic.
+                    if futures::poll!(&mut pump).is_ready() {
+                        let _ = ack.send(completed.get());
+                        break;
+                    }
+                    let _ = ack.send(completed.get());
+                }
+            }
+        }
+        PUMP.with(|pump| *pump.borrow_mut() = None);
+    }
+}
+
 /// Production id source: a unique nanoid per session (DD-2). Survives a
 /// process restart — a counter would reset and collide with persisted ids.
 pub fn default_acp_id_source() -> Rc<dyn Fn() -> String> {
@@ -389,29 +446,66 @@ where
             });
 
             let permission_conn = conn.clone();
-            tokio::task::spawn_local(async move {
-                while let Some(PermissionAsk { request, ack }) = permission_rx.recv().await {
-                    let _ = ack.send(permission_conn.request_permission(request).await);
+            #[cfg(feature = "test-instrumentation")]
+            let completed = Rc::new(Cell::new(0));
+            #[cfg(feature = "test-instrumentation")]
+            let observed_completed = completed.clone();
+            let permission_pump = async move {
+                while let Some(PermissionAsk { request, mut ack }) = permission_rx.recv().await {
+                    // Story 19.20c: cancellation drops the asking receiver.
+                    // Retire an unanswered SDK call before serving the next ask;
+                    // its late response must never settle a later approval.
+                    tokio::select! {
+                        biased;
+                        _ = ack.closed() => {}
+                        response = permission_conn.request_permission(request) => {
+                            let _ = ack.send(response);
+                        }
+                    }
+                    #[cfg(feature = "test-instrumentation")]
+                    completed.set(completed.get() + 1);
                 }
-            });
+            };
+            #[cfg(feature = "test-instrumentation")]
+            tokio::task::spawn_local(permission_test_probe::instrument(
+                permission_pump,
+                observed_completed,
+            ));
+            #[cfg(not(feature = "test-instrumentation"))]
+            tokio::task::spawn_local(permission_pump);
 
             let result = handle_io.await.map_err(anyhow::Error::from);
             // The session map is the ownership ledger for this ACP server.
             // Never infer transport membership from NodeTree ownership: the
             // tree may be shared with unrelated Self-rooted runtimes.
-            let cleanup: Vec<(String, bool, Arc<dyn crate::domain::ports::ToolSetPort>)> =
-                cleanup_sessions
-                    .borrow()
-                    .iter()
-                    .map(|(session_id, state)| {
-                        (
-                            session_id.clone(),
-                            state.cancel.is_cancelled(),
-                            Arc::clone(&state.core.tools),
-                        )
-                    })
-                    .collect();
-            for (session_id, was_cancelled, tools) in cleanup {
+            let cleanup: Vec<_> = cleanup_sessions
+                .borrow()
+                .iter()
+                .map(|(session_id, state)| {
+                    (
+                        session_id.clone(),
+                        state.cancel.clone(),
+                        Arc::clone(&state.core.approval),
+                        state.conversation_id.clone(),
+                        Arc::clone(&state.core.tools),
+                    )
+                })
+                .collect();
+            for (session_id, cancel, approval, conversation_id, tools) in cleanup {
+                let was_cancelled = cancel.is_cancelled();
+                // EOF must cancel execution before the LocalSet is dropped.
+                // Settle here as well: the scheduler need not be polled again
+                // after transport shutdown. cancel_by_source is idempotent.
+                cancel.cancel();
+                approval
+                    .cancel_by_source(
+                        &crate::domain::models::ApprovalSource::AcpSession {
+                            session_id: session_id.clone(),
+                            conversation_id,
+                        },
+                        crate::domain::services::approval_runtime::CancelReason::SourceAborted,
+                    )
+                    .await;
                 // Task 4 teardown order: terminal + deregister BEFORE the
                 // (time-bounded) MCP reap, so a hung child cannot leave a
                 // non-terminal registered node.

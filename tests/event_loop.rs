@@ -53,7 +53,7 @@ fn test_permission_queue_push_pop() {
             conversation_id: "c1".into(),
         },
         tool_name: "Bash".to_string(),
-        tool_input: "ls".to_string(),
+        input: std::sync::Arc::new(serde_json::json!({"command": "ls"})),
         risk: ToolRisk::Elevated,
     });
     queue.push(PendingPermission {
@@ -62,7 +62,7 @@ fn test_permission_queue_push_pop() {
             conversation_id: "c1".into(),
         },
         tool_name: "Write".to_string(),
-        tool_input: "a.rs".to_string(),
+        input: std::sync::Arc::new(serde_json::json!({"file_path": "a.rs"})),
         risk: ToolRisk::Standard,
     });
     assert_eq!(queue.len(), 2);

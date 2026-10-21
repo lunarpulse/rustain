@@ -1,0 +1,16 @@
+│ ℹ 2026-10-21 12:40:30Z ← inbound ⏸ awaiting-approval ·│   
+│   peer│                                                   
+│   122069d47d3bf6a4b093044444f98b1fe803e3887a99dcea5a9553│ 
+│   5fe24fa1fd9cc5 · task│                                  
+│   rustain-1792586430665877936-15246bf165972586 · task│    
+│   parked awaiting operator approval│                      
+│   2026-10-21 12:40:30Z ← inbound ↓ item-received · peer│  
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

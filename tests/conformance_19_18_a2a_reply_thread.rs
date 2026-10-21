@@ -1677,7 +1677,18 @@ async fn an_approved_follow_up_keeps_its_link() {
         assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    attach_shutdown.cancel();
+    // Story 19.20c: "nobody attached" is a detached writer, not a stopped
+    // attach server — stopping the server now cancels every pending approval
+    // and refuses new admissions (RuntimeShutdown). Detach and wait for the
+    // daemon to close the connection, which follows its registry removal.
+    write_frame(&mut operator, &ClientFrame::Detach)
+        .await
+        .expect("detach");
+    while read_frame::<_, DaemonFrame>(&mut operator)
+        .await
+        .expect("frame")
+        .is_some()
+    {}
     drop(operator);
 
     // Positive control: nobody attached → the unattended approval declines
@@ -1689,6 +1700,7 @@ async fn an_approved_follow_up_keeps_its_link() {
         "{declined}"
     );
     assert_eq!(received(&room_events(&b.journal).await).len(), 2);
+    attach_shutdown.cancel();
 }
 
 /// Grant the next forwarded admission approval through the real frame.

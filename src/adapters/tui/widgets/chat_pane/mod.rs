@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::adapters::daemon::protocol::ToolInputWithheld;
 use crate::adapters::tui::state::PendingPlanCard;
 use crate::adapters::tui::state::{CachedTurnLayout, TabRenderState};
 use crate::adapters::tui::theme::Theme;
@@ -827,9 +828,19 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
 // Height is clock-independent — see AC6.
 pub(super) fn expanded_turn_height(
     turn: &Turn,
+    theme: &Theme,
+    width: usize,
+    tool_block_states: &HashMap<String, ToolBlockState>,
+) -> CachedTurnLayout {
+    expanded_turn_height_attached(turn, theme, width, tool_block_states, None)
+}
+
+fn expanded_turn_height_attached(
+    turn: &Turn,
     _theme: &Theme,
     width: usize,
     tool_block_states: &HashMap<String, ToolBlockState>,
+    withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
 ) -> CachedTurnLayout {
     let content_width = width.saturating_sub(2);
     if content_width == 0 {
@@ -884,7 +895,11 @@ pub(super) fn expanded_turn_height(
                 // keyboard focus can name THIS block, not the first one.
                 tool_block_offsets.push((height, tc.id.clone()));
                 let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
-                height += tool_block::tool_block_height(&tc, &tb_state);
+                height += tool_block::tool_block_height_attached(
+                    &tc,
+                    &tb_state,
+                    withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
+                );
                 if *status == InvocationStatus::Running {
                     running_count += 1;
                 }
@@ -1169,6 +1184,7 @@ fn render_expanded_turn<'a>(
     clock: &dyn Clock,
     tool_block_states: &HashMap<String, ToolBlockState>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
+    withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
 ) -> Vec<Line<'a>> {
     let content_width = width.saturating_sub(2); // gutter + space
     if content_width == 0 {
@@ -1233,12 +1249,13 @@ fn render_expanded_turn<'a>(
                 let result = result_map.get(id).copied();
                 let tc = adapter_shim(turn, part, result);
                 let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
-                let tb_lines = tool_block::render_tool_block_lines(
+                let tb_lines = tool_block::render_tool_block_lines_attached(
                     &tc,
                     theme,
                     &tb_state,
                     content_width as u16,
                     clock,
+                    withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
                 );
                 lines.extend(tb_lines);
                 // Per-invocation live rail for running tools only
@@ -1475,6 +1492,8 @@ pub fn render(
 /// Attach-mode render wrapper: preserves the local TUI render contract while
 /// showing every persisted channel origin, including `[terminal]`, in the
 /// socket-sourced unified scrollback (Story 12.2c AC2).
+/// Withheld input is keyed by tool call id and replaces every input display,
+/// including expanded blocks. An empty map preserves trusted-local rendering.
 #[allow(clippy::too_many_arguments, dead_code)]
 pub fn render_attached(
     frame: &mut Frame,
@@ -1488,6 +1507,7 @@ pub fn render_attached(
     tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
     active_feedback_id: Option<&str>,
+    withheld_tool_inputs: &HashMap<String, ToolInputWithheld>,
 ) -> RenderResult {
     render_with_search_impl(
         frame,
@@ -1513,6 +1533,7 @@ pub fn render_attached(
         None, // current_focus
         true,
         active_feedback_id,
+        Some(withheld_tool_inputs),
     )
 }
 
@@ -1586,6 +1607,7 @@ pub fn render_with_search(
         current_focus,
         false,
         active_feedback_id,
+        None,
     )
 }
 
@@ -1617,6 +1639,7 @@ fn render_with_search_impl(
     current_focus: Option<&str>,
     show_terminal_origin_prefix: bool,
     active_feedback_id: Option<&str>,
+    withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
 ) -> RenderResult {
     let empty = RenderResult {
         total_content_height: 0,
@@ -1704,51 +1727,69 @@ fn render_with_search_impl(
                         terminal_width: area.width,
                         tool_block_states_version: tab_render_state.tool_block_states_version,
                     };
-                    let layout = match tab_render_state.height_cache.get(&key) {
-                        Some(l) => {
-                            let l = l.clone();
-                            #[cfg(debug_assertions)]
-                            {
-                                crate::adapters::tui::widgets::chat_pane::height_cache::metrics::HITS
+                    // Withheld blocks can omit input-derived diffs, so their
+                    // layouts must not reuse standalone argument-based heights.
+                    let layout = if let Some(inputs) =
+                        withheld_tool_inputs.filter(|inputs| !inputs.is_empty())
+                    {
+                        if collapsed {
+                            collapsed_turn_height(turn, view_state, theme, width)
+                        } else {
+                            expanded_turn_height_attached(
+                                turn,
+                                theme,
+                                width,
+                                tool_block_states,
+                                Some(inputs),
+                            )
+                        }
+                    } else {
+                        match tab_render_state.height_cache.get(&key) {
+                            Some(l) => {
+                                let l = l.clone();
+                                #[cfg(debug_assertions)]
+                                {
+                                    crate::adapters::tui::widgets::chat_pane::height_cache::metrics::HITS
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let probe = if collapsed {
+                                    let probe = if collapsed {
+                                        collapsed_turn_height(turn, view_state, theme, width)
+                                    } else {
+                                        expanded_turn_height(turn, theme, width, tool_block_states)
+                                    };
+                                    if probe.height != l.height
+                                        || probe.block_offsets != l.block_offsets
+                                        || probe.tool_block_offsets != l.tool_block_offsets
+                                    {
+                                        tracing::warn!(
+                                            "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}, {:?}), computed=({}, {:?}, {:?})",
+                                            turn.id.0,
+                                            !collapsed,
+                                            l.height,
+                                            l.block_offsets,
+                                            l.tool_block_offsets,
+                                            probe.height,
+                                            probe.block_offsets,
+                                            probe.tool_block_offsets
+                                        );
+                                        tab_render_state.height_cache.invalidate_all();
+                                    }
+                                }
+                                l
+                            }
+                            None => {
+                                let l = if collapsed {
                                     collapsed_turn_height(turn, view_state, theme, width)
                                 } else {
                                     expanded_turn_height(turn, theme, width, tool_block_states)
                                 };
-                                if probe.height != l.height
-                                    || probe.block_offsets != l.block_offsets
-                                    || probe.tool_block_offsets != l.tool_block_offsets
+                                #[cfg(debug_assertions)]
                                 {
-                                    tracing::warn!(
-                                        "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}, {:?}), computed=({}, {:?}, {:?})",
-                                        turn.id.0,
-                                        !collapsed,
-                                        l.height,
-                                        l.block_offsets,
-                                        l.tool_block_offsets,
-                                        probe.height,
-                                        probe.block_offsets,
-                                        probe.tool_block_offsets
-                                    );
-                                    tab_render_state.height_cache.invalidate_all();
-                                }
-                            }
-                            l
-                        }
-                        None => {
-                            let l = if collapsed {
-                                collapsed_turn_height(turn, view_state, theme, width)
-                            } else {
-                                expanded_turn_height(turn, theme, width, tool_block_states)
-                            };
-                            #[cfg(debug_assertions)]
-                            {
-                                crate::adapters::tui::widgets::chat_pane::height_cache::metrics::MISSES
+                                    crate::adapters::tui::widgets::chat_pane::height_cache::metrics::MISSES
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                tab_render_state.height_cache.set(key.clone(), l.clone());
+                                l
                             }
-                            tab_render_state.height_cache.set(key.clone(), l.clone());
-                            l
                         }
                     };
                     h = layout.height;
@@ -1784,7 +1825,11 @@ fn render_with_search_impl(
                         // `block_boundaries` keeps pushing the end (unchanged,
                         // it anchors scrolling), the focus list needs the start.
                         tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
-                        h += tool_block::tool_block_height(tc, &tb_state);
+                        h += tool_block::tool_block_height_attached(
+                            tc,
+                            &tb_state,
+                            withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
+                        );
                         block_boundaries.push(cumulative_offset + h);
                     }
                 }
@@ -1830,7 +1875,11 @@ fn render_with_search_impl(
                 for tc in &msg.tool_calls {
                     let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                     tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
-                    h += tool_block::tool_block_height(tc, &tb_state);
+                    h += tool_block::tool_block_height_attached(
+                        tc,
+                        &tb_state,
+                        withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
+                    );
                     block_boundaries.push(cumulative_offset + h);
                 }
             }
@@ -1892,7 +1941,13 @@ fn render_with_search_impl(
             if cumulative_offset > 0 {
                 cumulative_offset += spacing;
             }
-            let layout = expanded_turn_height(ot, theme, width, tool_block_states);
+            let layout = expanded_turn_height_attached(
+                ot,
+                theme,
+                width,
+                tool_block_states,
+                withheld_tool_inputs,
+            );
             // A3: a still-open turn's tool blocks are focusable too — the claim
             // is that EVERY tool block can be expanded, not every committed one.
             for (offset, id) in &layout.tool_block_offsets {
@@ -2015,6 +2070,7 @@ fn render_with_search_impl(
                                 clock,
                                 tool_block_states,
                                 liveness,
+                                withheld_tool_inputs,
                             )
                         };
                         let is_focused = view_state
@@ -2071,8 +2127,13 @@ fn render_with_search_impl(
                         for tc in &msg.tool_calls {
                             let tb_state =
                                 tool_block_states.get(&tc.id).cloned().unwrap_or_default();
-                            let tb_lines = tool_block::render_tool_block_lines(
-                                tc, theme, &tb_state, area.width, clock,
+                            let tb_lines = tool_block::render_tool_block_lines_attached(
+                                tc,
+                                theme,
+                                &tb_state,
+                                area.width,
+                                clock,
+                                withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
                             );
                             for (j, line) in tb_lines.into_iter().enumerate() {
                                 let abs_line = tool_line_offset + j;
@@ -2080,7 +2141,11 @@ fn render_with_search_impl(
                                     lines.push(line);
                                 }
                             }
-                            tool_line_offset += tool_block::tool_block_height(tc, &tb_state);
+                            tool_line_offset += tool_block::tool_block_height_attached(
+                                tc,
+                                &tb_state,
+                                withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
+                            );
                         }
                     }
                 }
@@ -2113,8 +2178,13 @@ fn render_with_search_impl(
                     let mut tool_line_offset = line_offset + text_height;
                     for tc in &msg.tool_calls {
                         let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
-                        let tb_lines = tool_block::render_tool_block_lines(
-                            tc, theme, &tb_state, area.width, clock,
+                        let tb_lines = tool_block::render_tool_block_lines_attached(
+                            tc,
+                            theme,
+                            &tb_state,
+                            area.width,
+                            clock,
+                            withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
                         );
                         for (j, line) in tb_lines.into_iter().enumerate() {
                             let abs_line = tool_line_offset + j;
@@ -2122,7 +2192,11 @@ fn render_with_search_impl(
                                 lines.push(line);
                             }
                         }
-                        tool_line_offset += tool_block::tool_block_height(tc, &tb_state);
+                        tool_line_offset += tool_block::tool_block_height_attached(
+                            tc,
+                            &tb_state,
+                            withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
+                        );
                     }
                 }
             }
@@ -2205,8 +2279,15 @@ fn render_with_search_impl(
                 }
                 line_offset += spacing;
             }
-            let turn_lines =
-                render_expanded_turn(ot, theme, width, clock, tool_block_states, liveness);
+            let turn_lines = render_expanded_turn(
+                ot,
+                theme,
+                width,
+                clock,
+                tool_block_states,
+                liveness,
+                withheld_tool_inputs,
+            );
             let tl_len = turn_lines.len();
             for (j, line) in turn_lines.into_iter().enumerate() {
                 let abs_line = line_offset + j;
@@ -2520,6 +2601,93 @@ mod parts_aware_tests {
         }
         turn.stop_reason = stop_reason;
         turn
+    }
+
+    #[test]
+    fn attached_render_routes_typed_withheld_input_to_legacy_and_turn_blocks() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut turn = Turn::new("claude".into(), 1_700_000_000_000);
+        let part_id = turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "Bash".into(),
+            args: serde_json::json!({"command": "secret-command"}),
+            status: InvocationStatus::Running,
+            started_at: 1_700_000_000_000,
+            ended_at: None,
+        });
+        let tool_id = tool_call_id_for(&turn.id, part_id);
+        let tc = adapter_shim(&turn, &turn.parts[0], None);
+        let theme = Theme::dark();
+        for use_turn in [false, true] {
+            let conversation = Conversation {
+                id: "attached-withheld".into(),
+                title: String::new(),
+                messages: vec![ChatMessage {
+                    id: turn.id.0.clone(),
+                    role: MessageRole::Assistant,
+                    tool_calls: vec![tc.clone()],
+                    ..Default::default()
+                }],
+                turns: if use_turn { vec![turn.clone()] } else { vec![] },
+                created_at: 0,
+                updated_at: 0,
+                last_response_at: None,
+                session_id: None,
+                usage: None,
+                plans: HashMap::new(),
+                fork_source: None,
+                compaction: None,
+                peer_row_controls: Default::default(),
+                peer_row_revision: 0,
+            };
+            let mut tab = TabRenderState::default();
+            for withheld in [
+                Some(ToolInputWithheld::PeerTier),
+                Some(ToolInputWithheld::TooLarge { bytes: 2_097_152 }),
+                None,
+            ] {
+                let inputs = withheld
+                    .map(|reason| HashMap::from([(tool_id.clone(), reason)]))
+                    .unwrap_or_default();
+                let mut terminal = Terminal::new(TestBackend::new(180, 24)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let area = frame.area();
+                        render_attached(
+                            frame,
+                            area,
+                            &conversation,
+                            &StreamingState::default(),
+                            0,
+                            true,
+                            &theme,
+                            &mut tab,
+                            &HashMap::new(),
+                            &BTreeMap::new(),
+                            None,
+                            &inputs,
+                        );
+                    })
+                    .unwrap();
+                let text = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                if let Some(withheld) = withheld {
+                    assert!(text.contains(&withheld.notice()), "{text}");
+                    assert!(!text.contains("secret-command"), "{text}");
+                } else {
+                    assert!(text.contains("secret-command"), "{text}");
+                    assert!(!text.contains("input withheld"), "{text}");
+                    assert!(!text.contains("input too large"), "{text}");
+                }
+            }
+        }
     }
 
     // ── Story 19.9 A3: the cached layout carries one (start, id) per tool ──
@@ -2876,7 +3044,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -2902,7 +3070,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
         let rail_text: String = lines
             .iter()
             .filter(|l| l.spans.iter().any(|s| s.content.contains("⠋")))
@@ -2929,7 +3097,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
         // Verify both prose and tool are present, and tool comes after prose
         let all_text: String = lines
             .iter()
@@ -2984,7 +3152,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
         // Every non-empty line should start with the gutter
         for line in &lines {
             if line.spans.is_empty() {
@@ -3057,7 +3225,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 0, &clock, &tbs, None);
+        let lines = render_expanded_turn(&turn, &theme, 0, &clock, &tbs, None, None);
         assert!(lines.is_empty());
     }
 
@@ -3251,7 +3419,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
         assert_eq!(cached.height, rendered, "parity: empty turn");
         // Empty turn: only trailing rail = 1
         assert_eq!(cached.height, 1);
@@ -3264,7 +3432,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
         assert_eq!(cached.height, rendered, "parity: single prose");
     }
 
@@ -3281,7 +3449,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
         assert_eq!(cached.height, rendered, "parity: prose + inter-part blank");
     }
 
@@ -3298,7 +3466,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
         assert_eq!(cached.height, rendered, "parity: running tool with rail");
         // Should include per-Running rail addend
         assert!(cached.height > 0);
@@ -3325,7 +3493,7 @@ mod parts_aware_tests {
             },
         );
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
         assert_eq!(cached.height, rendered, "parity: completed tool expanded");
     }
 
@@ -3343,7 +3511,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
         assert_eq!(cached.height, rendered, "parity: mixed prose-tool-prose");
     }
 
@@ -3354,7 +3522,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
         assert_eq!(
             cached.height, rendered,
             "parity: trailing rail after running"
@@ -3384,7 +3552,7 @@ mod parts_aware_tests {
             },
         );
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
         assert_eq!(cached.height, rendered, "parity: tool peek state");
         assert!(cached.height > 0);
     }
@@ -3410,9 +3578,11 @@ mod parts_aware_tests {
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
 
         let cached_9s = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered_9s = render_expanded_turn(&turn, &theme, 80, &clock_9s, &tbs, None).len();
+        let rendered_9s =
+            render_expanded_turn(&turn, &theme, 80, &clock_9s, &tbs, None, None).len();
         let cached_10s = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered_10s = render_expanded_turn(&turn, &theme, 80, &clock_10s, &tbs, None).len();
+        let rendered_10s =
+            render_expanded_turn(&turn, &theme, 80, &clock_10s, &tbs, None, None).len();
 
         assert_eq!(cached_9s.height, rendered_9s, "parity: 9.9s elapsed");
         assert_eq!(cached_10s.height, rendered_10s, "parity: 10.0s elapsed");
@@ -3603,7 +3773,8 @@ mod parts_aware_tests {
 
         for width in [79, 80, 81] {
             let cached = expanded_turn_height(&turn, &theme, width, &tbs);
-            let rendered = render_expanded_turn(&turn, &theme, width, &clock, &tbs, None).len();
+            let rendered =
+                render_expanded_turn(&turn, &theme, width, &clock, &tbs, None, None).len();
             assert_eq!(cached.height, rendered, "parity fail: width={}", width);
         }
     }
@@ -3636,7 +3807,7 @@ mod parts_aware_tests {
 
         // Render and verify cumulative offsets
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
 
         // The first block offset should be 0 (start of turn)
         assert_eq!(layout.block_offsets[0], 0, "first block should start at 0");

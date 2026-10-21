@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear};
-use unicode_width::UnicodeWidthStr as _;
+
+use crate::adapters::tui::widgets::delimited_body::wrap_text as wrap_prefix;
 
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::theme::Theme;
@@ -19,68 +20,6 @@ fn type_token(message_type: SemanticMessageType) -> &'static str {
 
 fn aliases(proposal: &TeamProposal) -> String {
     proposal.recipients.join(", ")
-}
-
-/// Wrap without normalizing source whitespace and without splitting graphemes.
-/// The caller may bound the number of rows, so large proposal bodies stay cheap.
-fn wrap_prefix(text: &str, width: usize, limit: usize) -> (Vec<String>, bool) {
-    let mut rows = Vec::new();
-    let mut row = String::new();
-    let mut cells = 0usize;
-    let mut pieces = text.split_inclusive(['\n', '\t']).peekable();
-    while let Some(piece) = pieces.next() {
-        // Span filters controls; reintroduce only the two permitted controls.
-        let span = Span::raw(piece);
-        let mut graphemes = span
-            .styled_graphemes(Style::default())
-            .map(|grapheme| grapheme.symbol)
-            .chain(piece.ends_with('\t').then_some("\t"))
-            .chain(piece.ends_with('\n').then_some("\n"))
-            .peekable();
-        while let Some(grapheme) = graphemes.next() {
-            if grapheme == "\n" {
-                rows.push(std::mem::take(&mut row));
-                cells = 0;
-                if rows.len() == limit {
-                    return (
-                        rows,
-                        graphemes.peek().is_some()
-                            || pieces.peek().is_some()
-                            || text.ends_with('\n'),
-                    );
-                }
-                continue;
-            }
-            if grapheme == "\t" {
-                for _ in 0..8 - cells % 8 {
-                    if cells >= width {
-                        rows.push(std::mem::take(&mut row));
-                        cells = 0;
-                        if rows.len() == limit {
-                            return (rows, true);
-                        }
-                    }
-                    row.push(' ');
-                    cells += 1;
-                }
-                continue;
-            }
-            let w = grapheme.width();
-            if cells > 0 && cells.saturating_add(w) > width {
-                rows.push(std::mem::take(&mut row));
-                cells = 0;
-                if rows.len() == limit {
-                    return (rows, true);
-                }
-            }
-            row.push_str(grapheme);
-            cells = cells.saturating_add(w);
-        }
-    }
-    if rows.len() < limit && (!row.is_empty() || rows.is_empty() || text.ends_with('\n')) {
-        rows.push(row);
-    }
-    (rows, false)
 }
 
 fn prefixed_body(
@@ -368,17 +307,4 @@ pub fn render(
         buffer.set_line(inner.x, inner.y + i as u16, &line, inner.width);
     }
     Some(proposal)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wrap_preserves_whitespace_and_graphemes() {
-        let (rows, more) = wrap_prefix("  e\u{301}界\t\n", 3, 8);
-        assert!(!more);
-        assert_eq!(rows.concat(), "  e\u{301}界      ");
-        assert_eq!(rows.last().map(String::as_str), Some(""));
-    }
 }

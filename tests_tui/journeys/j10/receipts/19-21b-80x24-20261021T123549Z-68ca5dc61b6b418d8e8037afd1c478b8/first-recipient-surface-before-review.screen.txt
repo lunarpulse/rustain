@@ -1,0 +1,24 @@
+│  item actions · ri_ejB4oE4Twy2oNCXzAP0u1NIyi87enyCJ                           
+│  story_assignment · peer-tainted                                              
+│  story_assignment · 1220593c77a46b6a3761640df965f6223f069c1ef3db5af40cd7deee1a
+│  e225d6fcab                                                                   
+│  received thread · 1220593c77a46b6a3761640df965f6223f069c1ef3db5af40cd7deee1ae
+│  225d6fcab · ri_ejB4oE4Twy2oNCXzAP0u1NIyi87enyCJ                              
+│  Context received: 1 text body · 254 bytes                                    
+│      STORY-047: publish the received card before persisting its row.          
+│   ╔══════════════════════════════════════════════════════════════════════╗    
+│   ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║    
+│   ║decision.                                                             ║    
+│  r║To: lena-po, jun-dev                                                  ║    
+│   ║Type: architecture_update                                             ║    
+│  i║│ ADR-047 conflict: publication races persistence.                    ║s da
+│  e║│ The assignment publishes before durable append.                     ║dgem
+│  e║│ ADR-047 requires persist, then publish.                             ║    
+│   ║│ A crash between those steps loses the item.                         ║    
+│  [║… more not shown — [r] Review first                                   ║    
+│  [║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║    
+│   ╚══════════════════════════════════════════════════════════════════════╝    
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                      log: 5
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

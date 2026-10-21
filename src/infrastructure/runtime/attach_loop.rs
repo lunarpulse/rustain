@@ -912,6 +912,385 @@ fn retract_confirm_lines(preview: &str) -> Vec<ratatui::text::Line<'static>> {
     ]
 }
 
+/// Story 19.20c: transient writer-only approval state. Consent/consolidation/
+/// retract confirmations keep precedence; generic permissions precede proposals.
+/// The pinned reader and feedback owner are request ids, never FIFO positions.
+#[derive(Default)]
+struct AttachedApprovals {
+    order: std::collections::VecDeque<crate::domain::models::tool_call::RequestId>,
+    pending: HashMap<crate::domain::models::tool_call::RequestId, AttachedApproval>,
+    review: Option<crate::domain::models::tool_call::RequestId>,
+    feedback: Option<(crate::domain::models::tool_call::RequestId, String)>,
+    painted: Option<crate::domain::models::tool_call::RequestId>,
+    scroll: usize,
+    scroll_max: usize,
+    presentation: Option<AttachedApprovalPresentation>,
+}
+
+struct AttachedApproval {
+    tool: String,
+    source: crate::domain::models::tool_call::ApprovalSource,
+    risk: crate::domain::models::ToolRisk,
+    summary: String,
+    assembly: Option<crate::adapters::daemon::protocol::ExactInputAssembly>,
+    value: Option<serde_json::Value>,
+}
+
+/// Rewrap only on request/view/width/completion/queue changes, not on ticks.
+struct AttachedApprovalPresentation {
+    id: crate::domain::models::tool_call::RequestId,
+    width: u16,
+    queued: usize,
+    reviewing: bool,
+    ready: bool,
+    header: Vec<ratatui::text::Line<'static>>,
+    body: Vec<ratatui::text::Line<'static>>,
+    footer: Vec<ratatui::text::Line<'static>>,
+}
+
+impl AttachedApproval {
+    fn card(
+        &self,
+        queue_len: usize,
+    ) -> crate::adapters::tui::widgets::permission_prompt::PermissionCard<'_> {
+        use crate::adapters::tui::widgets::permission_prompt::{ExactInput, PermissionCard};
+        PermissionCard {
+            source: &self.source,
+            tool_name: &self.tool,
+            risk: self.risk,
+            input: self.value.as_ref().map_or(
+                ExactInput::Receiving {
+                    summary: &self.summary,
+                },
+                ExactInput::Ready,
+            ),
+            queue_len,
+        }
+    }
+}
+
+impl AttachedApprovals {
+    fn shown(&self) -> Option<&crate::domain::models::tool_call::RequestId> {
+        self.feedback
+            .as_ref()
+            .map(|(id, _)| id)
+            .or(self.review.as_ref())
+            .or(self.order.front())
+    }
+
+    fn retire(&mut self, id: &crate::domain::models::tool_call::RequestId) {
+        let was_shown = self.shown() == Some(id);
+        self.pending.remove(id);
+        if self
+            .presentation
+            .as_ref()
+            .is_some_and(|view| &view.id == id)
+        {
+            self.presentation = None;
+        }
+        self.order.retain(|queued| queued != id);
+        if self.review.as_ref() == Some(id) {
+            self.review = None;
+        }
+        if self.feedback.as_ref().is_some_and(|(owner, _)| owner == id) {
+            self.feedback = None;
+        }
+        if self.painted.as_ref() == Some(id) {
+            self.painted = None;
+        }
+        if was_shown {
+            self.scroll = 0;
+            self.scroll_max = 0;
+        }
+    }
+
+    /// All private generic approval frames enter here from the socket arm.
+    /// A bad chunk permanently invalidates this transfer, not the decision.
+    fn apply(&mut self, frame: DaemonFrame, read_only: bool) -> Option<String> {
+        use crate::adapters::daemon::protocol::{ApprovalRefusal, ExactInputAssembly};
+        match frame {
+            DaemonFrame::ApprovalRequest {
+                request_id,
+                tool,
+                source,
+                risk,
+                summary,
+                input_bytes: Some(bytes),
+            } if !read_only => {
+                if !self.pending.contains_key(&request_id) {
+                    self.order.push_back(request_id.clone());
+                    self.pending.insert(
+                        request_id,
+                        AttachedApproval {
+                            tool,
+                            source,
+                            risk,
+                            summary,
+                            assembly: Some(ExactInputAssembly::new(bytes)),
+                            value: None,
+                        },
+                    );
+                }
+            }
+            DaemonFrame::ApprovalInputChunk {
+                request_id,
+                sequence,
+                data,
+            } if !read_only => {
+                if let Some(pending) = self.pending.get_mut(&request_id)
+                    && let Some(assembly) = pending.assembly.as_mut()
+                    && assembly.push(sequence, &data).is_err()
+                {
+                    pending.assembly = None;
+                }
+            }
+            DaemonFrame::ApprovalInputComplete { request_id, chunks } if !read_only => {
+                if let Some(pending) = self.pending.get_mut(&request_id)
+                    && let Some(assembly) = pending.assembly.take()
+                {
+                    pending.value = assembly.finish(chunks).ok();
+                }
+            }
+            DaemonFrame::ApprovalClosed { request_id } => self.retire(&request_id),
+            DaemonFrame::ApprovalRefused { request_id, reason } => {
+                if reason == ApprovalRefusal::NoLongerPending {
+                    self.retire(&request_id);
+                }
+                return Some(reason.to_string());
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn decide(
+        &mut self,
+        id: crate::domain::models::tool_call::RequestId,
+        outcome: crate::domain::models::ApprovalOutcome,
+        tx: &mpsc::UnboundedSender<ClientFrame>,
+    ) {
+        if tx
+            .send(ClientFrame::ApprovalResponse {
+                request_id: id.clone(),
+                outcome,
+            })
+            .is_ok()
+        {
+            self.retire(&id);
+        }
+    }
+
+    /// Same ownership gate as attached proposals: painted, writer, unmodified
+    /// Press, empty composer, and no higher-priority confirmation.
+    fn key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        blocked: bool,
+        input: &str,
+        tx: &mpsc::UnboundedSender<ClientFrame>,
+    ) -> bool {
+        use crate::domain::models::{ApprovalOutcome, ApprovalScope};
+        use crossterm::event::{KeyCode, KeyEventKind};
+        if blocked || !input.is_empty() {
+            return false;
+        }
+        let Some(id) = self.shown().cloned() else {
+            return false;
+        };
+        if self.painted.as_ref() != Some(&id) {
+            return false;
+        }
+        if key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL)
+        {
+            return false;
+        }
+        if key.kind != KeyEventKind::Press {
+            return true;
+        }
+        if let Some((_, buffer)) = self.feedback.as_mut() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc, modifiers) if modifiers.is_empty() => {
+                    self.feedback = None;
+                }
+                (KeyCode::Enter, modifiers) if modifiers.is_empty() => {
+                    let feedback = (!buffer.is_empty()).then(|| buffer.clone());
+                    self.decide(id, ApprovalOutcome::Reject { feedback }, tx);
+                }
+                (KeyCode::Backspace, modifiers) if modifiers.is_empty() => {
+                    buffer.pop();
+                }
+                (KeyCode::Char(c), modifiers)
+                    if modifiers.is_empty()
+                        || modifiers == crossterm::event::KeyModifiers::SHIFT =>
+                {
+                    buffer.push(c)
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if !key.modifiers.is_empty() {
+            return true;
+        }
+        match key.code {
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(5);
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_add(5).min(self.scroll_max);
+            }
+            KeyCode::Esc if self.review.is_some() => {
+                self.review = None;
+                self.scroll = 0;
+            }
+            KeyCode::Char('r') => {
+                if self
+                    .pending
+                    .get(&id)
+                    .is_some_and(|pending| pending.value.is_some())
+                {
+                    self.review = Some(id);
+                    self.scroll = 0;
+                }
+            }
+            KeyCode::Char('f') => {
+                self.feedback = Some((id, String::new()));
+            }
+            KeyCode::Char('y') => self.decide(id, ApprovalOutcome::Once, tx),
+            KeyCode::Char('s') => {
+                let tool_name = self.pending[&id].tool.clone();
+                self.decide(id, ApprovalOutcome::AlwaysTool { tool_name }, tx);
+            }
+            KeyCode::Char('a') => {
+                let scope = ApprovalScope::Tool(self.pending[&id].tool.clone());
+                self.decide(id, ApprovalOutcome::AlwaysAndSave { scope }, tx);
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.decide(id, ApprovalOutcome::Reject { feedback: None }, tx)
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn paint(
+        &mut self,
+        f: &mut ratatui::Frame<'_>,
+        area: ratatui::layout::Rect,
+        theme: &crate::adapters::tui::theme::Theme,
+    ) -> Option<crate::domain::models::tool_call::RequestId> {
+        use crate::adapters::tui::widgets::permission_prompt::{
+            paint_rows, permission_review_rows, render_feedback_input_lines,
+            render_permission_card_lines, render_permission_review,
+        };
+        use ratatui::widgets::{Clear, Paragraph};
+        let id = self.shown()?.clone();
+        let pending = self.pending.get(&id)?;
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        let queued = self.order.len().saturating_sub(1);
+        let reviewing = self.review.as_ref() == Some(&id);
+        let ready = pending.value.is_some();
+        if self.presentation.as_ref().is_none_or(|view| {
+            view.id != id
+                || view.width != area.width
+                || view.queued != queued
+                || view.reviewing != reviewing
+                || view.ready != ready
+        }) {
+            let card = pending.card(queued);
+            let (header, body, footer) = if reviewing {
+                let review = render_permission_review(&card, area.width, theme);
+                (review.header, review.body, review.footer)
+            } else {
+                (
+                    Vec::new(),
+                    render_permission_card_lines(&card, area.width, theme),
+                    Vec::new(),
+                )
+            };
+            self.presentation = Some(AttachedApprovalPresentation {
+                id: id.clone(),
+                width: area.width,
+                queued,
+                reviewing,
+                ready,
+                header,
+                body,
+                footer,
+            });
+        }
+        let view = self.presentation.as_ref()?;
+        if let Some((_, buffer)) = self.feedback.as_ref() {
+            crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(
+                f.buffer_mut(),
+                render_feedback_input_lines(buffer, theme),
+                theme.colors.accent,
+                area,
+            );
+        } else if reviewing {
+            let (header_rows, body_rows, footer_rows) =
+                permission_review_rows(area.height, view.header.len(), view.footer.len());
+            self.scroll_max = view.body.len().saturating_sub(body_rows);
+            self.scroll = self.scroll.min(self.scroll_max);
+            f.render_widget(Clear, area);
+            paint_rows(
+                f,
+                ratatui::layout::Rect::new(area.x, area.y, area.width, header_rows as u16),
+                &view.header,
+                0,
+            );
+            paint_rows(
+                f,
+                ratatui::layout::Rect::new(
+                    area.x,
+                    area.y + header_rows as u16,
+                    area.width,
+                    body_rows as u16,
+                ),
+                &view.body,
+                self.scroll,
+            );
+            paint_rows(
+                f,
+                ratatui::layout::Rect::new(
+                    area.x,
+                    area.bottom().saturating_sub(footer_rows as u16),
+                    area.width,
+                    footer_rows as u16,
+                ),
+                &view.footer,
+                0,
+            );
+        } else {
+            let height = usize::from(area.height).min(view.body.len());
+            self.scroll_max = view.body.len().saturating_sub(height);
+            self.scroll = self.scroll.min(self.scroll_max);
+            let card_area = ratatui::layout::Rect {
+                y: area.bottom().saturating_sub(height as u16),
+                height: height as u16,
+                ..area
+            };
+            f.render_widget(Clear, card_area);
+            f.render_widget(
+                Paragraph::new(
+                    view.body
+                        .iter()
+                        .skip(self.scroll)
+                        .take(height)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ),
+                card_area,
+            );
+        }
+        Some(id)
+    }
+}
+
 fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
     let request = call.request();
     let result = match call {
@@ -984,6 +1363,10 @@ pub fn seed_conversation(snapshot: &AttachSnapshot) -> Conversation {
     conv
 }
 
+fn retained_approval_attach_notice(count: usize, read_only: bool) -> Option<String> {
+    (read_only && count > 0).then(|| format!("{count} approval(s) waiting for the writer"))
+}
+
 fn upsert_peer_row(
     conversation: &mut Conversation,
     message: ChatMessage,
@@ -1027,6 +1410,64 @@ pub fn apply_peer_row_operation(
         }
     }
     true
+}
+
+/// Live rows use provider ids; committed rows use the reducer's turn/part id.
+/// Retain that binding across commit so late tool transitions use the same notice.
+#[derive(Default)]
+struct AttachedToolInputs {
+    reasons: HashMap<String, crate::adapters::daemon::protocol::ToolInputWithheld>,
+    render_ids: HashMap<String, String>,
+}
+
+impl AttachedToolInputs {
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        &mut self,
+        event: RawEvent,
+        withheld: Option<crate::adapters::daemon::protocol::ToolInputWithheld>,
+        conversation: &mut Conversation,
+        streaming: &mut StreamingState,
+        reducer: &mut ReducerState,
+        state: &mut TuiState,
+        permission_mode: &mut PermissionMode,
+        clock: &dyn Clock,
+    ) {
+        let (wire_id, invocation) = match &event.kind {
+            RawEventKind::Provider(crate::domain::models::StreamChunk::ToolUse { id, .. })
+            | RawEventKind::PeerProvider(crate::domain::models::StreamChunk::ToolUse {
+                id, ..
+            }) => (Some(id.clone()), true),
+            RawEventKind::Tool(transition) => (Some(transition.call.id().to_owned()), false),
+            _ => (None, false),
+        };
+        apply_client_event(
+            event,
+            conversation,
+            streaming,
+            reducer,
+            state,
+            permission_mode,
+            clock,
+        );
+        let Some(wire_id) = wire_id else { return };
+        if invocation {
+            if let Some(turn) = &reducer.open_turn
+                && let Some(part_id) = reducer.pending_invocations.get(&wire_id)
+            {
+                self.render_ids
+                    .insert(wire_id.clone(), tool_call_id_for(&turn.id, *part_id));
+            }
+            // A new genuine null is not omitted, even if the provider recycles an id.
+            self.reasons.remove(&wire_id);
+        }
+        if let Some(reason) = withheld {
+            self.reasons.insert(wire_id.clone(), reason);
+            if let Some(render_id) = self.render_ids.get(&wire_id) {
+                self.reasons.insert(render_id.clone(), reason);
+            }
+        }
+    }
 }
 
 /// Apply one socket-sourced [`ClientEvent`](crate::adapters::daemon::protocol::ClientEvent)
@@ -2066,6 +2507,17 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
 
     // ── View state (reuses the local render stack) ──
     let mut conversation = seed_conversation(&snapshot);
+    let mut tool_inputs = AttachedToolInputs {
+        reasons: snapshot
+            .withheld_tool_inputs
+            .iter()
+            .map(|entry| (entry.tool_call_id.clone(), entry.withheld))
+            .collect(),
+        ..Default::default()
+    };
+    if let Some(notice) = retained_approval_attach_notice(snapshot.retained_approvals, read_only) {
+        conversation.messages.push(system_message(notice));
+    }
     if read_only {
         // AC6 #2 — one-time, never-silent notice.
         conversation.messages.push(system_message(
@@ -2096,6 +2548,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     // only the current socket's rendering order, never the durable truth.
     let mut pending_consent_approvals = std::collections::VecDeque::<PendingConsentApproval>::new();
     let mut attached_team_requests = AttachedTeamRequests::default();
+    let mut approvals = AttachedApprovals::default();
 
     // ── Terminal ──
     let mut term = terminal::setup(false)?;
@@ -2134,6 +2587,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     let loop_result: Result<()> = loop {
         let mut visible_feedback_ids: Vec<String> = Vec::new();
         let mut visible_proposal = None;
+        let mut visible_approval = None;
         let drawn = term.draw(|f| {
             let area = f.area();
             let Some(mut layout) = crate::adapters::tui::layout::compute_layout(
@@ -2149,7 +2603,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             let proposal_higher = attached_proposal_higher_confirmation(
                 &state, !pending_consent_approvals.is_empty(),
                 pending_consolidation_card.is_some(), retract_confirm.is_some(),
-            );
+            ) || (!read_only && !approvals.pending.is_empty());
             let proposal_card = prepare_attached_proposal(
                 &state, &tab_render_state, &input, proposal_higher, read_only, &mut layout, area,
             );
@@ -2158,6 +2612,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 && pending_consolidation_card.is_none()
                 && pending_consent_approvals.is_empty()
                 && attached_proposal_pending(&state).is_none()
+                && approvals.pending.is_empty()
             {
                 pending_peer_response(&conversation)
                     .map(|pending| peer_response_card_lines(&pending, read_only))
@@ -2182,6 +2637,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 &tool_block_states,
                 &state.feedback_blocks,
                 state.active_feedback_id.as_deref(),
+                &tool_inputs.reasons,
             )
             .visible_feedback_ids;
             status_bar::render(
@@ -2293,18 +2749,39 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             );
             // Inline cards can leave fewer than five rows; paging must not skip visible content.
             state.viewport_height = transcript_area.height;
+            let approval_higher = attached_proposal_higher_confirmation(
+                &state, !pending_consent_approvals.is_empty(),
+                pending_consolidation_card.is_some(), retract_confirm.is_some(),
+            );
+            if !read_only && !approval_higher
+                && matches!(state.focus, FocusState::Chat | FocusState::Input)
+                && attached_display_input(&state, &input).is_empty()
+            {
+                visible_approval = approvals.paint(f, layout.chat_pane, &state.theme);
+            }
         });
         after_attached_draw(&mut state, drawn.is_ok(), &visible_feedback_ids);
         state.team_proposal_visible = drawn.is_ok().then_some(visible_proposal).flatten();
+        approvals.painted = drawn.is_ok().then_some(visible_approval).flatten();
 
         tokio::select! {
             maybe_ev = events.next() => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                        let proposal_higher = attached_proposal_higher_confirmation(
+                        let approval_higher = attached_proposal_higher_confirmation(
                             &state, !pending_consent_approvals.is_empty(),
                             pending_consolidation_card.is_some(), retract_confirm.is_some(),
                         );
+                        if approvals.key(
+                            key, read_only || approval_higher
+                                || !matches!(state.focus, FocusState::Chat | FocusState::Input),
+                            attached_display_input(&state, &input), &frame_tx,
+                        ) {
+                            state.needs_redraw = true;
+                            continue;
+                        }
+                        let proposal_higher = approval_higher
+                            || (!read_only && !approvals.pending.is_empty());
                         if attached_proposal_key(
                             key, proposal_higher, read_only, &input, &mut state,
                             &mut tab_render_state, &mut attached_team_requests, &frame_tx,
@@ -2594,6 +3071,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                         if state.recipient_surface.is_none()
                             && crate::adapters::tui::handlers::recipient_actions::pending_composition(&state).is_none()
                             && pending_consent_approvals.is_empty()
+                            && approvals.pending.is_empty()
                             && pending_consolidation_card.is_none()
                             && retract_confirm.is_none()
                         {
@@ -2656,8 +3134,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             }
                         }
                         Ok(Some(DaemonFrame::Event(raw))) => {
-                            apply_client_event(
+                            tool_inputs.apply(
                                 raw,
+                                None,
                                 &mut conversation,
                                 &mut streaming,
                                 &mut reducer,
@@ -2666,6 +3145,29 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                 &clock,
                             );
                         }
+                    Ok(Some(DaemonFrame::ToolEventWithheld { event, withheld })) => {
+                        tool_inputs.apply(
+                            event, Some(withheld), &mut conversation, &mut streaming, &mut reducer,
+                            &mut state, &mut permission_mode, &clock,
+                        );
+                    }
+                    Ok(Some(DaemonFrame::History { messages, withheld_tool_inputs: withheld, .. })) => {
+                        for entry in withheld {
+                            tool_inputs.reasons.insert(entry.tool_call_id, entry.withheld);
+                        }
+                        let existing: std::collections::HashSet<_> =
+                            conversation.messages.iter().map(|row| row.id.clone()).collect();
+                        let mut earlier: Vec<_> = messages.into_iter()
+                            .filter(|row| !existing.contains(&row.id)).collect();
+                        earlier.append(&mut conversation.messages);
+                        conversation.messages = earlier;
+                        state.needs_redraw = true;
+                    }
+                    Ok(Some(DaemonFrame::FrameTooLarge { frame, bytes })) => {
+                        conversation.messages.push(system_message(
+                            crate::adapters::daemon::protocol::frame_too_large_notice(&frame, bytes),
+                        ));
+                    }
                     Ok(Some(DaemonFrame::Error(ProtocolError::ReadOnly))) => {
                         // AC6 #1 — handle a daemon read-only refusal gracefully.
                         conversation.messages.push(system_message(
@@ -2678,21 +3180,25 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     Ok(Some(DaemonFrame::ApprovalRequest {
                         tool,
                         request_id,
-                        input_preview,
+                        summary,
                         ..
                     })) if tool == "a2a/sender-consent" => {
                         pending_consent_approvals.push_back(PendingConsentApproval {
                             request_id,
                             tool,
-                            input_preview,
+                            input_preview: summary,
                         });
                         state.needs_redraw = true;
                     }
-                    Ok(Some(DaemonFrame::ApprovalRequest { tool, request_id, .. })) => {
-                        conversation.messages.push(system_message(format!(
-                            "[approval needed] {tool} (id {}) — approve from the local TUI for now.",
-                            request_id.0
-                        )));
+                    Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. }))
+                    | Ok(Some(frame @ DaemonFrame::ApprovalInputChunk { .. }))
+                    | Ok(Some(frame @ DaemonFrame::ApprovalInputComplete { .. }))
+                    | Ok(Some(frame @ DaemonFrame::ApprovalClosed { .. }))
+                    | Ok(Some(frame @ DaemonFrame::ApprovalRefused { .. })) => {
+                        if let Some(notice) = approvals.apply(frame, read_only) {
+                            conversation.messages.push(system_message(notice));
+                        }
+                        state.needs_redraw = true;
                     }
                     Ok(Some(DaemonFrame::ConsolidationProposed { token, proposals })) => {
                         // Story 12.2d AC3 — store token + build the card for rendering.
@@ -2790,6 +3296,450 @@ mod tests {
     use crate::domain::models::{NoticeLevel, StopReason, StreamChunk};
     use std::time::Instant;
     use tokio::net::UnixStream;
+
+    // Supporting seams; signed socket/PTY K02 evidence is run after integration.
+    mod exact_attached_approval {
+        use super::*;
+        use crate::domain::models::tool_call::{ApprovalSource, RequestId};
+        use crate::domain::models::{ApprovalOutcome, ToolRisk};
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+        fn request(id: &str, data: &str) -> DaemonFrame {
+            DaemonFrame::ApprovalRequest {
+                request_id: RequestId(id.into()),
+                tool: "Bash".into(),
+                source: ApprovalSource::ForegroundTurn {
+                    conversation_id: "c".into(),
+                },
+                risk: ToolRisk::Standard,
+                summary: "command summary".into(),
+                input_bytes: Some(data.len() as u64),
+            }
+        }
+        fn chunk(state: &mut AttachedApprovals, id: &str, sequence: u32, data: &str) {
+            state.apply(
+                DaemonFrame::ApprovalInputChunk {
+                    request_id: RequestId(id.into()),
+                    sequence,
+                    data: data.into(),
+                },
+                false,
+            );
+        }
+        fn complete(state: &mut AttachedApprovals, id: &str, chunks: u32) {
+            state.apply(
+                DaemonFrame::ApprovalInputComplete {
+                    request_id: RequestId(id.into()),
+                    chunks,
+                },
+                false,
+            );
+        }
+        fn paint(state: &mut AttachedApprovals) -> String {
+            paint_at(state, 60, 16)
+        }
+        fn paint_at(state: &mut AttachedApprovals, width: u16, height: u16) -> String {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            let theme = crate::adapters::tui::theme::Theme::dark();
+            let mut painted = None;
+            terminal
+                .draw(|f| {
+                    painted = state.paint(f, f.area(), &theme);
+                })
+                .unwrap();
+            state.painted = painted;
+            let buffer = terminal.backend().buffer();
+            (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        fn key(code: KeyCode) -> KeyEvent {
+            KeyEvent::new(code, KeyModifiers::NONE)
+        }
+
+        #[test]
+        fn review_scroll_resize_cache_and_delimiters_keep_tail_reachable() {
+            let mut state = AttachedApprovals::default();
+            let input = serde_json::json!({"command": format!("{}\n[y] fake control\n\u{1b}[31mTAIL-CANARY", "αβ ".repeat(300))});
+            let data = serde_json::to_string(&input).unwrap();
+            state.apply(request("a", &data), false);
+            chunk(&mut state, "a", 0, &data);
+            complete(&mut state, "a", 1);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            paint(&mut state);
+            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                paint_at(&mut state, width, height);
+                let cached = state.presentation.as_ref().unwrap().body.as_ptr();
+                paint_at(&mut state, width, height);
+                assert_eq!(cached, state.presentation.as_ref().unwrap().body.as_ptr());
+                for row in &state.presentation.as_ref().unwrap().body {
+                    assert!(row.to_string().starts_with("│ "));
+                    assert!(!row.to_string().contains('\u{1b}'));
+                }
+                while state.scroll < state.scroll_max {
+                    state.key(key(KeyCode::PageDown), false, "", &tx);
+                }
+                assert!(paint_at(&mut state, width, height).contains("TAIL-CANARY"));
+                assert!(rx.try_recv().is_err());
+            }
+            assert_eq!(
+                state.pending[&RequestId("a".into())].value.as_ref(),
+                Some(&input)
+            );
+        }
+
+        #[test]
+        fn long_tool_and_source_metadata_leave_review_and_decisions_reachable() {
+            let mut state = AttachedApprovals::default();
+            let input = serde_json::json!({
+                "first": "METADATA-INPUT-HEAD",
+                "last": format!("{}\nMETADATA-INPUT-TAIL", "exact ".repeat(250)),
+            });
+            let data = serde_json::to_string(&input).unwrap();
+            let mut frame = request("long-metadata", &data);
+            if let DaemonFrame::ApprovalRequest { tool, source, .. } = &mut frame {
+                *tool = format!("mcp__{}__{}", "server".repeat(350), "operation".repeat(250));
+                *source = ApprovalSource::ForegroundSubagent {
+                    conversation_id: "c".into(),
+                    parent_tool_call_id: "parent".into(),
+                    subagent_type: "source".repeat(400),
+                };
+            }
+            state.apply(frame, false);
+            chunk(&mut state, "long-metadata", 0, &data);
+            complete(&mut state, "long-metadata", 1);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                // Use the real attached chat allocation, not the whole terminal.
+                let theme = crate::adapters::tui::theme::Theme::dark();
+                let layout = crate::adapters::tui::layout::compute_layout(
+                    ratatui::layout::Rect::new(0, 0, width, height),
+                    &theme,
+                    "",
+                    1,
+                    false,
+                    DensityMode::Focus,
+                )
+                .unwrap();
+                let pane_height = layout.chat_pane.height;
+                state.review = None;
+                state.scroll = 0;
+                let card = paint_at(&mut state, width, pane_height);
+                assert!(card.contains("[r] Review"), "{card}");
+                assert!(card.contains("[y] Allow"), "{card}");
+                assert!(state.key(key(KeyCode::Char('r')), false, "", &tx));
+                let mut painted = String::new();
+                loop {
+                    let page = paint_at(&mut state, width, pane_height);
+                    assert!(page.contains("[y] Allow"), "{page}");
+                    assert!(page.contains("[n] Deny"), "{page}");
+                    assert!(page.contains("[Esc] Back"), "{page}");
+                    painted.push_str(&page);
+                    if state.scroll == state.scroll_max {
+                        break;
+                    }
+                    let before = state.scroll;
+                    assert!(state.key(key(KeyCode::PageDown), false, "", &tx));
+                    assert!(state.scroll > before);
+                }
+                assert!(painted.contains("METADATA-INPUT-HEAD"));
+                assert!(painted.contains("METADATA-INPUT-TAIL"));
+                assert_eq!(
+                    state.pending[&RequestId("long-metadata".into())]
+                        .value
+                        .as_ref(),
+                    Some(&input)
+                );
+                assert!(rx.try_recv().is_err(), "scrolling is not a decision");
+            }
+            assert!(state.key(key(KeyCode::Char('n')), false, "", &tx));
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                ClientFrame::ApprovalResponse { request_id, outcome: ApprovalOutcome::Reject { feedback: None } }
+                    if request_id == RequestId("long-metadata".into())
+            ));
+        }
+
+        #[test]
+        fn rich_exact_receiving_until_valid_complete() {
+            let mut state = AttachedApprovals::default();
+            let data = r#"{"command":"unique exact tail"}"#;
+            state.apply(request("a", data), false);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            assert!(paint(&mut state).contains("receiving exact input…"));
+            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            assert!(state.review.is_none());
+            chunk(&mut state, "a", 0, data);
+            assert!(state.pending[&RequestId("a".into())].value.is_none());
+            assert!(paint(&mut state).contains("receiving exact input…"));
+            complete(&mut state, "a", 1);
+            assert_eq!(
+                state.pending[&RequestId("a".into())].value,
+                Some(serde_json::json!({"command": "unique exact tail"}))
+            );
+            assert!(paint(&mut state).contains("unique exact tail"));
+            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            assert!(paint(&mut state).contains("Exact tool input (not run yet)"));
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[test]
+        fn rich_invalid_stale_and_other_request_transfers_never_publish() {
+            let data = r#"{"command":"late tail"}"#;
+            for fault in [
+                "partial",
+                "duplicate",
+                "out-of-order",
+                "overflow",
+                "wrong-request",
+                "wrong-count",
+            ] {
+                let mut state = AttachedApprovals::default();
+                state.apply(request("a", data), false);
+                match fault {
+                    "partial" => chunk(&mut state, "a", 0, &data[..5]),
+                    "duplicate" => {
+                        chunk(&mut state, "a", 0, data);
+                        chunk(&mut state, "a", 0, data);
+                    }
+                    "out-of-order" => {
+                        chunk(&mut state, "a", 1, data);
+                        chunk(&mut state, "a", 0, data);
+                    }
+                    "overflow" => chunk(&mut state, "a", 0, &format!("{data}x")),
+                    "wrong-request" => chunk(&mut state, "b", 0, data),
+                    "wrong-count" => chunk(&mut state, "a", 0, data),
+                    _ => unreachable!(),
+                }
+                complete(&mut state, "a", if fault == "wrong-count" { 2 } else { 1 });
+                assert!(
+                    state.pending[&RequestId("a".into())].value.is_none(),
+                    "{fault}"
+                );
+                assert!(
+                    paint(&mut state).contains("receiving exact input…"),
+                    "{fault}"
+                );
+            }
+        }
+
+        #[test]
+        fn review_pins_request_while_another_queued_and_decides_once() {
+            let mut state = AttachedApprovals::default();
+            let a = r#"{"command":"first exact input"}"#;
+            let b = r#"{"command":"second secret input"}"#;
+            state.apply(request("a", a), false);
+            chunk(&mut state, "a", 0, a);
+            complete(&mut state, "a", 1);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            paint(&mut state);
+            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            state.apply(request("b", b), false);
+            chunk(&mut state, "b", 0, b);
+            complete(&mut state, "b", 1);
+            state.order.swap(0, 1);
+            let text = paint(&mut state);
+            assert!(text.contains("first exact input") && !text.contains("second secret input"));
+            state.key(key(KeyCode::Char('y')), false, "", &tx);
+            assert!(
+                matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
+                request_id, outcome: ApprovalOutcome::Once,
+            } if request_id.0 == "a")
+            );
+            assert!(!state.key(key(KeyCode::Char('y')), false, "", &tx));
+            assert!(rx.try_recv().is_err());
+            assert!(state.pending.contains_key(&RequestId("b".into())));
+        }
+
+        #[test]
+        fn closed_review_and_feedback_retire_and_ignore_late_parts() {
+            let mut state = AttachedApprovals::default();
+            let data = r#"{"command":"exact tail"}"#;
+            state.apply(request("a", data), false);
+            chunk(&mut state, "a", 0, data);
+            complete(&mut state, "a", 1);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            paint(&mut state);
+            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            paint(&mut state);
+            state.key(key(KeyCode::Char('f')), false, "", &tx);
+            state.apply(
+                DaemonFrame::ApprovalClosed {
+                    request_id: RequestId("a".into()),
+                },
+                false,
+            );
+            chunk(&mut state, "a", 0, data);
+            complete(&mut state, "a", 1);
+            assert!(!state.key(key(KeyCode::Char('y')), false, "", &tx));
+            assert!(state.review.is_none() && state.feedback.is_none());
+            assert!(state.pending.is_empty() && state.order.is_empty() && state.painted.is_none());
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[test]
+        fn only_writer_painted_empty_composer_unmodified_press_decides() {
+            let data = r#"{"command":"ok"}"#;
+            let mut state = AttachedApprovals::default();
+            state.apply(request("a", data), false);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            assert!(!state.key(key(KeyCode::Char('y')), false, "", &tx));
+            paint(&mut state);
+            assert!(!state.key(key(KeyCode::Char('y')), true, "", &tx));
+            assert!(!state.key(key(KeyCode::Char('y')), false, "draft", &tx));
+            for modifiers in [
+                KeyModifiers::SHIFT,
+                KeyModifiers::ALT,
+                KeyModifiers::CONTROL,
+            ] {
+                state.key(KeyEvent::new(KeyCode::Char('y'), modifiers), false, "", &tx);
+            }
+            for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                state.key(
+                    KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, kind),
+                    false,
+                    "",
+                    &tx,
+                );
+            }
+            assert!(rx.try_recv().is_err());
+            state.key(key(KeyCode::Char('s')), false, "", &tx);
+            assert!(
+                matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
+                request_id, outcome: ApprovalOutcome::AlwaysTool { tool_name },
+            } if request_id.0 == "a" && tool_name == "Bash")
+            );
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[test]
+        fn feedback_and_failed_enqueue_preserve_ownership() {
+            let data = r#"{"command":"ok"}"#;
+            let mut state = AttachedApprovals::default();
+            state.apply(request("a", data), false);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            paint(&mut state);
+            state.key(key(KeyCode::Char('f')), false, "", &tx);
+            state.key(key(KeyCode::Char('x')), false, "", &tx);
+            state.key(key(KeyCode::Enter), false, "", &tx);
+            assert!(
+                matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
+                outcome: ApprovalOutcome::Reject { feedback: Some(feedback) }, ..
+            } if feedback == "x")
+            );
+            state.apply(request("b", data), false);
+            paint(&mut state);
+            drop(rx);
+            state.key(key(KeyCode::Char('y')), false, "", &tx);
+            assert!(state.pending.contains_key(&RequestId("b".into())));
+        }
+
+        #[test]
+        fn always_deny_escape_and_refusal_lifecycle() {
+            use crate::adapters::daemon::protocol::ApprovalRefusal;
+            use crate::domain::models::ApprovalScope;
+            let data = r#"{"command":"ok"}"#;
+            for (code, expected) in [
+                (
+                    KeyCode::Char('a'),
+                    ApprovalOutcome::AlwaysAndSave {
+                        scope: ApprovalScope::Tool("Bash".into()),
+                    },
+                ),
+                (
+                    KeyCode::Char('n'),
+                    ApprovalOutcome::Reject { feedback: None },
+                ),
+                (KeyCode::Esc, ApprovalOutcome::Reject { feedback: None }),
+            ] {
+                let mut state = AttachedApprovals::default();
+                state.apply(request("a", data), false);
+                chunk(&mut state, "a", 0, data);
+                complete(&mut state, "a", 1);
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                paint(&mut state);
+                state.key(key(KeyCode::Char('r')), false, "", &tx);
+                paint(&mut state);
+                state.key(key(KeyCode::Esc), false, "", &tx);
+                assert!(state.review.is_none() && state.pending.len() == 1);
+                assert!(rx.try_recv().is_err());
+                paint(&mut state);
+                state.key(key(code), false, "", &tx);
+                assert!(
+                    matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
+                    request_id, outcome,
+                } if request_id.0 == "a" && outcome == expected)
+                );
+            }
+            let mut state = AttachedApprovals::default();
+            state.apply(request("a", data), false);
+            for reason in [
+                ApprovalRefusal::WriterOnly,
+                ApprovalRefusal::IssuedElsewhere,
+            ] {
+                assert_eq!(
+                    state.apply(
+                        DaemonFrame::ApprovalRefused {
+                            request_id: RequestId("a".into()),
+                            reason,
+                        },
+                        false
+                    ),
+                    Some(reason.to_string())
+                );
+                assert_eq!(state.pending.len(), 1);
+            }
+            state.apply(
+                DaemonFrame::ApprovalRefused {
+                    request_id: RequestId("a".into()),
+                    reason: ApprovalRefusal::NoLongerPending,
+                },
+                false,
+            );
+            assert!(state.pending.is_empty() && state.order.is_empty());
+        }
+
+        #[test]
+        fn retained_count_is_read_only_point_in_time_notice() {
+            assert_eq!(
+                retained_approval_attach_notice(2, true).as_deref(),
+                Some("2 approval(s) waiting for the writer")
+            );
+            assert!(retained_approval_attach_notice(0, true).is_none());
+            assert!(retained_approval_attach_notice(2, false).is_none());
+        }
+
+        #[test]
+        fn read_only_never_admits_private_input() {
+            let mut state = AttachedApprovals::default();
+            let data = r#"{"command":"private"}"#;
+            state.apply(request("a", data), true);
+            state.apply(
+                DaemonFrame::ApprovalInputChunk {
+                    request_id: RequestId("a".into()),
+                    sequence: 0,
+                    data: data.into(),
+                },
+                true,
+            );
+            state.apply(
+                DaemonFrame::ApprovalInputComplete {
+                    request_id: RequestId("a".into()),
+                    chunks: 1,
+                },
+                true,
+            );
+            assert!(state.pending.is_empty() && state.order.is_empty());
+            assert!(paint(&mut state).trim().is_empty());
+        }
+    }
 
     /// In-crate nearest-production-path seams, not native socket/PTY evidence.
     mod attached_proposals {
@@ -2911,6 +3861,7 @@ mod tests {
                             &HashMap::new(),
                             &self.state.feedback_blocks,
                             self.state.active_feedback_id.as_deref(),
+                            &HashMap::new(),
                         );
                         crate::adapters::tui::widgets::input_box::render(
                             frame,
@@ -3676,7 +4627,7 @@ mod tests {
                             .unwrap(),
                     },
                     tool_name: "Write".into(),
-                    tool_input: "{}".into(),
+                    input: std::sync::Arc::new(serde_json::json!({})),
                     risk: crate::domain::models::ToolRisk::Safe,
                 });
             assert!(
@@ -4965,9 +5916,11 @@ mod tests {
             channels: vec![ChannelKind::Terminal],
             blocked_actions_waiting: blocked,
             pending_consent_cards: 0,
+            retained_approvals: 0,
             peer_row_controls: BTreeMap::new(),
             peer_row_revision: 0,
             recipient_context_ids: Vec::new(),
+            withheld_tool_inputs: Vec::new(),
         }
     }
 
@@ -4977,6 +5930,256 @@ mod tests {
             timestamp_ms: 0,
             kind: RawEventKind::Provider(chunk),
         }
+    }
+
+    fn paint_attached_tool_inputs(
+        conversation: &Conversation,
+        streaming: &StreamingState,
+        inputs: &AttachedToolInputs,
+    ) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(180, 24)).unwrap();
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let mut tab = TabRenderState::default();
+        terminal
+            .draw(|frame| {
+                chat_pane::render_attached(
+                    frame,
+                    frame.area(),
+                    conversation,
+                    streaming,
+                    0,
+                    true,
+                    &theme,
+                    &mut tab,
+                    &HashMap::new(),
+                    &BTreeMap::new(),
+                    None,
+                    &inputs.reasons,
+                );
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn withheld_input_notice_tracks_provider_part_and_committed_render_ids() {
+        use crate::adapters::daemon::protocol::ToolInputWithheld;
+
+        for peer in [false, true] {
+            for transition_reason in [false, true] {
+                for reason in [
+                    ToolInputWithheld::PeerTier,
+                    ToolInputWithheld::TooLarge {
+                        bytes: 9 * 1024 * 1024,
+                    },
+                ] {
+                    let clock = SystemClock::default();
+                    let mut conversation = Conversation::default();
+                    let mut streaming = StreamingState::default();
+                    let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
+                    let mut state = TuiState::new(180, 24);
+                    let mut mode = PermissionMode::Normal;
+                    let mut inputs = AttachedToolInputs::default();
+                    let wrap = |chunk| RawEvent {
+                        conversation_id: Some("conv-test".into()),
+                        timestamp_ms: 0,
+                        kind: if peer {
+                            RawEventKind::PeerProvider(chunk)
+                        } else {
+                            RawEventKind::Provider(chunk)
+                        },
+                    };
+                    let event = wrap(StreamChunk::ToolUse {
+                        id: "provider-wire-id".into(),
+                        name: "Write".into(),
+                        input: serde_json::Value::Null,
+                    });
+                    // Exercise the omitted-input wire form, not a fabricated map.
+                    let (event, withheld) = if transition_reason {
+                        (event, None)
+                    } else {
+                        let frame = DaemonFrame::ToolEventWithheld {
+                            event,
+                            withheld: reason,
+                        };
+                        let decoded: DaemonFrame =
+                            serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+                        match decoded {
+                            DaemonFrame::ToolEventWithheld { event, withheld } => {
+                                (event, Some(withheld))
+                            }
+                            _ => unreachable!(),
+                        }
+                    };
+                    inputs.apply(
+                        event,
+                        withheld,
+                        &mut conversation,
+                        &mut streaming,
+                        &mut reducer,
+                        &mut state,
+                        &mut mode,
+                        &clock,
+                    );
+                    let turn = reducer.open_turn.as_ref().unwrap();
+                    let render_id =
+                        tool_call_id_for(&turn.id, reducer.pending_invocations["provider-wire-id"]);
+                    assert_ne!(render_id, "provider-wire-id");
+                    inputs.apply(
+                        wrap(StreamChunk::ToolResult {
+                            id: "provider-wire-id".into(),
+                            content: "written".into(),
+                            is_error: false,
+                            operator_private: false,
+                            diff: crate::domain::models::WriteDiffState::NotAWrite,
+                        }),
+                        None,
+                        &mut conversation,
+                        &mut streaming,
+                        &mut reducer,
+                        &mut state,
+                        &mut mode,
+                        &clock,
+                    );
+                    if transition_reason {
+                        inputs.apply(
+                            RawEvent {
+                                conversation_id: Some("conv-test".into()),
+                                timestamp_ms: 0,
+                                kind: RawEventKind::Tool(
+                                    crate::domain::models::ToolCallTransition {
+                                        conversation_id: "conv-test".into(),
+                                        call: ToolCall::Executing {
+                                            id: "provider-wire-id".into(),
+                                            request: crate::domain::models::ToolCallRequest {
+                                                id: "provider-wire-id".into(),
+                                                tool_name: "Write".into(),
+                                                input: serde_json::Value::Null,
+                                            },
+                                            started_at: 42,
+                                        },
+                                    },
+                                ),
+                            },
+                            Some(reason),
+                            &mut conversation,
+                            &mut streaming,
+                            &mut reducer,
+                            &mut state,
+                            &mut mode,
+                            &clock,
+                        );
+                    }
+                    assert_eq!(inputs.reasons.get(&render_id), Some(&reason));
+                    inputs.apply(
+                        wrap(StreamChunk::TurnComplete {
+                            stop_reason: StopReason::EndTurn,
+                        }),
+                        None,
+                        &mut conversation,
+                        &mut streaming,
+                        &mut reducer,
+                        &mut state,
+                        &mut mode,
+                        &clock,
+                    );
+                    if !peer {
+                        let committed =
+                            paint_attached_tool_inputs(&conversation, &streaming, &inputs);
+                        assert!(committed.contains(&reason.notice()), "{committed}");
+                        assert_eq!(
+                            conversation.messages.last().unwrap().tool_calls[0].id,
+                            render_id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reused_provider_id_preserves_genuine_null_without_stale_withholding() {
+        use crate::adapters::daemon::protocol::ToolInputWithheld;
+
+        let clock = SystemClock::default();
+        let mut conversation = Conversation::default();
+        let mut streaming = StreamingState::default();
+        let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
+        let mut state = TuiState::new(180, 24);
+        let mut mode = PermissionMode::Normal;
+        let mut inputs = AttachedToolInputs::default();
+        for withheld in [Some(ToolInputWithheld::PeerTier), None] {
+            inputs.apply(
+                provider(StreamChunk::ToolUse {
+                    id: "reused-wire-id".into(),
+                    name: "Write".into(),
+                    input: serde_json::Value::Null,
+                }),
+                withheld,
+                &mut conversation,
+                &mut streaming,
+                &mut reducer,
+                &mut state,
+                &mut mode,
+                &clock,
+            );
+            inputs.apply(
+                provider(StreamChunk::ToolResult {
+                    id: "reused-wire-id".into(),
+                    content: "written".into(),
+                    is_error: false,
+                    operator_private: false,
+                    diff: crate::domain::models::WriteDiffState::NotAWrite,
+                }),
+                None,
+                &mut conversation,
+                &mut streaming,
+                &mut reducer,
+                &mut state,
+                &mut mode,
+                &clock,
+            );
+            inputs.apply(
+                provider(StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                }),
+                None,
+                &mut conversation,
+                &mut streaming,
+                &mut reducer,
+                &mut state,
+                &mut mode,
+                &clock,
+            );
+            let latest = conversation.messages.last().unwrap().clone();
+            let tool = &latest.tool_calls[0];
+            assert_eq!(tool.input, serde_json::Value::Null);
+            assert_eq!(inputs.reasons.get(&tool.id).copied(), withheld);
+            let only_latest = Conversation {
+                messages: vec![latest],
+                ..Default::default()
+            };
+            let painted = paint_attached_tool_inputs(&only_latest, &streaming, &inputs);
+            if let Some(reason) = withheld {
+                assert!(painted.contains(&reason.notice()), "{painted}");
+            } else {
+                assert!(!painted.contains("input withheld"), "{painted}");
+                assert!(!painted.contains("input too large"), "{painted}");
+                assert!(painted.contains("Write"), "{painted}");
+            }
+        }
+        assert_eq!(conversation.messages.len(), 2);
+        assert_ne!(
+            conversation.messages[0].tool_calls[0].id,
+            conversation.messages[1].tool_calls[0].id
+        );
     }
 
     /// Test 1 (NFR49) — the attach handshake completes within the 500ms budget
@@ -5889,6 +7092,7 @@ mod tests {
                 &tbs,
                 &fbs,
                 None,
+                &HashMap::new(),
             );
         })
         .unwrap();
@@ -6025,6 +7229,7 @@ mod tests {
                     &tools,
                     &state.feedback_blocks,
                     state.active_feedback_id.as_deref(),
+                    &HashMap::new(),
                 )
                 .visible_feedback_ids;
             })

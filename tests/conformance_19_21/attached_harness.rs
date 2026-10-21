@@ -1535,9 +1535,9 @@ impl AttachedClient {
         {
             DaemonFrame::ApprovalRequest {
                 request_id,
-                input_preview,
+                summary,
                 ..
-            } => (request_id, input_preview),
+            } => (request_id, summary),
             other => panic!("sender-consent approval request expected, got {other:?}"),
         }
     }

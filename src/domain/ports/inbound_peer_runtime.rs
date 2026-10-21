@@ -47,7 +47,7 @@ pub struct InboundPeerTask {
     pub response_policy: PeerResponsePolicy,
 }
 
-/// Operator decision for one pending sender-consent card.
+/// Outcome for a pending inbound admission, including host interruption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundApprovalDecision {
     /// Release the tasks currently waiting without creating durable trust.
@@ -56,12 +56,16 @@ pub enum InboundApprovalDecision {
     AllowAlways,
     /// Decline every task currently waiting for this sender.
     Decline,
+    /// Story 19.20c: the runtime stopped without an operator decision. Finish
+    /// the live waiter, retaining any durable pending task/node for restart
+    /// reconciliation rather than recording an operator refusal.
+    RuntimeShutdown,
 }
 
 /// Outcome of raising an admission approval without waiting for it.
 pub struct InboundApprovalTicket {
-    /// `true` when a *human* decision is outstanding. `false` means policy
-    /// already resolved it and [`Self::decision`] is immediately ready.
+    /// `true` when a *human* decision is outstanding. `false` means policy or
+    /// runtime shutdown already resolved it and [`Self::decision`] is ready.
     ///
     /// This flag is the whole point of the type: it is what lets the caller
     /// answer `auth-required` instead of holding the request open.

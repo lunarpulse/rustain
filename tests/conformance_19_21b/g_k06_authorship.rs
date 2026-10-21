@@ -1,7 +1,7 @@
 use crate::attached_harness::{AttachedClient, AttachedDaemon};
 use crate::g_harness::*;
 use rustain::adapters::daemon::protocol::{
-    ClientFrame, ConnectionTier, DaemonFrame, TeamBoardRequest,
+    ClientFrame, ConnectionTier, DaemonFrame, TeamBoardRequest, ToolInputWithheld,
 };
 use rustain::domain::models::{JournalRecord, PermissionMode, ReplyAuthorship, RoomEvent};
 use serde_json::{Value, json};
@@ -312,30 +312,34 @@ async fn approved_dispatch_authorship_stays_out_of_raw_frames() {
         .chain(&peer.received)
         .chain(&readonly.received)
     {
-        if let DaemonFrame::Event(event) = frame {
-            let raw = serde_json::to_string(event).unwrap();
-            assert!(
-                !raw.contains(SECRET) && !raw.contains(&id),
-                "M50 attached privacy: no raw carrier may disclose undecided proposal body or id"
-            );
-            if matches!(
-                &event.kind,
-                RawEventKind::Provider(
+        // Story 19.20c: Peer-tier tool events arrive as `ToolEventWithheld`;
+        // both carriers are raw frames and both must stay private.
+        let event = match frame {
+            DaemonFrame::Event(event) | DaemonFrame::ToolEventWithheld { event, .. } => event,
+            _ => continue,
+        };
+        let raw = serde_json::to_string(frame).unwrap();
+        assert!(
+            !raw.contains(SECRET) && !raw.contains(&id),
+            "M50 attached privacy: no raw carrier may disclose undecided proposal body or id"
+        );
+        if matches!(
+            &event.kind,
+            RawEventKind::Provider(StreamChunk::ToolUse { .. } | StreamChunk::ToolResult { .. })
+                | RawEventKind::PeerProvider(
                     StreamChunk::ToolUse { .. } | StreamChunk::ToolResult { .. }
-                ) | RawEventKind::PeerProvider(
-                    StreamChunk::ToolUse { .. } | StreamChunk::ToolResult { .. }
-                ) | RawEventKind::Tool(_)
-            ) {
-                assert!(
-                    !raw.contains("lena-po"),
-                    "M50 attached privacy: private tool inputs/results/transitions hide proposal aliases"
-                );
-            }
+                )
+                | RawEventKind::Tool(_)
+        ) {
             assert!(
-                !raw.contains("agent-composed"),
-                "M49 attached: journal-only dispatch authorship must not leak on raw frames"
+                !raw.contains("lena-po"),
+                "M50 attached privacy: private tool inputs/results/transitions hide proposal aliases"
             );
         }
+        assert!(
+            !raw.contains("agent-composed"),
+            "M49 attached: journal-only dispatch authorship must not leak on raw frames"
+        );
     }
     assert!(
         !peer
@@ -344,13 +348,28 @@ async fn approved_dispatch_authorship_stays_out_of_raw_frames() {
             .any(|frame| matches!(frame, DaemonFrame::TeamProposal { .. })),
         "M50 attached privacy: daemon registry must not publish proposal to Peer"
     );
-    for observer in [&writer, &readonly, &peer] {
+    // Trusted-local attachments keep the unrelated tool invocation with its
+    // input (FR29); Peer tier sees the same invocation with its arguments
+    // withheld (Story 19.20c owner ruling O1).
+    for observer in [&writer, &readonly] {
         assert!(
             observer.received.iter().any(|frame| matches!(frame,
             DaemonFrame::Event(event) if matches!(&event.kind,
                 RawEventKind::Provider(StreamChunk::ToolUse { name, .. }) if name == "Read"))),
-            "unrelated tool invocation must remain observable on every attachment"
+            "unrelated tool invocation must remain observable on every trusted attachment"
         );
+    }
+    assert!(
+        peer.received.iter().any(|frame| matches!(frame,
+            DaemonFrame::ToolEventWithheld {
+                event,
+                withheld: ToolInputWithheld::PeerTier,
+            } if matches!(&event.kind,
+                RawEventKind::Provider(StreamChunk::ToolUse { name, input, .. })
+                    if name == "Read" && input.is_null()))),
+        "Peer tier observes the unrelated tool invocation with its input withheld"
+    );
+    for observer in [&writer, &readonly, &peer] {
         assert!(
             observer.received.iter().any(|frame| matches!(frame,
             DaemonFrame::Event(event) if matches!(&event.kind,

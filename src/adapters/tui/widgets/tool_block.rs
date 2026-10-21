@@ -3,6 +3,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::adapters::daemon::protocol::ToolInputWithheld;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::clock::Clock;
 use crate::domain::models::{
@@ -185,6 +186,26 @@ fn expanded_diff_body(tc: &ToolCallInfo) -> Option<DiffBody> {
     }
 }
 
+/// Keep result-supplied diffs, but never synthesize a view from withheld arguments.
+fn expanded_diff_body_attached(
+    tc: &ToolCallInfo,
+    withheld: Option<&ToolInputWithheld>,
+) -> Option<DiffBody> {
+    if withheld.is_some()
+        && (matches!(tc.name.as_str(), "Edit" | "edit")
+            || (matches!(tc.name.as_str(), "Write" | "write")
+                && tc.result.as_ref().is_some_and(|result| {
+                    matches!(
+                        &result.diff,
+                        WriteDiffState::NewFile | WriteDiffState::NotCaptured { .. }
+                    )
+                })))
+    {
+        return None;
+    }
+    expanded_diff_body(tc)
+}
+
 /// Memoized Edit hunk. `expanded_diff_body` is reached from
 /// [`tool_block_height`], which the chat pane calls for EVERY tool block on
 /// EVERY frame; computing an LCS there made frame cost scale with the size of
@@ -222,8 +243,8 @@ fn edit_hunk(old: &str, new: &str) -> (Vec<DiffLine>, usize) {
 /// Height of the expanded body (diff lines + cap marker, A4 line, or the
 /// ordinary output lines). Keeps [`tool_block_height`] in lockstep with
 /// [`render_tool_block_lines`].
-fn expanded_body_height(tc: &ToolCallInfo) -> usize {
-    match expanded_diff_body(tc) {
+fn expanded_body_height(tc: &ToolCallInfo, withheld: Option<&ToolInputWithheld>) -> usize {
+    match expanded_diff_body_attached(tc, withheld) {
         Some(DiffBody::Lines { lines }) => lines.len(),
         Some(DiffBody::NotCaptured { .. }) | Some(DiffBody::NoChange) => 1,
         None => tc.result.as_ref().map_or(0, |r| r.content.lines().count()),
@@ -232,6 +253,15 @@ fn expanded_body_height(tc: &ToolCallInfo) -> usize {
 
 /// Compute the rendered height of a tool block.
 pub fn tool_block_height(tc: &ToolCallInfo, state: &ToolBlockState) -> usize {
+    tool_block_height_attached(tc, state, None)
+}
+
+/// Attached height calculation mirrors the renderer without inspecting withheld input.
+pub fn tool_block_height_attached(
+    tc: &ToolCallInfo,
+    state: &ToolBlockState,
+    withheld: Option<&ToolInputWithheld>,
+) -> usize {
     if let Some(result) = &tc.result {
         if result.is_error {
             // Error: 1 line for header + error lines
@@ -242,7 +272,7 @@ pub fn tool_block_height(tc: &ToolCallInfo, state: &ToolBlockState) -> usize {
             1 // One-line collapsed summary
         } else {
             // Expanded: border top + input line + body + border bottom
-            3 + expanded_body_height(tc)
+            3 + expanded_body_height(tc, withheld)
         }
     } else {
         1 // Executing — one-line with ticker
@@ -258,7 +288,20 @@ pub fn render_tool_block_lines<'a>(
     width: u16,
     clock: &dyn Clock,
 ) -> Vec<Line<'a>> {
-    let summary = tool_summary(&tc.name, &tc.input);
+    render_tool_block_lines_attached(tc, theme, state, width, clock, None)
+}
+
+/// Render attached tool input using the host's typed withholding reason.
+/// Standalone callers continue through `render_tool_block_lines` unchanged.
+pub fn render_tool_block_lines_attached<'a>(
+    tc: &ToolCallInfo,
+    theme: &'a Theme,
+    state: &ToolBlockState,
+    width: u16,
+    clock: &dyn Clock,
+    withheld: Option<&ToolInputWithheld>,
+) -> Vec<Line<'a>> {
+    let summary = withheld.map_or_else(|| tool_summary(&tc.name, &tc.input), |w| w.notice());
     let elapsed = elapsed_str(tc, clock);
 
     match &tc.result {
@@ -421,17 +464,21 @@ pub fn render_tool_block_lines<'a>(
                 ]));
 
                 // Input line
-                let input_summary = match tc.name.as_str() {
-                    "Bash" | "bash" => {
-                        format!(
-                            "$ {}",
-                            tc.input
-                                .get("command")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                        )
+                let input_summary = if let Some(withheld) = withheld {
+                    withheld.notice()
+                } else {
+                    match tc.name.as_str() {
+                        "Bash" | "bash" => {
+                            format!(
+                                "$ {}",
+                                tc.input
+                                    .get("command")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                            )
+                        }
+                        _ => format!("{}", tc.input),
                     }
-                    _ => format!("{}", tc.input),
                 };
                 lines.push(Line::from(vec![
                     Span::styled("│ ", Style::default().fg(theme.colors.tool_border_expanded)),
@@ -443,7 +490,8 @@ pub fn render_tool_block_lines<'a>(
                 // tool actually changed" instead of "Successfully wrote N
                 // bytes"). Diff lines deliberately carry NO "│ " gutter so
                 // they never share a prefix with output-tail lines (A8).
-                match expanded_diff_body(tc) {
+                // Input-derived diffs stay withheld; result-supplied diffs remain visible.
+                match expanded_diff_body_attached(tc, withheld) {
                     Some(DiffBody::Lines { lines: dls }) => {
                         lines.extend(render_diff_lines(&dls, theme));
                     }
@@ -598,6 +646,156 @@ mod tests {
             completed_at_ms: completed,
             status: None,
         }
+    }
+
+    #[test]
+    fn attached_withheld_and_too_large_replace_input_in_every_block_state() {
+        let theme = Theme::dark();
+        let clock = test_clock();
+        for withheld in [
+            ToolInputWithheld::PeerTier,
+            ToolInputWithheld::TooLarge { bytes: 2_097_152 },
+        ] {
+            for result in [
+                None,
+                Some(ToolResultInfo {
+                    content: "output".into(),
+                    is_error: false,
+                    diff: WriteDiffState::NotAWrite,
+                }),
+                Some(ToolResultInfo {
+                    content: "failed".into(),
+                    is_error: true,
+                    diff: WriteDiffState::NotAWrite,
+                }),
+            ] {
+                let mut tc = make_tool_call("Bash", result);
+                tc.input = serde_json::json!({"command": "secret-command"});
+                for collapsed in [true, false] {
+                    let state = ToolBlockState {
+                        collapsed,
+                        peek_active: false,
+                    };
+                    let lines = render_tool_block_lines_attached(
+                        &tc,
+                        &theme,
+                        &state,
+                        120,
+                        &clock,
+                        Some(&withheld),
+                    );
+                    let text = lines
+                        .iter()
+                        .map(Line::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(text.contains(&withheld.notice()), "{text}");
+                    assert!(!text.contains("secret-command"), "{text}");
+                    assert_eq!(
+                        lines.len(),
+                        tool_block_height_attached(&tc, &state, Some(&withheld)),
+                    );
+                    let trusted =
+                        render_tool_block_lines_attached(&tc, &theme, &state, 120, &clock, None);
+                    assert!(
+                        trusted
+                            .iter()
+                            .any(|line| line.to_string().contains("secret-command"))
+                    );
+                    assert_eq!(
+                        trusted,
+                        render_tool_block_lines(&tc, &theme, &state, 120, &clock),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn attached_withheld_does_not_reconstruct_expanded_diff_from_arguments() {
+        let mut tc = make_tool_call(
+            "Edit",
+            Some(ToolResultInfo {
+                content: "edited".into(),
+                is_error: false,
+                diff: WriteDiffState::NotAWrite,
+            }),
+        );
+        tc.input = serde_json::json!({
+            "old_string": "secret-old",
+            "new_string": "secret-new",
+        });
+        let theme = Theme::dark();
+        let clock = test_clock();
+        let state = ToolBlockState {
+            collapsed: false,
+            peek_active: false,
+        };
+        let withheld = ToolInputWithheld::PeerTier;
+        let lines =
+            render_tool_block_lines_attached(&tc, &theme, &state, 120, &clock, Some(&withheld));
+        let text = lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(&withheld.notice()));
+        assert!(text.contains("edited"));
+        assert!(!text.contains("secret-old"));
+        assert!(!text.contains("secret-new"));
+        assert_eq!(
+            lines.len(),
+            tool_block_height_attached(&tc, &state, Some(&withheld))
+        );
+        let trusted = render_tool_block_lines(&tc, &theme, &state, 120, &clock);
+        assert!(
+            trusted
+                .iter()
+                .any(|line| line.to_string().contains("secret-old"))
+        );
+        assert!(
+            trusted
+                .iter()
+                .any(|line| line.to_string().contains("secret-new"))
+        );
+    }
+
+    #[test]
+    fn attached_withheld_preserves_result_supplied_write_diff() {
+        let mut tc = make_tool_call(
+            "Write",
+            Some(ToolResultInfo {
+                content: "write completed".into(),
+                is_error: false,
+                diff: WriteDiffState::Diff {
+                    lines: display_diff("before", "after"),
+                    more: 0,
+                },
+            }),
+        );
+        tc.input = serde_json::json!({"content": "secret-input"});
+        let theme = Theme::dark();
+        let clock = test_clock();
+        let state = ToolBlockState {
+            collapsed: false,
+            peek_active: false,
+        };
+        let withheld = ToolInputWithheld::PeerTier;
+        let lines =
+            render_tool_block_lines_attached(&tc, &theme, &state, 120, &clock, Some(&withheld));
+        let text = lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(&withheld.notice()));
+        assert!(text.contains("before"));
+        assert!(text.contains("after"));
+        assert!(!text.contains("secret-input"));
+        assert_eq!(
+            lines.len(),
+            tool_block_height_attached(&tc, &state, Some(&withheld))
+        );
     }
 
     #[test]

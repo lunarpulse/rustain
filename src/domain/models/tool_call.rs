@@ -11,6 +11,10 @@ use crate::domain::models::PolicyPrincipal;
 pub struct ToolCallRequest {
     pub id: String,
     pub tool_name: String,
+    /// Story 19.20c `A6`: an attach projection may withhold the arguments
+    /// (typed beside the event, never a placeholder), so the wire may omit
+    /// this key; it then decodes as `Null` and the typed state says why.
+    #[serde(default)]
     pub input: serde_json::Value,
 }
 

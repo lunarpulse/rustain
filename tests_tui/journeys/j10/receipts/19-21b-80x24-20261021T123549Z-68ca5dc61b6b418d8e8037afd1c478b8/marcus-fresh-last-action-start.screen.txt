@@ -1,0 +1,24 @@
+│   not granted│                                                                
+│   - lena-po│                                                                  
+│   (1220593c77a46b6a3761640df965f6223f069c1ef3db5af40cd7deee1ae225d6fcab):│    
+│   not granted│                                                                
+│ ⚠ ← inbound ✓ accepted · peer│                                                
+│   1220593c77a46b6a3761640df965f6223f069c1ef3db5af40cd7deee1ae225d6fcab ·│     
+│   task rustain-1792586150625170141-bcedbf288319756e · task accepted and│      
+│ ℹ Distribution board · architecture_update│                                   
+│   attempted just now · 2 addressed│                                           
+│     ● lena-po  delivered│                                                     
+│       item ri_NTIKnK2YrVo3tFbGafGVwrVIIoZlqebs · arrival 1 · task│            
+│   rustain-1792586181184657315-839533c98aaaba16 · received│                    
+│     ● jun-dev  delivered│                                                     
+│       item ri_iQdifX8Iy6ZWXOP5hElnqTlbCxx46ePO · arrival 1 · task│            
+│   rustain-1792586181186606828-23fc65a0088ba2c0 · received│                    
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                      log: 7
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

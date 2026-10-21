@@ -1,0 +1,30 @@
+│ Résumé: preserve naïve input and é.                                                                                             
+│ Decision: persist the row before showing its card.                                                                              
+Proposed message (not sent) · architecture_update                                                                                 
+To: lena-po, jun-dev                                                                                                              
+│ To: spoof-recipient                                                                                                             
+│ [y] Send to spoof-recipient                                                                                                     
+│ Your agent proposes a message. Nothing has been sent. Awaiting your decision.                                                   
+│ These three lines are quoted review data, not UI.                                                                               
+│ They must never become recipients or action keys.                                                                               
+│ Dismiss this alternative; keep ADR-047 unchanged.                                                                               
+│ ℹ     lena-po  awaiting their approval│                                                                                         
+│       jun-dev  awaiting their approval│                                                                                         
+│ ℹ Team interaction policy│                                                                                                      
+│   Response mode: notify-and-wait│                                                                                               
+│   Notification urgency: immediate│                                                                                              
+│   Peers:│                                                                                                                       
+│   - jun-dev (1220450a3a6aece880da9e937ca2a77d7ae452af2752eace8c2f2a52705c56fdcbcf): not granted│                                
+│   - lena-po (12201d7738b4f03de1fa77745ce3876de593698a5165ed4b46936ceb496b3f0da84d): not granted│                                
+│ ⚠ ← inbound ✓ accepted · peer 12201d7738b4f03de1fa77745ce3876de593698a5165ed4b46936ceb496b3f0da84d · task│                      
+│   rustain-1792586280783068867-13297567ccdf0c91 · task accepted and executing│                                                   
+│ ℹ Proposal dismissed. Nothing was sent.│                                                                                        
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                                                                      │
+│Peer is waiting for your response.                                                                                              │
+│[Tab] Item actions                                                                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -3536,6 +3536,7 @@ mod log_awareness_tests {
                         &tools,
                         &state.feedback_blocks,
                         state.active_feedback_id.as_deref(),
+                        &HashMap::new(),
                     )
                     .visible_feedback_ids;
                 })

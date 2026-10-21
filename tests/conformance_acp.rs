@@ -1074,9 +1074,25 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
 // Section 5 — AC3 approval bridge contrast over dispatched ACP JSON-RPC
 // ─────────────────────────────────────────────────────────────────────
 
+fn exact_permission_input(tool: &str) -> serde_json::Value {
+    let late = format!(
+        "{} — 終わり EXACT-APPROVAL-LATE-SUFFIX\n  whitespace kept  ",
+        "x".repeat(240)
+    );
+    if tool == "Edit" {
+        serde_json::json!({
+            "file_path": "review.txt", "old_string": "before\n", "new_string": late,
+        })
+    } else {
+        serde_json::json!({ "command": format!("touch sentinel\n{late}"), "extra": ["all", null, 7] })
+    }
+}
+
 #[derive(Debug, Default)]
 struct ToolThenDoneProvider {
     calls: std::sync::atomic::AtomicUsize,
+    edit: bool,
+    gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 #[async_trait::async_trait]
@@ -1093,12 +1109,18 @@ impl rustain::domain::ports::StreamingProvider for ToolThenDoneProvider {
         use rustain::domain::models::{StopReason, StreamChunk};
 
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 0
+            && let Some((started, release)) = &self.gate
+        {
+            started.notify_one();
+            release.notified().await;
+        }
         let chunks = if call == 0 {
             vec![
                 StreamChunk::ToolUse {
                     id: "tool-1".to_string(),
-                    name: "Bash".to_string(),
-                    input: serde_json::json!({ "command": "touch sentinel" }),
+                    name: if self.edit { "Edit" } else { "Bash" }.to_string(),
+                    input: exact_permission_input(if self.edit { "Edit" } else { "Bash" }),
                 },
                 StreamChunk::TurnComplete {
                     stop_reason: StopReason::ToolUse,
@@ -1174,10 +1196,15 @@ impl ToolSetPort for SentinelToolSet {
 
     async fn execute(
         &self,
-        _tool_name: &str,
-        _input: serde_json::Value,
+        tool_name: &str,
+        input: serde_json::Value,
         _cancel: tokio_util::sync::CancellationToken,
     ) -> Result<rustain::domain::models::ToolResult, rustain::domain::errors::ToolError> {
+        assert_eq!(
+            input,
+            exact_permission_input(tool_name),
+            "executor receives the complete original value"
+        );
         self.executions
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(rustain::domain::models::ToolResult {
@@ -1304,6 +1331,12 @@ async fn drive_acp_permission_case(option_id: &str) -> (usize, usize) {
                     serde_json::json!("acp-1"),
                     "permission request must be scoped to the ACP session"
                 );
+                let input = exact_permission_input("Bash");
+                assert_eq!(v["params"]["toolCall"]["rawInput"], input);
+                assert_eq!(v["params"]["toolCall"]["title"], "Bash: touch sentinel…");
+                let content = v["params"]["toolCall"]["content"].to_string();
+                assert!(content.contains("EXACT-APPROVAL-LATE-SUFFIX"), "{content}");
+                assert!(content.contains("whitespace kept"), "{content}");
                 let id = v["id"].clone();
                 let response = serde_json::json!({
                     "jsonrpc": "2.0",
@@ -1372,6 +1405,441 @@ async fn acp_permission_bridge_rejects_and_allows_side_effecting_tool() {
         allow_reject_count, 0,
         "Allowing through ACP must not increment rejected_count"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_permission_unknown_option_rejects() {
+    let (executions, rejected) = drive_acp_permission_case("not-an-offered-option").await;
+    assert_eq!((executions, rejected), (0, 1));
+}
+
+struct PermissionClient {
+    write: tokio::io::DuplexStream,
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::io::DuplexStream>>,
+    early_updates: Vec<serde_json::Value>,
+}
+
+impl PermissionClient {
+    async fn send(&mut self, value: serde_json::Value) {
+        use tokio::io::AsyncWriteExt as _;
+        self.write
+            .write_all(line(value.to_string()).as_bytes())
+            .await
+            .unwrap();
+        self.write.flush().await.unwrap();
+    }
+
+    async fn next(&mut self) -> serde_json::Value {
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(10), self.lines.next_line())
+            .await
+            .expect("ACP frame deadline")
+            .expect("ACP read")
+            .expect("ACP frame");
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    async fn result(&mut self, id: u64) -> Vec<serde_json::Value> {
+        let mut updates = Vec::new();
+        loop {
+            let frame = self.next().await;
+            assert_ne!(
+                frame["method"], "session/request_permission",
+                "unexpected extra ask: {frame}"
+            );
+            if frame["id"] == id {
+                assert!(frame["error"].is_null(), "{frame}");
+                return updates;
+            }
+            updates.push(frame);
+        }
+    }
+
+    async fn new_session(&mut self, id: u64, workspace: &Path) -> String {
+        self.send(serde_json::json!({
+            "jsonrpc":"2.0", "id":id, "method":"session/new",
+            "params":{"cwd":workspace, "mcpServers":[]}
+        }))
+        .await;
+        loop {
+            let frame = self.next().await;
+            if frame["id"] == id {
+                return frame["result"]["sessionId"]
+                    .as_str()
+                    .expect("new session id")
+                    .to_string();
+            }
+            assert_ne!(
+                frame["method"], "session/request_permission",
+                "unexpected ask: {frame}"
+            );
+        }
+    }
+
+    async fn prompt(&mut self, id: u64, session: &str) {
+        self.send(serde_json::from_str(&acp_prompt_req(serde_json::json!(id), session)).unwrap())
+            .await;
+    }
+
+    async fn ask(&mut self, session: &str, tool: &str) -> serde_json::Value {
+        loop {
+            let frame = self.next().await;
+            if frame["method"] == "session/request_permission" {
+                assert_eq!(frame["params"]["sessionId"], session, "cross-session send");
+                assert_eq!(
+                    frame["params"]["toolCall"]["rawInput"],
+                    exact_permission_input(tool)
+                );
+                let expected_title = if tool == "Edit" {
+                    "Edit: review.txt…"
+                } else {
+                    "Bash: touch sentinel…"
+                };
+                assert_eq!(frame["params"]["toolCall"]["title"], expected_title);
+                let text = frame["params"]["toolCall"]["content"][0]["content"]["text"]
+                    .as_str()
+                    .expect("complete readable permission text");
+                let input = exact_permission_input(tool);
+                if tool == "Edit" {
+                    assert!(text.contains(input["old_string"].as_str().unwrap()));
+                    assert!(text.contains(input["new_string"].as_str().unwrap()));
+                } else {
+                    assert!(text.contains(input["command"].as_str().unwrap()));
+                    assert!(text.contains(&serde_json::to_string_pretty(&input["extra"]).unwrap()));
+                }
+                return frame;
+            }
+            assert!(
+                frame["id"].is_null(),
+                "prompt completed without the permission bridge: {frame}"
+            );
+            self.early_updates.push(frame);
+        }
+    }
+
+    async fn allow(&mut self, ask: &serde_json::Value) {
+        self.send(serde_json::json!({
+            "jsonrpc":"2.0", "id":ask["id"],
+            "result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}
+        }))
+        .await;
+    }
+
+    async fn cancel(&mut self, session: &str) {
+        self.send(serde_json::json!({
+            "jsonrpc":"2.0", "method":"session/cancel", "params":{"sessionId":session}
+        }))
+        .await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PermissionLifecycle {
+    Deadline,
+    CancelThenNext,
+    CrossSession,
+    Close,
+    RpcError,
+    ReplayEdit,
+}
+
+async fn drive_permission_lifecycle(case: PermissionLifecycle) {
+    use rustain::adapters::acp::{agent::CoreFactory, run::serve_acp_with_core_factory};
+    use rustain::adapters::noop::NoOpApprovalPersistence;
+    use rustain::domain::services::approval_runtime::{ApprovalRuntime, ReviewScope};
+    use std::rc::Rc;
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+    #[cfg(feature = "test-instrumentation")]
+    let _run_turn_guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
+    #[cfg(feature = "test-instrumentation")]
+    let mut bridge_probe = rustain::adapters::acp::run::permission_test_probe::subscribe_bridge();
+    let workspace = tempfile::tempdir().unwrap();
+    let ws = workspace.path().to_path_buf();
+    let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let approval = ApprovalRuntime::new(64, Arc::new(NoOpApprovalPersistence));
+    let mut approval_events = approval.subscribe();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let count = std::cell::Cell::new(0);
+    let core_factory: CoreFactory = {
+        let executions = executions.clone();
+        let approval = approval.clone();
+        let started = started.clone();
+        let release = release.clone();
+        Rc::new(move |_, _| {
+            let mut core = make_core_with_sentinel(&ws, executions.clone(), approval.clone());
+            count.set(count.get() + 1);
+            core.provider = Arc::new(ToolThenDoneProvider {
+                edit: matches!(case, PermissionLifecycle::ReplayEdit),
+                gate: (matches!(case, PermissionLifecycle::CrossSession) && count.get() == 2)
+                    .then(|| (started.clone(), release.clone())),
+                ..Default::default()
+            });
+            Ok(core)
+        })
+    };
+    let (server_incoming, write) = tokio::io::duplex(64 * 1024);
+    let (read, server_outgoing) = tokio::io::duplex(64 * 1024);
+    let mut client = PermissionClient {
+        write,
+        lines: tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(read)),
+        early_updates: Vec::new(),
+    };
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        rustain::domain::models::AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+    let drive = async {
+        client
+            .send(serde_json::from_str(ACP_INITIALIZE_REQ).unwrap())
+            .await;
+        client.result(1).await;
+        let first = client.new_session(2, workspace.path()).await;
+        let second = if matches!(case, PermissionLifecycle::CrossSession) {
+            let second = client.new_session(4, workspace.path()).await;
+            client.prompt(5, &second).await;
+            // The second real turn has subscribed, but has not produced its tool.
+            started.notified().await;
+            Some(second)
+        } else {
+            None
+        };
+        client.prompt(3, &first).await;
+        let tool = if matches!(case, PermissionLifecycle::ReplayEdit) {
+            "Edit"
+        } else {
+            "Bash"
+        };
+        #[cfg(feature = "test-instrumentation")]
+        loop {
+            let (session, forwarded) = bridge_probe.recv().await.expect("bridge checkpoint");
+            if session == first {
+                assert!(
+                    forwarded,
+                    "real ACP turn must forward its scoped pending approval to the permission pump"
+                );
+                break;
+            }
+        }
+        let ask = client.ask(&first, tool).await;
+        match case {
+            PermissionLifecycle::Deadline => {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(31)).await;
+                // Resume before filesystem-backed RPCs: automatic paused-clock
+                // advancement must not outrun the duplex reader's blocking I/O.
+                tokio::time::resume();
+                // A round trip drives the transport and permission waiter
+                // after the old deadline, without sleeping.
+                client.send(serde_json::json!({"jsonrpc":"2.0","id":8,"method":"session/list","params":{}})).await;
+                client.result(8).await;
+                assert_eq!(
+                    approval
+                        .pending_tool_requests(ReviewScope::AllTools)
+                        .await
+                        .len(),
+                    1
+                );
+                assert_eq!(approval.rejected_count(), 0);
+                assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+                client.allow(&ask).await;
+                client.result(3).await;
+            }
+            PermissionLifecycle::CancelThenNext => {
+                #[cfg(feature = "test-instrumentation")]
+                assert_eq!(
+                    rustain::adapters::acp::run::permission_test_probe::pump_fence().await,
+                    0,
+                    "positive control: unanswered live SDK ask remains pending"
+                );
+                client.cancel(&first).await;
+                client.result(3).await;
+                #[cfg(feature = "test-instrumentation")]
+                assert_eq!(
+                    rustain::adapters::acp::run::permission_test_probe::pump_fence().await,
+                    1,
+                    "cancelled unanswered SDK ask must retire before the next permission"
+                );
+                assert!(
+                    approval
+                        .pending_tool_requests(ReviewScope::AllTools)
+                        .await
+                        .is_empty()
+                );
+                assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+                let second = client.new_session(4, workspace.path()).await;
+                client.prompt(5, &second).await;
+                let next = client.ask(&second, "Bash").await;
+                assert_ne!(ask["id"], next["id"]);
+                // A retired ask's late response cannot authorize the new one.
+                client.allow(&ask).await;
+                client.send(serde_json::json!({"jsonrpc":"2.0","id":8,"method":"session/list","params":{}})).await;
+                client.result(8).await;
+                assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(
+                    approval
+                        .pending_tool_requests(ReviewScope::AllTools)
+                        .await
+                        .len(),
+                    1
+                );
+                client.allow(&next).await;
+                client.result(5).await;
+            }
+            PermissionLifecycle::CrossSession => {
+                assert_eq!(
+                    approval
+                        .pending_tool_requests(ReviewScope::AllTools)
+                        .await
+                        .len(),
+                    1
+                );
+                assert_eq!(
+                    approval.rejected_count(),
+                    0,
+                    "other session must not settle this request"
+                );
+                client.allow(&ask).await;
+                client.result(3).await;
+                assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+                release.notify_one();
+                let next = client.ask(second.as_deref().unwrap(), "Bash").await;
+                assert_ne!(
+                    ask["params"]["toolCall"]["toolCallId"],
+                    next["params"]["toolCall"]["toolCallId"]
+                );
+                client.allow(&next).await;
+                client.result(5).await;
+            }
+            PermissionLifecycle::Close => {
+                drop(client);
+                return;
+            }
+            PermissionLifecycle::RpcError => {
+                client
+                    .send(serde_json::json!({
+                        "jsonrpc":"2.0","id":ask["id"],
+                        "error":{"code":-32603,"message":"permission RPC failed"}
+                    }))
+                    .await;
+                loop {
+                    let frame = client.next().await;
+                    if frame["id"] == 3 {
+                        assert!(!frame["error"].is_null(), "{frame}");
+                        break;
+                    }
+                }
+                assert_eq!(approval.rejected_count(), 1);
+            }
+            PermissionLifecycle::ReplayEdit => {
+                client.allow(&ask).await;
+                let mut live = std::mem::take(&mut client.early_updates);
+                live.extend(client.result(3).await);
+                client
+                    .send(serde_json::json!({
+                        "jsonrpc":"2.0","id":8,"method":"session/load",
+                        "params":{"sessionId":first,"cwd":workspace.path(),"mcpServers":[]}
+                    }))
+                    .await;
+                let replay = client.result(8).await;
+                let replay_tool = replay
+                    .iter()
+                    .map(|f| &f["params"]["update"])
+                    .find(|u| u["sessionUpdate"] == "tool_call")
+                    .expect("replayed tool");
+                assert_eq!(replay_tool["rawInput"], exact_permission_input("Edit"));
+                let live_tool = live
+                    .iter()
+                    .map(|f| &f["params"]["update"])
+                    .find(|u| u["sessionUpdate"] == "tool_call")
+                    .expect("live tool");
+                assert_eq!(live_tool["rawInput"], replay_tool["rawInput"]);
+                assert_eq!(live_tool["locations"], replay_tool["locations"]);
+                let diffs = |u: &serde_json::Value| {
+                    u["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|c| c["type"] == "diff")
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
+                assert!(!diffs(live_tool).is_empty(), "positive Diff control");
+                assert_eq!(diffs(live_tool), diffs(replay_tool));
+            }
+        }
+        drop(client);
+    };
+    // EOF is exercised, rather than dropping the server future.
+    let (_, result) = tokio::join!(drive, server);
+    result.expect("ACP server EOF cleanup");
+    assert!(
+        approval
+            .pending_tool_requests(ReviewScope::AllTools)
+            .await
+            .is_empty()
+    );
+    if matches!(
+        case,
+        PermissionLifecycle::Close | PermissionLifecycle::CancelThenNext
+    ) {
+        let mut cancelled = 0;
+        while let Ok(event) = approval_events.try_recv() {
+            if matches!(
+                event,
+                rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Cancelled { .. }
+            ) {
+                cancelled += 1;
+            }
+        }
+        assert_eq!(
+            cancelled, 1,
+            "cancel settles exactly once, never as rejection"
+        );
+        assert_eq!(approval.rejected_count(), 0);
+    }
+    let expected = match case {
+        PermissionLifecycle::CrossSession => 2,
+        PermissionLifecycle::Close | PermissionLifecycle::RpcError => 0,
+        _ => 1,
+    };
+    assert_eq!(
+        executions.load(std::sync::atomic::Ordering::SeqCst),
+        expected
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_exact_permission_has_no_reading_deadline() {
+    drive_permission_lifecycle(PermissionLifecycle::Deadline).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_cancelled_unanswered_permission_retires_pump() {
+    drive_permission_lifecycle(PermissionLifecycle::CancelThenNext).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_permission_is_never_sent_or_settled_by_another_session() {
+    drive_permission_lifecycle(PermissionLifecycle::CrossSession).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_connection_close_cancels_pending_permission() {
+    drive_permission_lifecycle(PermissionLifecycle::Close).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_permission_rpc_error_still_rejects() {
+    drive_permission_lifecycle(PermissionLifecycle::RpcError).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_exact_permission_preserves_live_and_replay_edit_payloads() {
+    drive_permission_lifecycle(PermissionLifecycle::ReplayEdit).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

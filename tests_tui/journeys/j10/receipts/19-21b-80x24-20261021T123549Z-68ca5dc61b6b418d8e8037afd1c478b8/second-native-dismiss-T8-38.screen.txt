@@ -1,0 +1,24 @@
+│ Review is local; only an operator may Send.                                   
+│ Preserve ordered recipients and exact UTF-8 bytes.                            
+│ Résumé: preserve naïve input and é.                                           
+│ Decision: persist the row before showing its card.                            
+│ ℹ     lena-po  awaiting their approval│                                       
+│       jun-dev  awaiting their approval│                                       
+│ ℹ Team interaction policy│                                                    
+│   Response mode: notify-and-wait│                                             
+│   Notification urgency: immediate│                                            
+│   Peers:│                                                                     
+│   - jun-dev│                                                                  
+│   (1220180ea534c9a2ce5df35945e043bd5f23f4ed9e81eadd8162e68f3f6bc6e31d2d):│    
+│   not granted│                                                                
+│   - lena-po│                                                                  
+│   (1220593c77a46b6a3761640df965f6223f069c1ef3db5af40cd7deee1ae225d6fcab):│    
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

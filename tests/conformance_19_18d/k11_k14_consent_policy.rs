@@ -75,7 +75,8 @@ fn wait_spec() -> HostSpec {
 
 // ── Observations ────────────────────────────────────────────────────────────
 
-/// One `ApprovalRuntimeEvent::Requested` (`approval_runtime.rs:85-91`).
+/// One `ApprovalRuntimeEvent::Requested`; `preview` is the sender-consent card
+/// text (`consent_card`, Story 19.20c — tool requests carry no values).
 #[derive(Debug)]
 struct Requested {
     id: RequestId,
@@ -92,13 +93,13 @@ impl Requested {
                 id,
                 source,
                 tool,
-                input_preview,
                 risk,
+                consent_card,
             } => Some(Self {
                 id,
                 source,
                 tool,
-                preview: input_preview,
+                preview: consent_card.unwrap_or_default(),
                 risk,
             }),
             _ => None,

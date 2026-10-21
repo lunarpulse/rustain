@@ -1,5 +1,6 @@
 pub mod adapter_catalog;
 pub mod adapter_overlay;
+pub mod approval_presentation;
 pub mod approval_runtime;
 pub mod authority_ledger;
 pub mod claude_code_jsonl;

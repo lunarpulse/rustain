@@ -30,6 +30,15 @@ use crate::domain::services::permission_chain;
 use std::path::PathBuf;
 use tokio::sync::{RwLock, mpsc};
 
+/// Test-only changes to the invocation resumed after a real approval.
+/// This never changes the authoritative pending record or its fingerprint.
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub enum ApprovalResumeChange {
+    Tool(String),
+    Input(serde_json::Value),
+    Source(ApprovalSource),
+}
+
 /// Schedules and executes tool calls with lifecycle event broadcast.
 pub struct ToolScheduler {
     security: Arc<dyn SecurityPort>,
@@ -38,6 +47,8 @@ pub struct ToolScheduler {
     approval_runtime: Arc<ApprovalRuntime>,
     plan_file: RwLock<Option<PathBuf>>,
     progress_tx: RwLock<Option<mpsc::UnboundedSender<ToolProgressEvent>>>,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    approval_resume_change: RwLock<Option<ApprovalResumeChange>>,
 }
 
 impl ToolScheduler {
@@ -64,6 +75,8 @@ impl ToolScheduler {
             approval_runtime,
             plan_file: RwLock::new(None),
             progress_tx: RwLock::new(None),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            approval_resume_change: RwLock::new(None),
         })
     }
 
@@ -71,6 +84,13 @@ impl ToolScheduler {
     /// call to `subscribe` (standard `tokio::sync::broadcast` tail semantics).
     pub fn subscribe(&self) -> broadcast::Receiver<ToolCallTransition> {
         self.events.subscribe()
+    }
+
+    /// Fault injection at the real post-approval execution boundary, without
+    /// fabricating an approval or bypassing the turn/scheduler front door.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub async fn change_next_approval_resume_for_test(&self, change: ApprovalResumeChange) {
+        *self.approval_resume_change.write().await = Some(change);
     }
 
     /// Set the plan file path for the current conversation.
@@ -220,6 +240,10 @@ impl ToolScheduler {
         provenance: crate::domain::models::ProvenanceTag,
         route: Option<crate::domain::models::turn::TurnRoute>,
     ) -> ToolCall {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let mut req = req;
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let mut source = source;
         let id = req.id.clone();
         let conversation_id = source.conversation_id().to_string();
         let now_secs = chrono::Utc::now().timestamp();
@@ -339,6 +363,14 @@ impl ToolScheduler {
                         });
                     }
                 };
+
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                match self.approval_resume_change.write().await.take() {
+                    Some(ApprovalResumeChange::Tool(tool)) => req.tool_name = tool,
+                    Some(ApprovalResumeChange::Input(input)) => req.input = input,
+                    Some(ApprovalResumeChange::Source(changed)) => source = changed,
+                    None => {}
+                }
 
                 // Story 14.6 AC3: re-match fingerprint before executing.
                 // Guard the confluence (run_one), not the tributaries (Winston).

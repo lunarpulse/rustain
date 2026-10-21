@@ -8,11 +8,18 @@
 //!   is forbidden (ADR-06-05).
 //! - Fast-path (`is_auto_approved == true`) emits **no** broadcast event,
 //!   inserts **nothing** into `pending`, and allocates **no** `RequestId`.
+//! - Story 19.20c `A3`: the exact input lives only in the pending record.
+//!   `Requested` carries no argument values; a deciding surface reads the
+//!   input through [`ApprovalRuntime::pending_review`], which validates and
+//!   acquires under one pending-state lock acquisition.
+//! - Story 19.20c `P5`: `cancel_all` irreversibly shuts down request admission.
+//!   Later requests return Cancel without pending state or broadcast. Admission
+//!   rechecks shutdown under the pending write lock, so it cannot race the drain.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::{RwLock, broadcast, oneshot};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast, oneshot};
 
 use crate::domain::models::ToolRisk;
 use crate::domain::models::tool_call::{ApprovalSource, RequestId};
@@ -80,14 +87,20 @@ impl SessionApprovalSet {
 /// `Deserialize` (Story 12.2b): forwarded over the daemon attach protocol inside
 /// [`crate::infrastructure::runtime::event_bus::RawEventKind::Approval`]; the
 /// attach client deserializes it to render the permission card.
+///
+/// Story 19.20c `P3`: `Requested` carries no argument values — id, source, tool
+/// and risk only. A deciding surface reads the exact input through
+/// [`ApprovalRuntime::pending_review`]. Sender-consent requests keep their
+/// card text in `consent_card` (unchanged copy).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ApprovalRuntimeEvent {
     Requested {
         id: RequestId,
         source: ApprovalSource,
         tool: String,
-        input_preview: String,
         risk: ToolRisk,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        consent_card: Option<String>,
     },
     Resolved {
         id: RequestId,
@@ -99,12 +112,12 @@ pub enum ApprovalRuntimeEvent {
     },
 }
 
-/// Reason an approval was cancelled.
+/// Reason an approval was cancelled. Story 19.20c `P5`: no reading deadline
+/// exists, so there is no timeout reason.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum CancelReason {
     SourceAborted,
     RuntimeShutdown,
-    Timeout,
 }
 
 /// Internal record for a pending approval.
@@ -114,6 +127,8 @@ struct PendingRecord {
     /// Server-side fingerprint computed at request time.
     /// The verifier never rides the wire on the thing it verifies (Winston).
     fp: crate::domain::models::invocation_fingerprint::InvocationFingerprint,
+    /// Monotonic request order (Story 19.20c: lag rescan and reissue keep it).
+    seq: u64,
 }
 
 /// In-memory wrapper carrying the approved fingerprint alongside the outcome.
@@ -134,20 +149,101 @@ struct ApprovalRequest {
     id: RequestId,
     source: ApprovalSource,
     tool: String,
-    input: serde_json::Value,
+    /// The exact input, shared immutably with review snapshots (`A3`).
+    input: Arc<serde_json::Value>,
     risk: ToolRisk,
     server_id: Option<String>,
     path_hint: Option<String>,
 }
 
+/// Story 19.20c `A3` — the private pending snapshot a deciding surface reads.
+///
+/// `input` is the exact pending `serde_json::Value`, shared rather than
+/// re-cloned per frame. It is presentation input only; the scheduler still
+/// executes, and the fingerprint still covers, its own copy.
+#[derive(Clone, Debug)]
+pub struct PendingReview {
+    pub id: RequestId,
+    pub source: ApprovalSource,
+    pub tool: String,
+    pub risk: ToolRisk,
+    pub input: Arc<serde_json::Value>,
+}
+
+/// Metadata of one pending tool approval — no argument values (lag rescan).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingApprovalMeta {
+    pub id: RequestId,
+    pub source: ApprovalSource,
+    pub tool: String,
+    pub risk: ToolRisk,
+}
+
+/// Which pending tool approvals a reader may see. Sender-consent requests are
+/// never tool approvals and match no scope.
+#[derive(Clone, Copy, Debug)]
+pub enum ReviewScope<'a> {
+    /// Every tool approval the runtime holds (standalone TUI, daemon gate).
+    AllTools,
+    /// Only requests raised by this ACP session.
+    AcpSession(&'a str),
+}
+
+impl ReviewScope<'_> {
+    fn admits(self, request: &ApprovalRequest) -> bool {
+        if is_sender_consent(&request.tool, &request.source) {
+            return false;
+        }
+        match self {
+            Self::AllTools => true,
+            Self::AcpSession(session) => matches!(
+                &request.source,
+                ApprovalSource::AcpSession { session_id, .. } if session_id == session
+            ),
+        }
+    }
+}
+
+fn is_sender_consent(tool: &str, source: &ApprovalSource) -> bool {
+    tool == "a2a/sender-consent" && matches!(source, ApprovalSource::RemotePeer { .. })
+}
+
+/// The pending table. Every acquisition goes through [`Self::read`] /
+/// [`Self::write`] so the Rule 4 ratchet can count them.
+#[derive(Default)]
+struct PendingTable {
+    inner: RwLock<HashMap<RequestId, PendingRecord>>,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    acquisitions: AtomicUsize,
+}
+
+impl PendingTable {
+    fn note_acquisition(&self) {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        self.acquisitions.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn read(&self) -> RwLockReadGuard<'_, HashMap<RequestId, PendingRecord>> {
+        self.note_acquisition();
+        self.inner.read().await
+    }
+
+    async fn write(&self) -> RwLockWriteGuard<'_, HashMap<RequestId, PendingRecord>> {
+        self.note_acquisition();
+        self.inner.write().await
+    }
+}
+
 /// Pub/sub runtime for tool-call approvals.
 pub struct ApprovalRuntime {
-    pending: Arc<RwLock<HashMap<RequestId, PendingRecord>>>,
+    pending: PendingTable,
     events: broadcast::Sender<ApprovalRuntimeEvent>,
     session: Arc<RwLock<SessionApprovalSet>>,
     persistence: Arc<dyn ApprovalPersistencePort>,
     subagent_auto_approve: AutoApprovePolicy,
     rejected_count: AtomicUsize,
+    next_seq: AtomicU64,
+    shut_down: AtomicBool,
 }
 impl ApprovalRuntime {
     /// Construct a new runtime. `event_capacity` defaults to 1024 when 0.
@@ -170,15 +266,16 @@ impl ApprovalRuntime {
         };
         let (events, _) = broadcast::channel(cap);
         Arc::new(Self {
-            pending: Arc::new(RwLock::new(HashMap::new())),
+            pending: PendingTable::default(),
             events,
             session: Arc::new(RwLock::new(SessionApprovalSet::default())),
             persistence,
             subagent_auto_approve,
             rejected_count: AtomicUsize::new(0),
+            next_seq: AtomicU64::new(0),
+            shut_down: AtomicBool::new(false),
         })
     }
-    /// Subscribe to runtime events.
 
     /// Return the number of approvals resolved with [`ApprovalOutcome::Reject`].
     /// This is the authoritative count for CLI auto-deny summaries; it is updated
@@ -186,34 +283,93 @@ impl ApprovalRuntime {
     pub fn rejected_count(&self) -> usize {
         self.rejected_count.load(Ordering::Relaxed)
     }
+
+    /// Subscribe to runtime events.
     pub fn subscribe(&self) -> broadcast::Receiver<ApprovalRuntimeEvent> {
         self.events.subscribe()
     }
 
     /// Pending sender-consent requests (tool `a2a/sender-consent`) with the
-    /// card preview their `Requested` event carried (F10). The approval gate
+    /// card text their `Requested` event carried (F10). The approval gate
     /// uses this after a broadcast `Lagged` to re-render cards the bus
     /// dropped, so a never-expiring consent request cannot hang silently with
-    /// no card on screen. Story 19.18d `P22`: the preview comes from the
+    /// no card on screen. Story 19.18d `P22`: the card comes from the
     /// request's stored input through the same derivation `request` used, so a
     /// re-render never re-derives copy (a bound card stays a bound card).
     pub async fn pending_sender_consent(&self) -> Vec<(RequestId, String, ToolRisk)> {
         let pending = self.pending.read().await;
-        pending
+        let mut consent: Vec<_> = pending
             .values()
-            .filter_map(|record| {
-                if record.request.tool != "a2a/sender-consent"
-                    || !matches!(record.request.source, ApprovalSource::RemotePeer { .. })
-                {
-                    return None;
-                }
-                Some((
-                    record.request.id.clone(),
-                    sender_consent_preview(&record.request.input),
-                    record.request.risk,
-                ))
+            .filter(|record| is_sender_consent(&record.request.tool, &record.request.source))
+            .map(|record| {
+                (
+                    record.seq,
+                    (
+                        record.request.id.clone(),
+                        sender_consent_card(&record.request.tool, &record.request.input),
+                        record.request.risk,
+                    ),
+                )
             })
-            .collect()
+            .collect();
+        consent.sort_by_key(|(seq, _)| *seq);
+        consent.into_iter().map(|(_, entry)| entry).collect()
+    }
+
+    /// Story 19.20c `A3` — the exact pending input for one tool approval.
+    ///
+    /// Matches the exact request id **and** `scope`; validation and acquisition
+    /// happen under one pending-state lock acquisition, released before the
+    /// caller formats, transports or awaits anything. Returns `None` once the
+    /// request resolved, was cancelled, is a sender-consent card, or is outside
+    /// `scope`.
+    pub async fn pending_review(
+        &self,
+        id: &RequestId,
+        scope: ReviewScope<'_>,
+    ) -> Option<PendingReview> {
+        let pending = self.pending.read().await;
+        let record = pending.get(id)?;
+        if !scope.admits(&record.request) {
+            return None;
+        }
+        Some(PendingReview {
+            id: record.request.id.clone(),
+            source: record.request.source.clone(),
+            tool: record.request.tool.clone(),
+            risk: record.request.risk,
+            input: Arc::clone(&record.request.input),
+        })
+    }
+
+    /// Story 19.20c `A3`/`P5` — metadata (no argument values) of every pending
+    /// tool approval in `scope`, in request order. Lag recovery rescans with it.
+    pub async fn pending_tool_requests(&self, scope: ReviewScope<'_>) -> Vec<PendingApprovalMeta> {
+        let pending = self.pending.read().await;
+        let mut requests: Vec<_> = pending
+            .values()
+            .filter(|record| scope.admits(&record.request))
+            .map(|record| {
+                (
+                    record.seq,
+                    PendingApprovalMeta {
+                        id: record.request.id.clone(),
+                        source: record.request.source.clone(),
+                        tool: record.request.tool.clone(),
+                        risk: record.request.risk,
+                    },
+                )
+            })
+            .collect();
+        requests.sort_by_key(|(seq, _)| *seq);
+        requests.into_iter().map(|(_, meta)| meta).collect()
+    }
+
+    /// Rule 4 ratchet (Story 19.20c `K07`): pending-state lock acquisitions
+    /// since construction.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn pending_lock_acquisitions(&self) -> usize {
+        self.pending.acquisitions.load(Ordering::SeqCst)
     }
 
     /// Request approval for a tool call.
@@ -251,6 +407,14 @@ impl ApprovalRuntime {
                 return (None, rx);
             }
         };
+        if self.shut_down.load(Ordering::Acquire) {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(ResolvedApproval {
+                outcome: ApprovalOutcome::Cancel,
+                fp,
+            });
+            return (None, rx);
+        }
 
         // Story 10.X-AUTO: subagent auto-approve policy short-circuit.
         // Placed BEFORE the session fast-path so "deny" wins over session-allow.
@@ -290,10 +454,17 @@ impl ApprovalRuntime {
             }
         }
 
-        let sender_consent_request =
-            tool == "a2a/sender-consent" && matches!(&source, ApprovalSource::RemotePeer { .. });
+        let sender_consent_request = is_sender_consent(&tool, &source);
         if !sender_consent_request {
             let mut set = self.session.write().await;
+            if self.shut_down.load(Ordering::Acquire) {
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(ResolvedApproval {
+                    outcome: ApprovalOutcome::Cancel,
+                    fp,
+                });
+                return (None, rx);
+            }
             if set.is_auto_approved(&tool, server_id, path_hint) {
                 let (tx, rx) = oneshot::channel();
                 let _ = tx.send(ResolvedApproval {
@@ -304,38 +475,46 @@ impl ApprovalRuntime {
             }
         }
 
-        let id = RequestId::new();
-        let (tx, rx) = oneshot::channel();
-        let input_preview = if sender_consent_request {
-            sender_consent_preview(&input)
-        } else {
-            summarize_for_display(&input, 140)
-        };
+        let consent_card = sender_consent_request.then(|| sender_consent_card(&tool, &input));
         let server_id_owned = server_id.map(|s| s.to_string());
         let path_hint_owned = path_hint.map(|s| s.to_string());
+        let mut pending = self.pending.write().await;
+        if self.shut_down.load(Ordering::Acquire) {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(ResolvedApproval {
+                outcome: ApprovalOutcome::Cancel,
+                fp,
+            });
+            return (None, rx);
+        }
+        let id = RequestId::new();
+        let (tx, rx) = oneshot::channel();
         let request = ApprovalRequest {
             id: id.clone(),
             source: source.clone(),
             tool: tool.clone(),
-            input,
+            input: Arc::new(input),
             risk,
             server_id: server_id_owned,
             path_hint: path_hint_owned,
         };
-        self.pending.write().await.insert(
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        pending.insert(
             id.clone(),
             PendingRecord {
                 request,
                 responder: tx,
                 fp,
+                seq,
             },
         );
+        drop(pending);
         let _ = self.events.send(ApprovalRuntimeEvent::Requested {
             id: id.clone(),
-            source: source.clone(),
-            tool: tool.clone(),
-            input_preview,
+            source,
+            tool,
             risk,
+            consent_card,
         });
         (Some(id), rx)
     }
@@ -470,6 +649,30 @@ impl ApprovalRuntime {
         }
     }
 
+    /// Story 19.20c `P5` — cancel every pending approval (daemon shutdown).
+    /// Each responder receives `Cancel`, so the waiting scheduler executes
+    /// nothing, and a late decision finds no record. Admission stays closed:
+    /// even a turn queued behind an old request cannot create a new responder.
+    pub async fn cancel_all(&self, reason: CancelReason) {
+        self.shut_down.store(true, Ordering::Release);
+        let records: Vec<(RequestId, PendingRecord)> = {
+            let mut pending = self.pending.write().await;
+            let mut drained: Vec<_> = pending.drain().collect();
+            drained.sort_by_key(|(_, record)| record.seq);
+            drained
+        };
+        for (id, record) in records {
+            let _ = record.responder.send(ResolvedApproval {
+                outcome: ApprovalOutcome::Cancel,
+                fp: record.fp,
+            });
+            let _ = self.events.send(ApprovalRuntimeEvent::Cancelled {
+                id,
+                reason: reason.clone(),
+            });
+        }
+    }
+
     /// Snapshot the current session approval set (for `rustain doctor` + tests).
     pub async fn snapshot_session(&self) -> SessionApprovalSet {
         self.session.read().await.clone()
@@ -516,26 +719,19 @@ impl ApprovalRuntime {
     }
 }
 
-/// Truncate input JSON to a display-friendly preview.
-fn summarize_for_display(input: &serde_json::Value, max_len: usize) -> String {
-    let s = input.to_string();
-    if s.chars().count() <= max_len {
-        s
-    } else {
-        let truncated: String = s.chars().take(max_len).collect();
-        format!("{}...", truncated)
-    }
-}
-
 /// Story 19.18d `P22` — the one derivation of a sender-consent request's
-/// preview: the card the requester rendered, else the generic summary. Both
-/// the `Requested` event and the `Lagged` re-render read it, so the two can
-/// never show different copy.
-fn sender_consent_preview(input: &serde_json::Value) -> String {
+/// card: the card the requester rendered, else the shared per-tool summary
+/// (Story 19.20c removed the 140-character JSON preview). Both the
+/// `Requested` event and the `Lagged` re-render read it, so the two can never
+/// show different copy.
+fn sender_consent_card(tool: &str, input: &serde_json::Value) -> String {
     input
         .get("card")
         .and_then(serde_json::Value::as_str)
-        .map_or_else(|| summarize_for_display(input, 140), str::to_owned)
+        .map_or_else(
+            || crate::domain::services::approval_presentation::summary(tool, input, false),
+            str::to_owned,
+        )
 }
 
 #[cfg(test)]
@@ -889,5 +1085,315 @@ mod tests {
             ),
             "allow must NOT broadcast Requested for BackgroundAgent"
         );
+    }
+
+    fn foreground(conversation: &str) -> ApprovalSource {
+        ApprovalSource::ForegroundTurn {
+            conversation_id: conversation.into(),
+        }
+    }
+
+    fn acp(session: &str) -> ApprovalSource {
+        ApprovalSource::AcpSession {
+            session_id: session.into(),
+            conversation_id: format!("conv-{session}"),
+        }
+    }
+
+    /// Story 19.20c `M18`: `Requested` carries no argument value; the exact
+    /// input (whitespace, Unicode, late suffix) is reachable only through the
+    /// scoped snapshot, byte-for-byte.
+    #[tokio::test]
+    async fn requested_is_value_free_and_snapshot_is_exact() {
+        let rt = make_runtime();
+        let mut events = rt.subscribe();
+        let marker = "SECRET-LATE-SUFFIX-ä漢🙂";
+        let input = serde_json::json!({
+            "command": format!("{}  \t {marker}", "x".repeat(200)),
+        });
+        let (id, _rx) = rt
+            .request(
+                foreground("c1"),
+                "Bash".into(),
+                input.clone(),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        let id = id.expect("slow path");
+        let event = events.recv().await.unwrap();
+        let wire = serde_json::to_string(&event).unwrap();
+        assert!(!wire.contains("SECRET-LATE-SUFFIX"), "{wire}");
+        assert!(!wire.contains("xxxx"), "{wire}");
+        let review = rt
+            .pending_review(&id, ReviewScope::AllTools)
+            .await
+            .expect("pending");
+        assert_eq!(*review.input, input);
+        assert_eq!(review.tool, "Bash");
+    }
+
+    /// ACP scope admits only its own session; resolution retires the snapshot.
+    #[tokio::test]
+    async fn snapshot_is_scoped_and_retires_with_the_request() {
+        let rt = make_runtime();
+        let (own, _own_rx) = rt
+            .request(
+                acp("s1"),
+                "Bash".into(),
+                serde_json::json!({"command": "ls"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        let (other, _other_rx) = rt
+            .request(
+                acp("s2"),
+                "Bash".into(),
+                serde_json::json!({"command": "rm"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        let (own, other) = (own.unwrap(), other.unwrap());
+        assert!(
+            rt.pending_review(&own, ReviewScope::AcpSession("s1"))
+                .await
+                .is_some()
+        );
+        assert!(
+            rt.pending_review(&other, ReviewScope::AcpSession("s1"))
+                .await
+                .is_none()
+        );
+        let scoped = rt
+            .pending_tool_requests(ReviewScope::AcpSession("s1"))
+            .await;
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, own);
+        rt.resolve(&own, ApprovalOutcome::Once).await;
+        assert!(
+            rt.pending_review(&own, ReviewScope::AllTools)
+                .await
+                .is_none()
+        );
+    }
+
+    /// Sender-consent cards are not tool approvals: no snapshot, no rescan
+    /// entry, and their card text stays on `Requested`.
+    #[tokio::test]
+    async fn sender_consent_is_never_a_tool_review() {
+        let rt = make_runtime();
+        let mut events = rt.subscribe();
+        let source = ApprovalSource::RemotePeer {
+            conversation_id: "c1".into(),
+            peer_id: crate::domain::models::peer_identity::PeerId::from_public_key(&[7u8; 32])
+                .unwrap(),
+            principal: None,
+        };
+        let (id, _rx) = rt
+            .request(
+                source,
+                "a2a/sender-consent".into(),
+                serde_json::json!({"card": "Consent required\n[y] Allow once"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        let id = id.unwrap();
+        match events.recv().await.unwrap() {
+            ApprovalRuntimeEvent::Requested { consent_card, .. } => {
+                assert_eq!(
+                    consent_card.as_deref(),
+                    Some("Consent required\n[y] Allow once")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            rt.pending_review(&id, ReviewScope::AllTools)
+                .await
+                .is_none()
+        );
+        assert!(
+            rt.pending_tool_requests(ReviewScope::AllTools)
+                .await
+                .is_empty()
+        );
+        assert_eq!(rt.pending_sender_consent().await.len(), 1);
+    }
+
+    /// Rule 4 ratchet (`K07`/`M29`): the snapshot validates and acquires under
+    /// exactly one pending-state lock acquisition — a validate-then-read split
+    /// counts two.
+    #[tokio::test]
+    async fn pending_review_acquires_the_pending_lock_exactly_once() {
+        let rt = make_runtime();
+        let (id, _rx) = rt
+            .request(
+                foreground("c1"),
+                "Write".into(),
+                serde_json::json!({"file_path": "/w/a", "content": "b"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        let id = id.unwrap();
+        let before = rt.pending_lock_acquisitions();
+        assert!(
+            rt.pending_review(&id, ReviewScope::AllTools)
+                .await
+                .is_some()
+        );
+        assert_eq!(rt.pending_lock_acquisitions() - before, 1);
+        let before = rt.pending_lock_acquisitions();
+        assert!(
+            rt.pending_review(&RequestId("missing".into()), ReviewScope::AllTools)
+                .await
+                .is_none()
+        );
+        assert_eq!(rt.pending_lock_acquisitions() - before, 1);
+    }
+
+    /// Shutdown cancels every responder in request order; nothing stays
+    /// pending, so a late decision resolves nothing.
+    #[tokio::test]
+    async fn cancel_all_cancels_every_responder() {
+        let rt = make_runtime();
+        let mut events = rt.subscribe();
+        let mut receivers = Vec::new();
+        for command in ["one", "two"] {
+            let (_id, rx) = rt
+                .request(
+                    foreground("c1"),
+                    "Bash".into(),
+                    serde_json::json!({ "command": command }),
+                    ToolRisk::Elevated,
+                    None,
+                    None,
+                )
+                .await;
+            receivers.push(rx);
+        }
+        let first = match events.recv().await.unwrap() {
+            ApprovalRuntimeEvent::Requested { id, .. } => id,
+            other => panic!("{other:?}"),
+        };
+        let _ = events.recv().await.unwrap();
+        rt.cancel_all(CancelReason::RuntimeShutdown).await;
+        for rx in receivers {
+            assert_eq!(rx.await.unwrap().outcome, ApprovalOutcome::Cancel);
+        }
+        match events.recv().await.unwrap() {
+            ApprovalRuntimeEvent::Cancelled {
+                id,
+                reason: CancelReason::RuntimeShutdown,
+            } => assert_eq!(id, first),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            rt.pending_tool_requests(ReviewScope::AllTools)
+                .await
+                .is_empty()
+        );
+        rt.resolve(&first, ApprovalOutcome::Once).await;
+        assert_eq!(rt.rejected_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn request_after_shutdown_cancels_without_pending_or_broadcast() {
+        let rt = make_runtime();
+        let mut events = rt.subscribe();
+        rt.cancel_all(CancelReason::RuntimeShutdown).await;
+        let source = foreground("after-shutdown");
+        let input = serde_json::json!({ "command": "must not run 漢🙂" });
+        let expected = crate::domain::models::invocation_fingerprint::InvocationFingerprint::of(
+            "Bash",
+            &input,
+            &source.scope_agent_id(),
+        )
+        .unwrap();
+        let (id, decision) = rt
+            .request(source, "Bash".into(), input, ToolRisk::Elevated, None, None)
+            .await;
+        assert!(id.is_none());
+        let resolved = decision.await.unwrap();
+        assert_eq!(resolved.outcome, ApprovalOutcome::Cancel);
+        assert_eq!(resolved.fp, expected);
+        assert!(
+            rt.pending_tool_requests(ReviewScope::AllTools)
+                .await
+                .is_empty()
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_an_admission_waiting_for_a_session_grant() {
+        let rt = make_runtime();
+        let mut events = rt.subscribe();
+        let mut session = rt.session.write().await;
+        session.always_tools.insert("Bash".into());
+        let request = rt.request(
+            foreground("session-shutdown-race"),
+            "Bash".into(),
+            serde_json::json!({ "command": "must not run" }),
+            ToolRisk::Elevated,
+            None,
+            None,
+        );
+        tokio::pin!(request);
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        rt.cancel_all(CancelReason::RuntimeShutdown).await;
+        drop(session);
+        let (id, decision) = request.await;
+        assert!(id.is_none());
+        assert_eq!(decision.await.unwrap().outcome, ApprovalOutcome::Cancel);
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_an_admission_already_waiting_for_the_pending_lock() {
+        let rt = make_runtime();
+        let mut events = rt.subscribe();
+        let pending_guard = rt.pending.write().await;
+        let request = rt.request(
+            foreground("shutdown-race"),
+            "Bash".into(),
+            serde_json::json!({ "command": "must not run" }),
+            ToolRisk::Elevated,
+            None,
+            None,
+        );
+        tokio::pin!(request);
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let shutdown = rt.cancel_all(CancelReason::RuntimeShutdown);
+        tokio::pin!(shutdown);
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        drop(pending_guard);
+        let (id, decision) = request.await;
+        shutdown.await;
+        assert!(id.is_none());
+        assert_eq!(decision.await.unwrap().outcome, ApprovalOutcome::Cancel);
+        assert!(
+            rt.pending_tool_requests(ReviewScope::AllTools)
+                .await
+                .is_empty()
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 }

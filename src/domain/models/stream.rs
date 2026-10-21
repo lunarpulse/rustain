@@ -30,6 +30,8 @@ pub enum StreamChunk {
     ToolUse {
         id: String,
         name: String,
+        /// Story 19.20c `A6`: may be absent on a withheld attach projection.
+        #[serde(default)]
         input: serde_json::Value,
     },
     ToolResult {

@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::adapters::rap::AgentSigner;
-use crate::domain::models::tool_call::RequestId;
+use crate::domain::models::tool_call::{ApprovalSource, RequestId};
 use crate::domain::models::{
     AgentEnvelope, ApprovalOutcome, ChannelKind, ChatMessage, Ed25519Sig, ImageAttachment,
     PeerIdentity, PermissionMode, SemanticMessageType, SendActionId, TeamProposalDecision,
@@ -43,7 +43,10 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// Current wire protocol version. Bump on ANY breaking frame-shape change so an
 /// older client/daemon is rejected with [`ProtocolError::VersionMismatch`]
 /// rather than mis-parsing (forward-compat for 12.3/12.4).
-pub const PROTOCOL_VERSION: u32 = 7;
+///
+/// v8 (Story 19.20c): exact approval input chunks, approval refusals, typed
+/// withheld tool inputs, over-cap frame notices, retained-approval count.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -97,6 +100,7 @@ pub struct AttachSnapshot {
     pub conversation_id: String,
     /// The current transcript (origin-tagged — AC5). The client may page further
     /// back via [`ClientFrame::HistoryRequest`].
+    #[serde(serialize_with = "transcript_serde::serialize")]
     pub transcript: Vec<ChatMessage>,
     /// The daemon's current permission mode (never `Yolo` headless — AC6).
     pub permission_mode: PermissionMode,
@@ -112,6 +116,11 @@ pub struct AttachSnapshot {
     /// actionable card frames.
     #[serde(default)]
     pub pending_consent_cards: usize,
+    /// Story 19.20c `O2`: tool approvals retained for the next trusted-local
+    /// writer. A read-only mirror prints it as a passive one-line notice; the
+    /// writer receives the requests themselves, never this count's card.
+    #[serde(default)]
+    pub retained_approvals: usize,
     /// Trusted-local row targets only; absent for authenticated Peer tier.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub peer_row_controls:
@@ -121,6 +130,271 @@ pub struct AttachSnapshot {
     /// Process-conversation selection shared by trusted-local attachments only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recipient_context_ids: Vec<String>,
+    /// Story 19.20c `A6`: transcript tool calls whose arguments this
+    /// connection did not receive, and why. Their `input` key is absent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld_tool_inputs: Vec<WithheldToolInput>,
+}
+
+/// Story 19.20c `A6` — the typed, host-minted reason a projected tool event or
+/// transcript tool call carries no arguments. Never a sentinel inside `input`:
+/// the projected `input` key is absent on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ToolInputWithheld {
+    /// Peer-tier attachments never receive tool arguments (owner ruling O1).
+    PeerTier,
+    /// The arguments' serialized size does not fit one attach frame.
+    TooLarge { bytes: u64 },
+}
+
+impl ToolInputWithheld {
+    /// The ratified tool-block copy (UX Approval Pattern clarification
+    /// 2026-10-20, Observers / Too large rows).
+    #[must_use]
+    pub fn notice(self) -> String {
+        match self {
+            Self::PeerTier => "input withheld — not shared with peer attachments".to_owned(),
+            Self::TooLarge { bytes } => {
+                format!("input too large to show here ({})", human_bytes(bytes))
+            }
+        }
+    }
+}
+
+/// Client copy for [`DaemonFrame::FrameTooLarge`] (Story 19.20c `P6`):
+/// `<frame> too large to show here (<size>)`, mirroring the ratified
+/// tool-input notice.
+#[must_use]
+pub fn frame_too_large_notice(frame: &str, bytes: u64) -> String {
+    format!("{frame} too large to show here ({})", human_bytes(bytes))
+}
+
+/// `<n> B` / `<n.n> KiB` / `<n.n> MiB` — sizes for the too-large notice.
+#[must_use]
+pub fn human_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    #[allow(clippy::cast_precision_loss)]
+    let value = bytes as f64;
+    if value < KIB {
+        format!("{bytes} B")
+    } else if value < KIB * KIB {
+        format!("{:.1} KiB", value / KIB)
+    } else {
+        format!("{:.1} MiB", value / (KIB * KIB))
+    }
+}
+
+/// One transcript tool call projected without its arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WithheldToolInput {
+    pub message_id: String,
+    pub tool_call_id: String,
+    pub withheld: ToolInputWithheld,
+}
+
+/// Why the daemon refused an [`ClientFrame::ApprovalResponse`] (Story 19.20c
+/// `A7`). A refusal resolves nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalRefusal {
+    /// This connection is not the registered trusted-local writer.
+    WriterOnly,
+    /// The request is pending but was issued to another connection.
+    IssuedElsewhere,
+    /// No such pending request: already decided, cancelled, or never issued.
+    NoLongerPending,
+}
+
+impl std::fmt::Display for ApprovalRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::WriterOnly => "approval refused: only the attached writer can decide",
+            Self::IssuedElsewhere => "approval refused: that request was issued to another client",
+            Self::NoLongerPending => "approval refused: that request is no longer pending",
+        })
+    }
+}
+
+/// Serialize transcript messages with every `null` tool-call `input` key
+/// omitted. Lossless: `ToolCallInfo.input` defaults to `null` on decode. A
+/// withheld projection therefore carries no placeholder value on the wire.
+mod transcript_serde {
+    use super::ChatMessage;
+    use serde::Serialize as _;
+
+    pub fn serialize<S: serde::Serializer>(
+        messages: &[ChatMessage],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut value = serde_json::to_value(messages).map_err(serde::ser::Error::custom)?;
+        if let Some(messages) = value.as_array_mut() {
+            for message in messages {
+                let calls = message
+                    .get_mut("toolCalls")
+                    .and_then(serde_json::Value::as_array_mut);
+                for call in calls.into_iter().flatten() {
+                    super::remove_null_input(call);
+                }
+            }
+        }
+        value.serialize(serializer)
+    }
+}
+
+/// Serialize one projected event with its tool `input` key omitted (the
+/// typed [`ToolInputWithheld`] beside it says why).
+mod withheld_event_serde {
+    use super::RawEvent;
+    use serde::Serialize as _;
+
+    pub fn serialize<S: serde::Serializer>(
+        event: &RawEvent,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut value = serde_json::to_value(event).map_err(serde::ser::Error::custom)?;
+        for pointer in [
+            "/kind/Provider/toolUse",
+            "/kind/PeerProvider/toolUse",
+            "/kind/Tool/call/request",
+        ] {
+            if let Some(carrier) = value.pointer_mut(pointer) {
+                super::remove_null_input(carrier);
+            }
+        }
+        value.serialize(serializer)
+    }
+}
+
+fn remove_null_input(carrier: &mut serde_json::Value) {
+    if let Some(object) = carrier.as_object_mut() {
+        if object.get("input").is_some_and(serde_json::Value::is_null) {
+            object.remove("input");
+        }
+    }
+}
+
+fn exact_input_chunk_budget() -> usize {
+    // Six bytes per source byte covers `\u00XX`; the remainder is envelope.
+    const ENVELOPE_RESERVE: u32 = 64 * 1024;
+    (((MAX_FRAME_BYTES - ENVELOPE_RESERVE) / 6) as usize).min(1024 * 1024)
+}
+
+/// Story 19.20c `P6`: the one-line summary on the wire is bounded by the same
+/// frame-derived budget as one exact-input chunk, ending in `…` when cut — the
+/// complete input follows in chunks on the same surface, so it is never lost.
+#[must_use]
+pub fn bounded_wire_summary(summary: String) -> String {
+    let budget = exact_input_chunk_budget();
+    if summary.len() <= budget {
+        return summary;
+    }
+    let mut end = budget;
+    while !summary.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &summary[..end])
+}
+
+/// Story 19.20c `A10` — split the serialized exact input into ordered,
+/// UTF-8-safe chunks whose frames stay under [`MAX_FRAME_BYTES`] even at
+/// worst-case JSON escaping. Ordinary inputs are one chunk; an empty input is
+/// one empty chunk, so every transfer has at least one part.
+#[must_use]
+pub fn exact_input_chunks(serialized: &str) -> Vec<&str> {
+    let budget = exact_input_chunk_budget();
+    if serialized.is_empty() {
+        return vec![""];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < serialized.len() {
+        let mut end = start.saturating_add(budget).min(serialized.len());
+        while end > start && !serialized.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = serialized[start..]
+                .char_indices()
+                .nth(1)
+                .map_or(serialized.len(), |(offset, _)| start + offset);
+        }
+        chunks.push(&serialized[start..end]);
+        start = end;
+    }
+    chunks
+}
+
+/// Why a client discarded an exact-input transfer. The request stays
+/// decidable; only Review is unavailable (deciding without Review is allowed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactInputError {
+    OutOfOrder { expected: u32, got: u32 },
+    Overflow { expected_bytes: u64 },
+    CountMismatch { expected: u32, got: u32 },
+    LengthMismatch { expected_bytes: u64, got_bytes: u64 },
+    Decode(String),
+}
+
+/// Story 19.20c `A10` — client-side reassembly of one request's exact input.
+/// Review is published only from [`Self::finish`]'s `Ok`: partial, missing,
+/// duplicate or out-of-order chunks never appear complete. The caller keys one
+/// assembly per `request_id`, so another request's chunks never mix in.
+#[derive(Debug)]
+pub struct ExactInputAssembly {
+    expected_bytes: u64,
+    next_sequence: u32,
+    buffer: String,
+}
+
+impl ExactInputAssembly {
+    #[must_use]
+    pub fn new(expected_bytes: u64) -> Self {
+        Self {
+            expected_bytes,
+            next_sequence: 0,
+            buffer: String::new(),
+        }
+    }
+
+    /// Append the next chunk; anything but the next sequence is an error.
+    pub fn push(&mut self, sequence: u32, data: &str) -> Result<(), ExactInputError> {
+        if sequence != self.next_sequence {
+            return Err(ExactInputError::OutOfOrder {
+                expected: self.next_sequence,
+                got: sequence,
+            });
+        }
+        let total = self.buffer.len() as u64 + data.len() as u64;
+        if total > self.expected_bytes {
+            return Err(ExactInputError::Overflow {
+                expected_bytes: self.expected_bytes,
+            });
+        }
+        self.buffer.push_str(data);
+        self.next_sequence += 1;
+        Ok(())
+    }
+
+    /// Validate the completion boundary and decode the exact value.
+    pub fn finish(self, chunks: u32) -> Result<serde_json::Value, ExactInputError> {
+        if chunks != self.next_sequence {
+            return Err(ExactInputError::CountMismatch {
+                expected: chunks,
+                got: self.next_sequence,
+            });
+        }
+        let got_bytes = self.buffer.len() as u64;
+        if got_bytes != self.expected_bytes {
+            return Err(ExactInputError::LengthMismatch {
+                expected_bytes: self.expected_bytes,
+                got_bytes,
+            });
+        }
+        serde_json::from_str(&self.buffer)
+            .map_err(|error| ExactInputError::Decode(error.to_string()))
+    }
 }
 
 fn peer_row_revision_is_zero(revision: &u64) -> bool {
@@ -570,6 +844,17 @@ pub enum DaemonFrame {
     },
     /// A forwarded turn event (the reused [`ClientEvent`]/`RawEvent` projection).
     Event(ClientEvent),
+    /// Story 19.20c `A6` — a tool event projected for this connection without
+    /// its arguments: the event's tool `input` key is absent and `withheld`
+    /// says why (Peer tier, or too large for one frame).
+    ToolEventWithheld {
+        #[serde(serialize_with = "withheld_event_serde::serialize")]
+        event: ClientEvent,
+        withheld: ToolInputWithheld,
+    },
+    /// Story 19.20c `P6` — a frame that would exceed [`MAX_FRAME_BYTES`] even
+    /// after projection. Sent instead of that frame; the connection stays up.
+    FrameTooLarge { frame: String, bytes: u64 },
     /// Committed local transcript/control mutation, trusted-local observers only.
     PeerRowOperation(
         #[serde(with = "peer_row_operation_serde")]
@@ -577,17 +862,49 @@ pub enum DaemonFrame {
     ),
     /// A page of history in response to [`ClientFrame::HistoryRequest`].
     History {
+        #[serde(serialize_with = "transcript_serde::serialize")]
         messages: Vec<ChatMessage>,
         has_more: bool,
+        /// Story 19.20c `A6`: tool calls on this page without their arguments.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        withheld_tool_inputs: Vec<WithheldToolInput>,
     },
-    /// A tool needs approval — the writer client renders the permission card and
-    /// replies [`ClientFrame::ApprovalResponse`] (AC6 #1).
+    /// A decision is needed — sent to the registered writer only. The writer
+    /// renders the card and replies [`ClientFrame::ApprovalResponse`].
+    ///
+    /// Story 19.20c: for a tool approval `summary` is the one-line per-tool
+    /// summary (writer-only, so it may contain values) and `input_bytes` is the
+    /// serialized size of the exact input that follows as ordered
+    /// [`DaemonFrame::ApprovalInputChunk`]s and one
+    /// [`DaemonFrame::ApprovalInputComplete`]. For a sender-consent card
+    /// (`tool == "a2a/sender-consent"`) `summary` is the unchanged card text
+    /// and `input_bytes` is `None`.
     ApprovalRequest {
         request_id: RequestId,
         tool: String,
-        input_preview: String,
+        source: ApprovalSource,
         risk: ToolRisk,
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_bytes: Option<u64>,
     },
+    /// One ordered UTF-8-safe part of a tool approval's serialized exact input.
+    ApprovalInputChunk {
+        request_id: RequestId,
+        sequence: u32,
+        data: String,
+    },
+    /// Completion boundary for a request's exact input: `chunks` parts sent.
+    ApprovalInputComplete { request_id: RequestId, chunks: u32 },
+    /// Story 19.20c `A7` — an `ApprovalResponse` was refused; nothing resolved.
+    ApprovalRefused {
+        request_id: RequestId,
+        reason: ApprovalRefusal,
+    },
+    /// Story 19.20c `AC6` — the request issued to this writer was resolved or
+    /// cancelled; the client retires its card, queue entry, Review and any
+    /// partial transfer. Late chunks for it are ignored.
+    ApprovalClosed { request_id: RequestId },
     /// Consolidation proposals generated by the daemon — sent to the writer only
     /// (Story 12.2d AC2). The client renders the existing `PendingConsolidationCard`
     /// verbatim and sends `ConsolidationResolve` on accept/decline.
@@ -816,6 +1133,139 @@ mod tests {
         Ed25519Sig(vec![0u8; 64])
     }
 
+    /// Story 19.20c `A10`/`M26`/`M27`: every chunk frame fits the cap at
+    /// worst-case escaping, chunks split only on char boundaries, and the
+    /// assembly reproduces the exact value byte for byte.
+    #[test]
+    fn exact_input_chunks_fit_the_cap_and_reassemble_exactly() {
+        let content = format!("{}\"\\\n漢🙂{}", "\u{1}".repeat(3_000_000), "TAIL");
+        let input = serde_json::json!({ "file_path": "/w/big", "content": content });
+        let serialized = serde_json::to_string(&input).unwrap();
+        let chunks = exact_input_chunks(&serialized);
+        assert!(chunks.len() > 1, "a large input travels in several parts");
+        let id = RequestId("r-big".into());
+        let mut assembly = ExactInputAssembly::new(serialized.len() as u64);
+        for (sequence, data) in chunks.iter().enumerate() {
+            let frame = DaemonFrame::ApprovalInputChunk {
+                request_id: id.clone(),
+                sequence: sequence as u32,
+                data: (*data).to_owned(),
+            };
+            let bytes = serde_json::to_vec(&frame).unwrap();
+            assert!(bytes.len() < MAX_FRAME_BYTES as usize, "{}", bytes.len());
+            assembly.push(sequence as u32, data).unwrap();
+        }
+        assert_eq!(assembly.finish(chunks.len() as u32).unwrap(), input);
+        assert_eq!(exact_input_chunks(""), [""]);
+    }
+
+    #[test]
+    fn huge_single_line_summary_fits_frame_without_losing_exact_input() {
+        let input =
+            serde_json::json!({ "command": format!("{}漢🙂TAIL", "x".repeat(10 * 1024 * 1024)) });
+        let serialized = serde_json::to_string(&input).unwrap();
+        let summary = bounded_wire_summary(
+            crate::domain::services::approval_presentation::summary("Bash", &input, true),
+        );
+        assert!(summary.ends_with('…'));
+        let frame = DaemonFrame::ApprovalRequest {
+            request_id: RequestId("r-huge-summary".into()),
+            tool: "Bash".into(),
+            source: ApprovalSource::ForegroundTurn {
+                conversation_id: "c".into(),
+            },
+            risk: ToolRisk::Elevated,
+            summary,
+            input_bytes: Some(serialized.len() as u64),
+        };
+        assert!(serde_json::to_vec(&frame).unwrap().len() < MAX_FRAME_BYTES as usize);
+        let chunks = exact_input_chunks(&serialized);
+        let mut assembly = ExactInputAssembly::new(serialized.len() as u64);
+        for (sequence, data) in chunks.iter().enumerate() {
+            assembly.push(sequence as u32, data).unwrap();
+        }
+        assert_eq!(assembly.finish(chunks.len() as u32).unwrap(), input);
+        assert_eq!(bounded_wire_summary("short".into()), "short");
+        let unicode = bounded_wire_summary("漢🙂".repeat(1024 * 1024));
+        assert!(unicode.ends_with('…'));
+    }
+
+    /// Partial, duplicate, out-of-order or miscounted transfers never complete.
+    #[test]
+    fn exact_input_assembly_rejects_incomplete_or_misordered_parts() {
+        let serialized = r#"{"command":"ls"}"#;
+        let (head, tail) = serialized.split_at(5);
+        let mut assembly = ExactInputAssembly::new(serialized.len() as u64);
+        assert!(matches!(
+            assembly.push(1, tail),
+            Err(ExactInputError::OutOfOrder {
+                expected: 0,
+                got: 1
+            })
+        ));
+        assembly.push(0, head).unwrap();
+        assert!(assembly.push(0, head).is_err(), "duplicate part");
+        let partial = ExactInputAssembly::new(serialized.len() as u64);
+        assert!(partial.finish(0).is_err(), "missing parts");
+        let mut short = ExactInputAssembly::new(serialized.len() as u64);
+        short.push(0, head).unwrap();
+        assert!(matches!(
+            short.finish(1),
+            Err(ExactInputError::LengthMismatch { .. })
+        ));
+        let mut over = ExactInputAssembly::new(3);
+        assert!(matches!(
+            over.push(0, serialized),
+            Err(ExactInputError::Overflow { .. })
+        ));
+        assembly.push(1, tail).unwrap();
+        assert!(matches!(
+            assembly.finish(3),
+            Err(ExactInputError::CountMismatch { .. })
+        ));
+    }
+
+    /// `A6`: a withheld projection carries no `input` key on the wire — not a
+    /// placeholder — and the typed reason travels beside it.
+    #[test]
+    fn withheld_projections_omit_the_input_key() {
+        let frame = DaemonFrame::ToolEventWithheld {
+            event: RawEvent {
+                conversation_id: None,
+                timestamp_ms: 1,
+                kind: RawEventKind::Tool(crate::domain::models::ToolCallTransition {
+                    conversation_id: "c".into(),
+                    call: crate::domain::models::ToolCall::Scheduled {
+                        id: "t-1".into(),
+                        request: crate::domain::models::ToolCallRequest {
+                            id: "t-1".into(),
+                            tool_name: "Bash".into(),
+                            input: serde_json::Value::Null,
+                        },
+                    },
+                }),
+            },
+            withheld: ToolInputWithheld::PeerTier,
+        };
+        let wire = serde_json::to_value(&frame).unwrap();
+        let request = wire
+            .pointer("/toolEventWithheld/event/kind/Tool/call/request")
+            .expect("request present");
+        assert!(request.get("input").is_none(), "{wire}");
+        assert_eq!(
+            wire.pointer("/toolEventWithheld/withheld/kind"),
+            Some(&serde_json::json!("peerTier"))
+        );
+        let decoded: DaemonFrame = serde_json::from_value(wire).unwrap();
+        assert!(matches!(
+            decoded,
+            DaemonFrame::ToolEventWithheld {
+                withheld: ToolInputWithheld::PeerTier,
+                ..
+            }
+        ));
+    }
+
     fn sample_client_frames() -> Vec<ClientFrame> {
         vec![
             ClientFrame::Attach {
@@ -902,9 +1352,15 @@ mod tests {
                     channels: vec![ChannelKind::Terminal],
                     blocked_actions_waiting: 2,
                     pending_consent_cards: 0,
+                    retained_approvals: 1,
                     peer_row_controls: Default::default(),
                     peer_row_revision: 0,
                     recipient_context_ids: Vec::new(),
+                    withheld_tool_inputs: vec![WithheldToolInput {
+                        message_id: "m-1".into(),
+                        tool_call_id: "t-1".into(),
+                        withheld: ToolInputWithheld::PeerTier,
+                    }],
                 },
             },
             DaemonFrame::Event(RawEvent {
@@ -950,12 +1406,49 @@ mod tests {
             DaemonFrame::History {
                 messages: vec![],
                 has_more: true,
+                withheld_tool_inputs: Vec::new(),
+            },
+            DaemonFrame::ToolEventWithheld {
+                event: RawEvent {
+                    conversation_id: Some("conv-1".into()),
+                    timestamp_ms: 7,
+                    kind: RawEventKind::Provider(StreamChunk::ToolUse {
+                        id: "t-1".into(),
+                        name: "Bash".into(),
+                        input: serde_json::Value::Null,
+                    }),
+                },
+                withheld: ToolInputWithheld::TooLarge { bytes: 9_000_000 },
+            },
+            DaemonFrame::FrameTooLarge {
+                frame: "event".into(),
+                bytes: 9_000_000,
             },
             DaemonFrame::ApprovalRequest {
                 request_id: RequestId::new(),
                 tool: "Write".into(),
-                input_preview: "config.toml".into(),
+                source: ApprovalSource::ForegroundTurn {
+                    conversation_id: "conv-1".into(),
+                },
                 risk: ToolRisk::Standard,
+                summary: "config.toml…".into(),
+                input_bytes: Some(42),
+            },
+            DaemonFrame::ApprovalInputChunk {
+                request_id: RequestId("r-1".into()),
+                sequence: 0,
+                data: "{\"file_path\":\"config.toml\"}".into(),
+            },
+            DaemonFrame::ApprovalInputComplete {
+                request_id: RequestId("r-1".into()),
+                chunks: 1,
+            },
+            DaemonFrame::ApprovalRefused {
+                request_id: RequestId("r-1".into()),
+                reason: ApprovalRefusal::IssuedElsewhere,
+            },
+            DaemonFrame::ApprovalClosed {
+                request_id: RequestId("r-1".into()),
             },
             DaemonFrame::RecipientActionResult {
                 action: RecipientAction::Reply,
@@ -1206,10 +1699,6 @@ mod tests {
 
     #[tokio::test]
     async fn v7_proposal_frames_preserve_exact_snapshot_without_a2a_features() {
-        assert_eq!(
-            PROTOCOL_VERSION, 7,
-            "attached proposal frames require protocol v7"
-        );
         let bytes = br#"{"teamProposal":{"proposal":"tp_exact","recipients":["jun-dev","lena-po"],"message_type":"architecture_update","body":"  exact\n\tbody \u00e9\u754c  "}}"#;
         let frame: DaemonFrame = serde_json::from_slice(bytes).unwrap();
         let (mut writer, mut reader) = tokio::io::duplex(4096);
@@ -1239,7 +1728,6 @@ mod tests {
             "  exact\n\tbody é界  ".as_bytes(),
             "proposal body bytes must survive the feature-independent frame path"
         );
-        assert_eq!(PROTOCOL_VERSION, 7, "proposal opt-in is additive to v7");
         write_frame(&mut writer, &ClientFrame::EnableTeamProposals)
             .await
             .unwrap();

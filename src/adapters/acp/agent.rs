@@ -71,7 +71,7 @@ pub(crate) struct SessionCore {
     security: Arc<dyn SecurityPort>,
     pub(crate) tools: Arc<dyn ToolSetPort>,
     tool_scheduler: Arc<ToolScheduler>,
-    approval: Arc<ApprovalRuntime>,
+    pub(crate) approval: Arc<ApprovalRuntime>,
     storage: Arc<dyn StoragePort>,
     ledger: Arc<dyn UsageLedgerPort>,
     registry: Arc<crate::adapters::provider::ProviderRegistry>,
@@ -953,37 +953,42 @@ impl RustainAcpAgent {
                 approval_event = approval_rx.recv() => {
                     match approval_event {
                         Ok(event) => {
-                            if let Some(request) = approval_request_to_acp(session_id.clone(), &event) {
-                                let tool_name = match &event {
-                                    crate::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { tool, .. } => tool.clone(),
-                                    _ => String::new(),
-                                };
-                                let response = match tokio::time::timeout(
-                                    Duration::from_secs(30),
-                                    self.request_permission(request),
+                            let crate::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id: requested_id, .. } = &event else {
+                                continue;
+                            };
+                            let review = approval
+                                .pending_review(
+                                    requested_id,
+                                    crate::domain::services::approval_runtime::ReviewScope::AcpSession(&session_id.0),
                                 )
-                                .await
-                                {
-                                    Ok(Ok(resp)) => resp,
-                                    Ok(Err(e)) => {
-                                        // P-3: resolve the pending approval before propagating.
-                                        if let crate::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } = event {
-                                            approval.resolve(&id, crate::domain::models::ApprovalOutcome::Reject { feedback: None }).await;
-                                        }
-                                        return Err(e);
-                                    }
-                                    Err(_) => {
-                                        // P-2: approval timed out — reject and keep the loop alive.
-                                        if let crate::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } = event {
-                                            approval.resolve(&id, crate::domain::models::ApprovalOutcome::Reject { feedback: None }).await;
-                                        }
-                                        continue;
-                                    }
-                                };
-                                if let crate::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } = event {
-                                    approval.resolve(&id, permission_response_to_outcome(response, &tool_name)).await;
+                                .await;
+                            let Some(review) = review else {
+                                #[cfg(feature = "test-instrumentation")]
+                                super::run::permission_test_probe::reviewed(&session_id.0, false);
+                                continue;
+                            };
+                            #[cfg(feature = "test-instrumentation")]
+                            super::run::permission_test_probe::reviewed(&session_id.0, true);
+                            let request = approval_request_to_acp(session_id.clone(), &review);
+                            let tool_name = review.tool.clone();
+                            let response = tokio::select! {
+                                biased;
+                                // Story 19.20c: no reading deadline. Dropping the
+                                // permission future closes its ack receiver, retiring
+                                // the pump's SDK request. The scheduler owns source
+                                // cancellation and settles the pending approval.
+                                _ = turn_cancel.cancelled() => continue,
+                                response = self.request_permission(request) => response,
+                            };
+                            let response = match response {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    // P-3: reject before propagating an RPC error.
+                                    approval.resolve(&review.id, crate::domain::models::ApprovalOutcome::Reject { feedback: None }).await;
+                                    return Err(error);
                                 }
-                            }
+                            };
+                            approval.resolve(&review.id, permission_response_to_outcome(response, &tool_name)).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("ACP approval broadcast lagged {n} events");

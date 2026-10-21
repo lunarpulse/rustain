@@ -13,6 +13,7 @@ pub mod consolidation_card;
 pub mod context_card;
 pub mod cross_search;
 pub mod delegation_card;
+pub mod delimited_body;
 pub mod diverge_view;
 pub mod forget_card;
 pub mod fork_confirm;

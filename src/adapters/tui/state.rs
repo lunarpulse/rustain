@@ -73,7 +73,7 @@ pub struct PendingPermission {
     pub id: RequestId,
     pub source: ApprovalSource,
     pub tool_name: String,
-    pub tool_input: String,
+    pub input: std::sync::Arc<serde_json::Value>,
     pub risk: ToolRisk,
 }
 
@@ -2557,6 +2557,8 @@ pub struct TuiState {
     pub permission_queue: PermissionQueue,
     /// Active feedback input state (AC5 — deny with feedback mini-input).
     pub pending_feedback_input: Option<FeedbackInputState>,
+    /// Story 19.20c: request-pinned exact input reader and width-bound layout.
+    pub permission_reader: crate::adapters::tui::widgets::permission_prompt::PermissionReaderState,
     /// Active retry state for provider error recovery.
     pub retry_state: Option<RetryState>,
     /// Feedback blocks displayed in conversation, keyed by block ID.
@@ -3118,6 +3120,7 @@ impl TuiState {
             pending_permission: None,
             permission_queue: PermissionQueue::default(),
             pending_feedback_input: None,
+            permission_reader: Default::default(),
             retry_state: None,
             feedback_blocks: BTreeMap::new(),
             team_send_blocks: BTreeMap::new(),

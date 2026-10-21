@@ -358,8 +358,8 @@ Detach or replacement retains a pending proposal and re-emits it when the next
 trusted writer opts in. Conversation reset/close, shutdown and process restart withdraw
 it without peer I/O. A full writer queue produces an explicit terminal protocol
 error and closes the connection, retaining the proposal for the next writer;
-this does not repair legacy `History`/`ApprovalRequest` queue drops. Saturating
-the eight-send limit refuses Send while leaving its proposal pending for an
+this same terminal-close/retention rule also applies to exact tool approvals.
+Saturating the eight-send limit refuses Send while leaving its proposal pending for an
 explicit human retry. Decisions enter the operator FIFO and stale-writer fence;
 duplicate or unknown decisions cannot create a second send.
 
@@ -397,10 +397,10 @@ The TUI holds **no local agent core** — it forwards each turn as a
 and renders the daemon's streamed events through the same `reduce()` path the local
 TUI uses. Memory recall rides a normal daemon turn (no client provider needed).
 
-**Multi-attach** is read-only: the first writer holds the write slot; later attaches
-are granted `ReadOnly` (daemon-enforced — a read-only client's writes are refused
-with `ProtocolError::ReadOnly`). A read-only client shows a persistent
-`read-only — another client holds write` status segment, a one-time notice, and an
+**Multi-attach** is read-only: the first trusted-local writer holds the write slot;
+later attaches are granted `ReadOnly` (daemon-enforced — ordinary read-only writes
+are refused with `ProtocolError::ReadOnly`; tool decisions use `ApprovalRefused`).
+A read-only client shows a persistent `read-only — another client holds write` status segment, a one-time notice, and an
 inert (dimmed `read-only — can't send here`) input box. Promotion happens by the
 next *new* attach after the writer detaches.
 
@@ -440,34 +440,89 @@ again (build-once), so an **idle daemon holds no live provider connection** and
 stays under 30 MB. The laziness invariant is checked two ways: a fast in-process
 unit gate (build-counter `0 → 1 → 1`) on every PR, and the `#[ignore]`d release
 idle-RSS gate on the systemd nightly lane.
+Refused tool-approval responses do not initialize this runtime: authority is
+checked first, and pending-request lookup uses only an already-built runtime.
 
 ### Headless approval policy
 
 The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 
-- **Attached writer** → the approval is forwarded as an `ApprovalRequest` frame; the
-  client renders the permission card and replies. An unresponsive writer times out
-  to a conservative **deny** (never an indefinite hang).
-- **Unattended** → **deny-by-default**: read-only/`Safe` tools auto-proceed; anything
+- **Attached TrustedLocal writer** → a writer-only `ApprovalRequest`, ordered
+  exact-input chunks and an explicit completion boundary. The client renders the
+  permission card and can Review the complete pending input before replying.
+  There is **no reading deadline**. Read-only mirrors and Peer-tier attachments
+  receive neither the approval card nor these chunks.
+- **Detach, replacement or a full writer queue** → pending tool approvals remain
+  pending. A full queue publishes a terminal protocol error and closes the
+  connection, never silently dropping or denying its approvals. After the next
+  trusted-local writer's `AttachAck`, requests are reissued in request order from
+  the authoritative pending input, with fresh chunks. If replay itself fills the
+  queue, the same close-and-retain rule applies.
+- **Waiting turns** → a retained approval keeps the turn lock. Later operator and
+  channel turns, `/clear`, notify-and-draft generation and inbound A2A peer turns
+  queue behind it until a writer decides or shutdown cancels it. Cron completions
+  are committed by the forwarder and do not queue behind that lock. A read-only
+  attach reports the point-in-time retained count as
+  `<N> approval(s) waiting for the writer`, without a decision card.
+- **Unattended at raise** (or never delivered and recovered by lag rescan with no
+  writer) → **deny-by-default**: read-only/`Safe` tools auto-proceed once; anything
   mutating is denied and recorded as a visible, resumable transcript note
   (`⏸ Skipped: … needed approval — no one was attached`), surfaced on the next
-  attach as an "N actions waiting on you" count. `Yolo` is unreachable headless.
+  attach as an "N actions waiting on you" count. Detach never invokes this policy.
+  `Yolo` is unreachable headless.
+- **Decision authority** → only the connection that received the request and is
+  still the registered TrustedLocal ReadWrite writer may decide. Other responses
+  receive `ApprovalRefused` (`writerOnly`, `issuedElsewhere` or `noLongerPending`) and
+  resolve nothing; duplicate decisions cannot execute a tool again. This control
+  lane is independent of the operator turn FIFO. Sender-consent handling is
+  unchanged and does not authorize generic tools or proposals.
+- **Shutdown** → close approval admission, cancel every pending request with
+  `RuntimeShutdown`, stop exact input delivery and join the daemon-owned approval
+  gates. This includes requests waiting on the session-grant lock and runtimes
+  first registered after the gate closes. A late decision executes nothing.
+  An interrupted inbound admission is not an operator refusal: its durable pending
+  record and parked node remain available to cold-restart reconciliation, which
+  reports it failed with the existing restart detail. Shutdown does not authorize
+  or resume that task.
 
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v7**; a client speaking another version
+attach handshake negotiates **protocol v8**; a client speaking another version
 receives `VersionMismatch` before registration or other attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
-(`ClientEvent = RawEvent`) — one `AppEvent → wire` mapping, in one place. That
-projection omits sender-local team action/settlement events and strips the
-additive action reference and dispatch authorship from legacy dispatch events.
-Proposal inputs, results and scheduler transitions are omitted from this public
-event stream. The daemon retains their structured internal conversation history,
-but omits their private tool-call data from attach snapshots, history pages and
-peer-row projections; unrelated tools remain visible. Completed tool responses
-precede later assistant messages when model history is rebuilt. Interrupted
-calls remain internally retained but are not replayed as unmatched invocations.
+(`ClientEvent = RawEvent`), followed by one daemon attach-audience projection.
+TrustedLocal attachments, including read-only mirrors, retain tool arguments in
+live events, snapshots, history pages and local peer rows. A mirror never receives
+the writer's `ApprovalRequest`, exact-input chunks or Review and cannot decide.
+Peer-tier attachments receive tool identity, status, results and prose, but never
+tool arguments: `ToolEventWithheld` marks live calls, and `withheldToolInputs`
+marks transcript calls in AttachAck and History. Their tool blocks show
+`input withheld — not shared with peer attachments`; the corresponding `input`
+key is absent, not replaced with a sentinel or an empty object.
+
+The underlying public event projection still omits sender-local team
+action/settlement events and strips additive action references and dispatch
+authorship from legacy dispatch events. Proposal inputs, results and scheduler
+transitions remain omitted; structured internal conversation history retains them,
+but attach snapshots, history pages and peer-row projections omit their private
+tool-call data. This proposal privacy exclusion is independent of the tier rule.
+Completed tool responses precede later assistant messages when model history is
+rebuilt. Interrupted calls remain retained internally but are not replayed as
+unmatched invocations.
+
+For every tier, an input exceeding `MAX_FRAME_BYTES - MAX_FRAME_BYTES / 128`
+serialized bytes reserves envelope headroom and is withheld from the tool block.
+TrustedLocal clients show `input too large to show here (<size>)`; Peer-tier
+clients keep their peer-withheld form. The writer receives the exact approval
+input separately in ordered chunks. If a snapshot or History page is still over
+the cap, the largest remaining inputs are withheld first as typed `TooLarge`
+entries. An oversized initial `AttachAck` is bounded to a suffix of complete
+transcript messages, followed by a `FrameTooLarge` notice; stored history is
+unchanged. If the acknowledgement's essential metadata alone cannot fit, attach
+fails with an explicit protocol error rather than an invalid first frame.
+Other frames still over the cap are replaced by `FrameTooLarge`, naming their
+variant and serialized byte count; later frames continue on the same connection.
 
 The client speaks `ClientFrame`, including `Attach`, `UserMessage`,
 `HistoryRequest`, `ApprovalResponse`, `Detach`, and the request-keyed team

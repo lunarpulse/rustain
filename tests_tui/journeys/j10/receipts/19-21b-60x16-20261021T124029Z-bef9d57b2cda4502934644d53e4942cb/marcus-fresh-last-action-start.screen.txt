@@ -1,0 +1,16 @@
+│       item ri_3zKh58nsYyBRFHYp3etwkC9RfKXx1lGI · arrival│ 
+│   1 · task rustain-1792586452003788056-972a0ebbe2b1284f│  
+│   · received│                                             
+│     ● jun-dev  delivered│                                 
+│       item ri_JsY0uPtqHBcluH3fCjJCEWyOHcFOIcg_ · arrival│ 
+│   1 · task rustain-1792586452012645253-38e199771dc0a648│  
+│   · received│                                             
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready  log: 7
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

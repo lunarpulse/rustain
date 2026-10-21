@@ -1,0 +1,24 @@
+┆  Jun owns implementation; Marcus checks the architecture.                     
+┆  Acceptance: an arriving item is visible before its durable append.           
+┆  Please identify conflicts with ADR-047; do not send automatically.           
+┆  response: notify-and-wait · via individual — a2a-interaction.toml            
+┆  notification: immediate · via individual — a2a-interaction.toml              
+                                                                                
+                                                                                
+[terminal] ⤷ Assistant:                                                         
+[awaiting your response]                                                        
+                                                                                
+                                                                                
+                                                                                
+│ ⚠ ← inbound ✓ accepted · peer│                                                
+│   1220593c77a46b6a3761640df965f6223f069c1ef3db5af40cd7deee1ae225d6fcab ·│     
+│   task rustain-1792586150625170141-bcedbf288319756e · task accepted and│      
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ Ready               Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

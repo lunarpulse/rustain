@@ -459,6 +459,10 @@ impl InputAction {
                 | InputAction::SubmitWithContext { .. }
                 | InputAction::PermissionAllow
                 | InputAction::PermissionDeny
+                | InputAction::PermissionAlwaysAllow
+                | InputAction::PermissionSessionAllow
+                | InputAction::PermissionDenyFeedback
+                | InputAction::FeedbackInputSubmit
                 | InputAction::PlanApproveNormal
                 | InputAction::PlanApproveAutoEdit
                 | InputAction::PlanReject
@@ -545,6 +549,16 @@ pub(crate) fn recipient_surface_ignores_raw_key(
     event: &crossterm::event::Event,
 ) -> bool {
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+    // Story 19.20c: conversion discards kind/modifiers. Guard the deciding
+    // surface first, preserving its existing Ctrl+C/Ctrl+Q modal behavior.
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
+        && let Event::Key(key) = event
+    {
+        return key.kind != KeyEventKind::Press
+            || (!key.modifiers.is_empty()
+                && !(key.modifiers == KeyModifiers::CONTROL
+                    && matches!(key.code, KeyCode::Char('c' | 'q'))));
+    }
     #[cfg(feature = "a2a")]
     if state.input_buffer.is_empty()
         && visible_team_proposal(state).is_some()
@@ -581,9 +595,67 @@ pub fn handle_operator_input(
     }
 }
 
+/// A generic permission may become visible only after every higher owner lets go.
+pub(crate) fn permission_modal_owns_focus(state: &TuiState) -> bool {
+    state.pending_plan_card.is_some()
+        || state.pending_delegation_card.is_some()
+        || state.pending_consolidation_card.is_some()
+        || state.pending_forget_card.is_some()
+        || state.task_panel_state.pending_deviation.is_some()
+        || state.task_panel_state.cancel_plan_confirm.is_some()
+        || state.task_panel_state.skip_cascade_pending.is_some()
+        || state.pending_skill_trust.is_some()
+        || state.pending_plan_approval.is_some()
+        || state.pending_spawn_gate.is_some()
+        || state.pending_large_image.is_some()
+        || state.pending_artifact_card.is_some()
+        || state.pending_feedback_input.is_some()
+        || state.tool_block_states.values().any(|tbs| tbs.peek_active)
+        || (matches!(state.focus, FocusState::Overlay(_))
+            && !matches!(
+                state.focus,
+                FocusState::Overlay(OverlayType::Confirmation(
+                    ConfirmationType::Permission | ConfirmationType::PermissionFeedback
+                ))
+            ))
+}
+
+/// Shared handoff for input-only dismissals and runtime-driven resolutions.
+pub(crate) fn advance_deferred_permission(state: &mut TuiState) {
+    if state.pending_permission.is_some() || permission_modal_owns_focus(state) {
+        return;
+    }
+    state.permission_reader = Default::default();
+    if let Some(next) = state.permission_queue.pop() {
+        state.pending_permission = Some(next);
+        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
+    } else if matches!(
+        state.focus,
+        FocusState::Overlay(OverlayType::Confirmation(
+            ConfirmationType::Permission | ConfirmationType::PermissionFeedback
+        ))
+    ) {
+        state.focus = if state.recipient_surface.is_some() {
+            FocusState::Chat
+        } else {
+            FocusState::Input
+        };
+    }
+    state.needs_redraw = true;
+}
+
 /// Handle a domain input event by updating TUI state.
 /// Returns an InputAction telling the event loop what to do.
 pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
+    let modal_owned_focus = permission_modal_owns_focus(state);
+    let action = dispatch_input(state, event);
+    if modal_owned_focus && !permission_modal_owns_focus(state) {
+        advance_deferred_permission(state);
+    }
+    action
+}
+
+fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
     if state.recipient_surface.is_some()
         && state.focus == FocusState::Chat
         && !recipient_higher_confirmation_active(state)
@@ -1047,6 +1119,13 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'a' => return InputAction::PermissionAlwaysAllow,
             's' => return InputAction::PermissionSessionAllow,
             'f' => return InputAction::PermissionDenyFeedback,
+            'r' => {
+                if let Some(pending) = &state.pending_permission {
+                    state.permission_reader.open(pending.id.clone());
+                    state.needs_redraw = true;
+                }
+                return InputAction::Consumed;
+            }
             // AC6: chat-scroll preserved while the prompt is up.
             // Story 16.8, AC7: migrated from direct mutation to InputAction emission.
             'j' => {
@@ -1953,7 +2032,20 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // Permission prompt: Esc → Deny
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
         return match key {
-            DomainKey::Esc => InputAction::PermissionDeny,
+            DomainKey::Esc => {
+                if state.permission_reader.review.is_some() {
+                    state.permission_reader.back();
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                } else {
+                    InputAction::PermissionDeny
+                }
+            }
+            DomainKey::PageUp | DomainKey::PageDown => {
+                state.permission_reader.page(key == DomainKey::PageDown);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
             _ => InputAction::Consumed,
         };
     }

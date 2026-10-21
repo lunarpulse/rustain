@@ -1372,6 +1372,13 @@ async fn setup_task(
                 crate::domain::ports::InboundApprovalDecision::Decline
             ),
         };
+        if decision == crate::domain::ports::InboundApprovalDecision::RuntimeShutdown {
+            if consent_parked {
+                runtime.discard_pending_consent_node(&task.node_id).await;
+            }
+            terminalize_start_failure(&state, &task, &peer_id, None).await;
+            return task_projection(&state, &task, &peer_id).await;
+        }
         if decision == crate::domain::ports::InboundApprovalDecision::Decline {
             if consent_parked {
                 runtime.discard_pending_consent_node(&task.node_id).await;
@@ -1522,6 +1529,13 @@ async fn watch_pending_approval(
             crate::domain::ports::InboundApprovalDecision::Decline
         ),
     };
+
+    // Story 19.20c: runtime shutdown cancels the responder, not the admission.
+    // Keep its pending record (including capability hash) and parked node so
+    // the existing cold-restart passes restore it as failed with RESTART_DETAIL.
+    if decision == crate::domain::ports::InboundApprovalDecision::RuntimeShutdown {
+        return;
+    }
 
     task.set_pending_auth(PendingAuth::None).await;
     if decision == crate::domain::ports::InboundApprovalDecision::Decline {

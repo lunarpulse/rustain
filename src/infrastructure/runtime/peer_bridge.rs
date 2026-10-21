@@ -593,11 +593,24 @@ async fn run_cli_share(
             // Asynchronous local operations are not the requested share result.
             Some(
                 DaemonFrame::Event(_)
+                | DaemonFrame::ToolEventWithheld { .. }
+                | DaemonFrame::ApprovalRequest { .. }
+                | DaemonFrame::ApprovalInputChunk { .. }
+                | DaemonFrame::ApprovalInputComplete { .. }
+                | DaemonFrame::ApprovalClosed { .. }
+                | DaemonFrame::ApprovalRefused { .. }
                 | DaemonFrame::PeerRowOperation(_)
                 | DaemonFrame::RecipientActionResult { .. }
                 | DaemonFrame::RecipientContextState { .. },
             ) => {
                 continue;
+            }
+            Some(DaemonFrame::FrameTooLarge { frame, bytes }) => {
+                writeln!(
+                    out,
+                    "{}",
+                    crate::adapters::daemon::protocol::frame_too_large_notice(&frame, bytes)
+                )?;
             }
             Some(DaemonFrame::Error(error)) => {
                 return refuse(

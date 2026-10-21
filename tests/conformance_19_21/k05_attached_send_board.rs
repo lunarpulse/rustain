@@ -5,8 +5,9 @@ use crate::attached_harness::{
 use crate::harness::read_room_events;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{
-    AttachMode, ClientFrame, ConnectionTier, DaemonFrame, ProtocolError, RecipientAction,
-    RecipientActionOutcome, RecipientActionTarget, TeamBoardRequest, read_frame, write_frame,
+    AttachMode, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION, ProtocolError,
+    RecipientAction, RecipientActionOutcome, RecipientActionTarget, TeamBoardRequest, read_frame,
+    write_frame,
 };
 use rustain::adapters::rap::IdentityKeyStore;
 use rustain::domain::models::{RoomEvent, SemanticMessageType};
@@ -522,8 +523,10 @@ async fn k05_interleaved_send_results_and_refusal_stay_with_their_request() {
     recipient.stop().await;
 }
 
+/// Story 19.20c `M30`: old signed clients — including the immediately previous
+/// version — are refused with the current daemon version before registration.
 #[tokio::test]
-async fn k05_v4_v5_v6_signed_attach_are_rejected_and_v7_control_succeeds() {
+async fn k05_old_signed_attach_versions_are_rejected_and_current_control_succeeds() {
     let daemon = AttachedDaemon::start(Vec::new()).await;
     let mut stream = UnixStream::connect(&daemon.path)
         .await
@@ -570,7 +573,7 @@ async fn k05_v4_v5_v6_signed_attach_are_rejected_and_v7_control_succeeds() {
         matches!(
             frame,
             DaemonFrame::Error(ProtocolError::VersionMismatch {
-                daemon: 7,
+                daemon: PROTOCOL_VERSION,
                 client: 4
             })
         ),
@@ -608,14 +611,15 @@ async fn k05_v4_v5_v6_signed_attach_are_rejected_and_v7_control_succeeds() {
     assert!(matches!(
         read_frame::<_, DaemonFrame>(&mut older).await.unwrap(),
         Some(DaemonFrame::Error(ProtocolError::VersionMismatch {
-            daemon: 7,
+            daemon: PROTOCOL_VERSION,
             client: 5
         }))
     ));
     drop(older);
+    let previous_version = PROTOCOL_VERSION - 1;
     let mut previous = UnixStream::connect(&daemon.path)
         .await
-        .expect("connect v6 client");
+        .expect("connect previous-version client");
     let nonce = match tokio::time::timeout(
         crate::attached_harness::FIXTURE_TIMEOUT,
         read_frame::<_, DaemonFrame>(&mut previous),
@@ -628,11 +632,16 @@ async fn k05_v4_v5_v6_signed_attach_are_rejected_and_v7_control_succeeds() {
         DaemonFrame::AttachChallenge { nonce } => nonce,
         other => panic!("challenge expected: {other:?}"),
     };
-    let proof = signer.attach_proof(&nonce, 6, ConnectionTier::TrustedLocal.proof_tag(), false);
+    let proof = signer.attach_proof(
+        &nonce,
+        previous_version,
+        ConnectionTier::TrustedLocal.proof_tag(),
+        false,
+    );
     write_frame(
         &mut previous,
         &ClientFrame::Attach {
-            protocol_version: 6,
+            protocol_version: previous_version,
             read_only_ok: false,
             tier: ConnectionTier::TrustedLocal,
             challenge_nonce: nonce,
@@ -641,7 +650,7 @@ async fn k05_v4_v5_v6_signed_attach_are_rejected_and_v7_control_succeeds() {
         },
     )
     .await
-    .expect("write fixed-v6 attach");
+    .expect("write previous-version attach");
     let frame = tokio::time::timeout(
         crate::attached_harness::FIXTURE_TIMEOUT,
         read_frame::<_, DaemonFrame>(&mut previous),
@@ -653,19 +662,17 @@ async fn k05_v4_v5_v6_signed_attach_are_rejected_and_v7_control_succeeds() {
     assert!(
         matches!(
             frame,
-            DaemonFrame::Error(ProtocolError::VersionMismatch {
-                daemon: 7,
-                client: 6
-            })
+            DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })
+                if daemon == PROTOCOL_VERSION && client == previous_version
         ),
-        "signed-v6 client must be refused by protocol v7: {frame:?}"
+        "signed previous-version client must be refused by the current protocol: {frame:?}"
     );
     drop(previous);
     let control = AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
     assert_eq!(
         control.granted,
         AttachMode::ReadWrite,
-        "signed-v7 control attaches"
+        "signed current-version control attaches"
     );
     daemon.stop().await;
 }

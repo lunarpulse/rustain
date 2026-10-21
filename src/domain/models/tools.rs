@@ -28,6 +28,8 @@ pub struct ToolInvocation<'a> {
 pub struct ToolCallInfo {
     pub id: String,
     pub name: String,
+    /// Story 19.20c `A6`: may be absent on a withheld attach projection.
+    #[serde(default)]
     pub input: serde_json::Value,
     pub result: Option<ToolResultInfo>,
     /// Unix timestamp in milliseconds (architecture spec uses Instant, but Instant is not serializable).

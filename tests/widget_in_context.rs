@@ -272,14 +272,20 @@ fn test_permission_prompt_in_full_layout() {
                 &BTreeMap::<String, FeedbackBlock>::new(),
             );
 
-            let prompt_lines = permission_prompt::render_permission_lines(
-                &ApprovalSource::ForegroundTurn {
-                    conversation_id: "c1".into(),
+            let input = serde_json::json!({"command": "rm -rf /tmp/test"});
+            let source = ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            };
+            let prompt_lines = permission_prompt::render_permission_card_lines(
+                &permission_prompt::PermissionCard {
+                    source: &source,
+                    tool_name: "Bash",
+                    risk: rustain::domain::models::ToolRisk::Elevated,
+                    input: permission_prompt::ExactInput::Ready(&input),
+                    queue_len: 0,
                 },
-                "Bash",
-                "rm -rf /tmp/test",
+                app_layout.chat_pane.width,
                 &theme,
-                0,
             );
             let prompt_height = prompt_lines.len() as u16;
             let prompt_area = Rect {
