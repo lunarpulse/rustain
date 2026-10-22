@@ -488,8 +488,9 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v8**; a client speaking another version
-receives `VersionMismatch` before registration or other attach side effects.
+attach handshake negotiates **protocol v9**; a client speaking another version
+receives `VersionMismatch` before proof verification, registration or other
+attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
 (`ClientEvent = RawEvent`), followed by one daemon attach-audience projection.
 TrustedLocal attachments, including read-only mirrors, retain tool arguments in
@@ -499,11 +500,17 @@ Peer-tier attachments receive tool identity, status, results and prose, but neve
 tool arguments: `ToolEventWithheld` marks live calls, and `withheldToolInputs`
 marks transcript calls in AttachAck and History. Their tool blocks show
 `input withheld — not shared with peer attachments`; the corresponding `input`
-key is absent, not replaced with a sentinel or an empty object.
+key is absent, not replaced with a sentinel or an empty object. Every message
+in a Peer-tier AttachAck snapshot or History page also has send authorization
+reset to Unknown (omitted), including messages without tool calls. TrustedLocal
+writers and read-only mirrors retain that fact. Live peer-row updates remain
+TrustedLocal-only.
 
 The underlying public event projection still omits sender-local team
-action/settlement events and strips additive action references and dispatch
-authorship from legacy dispatch events. Proposal inputs, results and scheduler
+action/settlement events and strips additive action references from legacy
+dispatch events. It resets both authorship and send authorization on dispatch
+and disclosure events, and send authorization alone on reply events; existing
+reply authorship exposure is unchanged. Proposal inputs, results and scheduler
 transitions remain omitted; structured internal conversation history retains them,
 but attach snapshots, history pages and peer-row projections omit their private
 tool-call data. This proposal privacy exclusion is independent of the tier rule.
@@ -564,9 +571,59 @@ The daemon injects the same composed outbound A2A runtime used by its core;
 the attach client composes no provider or egress. Protocol v7 changes only the
 local daemon attach protocol. It does **not** discharge the separate A2A
 boundary tracked by AD-1826, add a peer-visible authorship field, or close full
-J10. `/team log` marks approved-proposal dispatches `[agent-composed]`; the journal
-uses `agent-composed`, while typed sends use `human-written`. The daemon still
-carries no custom-agent selection/restriction context, and NotifyAndAuto remains
+J10. `/team log` renders the journal's two independent facts on dispatch,
+disclosure and reply rows: `[agent-composed]` for agent-composed text, then
+`[auto-sent]` only for automatic sends. Approved proposals record
+`agent-composed` + `human-decided`, while typed sends record
+`human-written` + `human-decided`. Neither is labelled `[auto-sent]`.
+The daemon still carries no custom-agent selection/restriction context, and NotifyAndAuto remains
 conservative template-only, not a model turn. Each message also carries its
 originating `ChannelKind` (`terminal` today), persisted on `ChatMessage.origin`
 so the prefix survives restart and crash-recovery replay.
+
+### Message provenance and retraction
+
+Authorship identifies who composed the text; send authorization records how
+this host authorized the act. `[agent-composed]` is not an automatic-send claim.
+An approved or edited draft keeps that authorship label without `[auto-sent]`.
+Unknown facts add no label.
+
+In the attached TUI, **Ctrl+X** retracts automatic sends only.
+`RetractAutoResponse` refuses any row whose send authorization is not
+`automatic` with `retraction refused: NotAutomatic`. The existing gates are
+unchanged: the connection must be a trusted-local, same-host read-write
+attachment; the row must have its `peer-response-<node>` identity and a
+journal-derived disclosure sequence greater than zero, and must not already
+be retracted. Settled controls remain excluded. This is not a reply-turn or
+cross-host retract command.
+
+RAP NotifyAndAuto rows record `agent-composed` + `unknown`: they show
+`[agent-composed]` only, with no `[auto-sent]` or Retract control. Approved or
+edited RAP drafts record `agent-composed` + `human-decided`, also without a
+delivery claim. These response modes send nothing over RAP; correcting the
+labels does not fix delivery. RAP response delivery is tracked separately as
+`DF-19-20A-RAP-RESPONSE-NOT-DELIVERED`, owned by
+`19-20b-rap-response-delivery`.
+
+Legacy rows are never backfilled: without recorded send authorization, that
+fact is Unknown. A legacy approved draft loses its false `[auto-sent]` label.
+A legacy genuine auto-response shows `[agent-composed]` only and is no longer
+Ctrl+X-retractable. A legacy retracted row keeps its append-only record:
+`┆ [retracted HH:MM]  [✗] Retract (used)`. Neither journal history nor authorship
+is used to infer automatic-send authorization.
+
+Loading a messages-only session preserves each migrated assistant row's origin,
+completion state, synthetic marker, bookmarks, fork marker, and search highlights.
+Turn-backed rendering keeps these decorations separate from provenance labels.
+Migrated tool blocks retain a consistent selection identity, so copying a selected
+block returns that tool's result before and after the message mirror is rebuilt.
+Fold navigation counts the same provenance and metadata rows that are painted.
+
+Protocol v9 replaces v8 because a v8 client would mislabel approved drafts as
+`[auto-sent]`. Such clients receive `VersionMismatch` before proof verification
+or registration; the historical v7 introductions above remain unchanged.
+
+Only host act producers write send authorization. It is never imported from an
+attached client's frame or an A2A/RAP peer payload. Session and journal files
+are trusted local inputs: editing a local row can change its retract
+eligibility. Provenance is not authenticated evidence.

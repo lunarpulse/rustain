@@ -396,7 +396,8 @@ async fn run_job(task: CronJobTask) {
             synthetic: false,
             images: vec![],
             origin: ChannelKind::Cron,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         });
@@ -423,7 +424,8 @@ async fn run_job(task: CronJobTask) {
             synthetic: true,
             images: vec![],
             origin: ChannelKind::Cron,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         });

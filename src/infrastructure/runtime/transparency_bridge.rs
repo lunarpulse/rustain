@@ -576,7 +576,7 @@ pub async fn team_command(
                 message_type,
                 None,
                 subject,
-                crate::domain::models::ReplyAuthorship::HumanWritten,
+                crate::domain::models::Authorship::HumanWritten,
             );
         }
         // Story 19.18 `AC7` — a follow-up IS a 19.17 delivery, N = 1, with the
@@ -598,7 +598,7 @@ pub async fn team_command(
                 None,
                 Some(turn_id),
                 None,
-                crate::domain::models::ReplyAuthorship::HumanWritten,
+                crate::domain::models::Authorship::HumanWritten,
             );
         }
         // Story 19.18 `AC6` — rail 3 SERVES the thread read: the only rail
@@ -775,7 +775,7 @@ pub(crate) fn start_proposed_team_send(
         message_type,
         None,
         None,
-        crate::domain::models::ReplyAuthorship::AgentComposed,
+        crate::domain::models::Authorship::AgentComposed,
     );
 }
 
@@ -794,7 +794,7 @@ fn start_team_send(
     message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<String>,
     subject: Option<String>,
-    authorship: crate::domain::models::ReplyAuthorship,
+    authorship: crate::domain::models::Authorship,
 ) {
     #[cfg(not(feature = "a2a"))]
     use crate::adapters::tui::handlers::team_command as handler;
@@ -826,6 +826,7 @@ fn start_team_send(
                 reply_to: reply_to.as_deref(),
                 subject: subject.as_deref(),
                 authorship,
+                send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             },
         );
         if let Err(refusal) = refusal {
@@ -855,6 +856,7 @@ fn start_team_send(
                     reply_to: reply_to.as_deref(),
                     subject: subject.as_deref(),
                     authorship,
+                    send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
                 },
                 cancel.clone(),
                 |_| {},
@@ -3480,7 +3482,8 @@ mod log_awareness_tests {
                         synthetic: true,
                         images: vec![],
                         origin: crate::domain::models::ChannelKind::Terminal,
-                        authorship: Default::default(),
+                        authorship: crate::domain::models::Authorship::HumanWritten,
+                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
                         retracted_at_ms: None,
                         history_source: Default::default(),
                     });

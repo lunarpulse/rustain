@@ -1,0 +1,30 @@
+[terminal] ⤷ System:                                                                                                              
+— session start — · Earlier sessions not loaded                                                                                   
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+┆  story_assignment · 1220c1833b401f2c55db5eb046c5fededacfafbeb5cc4c653b30a8b5f6dd8da2a90b                                        
+┆  STORY-047: publish the received card before persisting its row.                                                                
+┆  Jun owns implementation; Marcus checks the architecture.                                                                       
+┆  Acceptance: an arriving item is visible before its durable append.                                                             
+┆  Please identify conflicts with ADR-047; do not send automatically.                                                             
+┆  response: notify-and-wait · via individual — a2a-interaction.toml                                                              
+┆  notification: immediate · via individual — a2a-interaction.toml                                                                
+                                                                                                                                  
+                                                                                                                                  
+[terminal] ⤷ Assistant:                                                                                                           
+[awaiting your response]                                                                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                                                                      │
+│Peer is waiting for your response.                                                                                              │
+│[Tab] Item actions                                                                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

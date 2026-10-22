@@ -239,11 +239,9 @@ mod targeting_tests {
 /// `render_message`. The bookmark glyph is prepended to the role line as a
 /// 2-column stable-width string (`theme.bookmark_glyph`, validated at theme
 /// load to have `unicode-width` ∈ [2, 4]). Because the role label itself is
-/// at most `"Assistant:"` (10 chars) and the minimum terminal width enforced
-/// by `compute_layout` is 60, the total role-line width of at most 14 cannot
-/// wrap. The role line is therefore always 1 row, with or without the
-/// bookmark glyph — this parameter asserts that contract rather than
-/// computing from it.
+/// at most `"Assistant:"` (10 cells), the provenance tag adds 18 cells,
+/// and origin/fork/bookmark/synthetic prefixes keep the worst case at most
+/// 48 cells. At the enforced 60-column floor the role line remains one row.
 #[allow(clippy::too_many_arguments)]
 fn hash_message_content(msg: &crate::domain::models::conversation::ChatMessage) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -252,10 +250,10 @@ fn hash_message_content(msg: &crate::domain::models::conversation::ChatMessage) 
     msg.content.hash(&mut hasher);
     msg.content_blocks.hash(&mut hasher);
     msg.stop_reason.hash(&mut hasher);
-    // Story 18.3c — authorship changes the rendered line count (the
-    // `[auto-sent]` marker line); a hash that ignores it would serve a stale
-    // cached height after a draft resolution marks the row.
+    // Story 19.20a: both provenance axes and consumed retractions affect chrome.
     msg.authorship.hash(&mut hasher);
+    msg.send_authorization.hash(&mut hasher);
+    msg.retracted_at_ms.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -264,7 +262,7 @@ fn compute_message_height(
     has_error: bool,
     is_cancelled: bool,
     _is_bookmarked: bool,
-    agent_composed_marker: bool,
+    auto_sent_marker: bool,
     peer_derived: bool,
     width: usize,
 ) -> usize {
@@ -297,11 +295,126 @@ fn compute_message_height(
     // the suffix would push the last rendered line over width. Since
     // render_message() appends it as its own Line, we always add 1.
     let interrupted_line = if is_cancelled { 1 } else { 0 };
-    // Story 18.3c — `render_message` inserts the `[auto-sent]` marker as its
-    // own Line directly below the role line for every AgentComposed row. The
-    // virtual-scroll invariant (AC6) breaks unless every height path counts it.
-    let marker_line = if agent_composed_marker { 1 } else { 0 };
+    // Story 19.20a: automatic sends and consumed legacy retractions add one row.
+    let marker_line = if auto_sent_marker { 1 } else { 0 };
     1 + marker_line + content_height + interrupted_line
+}
+
+fn has_auto_sent_marker(msg: &crate::domain::models::ChatMessage) -> bool {
+    msg.send_authorization == crate::domain::models::SendAuthorization::Automatic
+        || msg.retracted_at_ms.is_some()
+}
+
+fn auto_sent_marker_line(
+    msg: &crate::domain::models::ChatMessage,
+    theme: &Theme,
+) -> Option<Line<'static>> {
+    if !has_auto_sent_marker(msg) {
+        return None;
+    }
+    let automatic = msg.send_authorization == crate::domain::models::SendAuthorization::Automatic;
+    let marker = match msg.retracted_at_ms {
+        Some(retracted_at_ms) => {
+            let timestamp =
+                crate::domain::services::transparency::format_unix_millis(retracted_at_ms);
+            let time = timestamp.get(11..16).unwrap_or("—");
+            let prefix = if automatic { "[auto-sent]  " } else { "" };
+            format!("┆ {prefix}[retracted {time}]  [✗] Retract (used)")
+        }
+        None => "┆ [auto-sent]  [✗] Retract".to_owned(),
+    };
+    Some(Line::from(Span::styled(
+        marker,
+        Style::default().fg(theme.colors.auto_sent_border),
+    )))
+}
+
+fn has_message_metadata(
+    msg: &crate::domain::models::ChatMessage,
+    is_fork_point: bool,
+    is_bookmarked: bool,
+    show_terminal_origin_prefix: bool,
+) -> bool {
+    show_terminal_origin_prefix
+        || msg.origin != crate::domain::models::ChannelKind::Terminal
+        || is_fork_point
+        || is_bookmarked
+        || msg.synthetic
+}
+
+fn message_metadata_spans(
+    msg: &crate::domain::models::ChatMessage,
+    theme: &Theme,
+    is_fork_point: bool,
+    is_bookmarked: bool,
+    show_terminal_origin_prefix: bool,
+    role_color: Color,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if show_terminal_origin_prefix || msg.origin != crate::domain::models::ChannelKind::Terminal {
+        spans.push(Span::styled(
+            format!("{} ", msg.origin.as_prefix()),
+            theme.typography.meta.fg(theme.colors.fg_muted),
+        ));
+    }
+    if is_fork_point {
+        spans.push(Span::styled(
+            "🔀 ",
+            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if is_bookmarked {
+        spans.push(Span::styled(
+            theme.bookmark_glyph.clone(),
+            Style::default()
+                .fg(theme.colors.bookmark_accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if msg.synthetic {
+        spans.push(Span::styled(
+            "⤷ ",
+            Style::default()
+                .fg(theme.colors.synthetic_marker)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans
+}
+
+fn turn_message_prefix_height(
+    msg: &crate::domain::models::ChatMessage,
+    is_fork_point: bool,
+    is_bookmarked: bool,
+    show_terminal_origin_prefix: bool,
+) -> usize {
+    usize::from(has_message_metadata(
+        msg,
+        is_fork_point,
+        is_bookmarked,
+        show_terminal_origin_prefix,
+    )) + usize::from(msg.authorship == crate::domain::models::Authorship::AgentComposed)
+        + usize::from(has_auto_sent_marker(msg))
+}
+
+fn highlight_content_lines(
+    lines: &mut [Line<'_>],
+    search: Option<(&str, Option<usize>)>,
+    match_cursor: &mut usize,
+    theme: &Theme,
+) {
+    if let Some((query, focused)) = search.filter(|(query, _)| !query.is_empty()) {
+        for line in lines {
+            *line = apply_search_highlights(
+                std::mem::take(line),
+                query,
+                theme.search_highlight,
+                theme.search_highlight_focused,
+                focused,
+                match_cursor,
+            );
+        }
+    }
 }
 
 /// Render a single message into Line objects.
@@ -340,8 +453,7 @@ fn render_message<'a>(
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::new();
     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
-    let is_agent_composed =
-        msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed;
+    let is_agent_composed = msg.authorship == crate::domain::models::Authorship::AgentComposed;
     let is_peer_derived = msg.content_blocks.contains(&ContentBlockType::PeerText);
     let content = if is_peer_derived {
         crate::domain::services::peer_text::sanitize_peer_text_block(&msg.content)
@@ -367,67 +479,27 @@ fn render_message<'a>(
         MessageRole::Assistant => theme.colors.fg_secondary,
         MessageRole::System => theme.colors.fg_secondary,
     };
-    let mut role_spans: Vec<Span<'a>> = Vec::new();
-    // Story 12.2c AC2 — dimmed, line-leading channel-origin prefix for the unified
-    // multi-channel scrollback. Rendered ONLY for non-Terminal origins: every
-    // pre-Epic-12 message is `Terminal` (the default), so gating on non-Terminal
-    // keeps the local single-channel TUI — and the render-snapshot suite —
-    // byte-unchanged, while the attach client shows `[telegram]`/`[cron]` on
-    // messages that came from those channels. Added before the fork/bookmark/
-    // synthetic markers so it leads the role line; one extra Span keeps the line
-    // count at 1 (the no-wrap height invariant, chat_pane contract :199).
-    if show_terminal_origin_prefix || msg.origin != crate::domain::models::ChannelKind::Terminal {
-        role_spans.push(Span::styled(
-            format!("{} ", msg.origin.as_prefix()),
-            theme.typography.meta.fg(theme.colors.fg_muted),
-        ));
-    }
-    if is_fork_point {
-        role_spans.push(Span::styled(
-            "🔀 ".to_string(),
-            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
-        ));
-    }
-    if is_bookmarked {
-        role_spans.push(Span::styled(
-            theme.bookmark_glyph.clone(),
-            Style::default()
-                .fg(theme.colors.bookmark_accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if msg.synthetic {
-        role_spans.push(Span::styled(
-            "⤷ ".to_string(),
-            Style::default()
-                .fg(theme.colors.synthetic_marker)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
+    let mut role_spans = message_metadata_spans(
+        msg,
+        theme,
+        is_fork_point,
+        is_bookmarked,
+        show_terminal_origin_prefix,
+        role_color,
+    );
     role_spans.push(Span::styled(
         role_text.to_string(),
         Style::default().fg(role_color).add_modifier(Modifier::BOLD),
     ));
-    lines.push(Line::from(role_spans));
     if is_agent_composed {
-        // CANONICAL Auto-Sent Pattern (`ux-design-specification.md:2141-2151`):
-        // magenta-dotted marker, `[auto-sent]` always visible, the retract
-        // control always visible (consumed form once used). No new border,
-        // glyph, or label — the honest local-scope statement belongs to the
-        // retract confirmation, not this line.
-        let marker = match msg.retracted_at_ms {
-            Some(retracted_at_ms) => {
-                let timestamp =
-                    crate::domain::services::transparency::format_unix_millis(retracted_at_ms);
-                let time = timestamp.get(11..16).unwrap_or("—");
-                format!("┆ [auto-sent]  [retracted {time}]  [✗] Retract (used)")
-            }
-            None => "┆ [auto-sent]  [✗] Retract".to_owned(),
-        };
-        lines.push(Line::from(Span::styled(
-            marker,
-            Style::default().fg(theme.colors.auto_sent_border),
-        )));
+        role_spans.push(Span::styled(
+            "  [agent-composed]",
+            theme.typography.meta.fg(theme.colors.fg_muted),
+        ));
+    }
+    lines.push(Line::from(role_spans));
+    if let Some(marker) = auto_sent_marker_line(msg, theme) {
+        lines.push(marker);
     }
 
     // Peer content is sanitized and rendered as plain text so hostile markdown
@@ -494,23 +566,12 @@ fn render_message<'a>(
     // line that contains a match. The match cursor counts every highlight
     // applied across all content lines in this message so the focused-match
     // style lands on the right one.
-    if let Some(q) = search_query {
-        if !q.is_empty() {
-            let mut match_cursor: usize = 0;
-            let base_style = theme.search_highlight;
-            let focused_style = theme.search_highlight_focused;
-            for line in lines.iter_mut().skip(content_start) {
-                *line = apply_search_highlights(
-                    line.clone(),
-                    q,
-                    base_style,
-                    focused_style,
-                    focused_match_ordinal_in_message,
-                    &mut match_cursor,
-                );
-            }
-        }
-    }
+    highlight_content_lines(
+        &mut lines[content_start..content_end],
+        search_query.map(|query| (query, focused_match_ordinal_in_message)),
+        &mut 0,
+        theme,
+    );
     if is_peer_derived {
         for line in &mut lines[content_start..content_end] {
             line.spans.insert(
@@ -1011,6 +1072,7 @@ pub fn build_layout_metrics(
         String,
         crate::adapters::tui::widgets::tool_block::ToolBlockState,
     >,
+    bookmarks: &[usize],
 ) -> LayoutMetrics {
     let _ = clock; // reserved for spinner-frame stability in running-turn heights (S16.5 W4)
     let width_usize = width as usize;
@@ -1018,6 +1080,12 @@ pub fn build_layout_metrics(
     let mut turn_top_offsets: Vec<(TurnId, usize)> = Vec::new();
     let mut cumulative_offset: usize = 0;
     let mut first_turn = true;
+    let messages: HashMap<_, _> = conversation
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message.id.as_str(), (index, message)))
+        .collect();
 
     for turn in &conversation.turns {
         if !first_turn {
@@ -1062,6 +1130,17 @@ pub fn build_layout_metrics(
         };
 
         cumulative_offset += layout.height;
+        if let Some(&(index, message)) = messages.get(turn.id.0.as_str()) {
+            let is_fork_point =
+                conversation.fork_source.is_some() && index + 1 == conversation.messages.len();
+            cumulative_offset +=
+                turn_message_prefix_height(
+                    message,
+                    is_fork_point,
+                    bookmarks.binary_search(&index).is_ok(),
+                    false,
+                ) + usize::from(message.stop_reason == Some(StopReason::Cancelled));
+        }
     }
 
     let focused_turn_top = view_state.focused_turn.as_ref().and_then(|ft| {
@@ -1185,6 +1264,7 @@ fn render_expanded_turn<'a>(
     tool_block_states: &HashMap<String, ToolBlockState>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
+    search: Option<(&str, Option<usize>)>,
 ) -> Vec<Line<'a>> {
     let content_width = width.saturating_sub(2); // gutter + space
     if content_width == 0 {
@@ -1202,6 +1282,7 @@ fn render_expanded_turn<'a>(
 
     let mut lines: Vec<Line<'a>> = Vec::new();
     let mut prev: Option<&TurnPart> = None;
+    let mut match_cursor = 0;
 
     for part in &turn.parts {
         // Inter-part spacing
@@ -1209,6 +1290,7 @@ fn render_expanded_turn<'a>(
         for _ in 0..blanks {
             lines.push(Line::from(""));
         }
+        let content_start = lines.len();
 
         match part {
             TurnPart::Prose { text, .. } => {
@@ -1309,6 +1391,14 @@ fn render_expanded_turn<'a>(
                 // expanded view — tool_block reads tc.result to decide shape.
             }
         }
+        if matches!(part, TurnPart::Prose { .. }) {
+            highlight_content_lines(
+                &mut lines[content_start..],
+                search,
+                &mut match_cursor,
+                theme,
+            );
+        }
 
         prev = Some(part);
     }
@@ -1329,6 +1419,7 @@ fn render_collapsed_turn<'a>(
     theme: &'a Theme,
     width: usize,
     clock: &dyn Clock,
+    search: Option<(&str, Option<usize>)>,
 ) -> Vec<Line<'a>> {
     let sentence = first_prose_sentence(turn);
     let has_error = turn.parts.iter().any(|p| {
@@ -1429,12 +1520,16 @@ fn render_collapsed_turn<'a>(
             Span::styled(format!(" {}", glyph), glyph_style),
         ])
     } else {
-        Line::from(vec![
-            Span::styled(collapse_glyph, collapse_style),
-            Span::styled(format!("{}…", truncated), text_style),
-            Span::styled(format!("{}{}", separator, tier_text), muted),
-            Span::styled(format!(" {}", glyph), glyph_style),
-        ])
+        let mut prose = [Line::from(Span::styled(
+            format!("{}…", truncated),
+            text_style,
+        ))];
+        highlight_content_lines(&mut prose, search, &mut 0, theme);
+        let mut spans = vec![Span::styled(collapse_glyph, collapse_style)];
+        spans.append(&mut prose[0].spans);
+        spans.push(Span::styled(format!("{}{}", separator, tier_text), muted));
+        spans.push(Span::styled(format!(" {}", glyph), glyph_style));
+        Line::from(spans)
     };
 
     gutter_lines(vec![line], theme)
@@ -1792,18 +1887,22 @@ fn render_with_search_impl(
                             }
                         }
                     };
-                    h = layout.height;
-                    if msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed {
-                        // Not reachable today (agent-composed rows carry no
-                        // Turn), but the marker line would break the
-                        // virtual-scroll invariant here too if that changed.
-                        h += 1;
-                    }
+                    // Story 19.20a: prefix both cached and withheld-input layouts.
+                    let prefix_height = turn_message_prefix_height(
+                        msg,
+                        conversation.fork_source.is_some() && i + 1 == msg_count,
+                        bookmarks.binary_search(&i).is_ok(),
+                        show_terminal_origin_prefix,
+                    );
+                    h = layout.height
+                        + prefix_height
+                        + usize::from(msg.stop_reason == Some(StopReason::Cancelled));
                     for offset in &layout.block_offsets {
-                        block_boundaries.push(cumulative_offset + offset);
+                        block_boundaries.push(cumulative_offset + prefix_height + offset);
                     }
                     for (offset, id) in &layout.tool_block_offsets {
-                        tool_block_boundaries.push((cumulative_offset + offset, id.clone()));
+                        tool_block_boundaries
+                            .push((cumulative_offset + prefix_height + offset, id.clone()));
                     }
                 } else {
                     // TODO(S16.10-cleanup): No matching turn — fall back to legacy height calc
@@ -1815,7 +1914,7 @@ fn render_with_search_impl(
                         has_error,
                         is_cancelled,
                         is_bookmarked,
-                        msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed,
+                        has_auto_sent_marker(msg),
                         msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
                     );
@@ -1863,8 +1962,7 @@ fn render_with_search_impl(
                             has_error,
                             is_cancelled,
                             is_bookmarked,
-                            msg.authorship
-                                == crate::domain::models::MessageAuthorship::AgentComposed,
+                            has_auto_sent_marker(msg),
                             msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
                         );
@@ -2060,8 +2158,34 @@ fn render_with_search_impl(
                     let turn_opt = turn_map.get(msg.id.as_str()).copied();
                     if let Some(turn) = turn_opt {
                         let collapsed = effective_is_collapsed(turn, view_state);
+                        let metadata_line = has_message_metadata(
+                            msg,
+                            is_fork_point,
+                            is_bookmarked,
+                            show_terminal_origin_prefix,
+                        )
+                        .then(|| {
+                            Line::from(message_metadata_spans(
+                                msg,
+                                theme,
+                                is_fork_point,
+                                is_bookmarked,
+                                show_terminal_origin_prefix,
+                                theme.colors.fg_secondary,
+                            ))
+                        });
+                        let authorship_line = (msg.authorship
+                            == crate::domain::models::Authorship::AgentComposed)
+                            .then(|| {
+                                Line::from(Span::styled(
+                                    "[agent-composed]",
+                                    theme.typography.meta.fg(theme.colors.fg_muted),
+                                ))
+                            });
+                        let marker_line = auto_sent_marker_line(msg, theme);
+                        let search = search_query.map(|query| (query, focused_local_ordinal));
                         let turn_lines = if collapsed {
-                            render_collapsed_turn(turn, view_state, theme, width, clock)
+                            render_collapsed_turn(turn, view_state, theme, width, clock, search)
                         } else {
                             render_expanded_turn(
                                 turn,
@@ -2071,15 +2195,35 @@ fn render_with_search_impl(
                                 tool_block_states,
                                 liveness,
                                 withheld_tool_inputs,
+                                search,
                             )
                         };
+                        let interrupted_line = (msg.stop_reason == Some(StopReason::Cancelled))
+                            .then(|| {
+                                Line::from(Span::styled(
+                                    " [interrupted]",
+                                    Style::default().fg(theme.colors.fg_muted),
+                                ))
+                            });
                         let is_focused = view_state
                             .focused_turn
                             .as_ref()
                             .is_some_and(|ft| *ft == turn.id);
-                        for (j, line) in turn_lines.into_iter().enumerate() {
+                        for (j, mut line) in metadata_line
+                            .into_iter()
+                            .chain(authorship_line)
+                            .chain(marker_line)
+                            .chain(turn_lines)
+                            .chain(interrupted_line)
+                            .enumerate()
+                        {
                             let abs_line = line_offset + j;
                             if abs_line >= visible_start && abs_line < visible_end {
+                                if msg.retracted_at_ms.is_some() {
+                                    for span in &mut line.spans {
+                                        span.style = span.style.add_modifier(Modifier::DIM);
+                                    }
+                                }
                                 if is_focused && j == 0 {
                                     let arrow = Span::styled(
                                         "▶ ",
@@ -2112,8 +2256,7 @@ fn render_with_search_impl(
                             msg.content_blocks.contains(&ContentBlockType::Error),
                             msg.stop_reason == Some(StopReason::Cancelled),
                             is_bookmarked,
-                            msg.authorship
-                                == crate::domain::models::MessageAuthorship::AgentComposed,
+                            has_auto_sent_marker(msg),
                             msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
                         );
@@ -2165,7 +2308,7 @@ fn render_with_search_impl(
                         msg.content_blocks.contains(&ContentBlockType::Error),
                         msg.stop_reason == Some(StopReason::Cancelled),
                         is_bookmarked,
-                        msg.authorship == crate::domain::models::MessageAuthorship::AgentComposed,
+                        has_auto_sent_marker(msg),
                         msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
                     );
@@ -2287,6 +2430,7 @@ fn render_with_search_impl(
                 tool_block_states,
                 liveness,
                 withheld_tool_inputs,
+                None,
             );
             let tl_len = turn_lines.len();
             for (j, line) in turn_lines.into_iter().enumerate() {
@@ -3044,7 +3188,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -3070,7 +3214,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
         let rail_text: String = lines
             .iter()
             .filter(|l| l.spans.iter().any(|s| s.content.contains("⠋")))
@@ -3097,7 +3241,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
         // Verify both prose and tool are present, and tool comes after prose
         let all_text: String = lines
             .iter()
@@ -3152,7 +3296,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
         // Every non-empty line should start with the gutter
         for line in &lines {
             if line.spans.is_empty() {
@@ -3182,7 +3326,7 @@ mod parts_aware_tests {
         vs.collapsed.insert(turn.id.clone(), true);
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let lines = render_collapsed_turn(&turn, &vs, &theme, 80, &clock);
+        let lines = render_collapsed_turn(&turn, &vs, &theme, 80, &clock, None);
         assert_eq!(lines.len(), 1);
         let combined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
@@ -3212,7 +3356,7 @@ mod parts_aware_tests {
         vs.collapsed.insert(turn.id.clone(), true);
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let lines = render_collapsed_turn(&turn, &vs, &theme, 80, &clock);
+        let lines = render_collapsed_turn(&turn, &vs, &theme, 80, &clock, None);
         let combined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(combined.contains('✗'), "missing error badge: {}", combined);
     }
@@ -3225,7 +3369,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 0, &clock, &tbs, None, None);
+        let lines = render_expanded_turn(&turn, &theme, 0, &clock, &tbs, None, None, None);
         assert!(lines.is_empty());
     }
 
@@ -3419,7 +3563,8 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
+        let rendered =
+            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
         assert_eq!(cached.height, rendered, "parity: empty turn");
         // Empty turn: only trailing rail = 1
         assert_eq!(cached.height, 1);
@@ -3432,7 +3577,8 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
+        let rendered =
+            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
         assert_eq!(cached.height, rendered, "parity: single prose");
     }
 
@@ -3449,7 +3595,8 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
+        let rendered =
+            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
         assert_eq!(cached.height, rendered, "parity: prose + inter-part blank");
     }
 
@@ -3466,7 +3613,8 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
+        let rendered =
+            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
         assert_eq!(cached.height, rendered, "parity: running tool with rail");
         // Should include per-Running rail addend
         assert!(cached.height > 0);
@@ -3493,7 +3641,8 @@ mod parts_aware_tests {
             },
         );
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
+        let rendered =
+            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
         assert_eq!(cached.height, rendered, "parity: completed tool expanded");
     }
 
@@ -3511,7 +3660,8 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
+        let rendered =
+            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
         assert_eq!(cached.height, rendered, "parity: mixed prose-tool-prose");
     }
 
@@ -3522,7 +3672,8 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
+        let rendered =
+            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
         assert_eq!(
             cached.height, rendered,
             "parity: trailing rail after running"
@@ -3552,7 +3703,8 @@ mod parts_aware_tests {
             },
         );
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None).len();
+        let rendered =
+            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
         assert_eq!(cached.height, rendered, "parity: tool peek state");
         assert!(cached.height > 0);
     }
@@ -3579,10 +3731,10 @@ mod parts_aware_tests {
 
         let cached_9s = expanded_turn_height(&turn, &theme, 80, &tbs);
         let rendered_9s =
-            render_expanded_turn(&turn, &theme, 80, &clock_9s, &tbs, None, None).len();
+            render_expanded_turn(&turn, &theme, 80, &clock_9s, &tbs, None, None, None).len();
         let cached_10s = expanded_turn_height(&turn, &theme, 80, &tbs);
         let rendered_10s =
-            render_expanded_turn(&turn, &theme, 80, &clock_10s, &tbs, None, None).len();
+            render_expanded_turn(&turn, &theme, 80, &clock_10s, &tbs, None, None, None).len();
 
         assert_eq!(cached_9s.height, rendered_9s, "parity: 9.9s elapsed");
         assert_eq!(cached_10s.height, rendered_10s, "parity: 10.0s elapsed");
@@ -3623,7 +3775,8 @@ mod parts_aware_tests {
                 synthetic: false,
                 images: vec![],
                 origin: crate::domain::models::ChannelKind::Terminal,
-                authorship: Default::default(),
+                authorship: crate::domain::models::Authorship::HumanWritten,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
                 retracted_at_ms: None,
                 history_source: Default::default(),
             }],
@@ -3774,7 +3927,7 @@ mod parts_aware_tests {
         for width in [79, 80, 81] {
             let cached = expanded_turn_height(&turn, &theme, width, &tbs);
             let rendered =
-                render_expanded_turn(&turn, &theme, width, &clock, &tbs, None, None).len();
+                render_expanded_turn(&turn, &theme, width, &clock, &tbs, None, None, None).len();
             assert_eq!(cached.height, rendered, "parity fail: width={}", width);
         }
     }
@@ -3807,7 +3960,7 @@ mod parts_aware_tests {
 
         // Render and verify cumulative offsets
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
 
         // The first block offset should be 0 (start of turn)
         assert_eq!(layout.block_offsets[0], 0, "first block should start at 0");
@@ -3854,6 +4007,7 @@ mod parts_aware_tests {
             24,
             &clock,
             &std::collections::HashMap::new(),
+            &[],
         );
 
         assert_eq!(layout.total_content_height, 0);
@@ -3901,6 +4055,7 @@ mod parts_aware_tests {
             24,
             &clock,
             &std::collections::HashMap::new(),
+            &[],
         );
 
         assert!(!layout.turn_top_offsets.is_empty(), "should have entries");
@@ -3960,6 +4115,7 @@ mod parts_aware_tests {
             24,
             &clock,
             &std::collections::HashMap::new(),
+            &[],
         );
 
         assert_eq!(layout.focused_turn_top, Some(layout.turn_top_offsets[1].1));
@@ -3969,7 +4125,8 @@ mod parts_aware_tests {
         let message = crate::domain::models::ChatMessage {
             role: MessageRole::Assistant,
             content: "generated response".to_owned(),
-            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            authorship: crate::domain::models::Authorship::AgentComposed,
+            send_authorization: crate::domain::models::SendAuthorization::Automatic,
             ..Default::default()
         };
         let theme = Theme::dark();
@@ -4095,7 +4252,8 @@ mod parts_aware_tests {
         let mut message = crate::domain::models::ChatMessage {
             role: MessageRole::Assistant,
             content: "generated response".to_owned(),
-            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            authorship: crate::domain::models::Authorship::AgentComposed,
+            send_authorization: crate::domain::models::SendAuthorization::Automatic,
             ..Default::default()
         };
         let theme = Theme::dark();

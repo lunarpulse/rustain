@@ -106,7 +106,13 @@ async fn ac3_fingerprint_match_mismatch_keystone() {
     let id = id.expect("Elevated risk with no session pre-approval must be a slow-path request");
 
     // Real resolve() — delivers the REAL server-side ResolvedApproval over the oneshot.
-    approval_runtime.resolve(&id, ApprovalOutcome::Once).await;
+    approval_runtime
+        .resolve(
+            &id,
+            ApprovalOutcome::Once,
+            rustain::domain::models::PermissionResolution::Operator,
+        )
+        .await;
     let resolved = rx.await.expect("resolve must deliver a ResolvedApproval");
 
     // Positive control: the SAME comparator run_one uses, fed the real stored fp
@@ -347,7 +353,11 @@ async fn ac1_gated_invocation_exactly_once_counter() {
         }
     };
     approval_runtime
-        .resolve(&req_id, ApprovalOutcome::Once)
+        .resolve(
+            &req_id,
+            ApprovalOutcome::Once,
+            rustain::domain::models::PermissionResolution::Operator,
+        )
         .await;
 
     let results = sched_task.await.expect("scheduler task panicked");
@@ -451,7 +461,11 @@ async fn ac1_sibling_independence_positive_control() {
     );
 
     approval_runtime
-        .resolve(&req_id, ApprovalOutcome::Once)
+        .resolve(
+            &req_id,
+            ApprovalOutcome::Once,
+            rustain::domain::models::PermissionResolution::Operator,
+        )
         .await;
     let results = sched_task.await.expect("scheduler task panicked");
     assert_eq!(results.len(), 2);

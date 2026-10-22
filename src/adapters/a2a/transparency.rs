@@ -44,8 +44,8 @@ use tokio::sync::Mutex;
 
 use crate::domain::events::{AppEvent, DomainEventPayload};
 use crate::domain::models::{
-    AgentId, Direction, JournalRecord, PeerId, PolicyPrincipal, PrincipalKind, RejectReason,
-    RoomEvent,
+    AgentId, Authorship, Direction, JournalRecord, PeerId, PolicyPrincipal, PrincipalKind,
+    RejectReason, RoomEvent, SendAuthorization,
 };
 use crate::domain::ports::{
     EventEmitter, PeerDeliveryOutcome, PeerDeliveryRecord, PeerInteractionRecorder, RoomJournal,
@@ -99,6 +99,8 @@ pub enum InboundOutcome {
         node: AgentId,
         task_id: String,
         disclosed_bytes: usize,
+        authorship: Authorship,
+        send_authorization: SendAuthorization,
     },
 }
 
@@ -336,11 +338,15 @@ impl TransparencySink {
                 node,
                 task_id,
                 disclosed_bytes,
+                authorship,
+                send_authorization,
             } => RoomEvent::PeerDisclosure {
                 peer: Some(peer),
                 node,
                 task: Some(disclosable_task_id(&task_id)),
                 disclosed_bytes,
+                authorship,
+                send_authorization,
             },
         };
         if let Err(error) = journal.record_event(event).await {
@@ -514,6 +520,8 @@ mod tests {
                 node: AgentId::root(),
                 task_id: "t-1".to_owned(),
                 disclosed_bytes: 1,
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::Automatic,
             }
             .is_fail_closed()
         );

@@ -228,9 +228,12 @@ async fn k11_peer_attach_withholds_local_controls_and_rejects_context_inventory(
     write_frame(&mut peer, &ClientFrame::InspectRecipientContext)
         .await
         .expect("request context inventory through actual peer socket");
-    match socket_frame(&mut peer).await {
-        DaemonFrame::Error(ProtocolError::PeerVerification(_)) => {}
-        other => panic!("peer context inspection must be denied without inventory: {other:?}"),
+    loop {
+        match socket_frame(&mut peer).await {
+            DaemonFrame::Event(_) => {}
+            DaemonFrame::Error(ProtocolError::PeerVerification(_)) => break,
+            other => panic!("peer context inspection must be denied without inventory: {other:?}"),
+        }
     }
     for (frame, action) in [
         (
@@ -320,19 +323,31 @@ async fn k11_live_context_broadcast_excludes_peer_tier() {
     }
     // The peer is read-only, so a bounded drain checks the live stream without
     // sending an unauthorized HistoryRequest.
+    // Keep the frame decoder alive across receive deadlines.
+    let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel();
+    let frame_reader = tokio::spawn(async move {
+        while let Some(frame) = read_frame::<_, DaemonFrame>(&mut peer)
+            .await
+            .expect("valid peer daemon frame")
+        {
+            if frames_tx.send(frame).is_err() {
+                break;
+            }
+        }
+    });
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(300);
     loop {
-        match tokio::time::timeout_at(deadline, read_frame::<_, DaemonFrame>(&mut peer)).await {
+        match tokio::time::timeout_at(deadline, frames_rx.recv()).await {
             Err(_) => break,
-            Ok(Ok(Some(DaemonFrame::Event(_)))) => {}
-            Ok(Ok(Some(DaemonFrame::PeerRowOperation(_)))) => {}
-            Ok(Ok(Some(other))) => {
+            Ok(Some(DaemonFrame::Event(_))) => {}
+            Ok(Some(DaemonFrame::PeerRowOperation(_))) => {}
+            Ok(Some(other)) => {
                 panic!("peer tier received forbidden or unexpected live frame: {other:?}")
             }
-            Ok(Ok(None)) => panic!("peer connection closed during live broadcast check"),
-            Ok(Err(error)) => panic!("peer frame decode failed: {error}"),
+            Ok(None) => panic!("peer connection closed during live broadcast check"),
         }
     }
+    frame_reader.abort();
 }
 #[tokio::test]
 async fn k11_http_arrival_reaches_pre_attached_reader_then_writer_actions_are_fenced() {

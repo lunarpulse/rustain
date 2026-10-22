@@ -1,0 +1,30 @@
+                                                                                                                                  
+                                                                                                                                  
+│ ℹ item ri_4NIpwNHx4Lqf05SWs7IhI0Zvnf943zRo selected as peer context for this daemon conversation — clears on /clear or daemon│  
+│   restart; view and acknowledgement do not select it│                                                                           
+│ ℹ Distribution board · architecture_update│                                                                                     
+│   attempted just now · 2 addressed│                                                                                             
+│     ● lena-po  delivered│                                                                                                       
+│       item ri_SBDuNVUtxuehw4OEQyfaIx5PIxjpfQwS · arrival 1 · task rustain-1792646178980194642-a429dd5f9bf3d8ad · received│      
+│     ● jun-dev  delivered│                                                                                                       
+│       item ri_-y3pE8gyvzpXmC8sr_cGETARD_PhfXMm · arrival 1 · task rustain-1792646178980236440-5d11b842612d42d6 · received│      
+│ ℹ 2026-10-22 05:15:46Z ← inbound ⏸ awaiting-approval · peer│                                                                    
+│   1220d1250d796fe91562427d22423be42e9bd27213ee340e6632f1414f1f2cd121a4 · task rustain-1792646146867291386-de648da45410437a ·│   
+│   task parked awaiting operator approval│                                                                                       
+│   2026-10-22 05:15:47Z ← inbound ↓ item-received · peer 1220d1250d796fe91562427d22423be42e9bd27213ee340e6632f1414f1f2cd121a4 ·│ 
+│   task ri_4NIpwNHx4Lqf05SWs7IhI0Zvnf943zRo · recipient item received│                                                           
+│   2026-10-22 05:15:47Z ← inbound ✓ accepted · peer 1220d1250d796fe91562427d22423be42e9bd27213ee340e6632f1414f1f2cd121a4 · task│ 
+│   rustain-1792646146867291386-de648da45410437a · task accepted and executing│                                                   
+│   2026-10-22 05:15:47Z ← inbound ! surfaced · peer 1220d1250d796fe91562427d22423be42e9bd27213ee340e6632f1414f1f2cd121a4 · task│ 
+                             ╔══════════════════════════════════════════════════════════════════════╗                             
+                             ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+                             ║decision.                                                             ║                             
+                             ║To: lena-po, jun-dev                                                  ║                             
+                             ║Type: architecture_update                                             ║                             
+                             ║… more not shown — [r] Review first                                   ║                             
+                             ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║                             
+                             ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

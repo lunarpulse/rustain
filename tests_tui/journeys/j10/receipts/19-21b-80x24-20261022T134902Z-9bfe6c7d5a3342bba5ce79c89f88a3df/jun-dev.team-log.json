@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "structural_replay": "append-only, crash-safe, structurally replayable (not payload- or provenance-authenticated)",
+  "attribution": "peer attribution is only as strong as the credential scheme that produced it",
+  "structurally_consistent": true,
+  "divergence": null,
+  "export_path": null,
+  "export_rows": null,
+  "rows": [
+    {
+      "seq": 6,
+      "recorded_at_ms": 1792676974610,
+      "direction": "inbound",
+      "kind": "awaiting-approval",
+      "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+      "task": "rustain-1792676974530298095-3fab528805df5e48",
+      "summary": "task parked awaiting operator approval",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 7,
+      "recorded_at_ms": 1792676975250,
+      "direction": "inbound",
+      "kind": "item-received",
+      "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+      "task": "ri_6nun2Zo3xPSRkFodG04FNgTbzMjpr_e9",
+      "summary": "recipient item received",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 8,
+      "recorded_at_ms": 1792676975262,
+      "direction": "inbound",
+      "kind": "accepted",
+      "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+      "task": "rustain-1792676974530298095-3fab528805df5e48",
+      "summary": "task accepted and executing",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 9,
+      "recorded_at_ms": 1792676975273,
+      "direction": "inbound",
+      "kind": "surfaced",
+      "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+      "task": "a2a-in/p-cGVlcjoxMjIwMWU4MGNjODdmZmU4NTJiNWNkZTdkMDdmOTUzYzZkZjc2MzkwY2U2NDI0YmEyMWZhMmNmZmQ4ODRhYjE1NTU0ZQ/t-cnVzdGFpbi0xNzkyNjc2OTc0NTMwMjk4MDk1LTNmYWI1Mjg4MDVkZjVlNDg",
+      "summary": "peer interaction recorded · notification immediate",
+      "response_clause": "response: notify-and-wait · via individual — a2a-interaction.toml",
+      "notification_clause": "notification: immediate · via individual — a2a-interaction.toml"
+    }
+  ]
+}

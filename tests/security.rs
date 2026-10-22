@@ -551,6 +551,7 @@ async fn test_session_allow_bypasses_second_request() {
             ApprovalOutcome::AlwaysTool {
                 tool_name: "Bash".into(),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     assert_eq!(
@@ -618,6 +619,7 @@ async fn test_session_allow_not_persisted() {
             ApprovalOutcome::AlwaysTool {
                 tool_name: "Bash".into(),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     let _ = rx.await;
@@ -665,6 +667,7 @@ async fn test_reject_propagates() {
             ApprovalOutcome::Reject {
                 feedback: Some("don't delete".into()),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     let resolved = rx.await.unwrap();
@@ -831,6 +834,7 @@ async fn test_mode_switch_preserves_session_allow() {
             ApprovalOutcome::AlwaysTool {
                 tool_name: "Bash".into(),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     let _ = rx.await;
@@ -909,6 +913,7 @@ async fn test_session_allow_does_not_persist() {
             ApprovalOutcome::AlwaysTool {
                 tool_name: "Bash".into(),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     let _ = rx.await;
@@ -994,6 +999,7 @@ async fn test_approval_runtime_always_and_save_persists_scope() {
             ApprovalOutcome::AlwaysAndSave {
                 scope: ApprovalScope::Tool("Bash".into()),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     let _ = rx.await;

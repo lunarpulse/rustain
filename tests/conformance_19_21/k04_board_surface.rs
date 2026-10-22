@@ -862,7 +862,8 @@ async fn legacy_dispatch_rows_remain_inventory_only_and_action_selectors_render_
                 content_hash: None,
                 endpoint: None,
                 action: None,
-                authorship: rustain::domain::models::ReplyAuthorship::Unknown,
+                authorship: rustain::domain::models::Authorship::Unknown,
+                send_authorization: rustain::domain::models::SendAuthorization::Unknown,
             },
         )
         .await

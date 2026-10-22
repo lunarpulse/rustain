@@ -139,8 +139,15 @@ impl InboundPeerRuntime for DisclosureRuntime {
         ))
     }
 
-    async fn take_result_text(&self, _node_id: &AgentId) -> Option<String> {
-        Some(self.result.clone())
+    async fn take_result(
+        &self,
+        _node_id: &AgentId,
+    ) -> Option<rustain::domain::ports::StagedPeerResult> {
+        Some(rustain::domain::ports::StagedPeerResult {
+            text: self.result.clone(),
+            authorship: rustain::domain::models::Authorship::AgentComposed,
+            send_authorization: rustain::domain::models::SendAuthorization::Automatic,
+        })
     }
 
     async fn disclosure_forbidden_fragments(&self) -> Vec<String> {
@@ -194,7 +201,10 @@ impl InboundPeerRuntime for TypeRecordingRuntime {
         Err(InboundPeerError::unavailable("approval is not used"))
     }
 
-    async fn take_result_text(&self, _node_id: &AgentId) -> Option<String> {
+    async fn take_result(
+        &self,
+        _node_id: &AgentId,
+    ) -> Option<rustain::domain::ports::StagedPeerResult> {
         None
     }
 
@@ -1124,7 +1134,10 @@ async fn ac4_working_poll_records_status_query_without_disclosure_but_completed_
     assert_eq!(disclosure.direction.label(), "outbound");
     assert_eq!(
         disclosure.summary,
-        format!("disclosed result to peer ({} bytes)", RESULT.len())
+        format!(
+            "disclosed result to peer ({} bytes) [agent-composed] [auto-sent]",
+            RESULT.len()
+        )
     );
     assert_eq!(
         rows.iter()
@@ -1997,7 +2010,8 @@ async fn ac3b2_an_unreachable_roster_peer_renders_warned_never_declined() {
             content_hash: None,
             endpoint: None,
             action: None,
-            authorship: rustain::domain::models::ReplyAuthorship::Unknown,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         },
     )
     .await
@@ -2149,7 +2163,8 @@ async fn ac3_the_board_is_assembled_from_remote_reads_not_the_local_projection()
             content_hash: None,
             endpoint: None,
             action: None,
-            authorship: rustain::domain::models::ReplyAuthorship::Unknown,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         },
     )
     .await
@@ -2273,7 +2288,8 @@ async fn ac3g_the_board_row_answers_for_the_dispatched_task_not_the_newest_bag()
             content_hash: None,
             endpoint: None,
             action: None,
-            authorship: rustain::domain::models::ReplyAuthorship::Unknown,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         },
     )
     .await
@@ -2375,7 +2391,8 @@ async fn ac2c_the_board_carries_the_collapse_disclosure_from_a_loopback_peer() {
             content_hash: None,
             endpoint: None,
             action: None,
-            authorship: rustain::domain::models::ReplyAuthorship::Unknown,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         },
     )
     .await

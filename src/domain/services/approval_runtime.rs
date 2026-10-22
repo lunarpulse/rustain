@@ -23,7 +23,9 @@ use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast, oneshot}
 
 use crate::domain::models::ToolRisk;
 use crate::domain::models::tool_call::{ApprovalSource, RequestId};
-use crate::domain::models::{ApprovalOutcome, ApprovalScope, AutoApprovePolicy};
+use crate::domain::models::{
+    ApprovalOutcome, ApprovalScope, AutoApprovePolicy, PermissionResolution,
+};
 use crate::domain::ports::ApprovalPersistencePort;
 
 /// In-memory session-level auto-allow set.
@@ -141,6 +143,7 @@ struct PendingRecord {
 pub struct ResolvedApproval {
     pub outcome: ApprovalOutcome,
     pub fp: crate::domain::models::invocation_fingerprint::InvocationFingerprint,
+    pub resolution: PermissionResolution,
 }
 
 /// Internal request struct.
@@ -397,6 +400,7 @@ impl ApprovalRuntime {
             Err(_) => {
                 let (tx, rx) = oneshot::channel();
                 let _ = tx.send(ResolvedApproval {
+                    resolution: PermissionResolution::Policy,
                     outcome: ApprovalOutcome::Reject {
                         feedback: Some(
                             "input contains non-finite float; cannot fingerprint".into(),
@@ -410,6 +414,7 @@ impl ApprovalRuntime {
         if self.shut_down.load(Ordering::Acquire) {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(ResolvedApproval {
+                resolution: PermissionResolution::Policy,
                 outcome: ApprovalOutcome::Cancel,
                 fp,
             });
@@ -425,6 +430,7 @@ impl ApprovalRuntime {
                         tracing::info!(tool = %tool, "subagent_auto_approve=deny: rejecting subagent tool call");
                         let (tx, rx) = oneshot::channel();
                         let _ = tx.send(ResolvedApproval {
+                            resolution: PermissionResolution::Policy,
                             outcome: ApprovalOutcome::Reject {
                                 feedback: Some("subagent_auto_approve=deny".into()),
                             },
@@ -436,6 +442,7 @@ impl ApprovalRuntime {
                         tracing::debug!(tool = %tool, "subagent_auto_approve=allow: auto-approving subagent tool call");
                         let (tx, rx) = oneshot::channel();
                         let _ = tx.send(ResolvedApproval {
+                            resolution: PermissionResolution::Policy,
                             outcome: ApprovalOutcome::Once,
                             fp,
                         });
@@ -460,6 +467,7 @@ impl ApprovalRuntime {
             if self.shut_down.load(Ordering::Acquire) {
                 let (tx, rx) = oneshot::channel();
                 let _ = tx.send(ResolvedApproval {
+                    resolution: PermissionResolution::Policy,
                     outcome: ApprovalOutcome::Cancel,
                     fp,
                 });
@@ -468,6 +476,7 @@ impl ApprovalRuntime {
             if set.is_auto_approved(&tool, server_id, path_hint) {
                 let (tx, rx) = oneshot::channel();
                 let _ = tx.send(ResolvedApproval {
+                    resolution: PermissionResolution::Policy,
                     outcome: ApprovalOutcome::Once,
                     fp,
                 });
@@ -482,6 +491,7 @@ impl ApprovalRuntime {
         if self.shut_down.load(Ordering::Acquire) {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(ResolvedApproval {
+                resolution: PermissionResolution::Policy,
                 outcome: ApprovalOutcome::Cancel,
                 fp,
             });
@@ -532,7 +542,12 @@ impl ApprovalRuntime {
     }
 
     /// Resolve a pending approval with an outcome.
-    pub async fn resolve(&self, id: &RequestId, outcome: ApprovalOutcome) {
+    pub async fn resolve(
+        &self,
+        id: &RequestId,
+        outcome: ApprovalOutcome,
+        resolver: PermissionResolution,
+    ) {
         let record = self.pending.write().await.remove(id);
         if let Some(record) = record {
             // `[a]` on the sender-consent card is persisted by the consent
@@ -603,6 +618,7 @@ impl ApprovalRuntime {
                 for pid in to_resolve {
                     if let Some(rec) = self.pending.write().await.remove(&pid) {
                         let _ = rec.responder.send(ResolvedApproval {
+                            resolution: PermissionResolution::Policy,
                             outcome: ApprovalOutcome::Once,
                             fp: rec.fp,
                         });
@@ -615,6 +631,7 @@ impl ApprovalRuntime {
             }
 
             let _ = record.responder.send(ResolvedApproval {
+                resolution: resolver,
                 outcome: outcome.clone(),
                 fp: record.fp,
             });
@@ -638,6 +655,7 @@ impl ApprovalRuntime {
         for id in ids {
             if let Some(record) = self.pending.write().await.remove(&id) {
                 let _ = record.responder.send(ResolvedApproval {
+                    resolution: PermissionResolution::Policy,
                     outcome: ApprovalOutcome::Cancel,
                     fp: record.fp,
                 });
@@ -663,6 +681,7 @@ impl ApprovalRuntime {
         };
         for (id, record) in records {
             let _ = record.responder.send(ResolvedApproval {
+                resolution: PermissionResolution::Policy,
                 outcome: ApprovalOutcome::Cancel,
                 fp: record.fp,
             });
@@ -760,6 +779,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standing_grant_cascade_resolves_pending_requests_as_policy() {
+        for grant in [false, true] {
+            let rt = make_runtime();
+            let source = ApprovalSource::ForegroundTurn {
+                conversation_id: "cascade".into(),
+            };
+            let (first, first_rx) = rt
+                .request(
+                    source.clone(),
+                    "Bash".into(),
+                    serde_json::json!({"command":"first"}),
+                    ToolRisk::Elevated,
+                    None,
+                    None,
+                )
+                .await;
+            let (second, mut second_rx) = rt
+                .request(
+                    source,
+                    "Bash".into(),
+                    serde_json::json!({"command":"second"}),
+                    ToolRisk::Elevated,
+                    None,
+                    None,
+                )
+                .await;
+            rt.resolve(
+                &first.unwrap(),
+                if grant {
+                    ApprovalOutcome::AlwaysTool {
+                        tool_name: "Bash".into(),
+                    }
+                } else {
+                    ApprovalOutcome::Once
+                },
+                PermissionResolution::Operator,
+            )
+            .await;
+            assert_eq!(
+                first_rx.await.unwrap().resolution,
+                PermissionResolution::Operator,
+                "directly answered responder must retain Operator"
+            );
+            if grant {
+                let resolved = second_rx.await.unwrap();
+                assert_eq!(resolved.outcome, ApprovalOutcome::Once);
+                assert_eq!(
+                    resolved.resolution,
+                    PermissionResolution::Policy,
+                    "standing-grant cascade must record Policy, not an operator answer"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        second_rx.try_recv(),
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                    ),
+                    "Once must leave the other request pending"
+                );
+                assert!(rt.pending.read().await.contains_key(&second.unwrap()));
+                assert!(rt.snapshot_session().await.always_tools.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn fast_path_tool_auto_approved() {
         let rt = make_runtime();
         rt.session.write().await.always_tools.insert("Read".into());
@@ -821,6 +906,7 @@ mod tests {
             ApprovalOutcome::AlwaysTool {
                 tool_name: "Bash".into(),
             },
+            crate::domain::models::PermissionResolution::Operator,
         )
         .await;
         let resolved = rx.await.unwrap();
@@ -1174,7 +1260,12 @@ mod tests {
             .await;
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].id, own);
-        rt.resolve(&own, ApprovalOutcome::Once).await;
+        rt.resolve(
+            &own,
+            ApprovalOutcome::Once,
+            crate::domain::models::PermissionResolution::Operator,
+        )
+        .await;
         assert!(
             rt.pending_review(&own, ReviewScope::AllTools)
                 .await
@@ -1301,7 +1392,12 @@ mod tests {
                 .await
                 .is_empty()
         );
-        rt.resolve(&first, ApprovalOutcome::Once).await;
+        rt.resolve(
+            &first,
+            ApprovalOutcome::Once,
+            crate::domain::models::PermissionResolution::Operator,
+        )
+        .await;
         assert_eq!(rt.rejected_count(), 0);
     }
 

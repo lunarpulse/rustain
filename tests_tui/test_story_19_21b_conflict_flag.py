@@ -267,7 +267,7 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
         "daemon_binary": str(binary), "daemon_binary_sha256": binary_sha,
         "daemon_binary_bytes": binary.stat().st_size,
         "client_binary": str(binary), "client_binary_sha256": binary_sha,
-        "client_binary_bytes": binary.stat().st_size, "daemon_protocol_version": 7,
+        "client_binary_bytes": binary.stat().st_size,
         "source_sha256": source_sha, "scene_sha256": scene_sha,
         "tls": {"ca_sha256": _sha(ca), "certificate_sha256": _sha(cert),
                 "listener_bind": "0.0.0.0", "advertised_host": "127.0.0.1",

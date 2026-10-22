@@ -1,0 +1,30 @@
+┆  ADR-047 requires persist, then publish.                                                                                        
+┆  A crash between those steps loses the item.                                                                                    
+┆  Lena: amend the story acceptance order.                                                                                        
+┆  Jun: keep the owner lock through publication.                                                                                  
+┆  Do not acknowledge on arrival or passive View.                                                                                 
+┆  Retain the peer-tainted context boundary.                                                                                      
+┆  Review is local; only an operator may Send.                                                                                    
+┆  Preserve ordered recipients and exact UTF-8 bytes.                                                                             
+┆  Résumé: preserve naïve input and é.                                                                                            
+┆  Decision: persist the row before showing its card.                                                                             
+┆  response: notify-and-wait · via individual — a2a-interaction.toml                                                              
+┆  notification: immediate · via individual — a2a-interaction.toml                                                                
+                                                                                                                                  
+                                                                                                                                  
+[terminal] ⤷ Assistant:                                                                                                           
+[awaiting your response]                                                                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ⚠ ← inbound ✓ accepted · peer 12208fb9eeb42f7472694018288da6ed738e22e727968140d821a27b256b48164e0b · task│                      
+│   rustain-1792646178980236440-5d11b842612d42d6 · task accepted and executing│                                                   
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│architecture_update · marcus-arch                                                                                               │
+│Peer is waiting for your response.                                                                                              │
+│[Tab] Item actions                                                                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ Ready                                                          Esc/Ctrl+D/Ctrl+C detach log: 1
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

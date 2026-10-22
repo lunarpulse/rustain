@@ -1,0 +1,24 @@
+│  item actions · ri_Qfli4AYl9pS6FGIpW53fU2sNKCqjXkSe                           
+│  story_assignment                                                             
+│  story_assignment · 12205c2d06236be4738bbe138442c5e343868cbfae9a58834631ede8c1
+│  4446d3419d                                                                   
+│  received thread · 12205c2d06236be4738bbe138442c5e343868cbfae9a58834631ede8c14
+│  446d3419d · ri_Qfli4AYl9pS6FGIpW53fU2sNKCqjXkSe                              
+│  Context received: 1 text body · 254 bytes                                    
+│      STORY-047: publish the received card before persisting its row.          
+│      Jun owns implementation; Marcus checks the architecture.                 
+│      Acceptance: an arriving item is visible before its durable append.       
+│      Please identify conflicts with ADR-047; do not send automatically.       
+│  ri_Qfli4AYl9pS6FGIpW53fU2sNKCqjXkSe · received                               
+│                                                                               
+│                                                                               
+│                                                                               
+│                                                                               
+│                                                                               
+│  [r] Respond  [a] Acknowledge  [n] Decline  [c] Use as context                
+│  [Tab] Item/Response actions                                                  
+│    Ctrl+D/Ctrl+C: detach[PgUp/PgDn] Scroll  [Esc] Close                       
+ (daemon) [F] │ attached │ Normal │ Ready                                 log: 4
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

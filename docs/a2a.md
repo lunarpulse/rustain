@@ -249,11 +249,27 @@ new CLI command or a `describe` registry entry.
 
 Human Send enters the same validated operator send path as `/team send`, with
 the exact reviewed body, ordered recipients and type, and no subject or appended
-conversation context. Its sender-local journal records `AgentComposed` as
-`agent-composed`, distinct from typed sends' `human-written`, and `/team log`
-labels those dispatches `[agent-composed]`, never `[auto-sent]`. This provenance is
-not a new peer-wire field and is omitted from raw event projections. Legacy and
-unknown future provenance tokens remain readable as Unknown.
+conversation context. This host records two independent facts on dispatch,
+disclosure and reply journal rows: **authorship** (`human-written`,
+`agent-composed`, or `unknown`) and **send authorization** (`human-decided`,
+`automatic`, or `unknown`). `/team log` appends `[agent-composed]` for
+agent-composed text, then `[auto-sent]` only for automatic sends. Approved
+proposals record `agent-composed` + `human-decided`, so they never gain
+`[auto-sent]`; typed sends record `human-written` + `human-decided`.
+Unknown facts add no label, and unknown future tokens remain readable as Unknown.
+
+These recorded act facts are journal-local, not new peer-wire fields. Raw event
+projections omit both facts on dispatch and disclosure rows, and send
+authorization on reply rows; the existing reply authorship exposure is unchanged.
+Peer-tier attach transcripts never expose send authorization, while trusted-local
+writers and read-only mirrors retain it.
+
+For model delegation, `human-decided` means an operator-surface resolver
+authorized the exact fingerprint-bound invocation, with its full input available
+for review on that surface (Story 19.20c). It does not claim the input was read
+or attest human presence. A policy-resolved invocation records `automatic`;
+without a gate decision, send authorization is `unknown`. Proposal Send remains
+a distinct per-proposal consent decision.
 
 On protocol v7, only an authenticated TrustedLocal read-write attachment that
 opts in to proposal decisions receives the daemon's card. The rich TUI opts in
@@ -309,7 +325,7 @@ ratified remedies 512) are disclosure bounds, not a width rule, and keep their
 
 ## Live daemon recipient rows
 
-Daemon attachments use protocol **v7**. Continuously attached trusted-local
+Daemon attachments use protocol **v9**. Continuously attached trusted-local
 writers and read-only observers receive revisioned peer-row upserts and removals
 only after successful persistence. Snapshot and live updates use the same row
 identity; duplicate or older updates cannot restore a settled/deleted card.
@@ -605,7 +621,7 @@ revocation (`D3`, `DF-19-18C-CAPABILITY-NO-REVOCATION`) and no key rotation
 
 When the transparency log holds rows newer than your last visit, the right edge of the status bar shows a muted `log: N` (`log: 99+` above 99). Your client reads its own workspace journal about once a second; nothing is pushed to it, and no peer, item, task or event name ever appears in the segment. It counts every transparency row of every kind and direction — a teammate's retract of an item you received is one such row — so the count is a reason to look, not a description of what happened.
 
-- **How to clear it.** Open the log unfiltered: `Ctrl+X, L` or `/team log` in the standalone TUI; `/team log` in a daemon-attached client (there `Ctrl+X` retracts this host's auto-sent message, and a read-only attach may still read the log). The reminder clears only once the view is actually drawn on screen. A filtered command (`--filter=…`), a panel with an active search, a failed read, a result scrolled off screen, a panel export, an unrelated key, a restart, or the offline `rustain team log` command never clears it. `--json` and `--export` clear it like the plain view, because the rows were shown — whether or not the export file was written.
+- **How to clear it.** Open the log unfiltered: `Ctrl+X, L` or `/team log` in the standalone TUI; `/team log` in a daemon-attached client (there `Ctrl+X` retracts this host's automatic sends only, and a read-only attach may still read the log). The reminder clears only once the view is actually drawn on screen. A filtered command (`--filter=…`), a panel with an active search, a failed read, a result scrolled off screen, a panel export, an unrelated key, a restart, or the offline `rustain team log` command never clears it. `--json` and `--export` clear it like the plain view, because the rows were shown — whether or not the export file was written.
 - **What clearing means.** It records that this client *presented* that snapshot. It is a local visit reminder: ⛔ not `/team ack`, not `/team remove`, not `/team retract`, not an acknowledgement or a receipt to anyone, and not proof that you read a row. The in-chat `/team log` shows at most 20 rows and says so; presenting it clears the reminder for the whole snapshot it read, while the older rows remain in `rustain team log` and the panel. Clearing does not mean those older rows were read.
 - **What it counts.** Rows newer than the durable boundary your last presented visit recorded; rows that arrive after a view was read stay counted until the next visit. On first use every existing row counts. The boundary lives in `.rustain/transparency-seen.json`, is shared by the standalone and attached clients of this workspace, survives restarts, and is never written by polling.
 - **`log: ?`** means the reminder cannot currently be trusted — the journal or the preference could not be read, a visit could not be saved, or the journal's head fell below the saved boundary (a reset, which the client confirms and then counts from zero). It is never shown as an apparently current zero; open the log for details.

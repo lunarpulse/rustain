@@ -24,8 +24,18 @@
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::models::{AgentId, NodeState, PolicyPrincipal, SemanticMessageType};
+use crate::domain::models::{
+    AgentId, Authorship, NodeState, PolicyPrincipal, SemanticMessageType, SendAuthorization,
+};
 use crate::domain::ports::PeerResponsePolicy;
+
+/// A completed peer answer and the facts recorded by its producing act.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedPeerResult {
+    pub text: String,
+    pub authorship: Authorship,
+    pub send_authorization: SendAuthorization,
+}
 
 /// One admitted inbound task, ready to execute as a local peer node.
 #[derive(Debug, Clone)]
@@ -185,11 +195,11 @@ pub trait InboundPeerRuntime: Send + Sync {
     /// Remove and return the agent's textual answer for a finished node, if one
     /// was produced.
     ///
-    /// Deliberately narrow: the seam returns *text*, never a conversation, node,
-    /// or result-store handle, so a caller physically cannot project internal
-    /// state it was never given. Taking it makes lifecycle transfer the sole
-    /// owner and prevents completed answers accumulating for daemon lifetime.
-    async fn take_result_text(&self, node_id: &AgentId) -> Option<String>;
+    /// Deliberately narrow: the seam returns only text and its staged act facts,
+    /// never a conversation, node, or result-store handle. Taking it makes
+    /// lifecycle transfer the sole owner and prevents completed answers
+    /// accumulating for daemon lifetime.
+    async fn take_result(&self, node_id: &AgentId) -> Option<StagedPeerResult>;
 
     /// Host-sensitive text fragments that must never be disclosed to a remote
     /// submitter. Implementations derive these from local-only state (for

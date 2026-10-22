@@ -7872,6 +7872,7 @@ mod tests {
                     node,
                     task,
                     disclosed_bytes,
+                    ..
                 } => {
                     let n = it.sym(node.as_str());
                     lines.push(format!(
@@ -8053,6 +8054,7 @@ mod tests {
                     answers,
                     content,
                     authorship,
+                    send_authorization: _,
                     kind,
                     via_node,
                 } => {

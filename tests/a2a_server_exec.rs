@@ -241,11 +241,15 @@ impl InboundPeerRuntime for ScrubRuntime {
         ))
     }
 
-    async fn take_result_text(
+    async fn take_result(
         &self,
         _node_id: &rustain::domain::models::AgentId,
-    ) -> Option<String> {
-        Some(self.result.clone())
+    ) -> Option<rustain::domain::ports::StagedPeerResult> {
+        Some(rustain::domain::ports::StagedPeerResult {
+            text: self.result.clone(),
+            authorship: rustain::domain::models::Authorship::AgentComposed,
+            send_authorization: rustain::domain::models::SendAuthorization::Automatic,
+        })
     }
 
     async fn disclosure_forbidden_fragments(&self) -> Vec<String> {
@@ -283,10 +287,10 @@ impl InboundPeerRuntime for FailingStartRuntime {
         Err(InboundPeerError::unavailable("not reached"))
     }
 
-    async fn take_result_text(
+    async fn take_result(
         &self,
         _node_id: &rustain::domain::models::AgentId,
-    ) -> Option<String> {
+    ) -> Option<rustain::domain::ports::StagedPeerResult> {
         None
     }
 

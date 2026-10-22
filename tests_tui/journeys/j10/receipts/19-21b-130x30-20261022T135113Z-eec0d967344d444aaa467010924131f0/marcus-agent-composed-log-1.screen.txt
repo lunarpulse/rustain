@@ -1,0 +1,30 @@
+│ ℹ     lena-po  awaiting their approval│                                                                                         
+│       jun-dev  awaiting their approval│                                                                                         
+│ ℹ Team interaction policy│                                                                                                      
+│   Response mode: notify-and-wait│                                                                                               
+│   Notification urgency: immediate│                                                                                              
+│   Peers:│                                                                                                                       
+│   - jun-dev (12201e2aee5b7c5a8fe40d312c8f93511ec97afefc95c9aa6dfa1ddaa08b8e2e02ca): not granted│                                
+│   - lena-po (1220c1833b401f2c55db5eb046c5fededacfafbeb5cc4c653b30a8b5f6dd8da2a90b): not granted│                                
+│ ⚠ ← inbound ✓ accepted · peer 1220c1833b401f2c55db5eb046c5fededacfafbeb5cc4c653b30a8b5f6dd8da2a90b · task│                      
+│   rustain-1792677074643677450-2b27f855a2caa6c4 · task accepted and executing│                                                   
+│ ℹ 2026-10-22 13:51:14Z ← inbound ⏸ awaiting-approval · peer│                                                                    
+│   1220c1833b401f2c55db5eb046c5fededacfafbeb5cc4c653b30a8b5f6dd8da2a90b · task rustain-1792677074643677450-2b27f855a2caa6c4 ·│   
+│   task parked awaiting operator approval│                                                                                       
+│   2026-10-22 13:51:14Z ← inbound ↓ item-received · peer 1220c1833b401f2c55db5eb046c5fededacfafbeb5cc4c653b30a8b5f6dd8da2a90b ·│ 
+│   task ri_JVlGS1xgy6LKFpsgRSqeh0MpuJLtKLDs · recipient item received│                                                           
+│   2026-10-22 13:51:14Z ← inbound ✓ accepted · peer 1220c1833b401f2c55db5eb046c5fededacfafbeb5cc4c653b30a8b5f6dd8da2a90b · task│ 
+│   rustain-1792677074643677450-2b27f855a2caa6c4 · task accepted and executing│                                                   
+│   2026-10-22 13:51:14Z ← inbound ! surfaced · peer 1220c1833b401f2c55db5eb046c5fededacfafbeb5cc4c653b30a8b5f6dd8da2a90b · task│ 
+│   a2a-in/p-cGVlcjoxMjIwYzE4MzNiNDAxZjJjNTVkYjVlYjA0NmM1ZmVkZWRhY2ZhZmJlYjVjYzRjNjUzYjMwYThiNWY2ZGQ4ZGEyYTkwYg/t-cnVzdGFpbi0xNz│ 
+│   kyNjc3MDc0NjQzNjc3NDUwLTJiMjdmODU1YTJjYWE2YzQ · peer interaction recorded · notification immediate│                           
+│     response: notify-and-wait · via individual — a2a-interaction.toml│                                                          
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                                                                      │
+│Peer is waiting for your response.                                                                                              │
+│[Tab] Item actions                                                                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

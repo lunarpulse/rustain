@@ -2,6 +2,7 @@
 //!
 //! `RoomEvent` is the canonical durable event. `OrchestrationRoom::project`
 //! performs no I/O and exposes no mutation surface to observers.
+use super::provenance::{Authorship, SendAuthorization};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,9 +20,7 @@ use crate::domain::models::node_state::NodeState;
 use crate::domain::models::peer_frame::FrameRefusal;
 use crate::domain::models::peer_identity::PeerId;
 use crate::domain::models::policy_principal::PrincipalKind;
-use crate::domain::models::recipient_item::{
-    ItemAddress, ItemId, ReplyAuthorship, ReplyKind, TurnAddress,
-};
+use crate::domain::models::recipient_item::{ItemAddress, ItemId, ReplyKind, TurnAddress};
 use crate::domain::models::room_role::RoomRole;
 use crate::domain::models::team_policy::{InteractionPolicySnapshot, NotificationUrgency};
 use crate::domain::models::ticket_addressee::TicketAddressee;
@@ -641,8 +640,17 @@ pub enum RoomEvent {
         action: Option<SendActionRef>,
         /// Who authored this dispatch. Older journals and future tokens
         /// conservatively replay as unknown and keep the legacy JSON shape.
-        #[serde(default, skip_serializing_if = "ReplyAuthorship::is_unknown")]
-        authorship: ReplyAuthorship,
+        #[serde(
+            default = "Authorship::unknown",
+            skip_serializing_if = "Authorship::is_unknown"
+        )]
+        authorship: Authorship,
+        /// AD-1830 fact 2, recorded at the dispatch act; journal-local (Story 19.20a).
+        #[serde(
+            default = "SendAuthorization::unknown",
+            skip_serializing_if = "SendAuthorization::is_unknown"
+        )]
+        send_authorization: SendAuthorization,
     },
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.
@@ -766,6 +774,17 @@ pub enum RoomEvent {
         /// Byte length of the content handed back. Never the content itself.
         #[serde(default)]
         disclosed_bytes: usize,
+        /// Composition and send decision recorded at actual disclosure.
+        #[serde(
+            default = "Authorship::unknown",
+            skip_serializing_if = "Authorship::is_unknown"
+        )]
+        authorship: Authorship,
+        #[serde(
+            default = "SendAuthorization::unknown",
+            skip_serializing_if = "SendAuthorization::is_unknown"
+        )]
+        send_authorization: SendAuthorization,
     },
     /// Append-only same-host retraction of a previously disclosed auto response.
     AutoResponseRetracted {
@@ -779,6 +798,7 @@ pub enum RoomEvent {
     /// Durable operator resolution of a buffered peer-response draft.
     PeerDraftResolved {
         node: AgentId,
+        /// Frozen legacy encoding; never a provenance source for any render, serve or retract decision (Story 19.20a).
         agent_composed: bool,
         sent: bool,
     },
@@ -1156,8 +1176,14 @@ pub enum RoomEvent {
         /// The reply text, stored raw (`AD-1824`); scrubbed at serve time.
         content: String,
         /// Carried from the act that authored the turn (`A14`).
-        #[serde(default)]
-        authorship: ReplyAuthorship,
+        #[serde(default = "Authorship::unknown")]
+        authorship: Authorship,
+        /// The send decision carried from the reply act; journal-local.
+        #[serde(
+            default = "SendAuthorization::unknown",
+            skip_serializing_if = "SendAuthorization::is_unknown"
+        )]
+        send_authorization: SendAuthorization,
         /// Whether the turn is an answer, a reported defer, or an unknown
         /// future kind. Older journal rows default to Answer.
         #[serde(default, skip_serializing_if = "ReplyKind::is_answer")]

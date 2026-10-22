@@ -7,3 +7,5 @@ mod harness;
 mod k01_exact;
 #[path = "conformance_19_20c_standalone/k05_ownership.rs"]
 mod k05_ownership;
+#[path = "conformance_19_20c_standalone/k20a_resolution.rs"]
+mod k20a_resolution;

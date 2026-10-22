@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::tui::state::TuiState;
-use rustain::domain::models::{JournalRecord, ReplyAuthorship, ResponseMode, RoomEvent};
+use rustain::domain::models::{
+    Authorship, JournalRecord, ResponseMode, RoomEvent, SendAuthorization,
+};
 use rustain::domain::ports::CapabilityProvider;
 use rustain::infrastructure::subagent::NodeJournal;
 use serde_json::json;
@@ -27,7 +29,8 @@ async fn k06_production_node_journal_replays_legacy_and_future_dispatch_authorsh
             content_hash: None,
             endpoint: None,
             action: None,
-            authorship: ReplyAuthorship::Unknown,
+            authorship: Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         })
         .await
         .expect("write a legacy-shape row through NodeJournal");
@@ -51,7 +54,7 @@ async fn k06_production_node_journal_replays_legacy_and_future_dispatch_authorsh
     else {
         panic!("legacy row is not a dispatch: {legacy_entry:?}");
     };
-    assert_eq!(*authorship, ReplyAuthorship::Unknown);
+    assert_eq!(*authorship, Authorship::Unknown);
 
     row["record"]["payload"]["authorship"] = json!("future-authorship-token");
     let mut future = serde_json::to_vec(&row).expect("encode future token row");
@@ -74,7 +77,7 @@ async fn k06_production_node_journal_replays_legacy_and_future_dispatch_authorsh
     else {
         panic!("replayed journal entry is not a dispatch: {entry:?}");
     };
-    assert_eq!(*authorship, ReplyAuthorship::Unknown);
+    assert_eq!(*authorship, Authorship::Unknown);
 }
 
 #[tokio::test]
@@ -136,8 +139,11 @@ async fn k06_followup_and_retract_dispatches_keep_human_and_unknown_provenance()
         .into_iter()
         .filter_map(|(_, event)| match event {
             RoomEvent::RemoteEnvelopeDispatched {
-                act, authorship, ..
-            } => Some((act, authorship)),
+                act,
+                authorship,
+                send_authorization,
+                ..
+            } => Some((act, authorship, send_authorization)),
             _ => None,
         })
         .collect();
@@ -146,13 +152,31 @@ async fn k06_followup_and_retract_dispatches_keep_human_and_unknown_provenance()
         3,
         "typed send, follow-up and retract each dispatched"
     );
-    assert_eq!(authorship[0].1, ReplyAuthorship::HumanWritten);
-    assert_eq!(authorship[1].1, ReplyAuthorship::HumanWritten);
+    assert_eq!(authorship[0].1, Authorship::HumanWritten);
+    assert_eq!(authorship[1].1, Authorship::HumanWritten);
     assert!(matches!(
         authorship[2].0,
         rustain::domain::models::DispatchAct::ItemRetract { .. }
     ));
-    assert_eq!(authorship[2].1, ReplyAuthorship::Unknown);
+    assert_eq!(authorship[2].1, Authorship::Unknown);
+    for dispatch in &authorship {
+        assert_eq!(
+            dispatch.2,
+            SendAuthorization::HumanDecided,
+            "typed/followup/retract authorization must be HumanDecided: {:?}",
+            dispatch.0
+        );
+    }
+    for entry in sender.journal.entries().await {
+        if matches!(
+            entry.record,
+            JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched { .. })
+        ) {
+            let row = rustain::domain::services::transparency::transparency_row(&entry).unwrap();
+            assert!(!row.summary.contains("[agent-composed]"), "{}", row.summary);
+            assert!(!row.summary.contains("[auto-sent]"), "{}", row.summary);
+        }
+    }
     host.stop().await;
 }
 
@@ -198,13 +222,22 @@ async fn k06_model_delegation_dispatch_is_agent_composed() {
         row.summary
     );
     assert!(!row.summary.contains("[auto-sent]"), "{}", row.summary);
-    let JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched { authorship, .. }) = &entry.record
+    let JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched {
+        authorship,
+        send_authorization,
+        ..
+    }) = &entry.record
     else {
         panic!("selected journal entry is not a dispatch: {entry:?}");
     };
     assert_eq!(
         *authorship,
-        ReplyAuthorship::AgentComposed,
+        Authorship::AgentComposed,
         "model delegation must retain agent-composed dispatch authorship"
+    );
+    assert_eq!(
+        *send_authorization,
+        SendAuthorization::Unknown,
+        "ungated provider bypass must not invent a gate decision"
     );
 }

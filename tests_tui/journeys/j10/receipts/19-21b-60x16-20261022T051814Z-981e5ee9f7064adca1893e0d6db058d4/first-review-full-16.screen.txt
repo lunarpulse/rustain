@@ -1,0 +1,16 @@
+┆  story_assignment ·                                       
+┆  1220007e0c1f261095af25e8f1db840c45338f53f9b260d7234f2a6e8
+┆  f08fcfb9401                                              
+╔══════════════════════════════════════════════════════════╗
+║Your agent proposes a message. Nothing has been sent. Aw  ║
+║aiting your decision.                                     ║
+║To: lena-po, jun-dev                                      ║
+║Type: architecture_update                                 ║
+║… more not shown — [r] Review first                       ║
+║[y] Send to lena-po, jun-dev   [r] Review first   [n] Di  ║
+║smiss                                                     ║
+╚══════════════════════════════════════════════════════════╝
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready  log: 5
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

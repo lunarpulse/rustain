@@ -212,7 +212,7 @@ async fn k09_architecture_update_ack_is_durable_idempotent_and_discussion_remain
                 answers,
                 content,
                 kind: rustain::domain::models::ReplyKind::Answer,
-                authorship: rustain::domain::models::ReplyAuthorship::HumanWritten,
+                authorship: rustain::domain::models::Authorship::HumanWritten,
                 via_node: None,
                 ..
             } if answers.as_str() == item_id.as_str()
@@ -587,13 +587,23 @@ async fn k09_gated_ack_and_discuss_actions_keep_distinct_targets_and_outcomes() 
     // The gated Ack holds this connection's reader, so no in-band fence can
     // pass it. Observe the socket for a bounded window while the append is
     // still blocked: any Applied result for the Ack here is premature.
+    // A receive deadline must not cancel a partially decoded socket frame.
+    let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel();
+    let frame_reader = tokio::spawn(async move {
+        while let Some(frame) = read_frame::<_, DaemonFrame>(&mut ack_writer)
+            .await
+            .expect("valid acknowledgement daemon frame")
+        {
+            if frames_tx.send(frame).is_err() {
+                break;
+            }
+        }
+    });
     let observe_until = tokio::time::Instant::now() + std::time::Duration::from_millis(300);
-    while let Ok(frame) =
-        tokio::time::timeout_at(observe_until, read_frame::<_, DaemonFrame>(&mut ack_writer)).await
-    {
+    while let Ok(frame) = tokio::time::timeout_at(observe_until, frames_rx.recv()).await {
         if let DaemonFrame::RecipientActionResult {
             action, outcome, ..
-        } = frame.expect("valid daemon frame").expect("open socket")
+        } = frame.expect("open socket")
         {
             assert!(
                 !matches!(action, RecipientAction::Acknowledge)
@@ -602,7 +612,25 @@ async fn k09_gated_ack_and_discuss_actions_keep_distinct_targets_and_outcomes() 
             );
         }
     }
-    let ack_result = Box::pin(recipient_action_result(&mut ack_writer, None));
+    let ack_result = Box::pin(async {
+        loop {
+            match tokio::time::timeout(ACTION_SET, frames_rx.recv())
+                .await
+                .expect("acknowledgement result deadline")
+                .expect("open acknowledgement socket")
+            {
+                DaemonFrame::RecipientActionResult {
+                    action,
+                    target,
+                    outcome,
+                } => {
+                    break (action, target, outcome);
+                }
+                DaemonFrame::Error(error) => panic!("action result was not correlated: {error:?}"),
+                _ => {}
+            }
+        }
+    });
 
     // The first outcome is held behind a real durable append. Send a different
     // action and item target through another authenticated socket before opening
@@ -678,7 +706,7 @@ async fn k09_gated_ack_and_discuss_actions_keep_distinct_targets_and_outcomes() 
     assert_eq!(host.node_tree.list().await, nodes_before);
     assert_eq!(host.requests.lock().len(), requests_before);
 
-    drop(ack_writer);
+    frame_reader.abort();
     drop(reply_writer);
     drop(socket);
     stop_host(host).await;

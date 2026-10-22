@@ -191,7 +191,8 @@ pub struct SendRequest<'a> {
     pub reply_to: Option<&'a str>,
     pub subject: Option<&'a str>,
     /// Provenance for this outbound dispatch; never sent to the peer.
-    pub authorship: crate::domain::models::ReplyAuthorship,
+    pub authorship: crate::domain::models::Authorship,
+    pub send_authorization: crate::domain::models::SendAuthorization,
 }
 
 /// The one send coordinator (Story 19.21 `C1`): validate the whole action,
@@ -295,6 +296,7 @@ where
                 request.reply_to,
                 reference.as_ref(),
                 request.authorship,
+                request.send_authorization,
                 &mut item,
             )
             .await;
@@ -408,7 +410,8 @@ pub async fn deliver_text(
         message_type,
         reply_to,
         None,
-        crate::domain::models::ReplyAuthorship::HumanWritten,
+        crate::domain::models::Authorship::HumanWritten,
+        crate::domain::models::SendAuthorization::HumanDecided,
         &mut None,
     )
     .await
@@ -426,7 +429,8 @@ async fn deliver_one(
     message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<&str>,
     action: Option<&crate::domain::models::SendActionRef>,
-    authorship: crate::domain::models::ReplyAuthorship,
+    authorship: crate::domain::models::Authorship,
+    send_authorization: crate::domain::models::SendAuthorization,
     item_out: &mut Option<String>,
 ) -> RecipientOutcome {
     use super::lifecycle::A2aTaskTransport;
@@ -518,7 +522,14 @@ async fn deliver_one(
     let result = transport
         .send_after(message, || async {
             runtime
-                .journal_send_dispatch(&spec, &task_id, text, action, authorship)
+                .journal_send_dispatch(
+                    &spec,
+                    &task_id,
+                    text,
+                    action,
+                    authorship,
+                    send_authorization,
+                )
                 .await
                 .map_err(|_| A2aError::JournalDispatch)?;
             dispatched.store(true, Ordering::Relaxed);
@@ -1075,7 +1086,7 @@ pub struct ServedTurn {
     /// Hash of the body this host received, when it received one.
     pub content_hash: Option<crate::domain::models::ContentHash>,
     pub kind: crate::domain::models::ReplyKind,
-    pub authorship: crate::domain::models::ReplyAuthorship,
+    pub authorship: crate::domain::models::Authorship,
     pub retracted_at_ms: Option<i64>,
 }
 
@@ -1223,7 +1234,7 @@ fn transport_failure(error: &A2aError) -> RecipientOutcome {
 /// over `MAX_PEER_ID_BYTES`, or a kind this build cannot name — ⛔ never
 /// rendered as if it were a partial thread.
 pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
-    use crate::domain::models::{MAX_REPLY_BYTES, ReplyAuthorship, ReplyKind};
+    use crate::domain::models::{Authorship, MAX_REPLY_BYTES, ReplyKind};
 
     let bounded = |value: Option<&serde_json::Value>| {
         value
@@ -1260,7 +1271,7 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
             authorship: turn
                 .get("authorship")
                 .and_then(serde_json::Value::as_str)
-                .map_or(ReplyAuthorship::Unknown, ReplyAuthorship::from_wire),
+                .map_or(Authorship::Unknown, Authorship::from_wire),
             kind: match turn.get("replyKind") {
                 None => ReplyKind::Answer,
                 Some(serde_json::Value::String(kind)) => match kind.as_str() {

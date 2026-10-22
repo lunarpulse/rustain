@@ -753,9 +753,11 @@ async fn k07_story_assignment_view_stays_delivered_ack_refines_and_auto_stays_de
     let history = view_received_item(&mut auto_attached).await;
     assert!(
         history.iter().any(|message| {
-            message.authorship == rustain::domain::models::MessageAuthorship::AgentComposed
+            message.authorship == rustain::domain::models::Authorship::AgentComposed
+                && message.send_authorization
+                    == rustain::domain::models::SendAuthorization::Automatic
         }),
-        "M51 positive control: notify-and-auto produced an agent-composed response"
+        "M51 positive control: notify-and-auto produced an agent-composed automatic response"
     );
     let auto_board = board_fresh(&auto, &auto_sender).await;
     assert!(

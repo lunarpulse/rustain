@@ -3,7 +3,9 @@ use crate::g_harness::*;
 use rustain::adapters::daemon::protocol::{
     ClientFrame, ConnectionTier, DaemonFrame, TeamBoardRequest, ToolInputWithheld,
 };
-use rustain::domain::models::{JournalRecord, PermissionMode, ReplyAuthorship, RoomEvent};
+use rustain::domain::models::{
+    Authorship, JournalRecord, PermissionMode, RoomEvent, SendAuthorization,
+};
 use serde_json::{Value, json};
 
 #[tokio::test]
@@ -78,7 +80,7 @@ async fn model_delegation_through_attached_turn_is_agent_composed() {
         .collect();
     assert_eq!(
         authorship,
-        [ReplyAuthorship::AgentComposed],
+        [Authorship::AgentComposed],
         "M47 attached: model delegation dispatch must be agent-composed"
     );
     let log = rustain::domain::services::transparency::fold_transparency(&entries)
@@ -266,6 +268,7 @@ async fn approved_dispatch_authorship_stays_out_of_raw_frames() {
             "history pages retain unrelated tool evidence"
         );
     }
+    let before_send = daemon.journal.entries().await.len();
     send_once(&daemon, &mut writer, &host, &id).await;
     let posts = host.posts();
     let sent: Value = serde_json::from_slice(posts[0].body()).unwrap();
@@ -288,7 +291,7 @@ async fn approved_dispatch_authorship_stays_out_of_raw_frames() {
             matches!(dispatch,DaemonFrame::Event(event)
             if matches!(event.kind,rustain::infrastructure::runtime::event_bus::RawEventKind::DomainEvent(
                 rustain::domain::events::DomainEventPayload::Room(RoomEvent::RemoteEnvelopeDispatched {
-                    authorship:ReplyAuthorship::Unknown,..})))),
+                    authorship:Authorship::Unknown,..})))),
             "M49 attached: journal-only dispatch authorship must not leak on raw frames"
         );
     }
@@ -296,15 +299,42 @@ async fn approved_dispatch_authorship_stays_out_of_raw_frames() {
     fence(&mut peer, "raw-peer-fence").await;
     fence(&mut readonly, "raw-readonly-fence").await;
     let entries = daemon.journal.entries().await;
+    let dispatches: Vec<_> = entries[before_send..]
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.record,
+                JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched { .. })
+            )
+        })
+        .collect();
+    assert_eq!(
+        dispatches.len(),
+        1,
+        "approved proposal produces exactly one dispatch"
+    );
+    let dispatch = dispatches[0];
     assert!(
-        entries.iter().any(|entry| matches!(
-            &entry.record,
+        matches!(
+            &dispatch.record,
             JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched {
-                authorship: ReplyAuthorship::AgentComposed,
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
                 ..
             })
-        )),
-        "positive control: journal retains approved authorship"
+        ),
+        "R6 approved proposal dispatch retains AgentComposed + HumanDecided"
+    );
+    let row = rustain::domain::services::transparency::transparency_row(dispatch).unwrap();
+    assert!(
+        row.summary.contains("[agent-composed]"),
+        "R6 approved proposal summary retains agent-composed: {}",
+        row.summary
+    );
+    assert!(
+        !row.summary.contains("[auto-sent]"),
+        "R6 approved proposal summary must not claim auto-sent: {}",
+        row.summary
     );
     for frame in writer
         .received
@@ -496,7 +526,7 @@ async fn future_dispatch_authorship_replays_into_attached_board() {
         loaded.iter().any(|entry| matches!(
             &entry.record,
             JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched {
-                authorship: ReplyAuthorship::Unknown,
+                authorship: Authorship::Unknown,
                 ..
             })
         )),

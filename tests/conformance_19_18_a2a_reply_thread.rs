@@ -64,8 +64,8 @@ use rustain::domain::errors::ProviderError;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::capability_registry::CapabilityRegistry;
 use rustain::domain::models::{
-    A2aPeerSource, A2aPeerSpec, AppConfig, CompletionOptions, Conversation, FeedbackLevel,
-    JournalRecord, Message, ReplyAuthorship, ResponseMode, RoomEvent, StopReason, StreamChunk,
+    A2aPeerSource, A2aPeerSpec, AppConfig, Authorship, CompletionOptions, Conversation,
+    FeedbackLevel, JournalRecord, Message, ResponseMode, RoomEvent, StopReason, StreamChunk,
 };
 use rustain::domain::ports::{
     DeliveryPolicy, RoomJournal, RoomJournalError, RoomJournalReader, SecurityPort, StoragePort,
@@ -890,7 +890,7 @@ struct ReplyRow {
     turn: String,
     answers: String,
     content: String,
-    authorship: ReplyAuthorship,
+    authorship: Authorship,
     via_node: Option<String>,
 }
 
@@ -1055,7 +1055,7 @@ async fn the_reply_round_trip_through_every_front_door() {
             turn: rr_1.clone(),
             answers: ri_q.clone(),
             content: body.to_owned(),
-            authorship: ReplyAuthorship::HumanWritten,
+            authorship: Authorship::HumanWritten,
             via_node: Some(node_q.clone()),
         }
     );
@@ -1397,15 +1397,55 @@ async fn refused_replies_write_nothing() {
     attach_shutdown.cancel();
 }
 
-/// `K04` — the draft path records exactly the SENDING resolutions, with the
-/// recorded authorship: WriteOwn → `HumanWritten` equal to the task's
-/// completed message; Approve → `AgentComposed`; Reject → nothing; an auto
-/// template → nothing (`A7(c)`).
-///
-/// `M05` (turn on Reject), `M06` (Approve as HumanWritten), `M34` (auto
-/// template records a turn) → RED.
+/// K07 — composition and send authorization remain independent on raw reply
+/// events; the public thread preserves only composition and its existing marks.
 #[tokio::test]
 async fn draft_resolutions_record_exactly_the_sending_turns() {
+    use rustain::domain::models::SendAuthorization;
+
+    let assert_facts = |rows: &[(u64, RoomEvent)], item: &str, expected, act: &str| {
+        let facts: Vec<_> = rows
+            .iter()
+            .filter_map(|(_, event)| match event {
+                RoomEvent::RecipientItemReplied {
+                    answers,
+                    authorship,
+                    send_authorization,
+                    ..
+                } if answers.as_str() == item => Some((*authorship, *send_authorization)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            facts,
+            vec![(expected, SendAuthorization::HumanDecided)],
+            "K07 {act}: exactly one raw reply records composition independently of the human send decision"
+        );
+    };
+    let assert_thread = |thread: &serde_json::Value, expected: &str, act: &str| {
+        let turns = thread["result"]["turns"]
+            .as_array()
+            .expect("K07 served thread contains turns");
+        let replies: Vec<_> = turns
+            .iter()
+            .filter(|turn| turn["kind"] == "reply")
+            .collect();
+        assert!(
+            !replies.is_empty(),
+            "K07 {act}: privacy assertion requires a served reply"
+        );
+        for reply in replies {
+            assert_eq!(
+                reply["authorship"], expected,
+                "K07 {act}: authorship keeps its existing wire token"
+            );
+        }
+        let json = serde_json::to_string(thread).expect("thread JSON");
+        assert!(
+            !json.contains("\"sendAuthorization\"") && !json.contains("\"send_authorization\""),
+            "K07 {act}: public thread must not expose either spelling of send authorization: {json}"
+        );
+    };
     // (1) WriteOwn on a wait-mode card.
     let mut b = Host::serve(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let (mut operator, attach_shutdown) = attach_operator(&mut b).await;
@@ -1436,11 +1476,81 @@ async fn draft_resolutions_record_exactly_the_sending_turns() {
     let turns = replies(&room_events(&b.journal).await);
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].1.answers, ri_w);
-    assert_eq!(turns[0].1.authorship, ReplyAuthorship::HumanWritten);
+    assert_eq!(
+        turns[0].1.authorship,
+        Authorship::HumanWritten,
+        "K07 WriteOwn: the human-written reply turn keeps HumanWritten authorship"
+    );
+    assert_facts(
+        &room_events(&b.journal).await,
+        &ri_w,
+        Authorship::HumanWritten,
+        "WriteOwn",
+    );
+    assert_thread(&thread_rpc(&b, &ri_w).await, "human-written", "WriteOwn");
     assert_eq!(
         completed["result"]["status"]["message"]["parts"][0]["text"],
         turns[0].1.content.as_str()
     );
+    // Direct operator reply and defer use the same frames as their /team verbs.
+    for (defer, act) in [(false, "/team reply"), (true, "/team defer")] {
+        let item = if defer {
+            let (item, task) = ask(&mut sender, &mut state, &b, act).await;
+            let node = waiting_node(&b, &task).await;
+            pending_card(&b, &node).await;
+            item
+        } else {
+            // The WriteOwn card is already resolved: this must exercise the
+            // direct reply writer, not resolve another live card as WriteOwn.
+            ri_w.clone()
+        };
+        let frame = if defer {
+            write_frame(
+                &mut operator,
+                &ClientFrame::DeferRecipientItem {
+                    item_id: item.clone(),
+                },
+            )
+            .await
+            .expect("K07 send direct defer");
+            next_answer(&mut operator).await
+        } else {
+            operator_reply(&mut operator, &item, "direct human answer").await
+        };
+        assert!(
+            matches!(
+                frame,
+                DaemonFrame::RecipientActionResult {
+                    outcome: RecipientActionOutcome::Applied { reply: Some(_) },
+                    ..
+                }
+            ),
+            "K07 {act}: direct operator act must produce a durable turn"
+        );
+        let rows = room_events(&b.journal).await;
+        if defer {
+            assert_facts(&rows, &item, Authorship::HumanWritten, act);
+        } else {
+            let facts: Vec<_> = rows
+                .iter()
+                .filter_map(|(_, event)| match event {
+                    RoomEvent::RecipientItemReplied {
+                        answers,
+                        authorship,
+                        send_authorization,
+                        ..
+                    } if answers.as_str() == item => Some((*authorship, *send_authorization)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                facts,
+                vec![(Authorship::HumanWritten, SendAuthorization::HumanDecided); 2],
+                "K07 /team reply: the resolved-card direct writer adds one human-written, human-decided turn without changing WriteOwn"
+            );
+        }
+        assert_thread(&thread_rpc(&b, &item).await, "human-written", act);
+    }
     attach_shutdown.cancel();
 
     // (2) Approve and (3) Reject on draft-mode cards.
@@ -1462,6 +1572,48 @@ async fn draft_resolutions_record_exactly_the_sending_turns() {
         } if node_id == &node_a && receipt.item_id.as_str() == ri_a.as_str()
     ));
     poll_state(&d.endpoint, &task_a, "completed").await;
+    assert_facts(
+        &room_events(&d.journal).await,
+        &ri_a,
+        Authorship::AgentComposed,
+        "Approve",
+    );
+    assert_thread(&thread_rpc(&d, &ri_a).await, "agent-composed", "Approve");
+    let rendered = read_thread_block(&mut sender, &mut state, "b", &ri_a).await;
+    assert!(
+        rendered.contains("[agent-composed]"),
+        "K07 approved composition remains marked in /team thread: {rendered}"
+    );
+
+    let (ri_e, task_e) = ask(&mut sender, &mut state, &d, "edit me").await;
+    let node_e = waiting_node(&d, &task_e).await;
+    pending_card(&d, &node_e).await;
+    let edited = resolve(
+        &mut operator,
+        &node_e,
+        PeerDraftAction::Edit {
+            content: "edited answer".to_owned(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            edited,
+            DaemonFrame::RecipientActionResult {
+                outcome: RecipientActionOutcome::Applied { reply: Some(_) },
+                ..
+            }
+        ),
+        "K07 Edit must send a durable reply"
+    );
+    poll_state(&d.endpoint, &task_e, "completed").await;
+    assert_facts(
+        &room_events(&d.journal).await,
+        &ri_e,
+        Authorship::AgentComposed,
+        "Edit",
+    );
+    assert_thread(&thread_rpc(&d, &ri_e).await, "agent-composed", "Edit");
     let (_, task_r) = ask(&mut sender, &mut state, &d, "reject me").await;
     let node_r = waiting_node(&d, &task_r).await;
     pending_card(&d, &node_r).await;
@@ -1475,14 +1627,18 @@ async fn draft_resolutions_record_exactly_the_sending_turns() {
         } if node_id == node_r
     ));
     let deadline = tokio::time::Instant::now() + SETTLE;
-    while resolved(&room_events(&d.journal).await).len() < 2 {
+    while resolved(&room_events(&d.journal).await).len() < 3 {
         assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let turns = replies(&room_events(&d.journal).await);
-    assert_eq!(turns.len(), 1, "the reject recorded no turn");
+    assert_eq!(
+        turns.len(),
+        2,
+        "K07 Reject records no turn after Approve and Edit"
+    );
     assert_eq!(turns[0].1.answers, ri_a);
-    assert_eq!(turns[0].1.authorship, ReplyAuthorship::AgentComposed);
+    assert_eq!(turns[0].1.authorship, Authorship::AgentComposed);
     assert_eq!(turns[0].1.content, "automatic reply");
     attach_shutdown.cancel();
 
@@ -1491,7 +1647,49 @@ async fn draft_resolutions_record_exactly_the_sending_turns() {
     let mut sender = new_sender(vec![a.peer("b")]).await;
     let (_, task_t) = ask(&mut sender, &mut state, &a, "auto me").await;
     poll_state(&a.endpoint, &task_t, "completed").await;
-    assert!(replies(&room_events(&a.journal).await).is_empty());
+    assert!(
+        replies(&room_events(&a.journal).await).is_empty(),
+        "K07 NotifyAndAuto template must not fabricate a reply turn"
+    );
+
+    // Unknown future composition is a render-only compatibility control, not
+    // a fabricated journal act. The approved positive control above used HTTP.
+    use rustain::adapters::a2a::send::{ServedThread, ServedTurn, ThreadRead};
+    let unknown = ThreadRead::Read {
+        thread: ServedThread {
+            root: "ri_unknown".to_owned(),
+            turns: vec![ServedTurn {
+                turn_id: "rr_unknown".to_owned(),
+                reply: true,
+                task: None,
+                in_reply_to: Some("ri_unknown".to_owned()),
+                removed: false,
+                content: Some("future composition answer".to_owned()),
+                content_hash: None,
+                kind: rustain::domain::models::ReplyKind::Answer,
+                authorship: Authorship::Unknown,
+                retracted_at_ms: None,
+            }],
+            omitted_before: 0,
+            principal_collapsed: true,
+            principal_bound: false,
+        },
+        mine: vec![false],
+    };
+    let rendered = rustain::adapters::tui::handlers::team_command::render_team_thread(
+        "b",
+        "ri_unknown",
+        &unknown,
+        false,
+    );
+    assert!(
+        rendered.contains("future composition answer"),
+        "K07 Unknown control must actually render its turn: {rendered}"
+    );
+    assert!(
+        !rendered.contains("[agent-composed]") && !rendered.contains("[auto-sent]"),
+        "K07 Unknown composition must render no provenance mark: {rendered}"
+    );
 }
 
 /// `K04` ordering control (`M07`): with the AttachServer's journal refusing

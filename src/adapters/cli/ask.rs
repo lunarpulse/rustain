@@ -770,7 +770,8 @@ pub async fn run_ask_core(
         synthetic: false,
         images: vec![],
         origin: crate::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: crate::domain::models::Authorship::HumanWritten,
+        send_authorization: crate::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     });
@@ -840,7 +841,11 @@ pub async fn run_ask_core(
                         }
                         use crate::domain::models::ApprovalOutcome;
                         approval_arc
-                            .resolve(&id, ApprovalOutcome::Reject { feedback: None })
+                            .resolve(
+                                &id,
+                                ApprovalOutcome::Reject { feedback: None },
+                                crate::domain::models::PermissionResolution::Policy,
+                            )
                             .await;
                     }
                     Ok(_) => {}
@@ -1106,7 +1111,8 @@ pub async fn run_ask_core(
             images: vec![],
             synthetic: false,
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         });

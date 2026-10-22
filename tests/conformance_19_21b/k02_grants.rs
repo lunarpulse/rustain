@@ -83,6 +83,7 @@ async fn session_always_tool_grant_only_leaves_proposal_pending() {
             ApprovalOutcome::AlwaysTool {
                 tool_name: TOOL.to_owned(),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     assert_eq!(
@@ -120,6 +121,7 @@ async fn persisted_always_tool_load_only_leaves_proposal_pending() {
             ApprovalOutcome::AlwaysAndSave {
                 scope: ApprovalScope::Tool(TOOL.to_owned()),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     assert_eq!(
@@ -132,7 +134,14 @@ async fn persisted_always_tool_load_only_leaves_proposal_pending() {
 
     let (id, before_load) = request_tool(&fixture.approval, &fixture.conversation.id).await;
     let id = id.expect("fixture runtime must have no grant before loading persisted state");
-    fixture.approval.resolve(&id, ApprovalOutcome::Cancel).await;
+    fixture
+        .approval
+        .resolve(
+            &id,
+            ApprovalOutcome::Cancel,
+            rustain::domain::models::PermissionResolution::Operator,
+        )
+        .await;
     assert_eq!(
         before_load.await.expect("cancelled pre-load probe").outcome,
         ApprovalOutcome::Cancel

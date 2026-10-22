@@ -32,6 +32,17 @@ pub enum ApprovalOutcome {
     Cancel,
 }
 
+/// Story 19.20a: how this invocation's permission gate resolved, for every tool.
+/// This is not an AD-1830 vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionResolution {
+    /// A trusted resolver surface answered; not proof of human presence or that
+    /// the input was read.
+    Operator,
+    /// Runtime policy resolved the gate without an operator answer.
+    Policy,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

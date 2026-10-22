@@ -1,0 +1,24 @@
+│ ⚠ ← inbound ✓ accepted · peer│                                                
+│   1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd ·│     
+│   task rustain-1792676943978713007-056159f9a7479968 · task accepted and│      
+Proposed message (not sent) · architecture_update                               
+To: lena-po, jun-dev                                                            
+│ ADR-047 conflict: publication races persistence.                              
+│ The assignment publishes before durable append.                               
+│ ADR-047 requires persist, then publish.                                       
+│ A crash between those steps loses the item.                                   
+│ Lena: amend the story acceptance order.                                       
+│ Jun: keep the owner lock through publication.                                 
+│ Do not acknowledge on arrival or passive View.                                
+    ╔══════════════════════════════════════════════════════════════════════╗    
+    ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║    
+    ║decision.                                                             ║    
+    ║To: lena-po, jun-dev                                                  ║    
+    ║Type: architecture_update                                             ║    
+    ║… more not shown — [r] Review first                                   ║    
+    ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║    
+    ╚══════════════════════════════════════════════════════════════════════╝    
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                      log: 5
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

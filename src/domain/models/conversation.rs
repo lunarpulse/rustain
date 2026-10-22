@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::checkpoint::CheckpointId;
 use super::content::ContentBlockType;
 use super::message::MessageRole;
+use super::provenance::{Authorship, SendAuthorization};
 use super::stream::StopReason;
 use super::tools::{ToolCallInfo, ToolResultInfo};
 use super::turn::{Turn, TurnPart, migrate_chat_message_to_turn, tool_call_id_for};
@@ -73,21 +74,6 @@ fn is_local_history_source(source: &HistorySource) -> bool {
     *source == HistorySource::Local
 }
 
-/// Authorship provenance for a persisted conversation row.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum MessageAuthorship {
-    #[default]
-    HumanWritten,
-    AgentComposed,
-}
-
-impl MessageAuthorship {
-    fn is_human_written(&self) -> bool {
-        *self == Self::HumanWritten
-    }
-}
-
 /// A single message in a conversation. Persisted to session files.
 /// Distinct from `Message` which is the provider-agnostic API request format.
 ///
@@ -95,7 +81,7 @@ impl MessageAuthorship {
 /// `ChatMessage { content, role, origin, ..Default::default() }` instead of
 /// restating every field; `MessageRole`'s own `Default` (Assistant) and
 /// `ChannelKind`'s (`Terminal`) back it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     /// Unique message ID (nanoid). `#[serde(default)]` ensures old sessions without IDs still load.
@@ -130,12 +116,43 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "is_terminal_origin")]
     pub origin: super::channel_kind::ChannelKind,
     /// Agent-composed text remains marked even after operator edits.
-    #[serde(default, skip_serializing_if = "MessageAuthorship::is_human_written")]
-    pub authorship: MessageAuthorship,
+    #[serde(
+        default = "Authorship::human_written",
+        skip_serializing_if = "Authorship::is_human_written"
+    )]
+    pub authorship: Authorship,
+    /// AD-1830 fact 2, recorded at the act, never inferred (Story 19.20a).
+    #[serde(
+        default = "SendAuthorization::unknown",
+        skip_serializing_if = "SendAuthorization::is_unknown"
+    )]
+    pub send_authorization: SendAuthorization,
     /// Host-local append-only retraction mark; content is intentionally retained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retracted_at_ms: Option<i64>,
 }
+impl Default for ChatMessage {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            role: Default::default(),
+            content: String::new(),
+            content_blocks: Vec::new(),
+            tool_calls: Vec::new(),
+            created_at: 0,
+            token_count: None,
+            history_source: Default::default(),
+            stop_reason: None,
+            synthetic: false,
+            images: Vec::new(),
+            origin: Default::default(),
+            authorship: Authorship::HumanWritten,
+            send_authorization: SendAuthorization::Unknown,
+            retracted_at_ms: None,
+        }
+    }
+}
+
 impl ChatMessage {
     /// Explicit or structurally retained legacy peer-display lineage.
     pub fn is_peer_display(&self) -> bool {
@@ -365,6 +382,16 @@ impl Conversation {
             }
 
             let created_at = turn.started_at / 1000;
+            let provenance = msg_indices.get(&turn.id.0).map(|&idx| {
+                let previous = &self.messages[idx];
+                (
+                    previous.authorship,
+                    previous.send_authorization,
+                    previous.retracted_at_ms,
+                    previous.origin,
+                    previous.synthetic,
+                )
+            });
 
             let msg = ChatMessage {
                 id: turn.id.0.clone(),
@@ -376,11 +403,14 @@ impl Conversation {
                 history_source: turn.history_source,
                 token_count: self.usage.as_ref().map(|u| u.output_tokens),
                 stop_reason: turn.stop_reason.clone(),
-                synthetic: false,
+                synthetic: provenance.is_some_and(|facts| facts.4),
                 images: vec![],
-                origin: crate::domain::models::ChannelKind::Terminal,
-                authorship: Default::default(),
-                retracted_at_ms: None,
+                origin: provenance.map_or(crate::domain::models::ChannelKind::Terminal, |facts| {
+                    facts.3
+                }),
+                authorship: provenance.map_or(Authorship::HumanWritten, |facts| facts.0),
+                send_authorization: provenance.map_or(SendAuthorization::Unknown, |facts| facts.1),
+                retracted_at_ms: provenance.and_then(|facts| facts.2),
             };
 
             if let Some(&idx) = msg_indices.get(&turn.id.0) {
@@ -541,9 +571,24 @@ impl PersistedConversation {
         // them) — migrating them to `turns` would cause them to be dropped by the mirror rebuild
         // because rebuild_messages_mirror only rebuilds Assistant messages from turns.
         if conv.turns.is_empty() && !conv.messages.is_empty() {
-            for msg in &conv.messages {
+            for msg in &mut conv.messages {
                 if msg.role == MessageRole::Assistant {
-                    conv.turns.push(migrate_chat_message_to_turn(msg));
+                    let turn = migrate_chat_message_to_turn(msg);
+                    // Story 19.20a: id-less legacy rows acquire the same unique join identity.
+                    if msg.id.is_empty() {
+                        msg.id = turn.id.0.clone();
+                    }
+                    // The turn renderer and rebuilt mirror use these invocation identities.
+                    // Normalize immediately so selection/copy work before the first rebuild.
+                    for (call, part_id) in msg.tool_calls.iter_mut().zip(
+                        turn.parts.iter().filter_map(|part| match part {
+                            TurnPart::ToolInvocation { id, .. } => Some(*id),
+                            _ => None,
+                        }),
+                    ) {
+                        call.id = tool_call_id_for(&turn.id, part_id);
+                    }
+                    conv.turns.push(turn);
                 }
             }
         }
@@ -554,6 +599,40 @@ impl PersistedConversation {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_migration_gives_idless_rows_distinct_mirror_join_identities() {
+        let mut conversation = Conversation::default();
+        conversation.messages = vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "first".into(),
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::Automatic,
+                ..Default::default()
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "second".into(),
+                retracted_at_ms: Some(123),
+                ..Default::default()
+            },
+        ];
+        let mut loaded = PersistedConversation::from_conversation(&conversation).to_conversation();
+        assert_ne!(loaded.messages[0].id, loaded.messages[1].id);
+        for (message, turn) in loaded.messages.iter().zip(&loaded.turns) {
+            assert!(!message.id.is_empty());
+            assert_eq!(message.id, turn.id.0);
+        }
+        loaded.rebuild_messages_mirror();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].authorship, Authorship::AgentComposed);
+        assert_eq!(
+            loaded.messages[0].send_authorization,
+            SendAuthorization::Automatic
+        );
+        assert_eq!(loaded.messages[1].retracted_at_ms, Some(123));
+    }
+
     use super::*;
     use crate::domain::models::MessageRole;
 
@@ -579,7 +658,8 @@ mod tests {
             synthetic: false,
             images,
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
         }
     }
@@ -785,6 +865,9 @@ mod tests {
                 id: "assistant-turn".into(),
                 content: "peer-authored".into(),
                 content_blocks: vec![ContentBlockType::PeerText],
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::Automatic,
+                retracted_at_ms: Some(123456),
                 ..Default::default()
             }],
             turns: vec![],
@@ -804,6 +887,15 @@ mod tests {
         assert_eq!(restored.turns[0].history_source, HistorySource::PeerDisplay);
         conversation.turns = restored.turns;
         conversation.rebuild_messages_mirror();
+        assert_eq!(
+            conversation.messages[0].authorship,
+            Authorship::AgentComposed
+        );
+        assert_eq!(
+            conversation.messages[0].send_authorization,
+            SendAuthorization::Automatic
+        );
+        assert_eq!(conversation.messages[0].retracted_at_ms, Some(123456));
         assert_eq!(conversation.messages[0].content, "peer-authored");
         assert_eq!(
             conversation.messages[0].history_source,
@@ -812,7 +904,7 @@ mod tests {
 
         let ordinary = ChatMessage {
             content: "ordinary".into(),
-            authorship: MessageAuthorship::AgentComposed,
+            authorship: Authorship::AgentComposed,
             ..Default::default()
         };
         assert!(!ordinary.is_peer_display());
@@ -826,13 +918,13 @@ mod tests {
         assert!(!legacy_json.contains("retractedAtMs"));
 
         let mut marked = legacy;
-        marked.authorship = MessageAuthorship::AgentComposed;
+        marked.authorship = Authorship::AgentComposed;
         marked.retracted_at_ms = Some(1_700_000_123_000);
         let json = serde_json::to_string(&marked).unwrap();
         assert!(json.contains("\"authorship\":\"agent-composed\""));
         assert!(json.contains("\"retractedAtMs\":1700000123000"));
         let restored: ChatMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.authorship, MessageAuthorship::AgentComposed);
+        assert_eq!(restored.authorship, Authorship::AgentComposed);
         assert_eq!(restored.retracted_at_ms, Some(1_700_000_123_000));
     }
 }

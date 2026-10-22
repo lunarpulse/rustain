@@ -308,7 +308,7 @@ impl ToolScheduler {
             }
         };
         use permission_chain::PermissionDecision::*;
-        match decision {
+        let permission_resolution = match decision {
             Deny(reason) => {
                 return self.terminal(
                     &conversation_id,
@@ -319,7 +319,7 @@ impl ToolScheduler {
                     },
                 );
             }
-            Allow => { /* proceed */ }
+            Allow => Some(crate::domain::models::PermissionResolution::Policy),
             Prompt {
                 server_id,
                 path_hint,
@@ -436,8 +436,9 @@ impl ToolScheduler {
                         );
                     }
                 }
+                Some(resolved.resolution)
             }
-        }
+        };
 
         // Phase 4: Executing
         let started_ms = chrono::Utc::now().timestamp_millis();
@@ -451,6 +452,7 @@ impl ToolScheduler {
         let invocation = crate::domain::models::ToolInvocation {
             conversation_id: &conversation_id,
             route,
+            permission_resolution,
         };
         let progress_tx = self.progress_tx.read().await.clone();
         let exec = tokio::select! {
@@ -587,6 +589,131 @@ mod tests {
         let approval_runtime =
             ApprovalRuntime::new(16, Arc::new(crate::adapters::noop::NoOpApprovalPersistence));
         ToolScheduler::new(security, tools, approval_runtime, 16)
+    }
+
+    #[tokio::test]
+    async fn scheduler_cascade_records_each_resolution_by_request() {
+        use crate::domain::models::{
+            ApprovalOutcome, PermissionMode, PermissionResolution, ToolInvocation,
+        };
+        use crate::domain::services::approval_runtime::ApprovalRuntimeEvent;
+        struct Capture(
+            std::sync::Mutex<std::collections::HashMap<String, Option<PermissionResolution>>>,
+        );
+        #[async_trait]
+        impl ToolSetPort for Capture {
+            fn available_tools(&self) -> Vec<ToolDefinition> {
+                MockToolSet {
+                    parallel_safe: false,
+                    delay_ms: 0,
+                }
+                .available_tools()
+            }
+            async fn execute(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: CancellationToken,
+            ) -> Result<ToolResult, ToolError> {
+                Ok(ToolResult {
+                    tool_use_id: String::new(),
+                    content: "ok".into(),
+                    is_error: false,
+                })
+            }
+            async fn execute_invocation(
+                &self,
+                name: &str,
+                id: &str,
+                input: serde_json::Value,
+                cancel: CancellationToken,
+                _: Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>,
+                invocation: &ToolInvocation<'_>,
+            ) -> Result<ToolResult, ToolError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .insert(id.to_owned(), invocation.permission_resolution);
+                self.execute(name, input, cancel).await
+            }
+        }
+        let approval =
+            ApprovalRuntime::new(16, Arc::new(crate::adapters::noop::NoOpApprovalPersistence));
+        let mut events = approval.subscribe();
+        let tools = Arc::new(Capture(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )));
+        let scheduler = ToolScheduler::new(
+            Arc::new(MockSecurity {
+                mode: PermissionMode::Normal,
+            }),
+            tools.clone(),
+            approval.clone(),
+            16,
+        );
+        let mut handles = Vec::new();
+        let mut pending = Vec::new();
+        for identity in ["answered", "cascade"] {
+            let scheduler = scheduler.clone();
+            handles.push(tokio::spawn(async move {
+                scheduler
+                    .schedule(
+                        ApprovalSource::ForegroundTurn {
+                            conversation_id: identity.into(),
+                        },
+                        vec![ToolCallRequest {
+                            id: identity.into(),
+                            tool_name: "Bash".into(),
+                            input: serde_json::json!({"command":identity}),
+                        }],
+                        CancellationToken::new(),
+                        None,
+                    )
+                    .await
+            }));
+            let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                ApprovalRuntimeEvent::Requested { id, source, .. } => {
+                    assert_eq!(
+                        source,
+                        ApprovalSource::ForegroundTurn {
+                            conversation_id: identity.into()
+                        }
+                    );
+                    pending.push(id);
+                }
+                other => panic!("expected pending request, got {other:?}"),
+            }
+        }
+        approval
+            .resolve(
+                &pending[0],
+                ApprovalOutcome::AlwaysTool {
+                    tool_name: "Bash".into(),
+                },
+                PermissionResolution::Operator,
+            )
+            .await;
+        for handle in handles {
+            assert!(matches!(
+                handle.await.unwrap().as_slice(),
+                [ToolCall::Success { .. }]
+            ));
+        }
+        let captures = tools.0.lock().unwrap();
+        assert_eq!(
+            captures.get("answered"),
+            Some(&Some(PermissionResolution::Operator)),
+            "answered request must execute with Operator"
+        );
+        assert_eq!(
+            captures.get("cascade"),
+            Some(&Some(PermissionResolution::Policy)),
+            "cascade-released request must execute with Policy"
+        );
     }
 
     #[tokio::test]

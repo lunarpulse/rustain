@@ -448,7 +448,8 @@ async fn the_typed_retract_reaches_the_recipients_durable_mark_through_the_confi
             content_hash: None,
             endpoint: None,
             action: None,
-            authorship: rustain::domain::models::ReplyAuthorship::Unknown,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         })
         .await
         .expect("seed the sender's dispatch");
@@ -556,7 +557,8 @@ async fn a_landed_retract_re_renders_the_remembered_board_with_its_mark() {
             content_hash: None,
             endpoint: None,
             action: None,
-            authorship: rustain::domain::models::ReplyAuthorship::Unknown,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         })
         .await
         .expect("seed the sender's dispatch");
@@ -1042,7 +1044,8 @@ async fn a_narrowed_board_renders_every_item_and_the_full_board_states_its_cap()
                 content_hash: None,
                 endpoint: None,
                 action: None,
-                authorship: rustain::domain::models::ReplyAuthorship::Unknown,
+                authorship: rustain::domain::models::Authorship::Unknown,
+                send_authorization: rustain::domain::models::SendAuthorization::Unknown,
             })
             .await
             .expect("seed dispatch");

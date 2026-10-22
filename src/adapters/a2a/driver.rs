@@ -874,7 +874,8 @@ impl A2aDelegationRuntime {
         task: &str,
         text: &str,
         action: Option<&SendActionRef>,
-        authorship: crate::domain::models::ReplyAuthorship,
+        authorship: crate::domain::models::Authorship,
+        send_authorization: crate::domain::models::SendAuthorization,
     ) -> Result<(), DelegationError> {
         let peer = spec.resolved_identity();
         let task = sanitize_disclosable(task, MAX_PEER_ID_BYTES);
@@ -889,6 +890,7 @@ impl A2aDelegationRuntime {
             endpoint: endpoint.clone(),
             action: action.cloned(),
             authorship,
+            send_authorization,
         })
         .await?;
         // Kept current by this path's own appends (`A13`): a send after the
@@ -1247,7 +1249,8 @@ impl A2aDelegationRuntime {
             content_hash: None,
             endpoint: None,
             action: None,
-            authorship: crate::domain::models::ReplyAuthorship::Unknown,
+            authorship: crate::domain::models::Authorship::Unknown,
+            send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
         })
         .await
     }
@@ -1350,13 +1353,22 @@ impl A2aDelegationRuntime {
         transport: Arc<dyn A2aTaskTransport>,
         message: serde_json::Value,
         cancel: CancellationToken,
+        send_authorization: crate::domain::models::SendAuthorization,
     ) -> Result<serde_json::Value, DelegationError> {
         let runtime = self.clone();
         let spec = spec.clone();
         let parent_tool_call_id = parent_tool_call_id.to_owned();
         tokio::spawn(async move {
             runtime
-                .delegate_inner(spec, trust, parent_tool_call_id, transport, message, cancel)
+                .delegate_inner(
+                    spec,
+                    trust,
+                    parent_tool_call_id,
+                    transport,
+                    message,
+                    cancel,
+                    send_authorization,
+                )
                 .await
         })
         .await
@@ -1371,6 +1383,7 @@ impl A2aDelegationRuntime {
         transport: Arc<dyn A2aTaskTransport>,
         message: serde_json::Value,
         cancel: CancellationToken,
+        send_authorization: crate::domain::models::SendAuthorization,
     ) -> Result<serde_json::Value, DelegationError> {
         let peer = spec.resolved_identity();
         // Admission signal only — stamped into the dispatch log, never used to
@@ -1390,7 +1403,8 @@ impl A2aDelegationRuntime {
             endpoint: endpoint.clone(),
             // The model rail records no operator send action (19.21 `AC1(i)`).
             action: None,
-            authorship: crate::domain::models::ReplyAuthorship::AgentComposed,
+            authorship: crate::domain::models::Authorship::AgentComposed,
+            send_authorization,
         })
         .await?;
         if let Some(task) = submitted_task.clone()
@@ -2600,6 +2614,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .expect("completed delegation returns content");
@@ -2663,6 +2678,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .expect("journal-observing transport completes");
@@ -2717,6 +2733,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .expect_err("canceled task must fail");
@@ -2798,6 +2815,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .expect_err("rejected task must fail");
@@ -2848,6 +2866,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .expect_err("dead transport must fail");
@@ -2907,6 +2926,7 @@ mod tests {
                 Arc::new(Scripted::new(&["working", "completed"])),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await;
         assert!(matches!(
@@ -2940,6 +2960,7 @@ mod tests {
                 transport.clone(),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .expect_err("an oversized remote task id is refused before materialization");
@@ -3011,6 +3032,7 @@ mod tests {
             Arc::new(Scripted::new(&["working", "completed"])),
             serde_json::json!({}),
             CancellationToken::new(),
+            crate::domain::models::SendAuthorization::Unknown,
         );
         let right = rt.delegate(
             &right_spec,
@@ -3019,6 +3041,7 @@ mod tests {
             Arc::new(Scripted::new(&["working", "completed"])),
             serde_json::json!({}),
             CancellationToken::new(),
+            crate::domain::models::SendAuthorization::Unknown,
         );
         let (left, right) = tokio::join!(left, right);
         assert!(matches!(
@@ -3058,6 +3081,7 @@ mod tests {
                     transport,
                     serde_json::json!({}),
                     cancel,
+                    crate::domain::models::SendAuthorization::Unknown,
                 )
                 .await
             }
@@ -3095,6 +3119,7 @@ mod tests {
                     transport,
                     serde_json::json!({}),
                     CancellationToken::new(),
+                    crate::domain::models::SendAuthorization::Unknown,
                 )
                 .await
             }
@@ -3126,6 +3151,7 @@ mod tests {
                 Arc::new(Scripted::new(&["working", "completed"])),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .unwrap();
@@ -3138,6 +3164,7 @@ mod tests {
                 Arc::new(Scripted::new(&["working", "completed"])),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .unwrap();
@@ -3163,6 +3190,7 @@ mod tests {
                 transport.clone(),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .expect_err("input-required is a refusal, not a success");
@@ -3271,6 +3299,7 @@ mod tests {
                 Arc::new(HostileIds::new()),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .expect_err("input-required is a refusal");
@@ -3355,6 +3384,7 @@ mod tests {
                 Arc::new(Scripted::new(&["working", "rejected"])),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .expect_err("rejected is a refusal");
@@ -3551,7 +3581,8 @@ mod tests {
                 "task-q",
                 "question",
                 None,
-                crate::domain::models::ReplyAuthorship::Unknown,
+                crate::domain::models::Authorship::Unknown,
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .unwrap();
@@ -3607,7 +3638,8 @@ mod tests {
                 "task-f",
                 "and retries?",
                 None,
-                crate::domain::models::ReplyAuthorship::Unknown,
+                crate::domain::models::Authorship::Unknown,
+                crate::domain::models::SendAuthorization::Unknown,
             )
             .await
             .unwrap();

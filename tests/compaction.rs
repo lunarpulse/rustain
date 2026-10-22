@@ -40,7 +40,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     });
@@ -56,7 +57,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     });
@@ -72,7 +74,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     });
@@ -88,7 +91,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     });
@@ -104,7 +108,8 @@ fn make_conversation_with_messages() -> Conversation {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     });
@@ -198,7 +203,8 @@ fn test_first_kept_message_id_less_than_two_turns() {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     });

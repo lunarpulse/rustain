@@ -415,6 +415,7 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             bytes,
             act,
             authorship,
+            send_authorization,
             ..
         } => (
             TransparencyKind::Dispatched,
@@ -423,9 +424,14 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             task.clone(),
             match act {
                 crate::domain::models::DispatchAct::Task => format!(
-                    "task dispatched to peer ({bytes} bytes){}",
-                    if *authorship == crate::domain::models::ReplyAuthorship::AgentComposed {
+                    "task dispatched to peer ({bytes} bytes){}{}",
+                    if *authorship == crate::domain::models::Authorship::AgentComposed {
                         " [agent-composed]"
+                    } else {
+                        ""
+                    },
+                    if *send_authorization == crate::domain::models::SendAuthorization::Automatic {
+                        " [auto-sent]"
                     } else {
                         ""
                     }
@@ -485,6 +491,8 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             node: _,
             task,
             disclosed_bytes,
+            authorship,
+            send_authorization,
         } => (
             TransparencyKind::Disclosed,
             Direction::Outbound,
@@ -492,7 +500,19 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
                 .map(|peer| peer.as_str().to_owned())
                 .unwrap_or_else(|| "unknown-peer".to_owned()),
             task.clone(),
-            format!("disclosed result to peer ({disclosed_bytes} bytes)"),
+            format!(
+                "disclosed result to peer ({disclosed_bytes} bytes){}{}",
+                if *authorship == crate::domain::models::Authorship::AgentComposed {
+                    " [agent-composed]"
+                } else {
+                    ""
+                },
+                if *send_authorization == crate::domain::models::SendAuthorization::Automatic {
+                    " [auto-sent]"
+                } else {
+                    ""
+                }
+            ),
         ),
         RoomEvent::PeerInteractionSurfaced {
             peer,
@@ -698,16 +718,30 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         // host-minted ids: ⛔ never the reply text, and ⛔ never "sent" or
         // "delivered" — nothing left this host (`A2`).
         RoomEvent::RecipientItemReplied {
-            address, answers, ..
+            address,
+            answers,
+            authorship,
+            send_authorization,
+            ..
         } => (
             TransparencyKind::RecipientItemReplied,
             Direction::Unknown,
             item_principal_label(address.principal()),
             Some(answers.as_str().to_owned()),
             format!(
-                "reply {} recorded for item {} — its sender sees it when they read the thread",
+                "reply {} recorded for item {} — its sender sees it when they read the thread{}{}",
                 address.turn().as_str(),
-                answers.as_str()
+                answers.as_str(),
+                if *authorship == crate::domain::models::Authorship::AgentComposed {
+                    " [agent-composed]"
+                } else {
+                    ""
+                },
+                if *send_authorization == crate::domain::models::SendAuthorization::Automatic {
+                    " [auto-sent]"
+                } else {
+                    ""
+                }
             ),
         ),
         // Story 19.18 `A13` — the asker's receipt of one peer reply turn.
@@ -1426,7 +1460,8 @@ mod tests {
                 content_hash: None,
                 endpoint: None,
                 action: None,
-                authorship: crate::domain::models::ReplyAuthorship::Unknown,
+                authorship: crate::domain::models::Authorship::Unknown,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
             },
         );
         let row = transparency_row(&entry).expect("dispatch projects");
@@ -1461,6 +1496,8 @@ mod tests {
                     node: AgentId::from_validated("peer-response-node"),
                     task: Some("remote-task".to_owned()),
                     disclosed_bytes: 42,
+                    authorship: crate::domain::models::Authorship::Unknown,
+                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
                 },
             ),
             room_entry(
@@ -1512,6 +1549,8 @@ mod tests {
                 node: AgentId::from_validated("peer-response-node"),
                 task: Some("remote-task".to_owned()),
                 disclosed_bytes: 42,
+                authorship: crate::domain::models::Authorship::Unknown,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
             },
         );
         let unmarked = fold_transparency([&disclosure]);
@@ -1647,6 +1686,8 @@ mod tests {
                 node: AgentId::from_validated("a2a-in/p-peer/t-task".to_owned()),
                 task: Some("remote-task".to_owned()),
                 disclosed_bytes: 42,
+                authorship: crate::domain::models::Authorship::Unknown,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
             },
         );
         let row = transparency_row(&entry).expect("disclosure projects");
@@ -1925,6 +1966,147 @@ mod tests {
         assert!(first.contains("\"direction\":\"inbound\""));
         assert!(first.contains("\"direction\":\"outbound\""));
         assert!(first.contains("\"structural_replay\""));
+    }
+
+    #[test]
+    fn journal_provenance_defaults_preserve_disclosure_and_reply_serialization() {
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, ReplyKind, ReplyTurnId, SendAuthorization, TurnAddress,
+        };
+        let address = ItemAddress::from_a2a_ingress(peer(), ItemId::from_replay("ri_question"));
+        let disclosure = RoomEvent::PeerDisclosure {
+            peer: Some(peer()),
+            node: AgentId::root(),
+            task: None,
+            disclosed_bytes: 4,
+            authorship: Authorship::Unknown,
+            send_authorization: SendAuthorization::Unknown,
+        };
+        let reply = RoomEvent::RecipientItemReplied {
+            address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_answer")),
+            answers: address.item().clone(),
+            content: "body".to_owned(),
+            authorship: Authorship::Unknown,
+            send_authorization: SendAuthorization::Unknown,
+            kind: ReplyKind::Answer,
+            via_node: None,
+        };
+        for event in [disclosure, reply] {
+            let is_reply = matches!(&event, RoomEvent::RecipientItemReplied { .. });
+            let encoded = serde_json::to_value(&event).unwrap();
+            assert!(encoded.get("send_authorization").is_none());
+            assert_eq!(encoded.get("authorship").is_some(), is_reply);
+            if is_reply {
+                assert_eq!(encoded["authorship"], "unknown");
+            }
+            let mut legacy = encoded.clone();
+            legacy.as_object_mut().unwrap().remove("authorship");
+            let decoded: RoomEvent = serde_json::from_value(legacy.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+            legacy["authorship"] = serde_json::json!("future-composer");
+            legacy["send_authorization"] = serde_json::json!("future-send-decision");
+            let decoded: RoomEvent = serde_json::from_value(legacy).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+    }
+
+    #[test]
+    fn act_tags_report_composition_and_authorization_independently() {
+        use crate::domain::models::{
+            Authorship, DispatchAct, ItemAddress, ItemId, ReplyKind, ReplyTurnId,
+            SendAuthorization, TurnAddress,
+        };
+
+        let address = ItemAddress::from_a2a_ingress(peer(), ItemId::from_replay("ri_question"));
+        for authorship in [
+            Authorship::HumanWritten,
+            Authorship::AgentComposed,
+            Authorship::Unknown,
+        ] {
+            for send_authorization in [
+                SendAuthorization::HumanDecided,
+                SendAuthorization::Automatic,
+                SendAuthorization::Unknown,
+            ] {
+                let events = [
+                    RoomEvent::RemoteEnvelopeDispatched {
+                        peer: peer(),
+                        task: None,
+                        bytes: 4,
+                        act: DispatchAct::Task,
+                        content_hash: None,
+                        endpoint: None,
+                        action: None,
+                        authorship,
+                        send_authorization,
+                    },
+                    RoomEvent::PeerDisclosure {
+                        peer: Some(peer()),
+                        node: AgentId::root(),
+                        task: None,
+                        disclosed_bytes: 4,
+                        authorship,
+                        send_authorization,
+                    },
+                    RoomEvent::RecipientItemReplied {
+                        address: TurnAddress::answering(
+                            &address,
+                            ReplyTurnId::from_replay("rr_answer"),
+                        ),
+                        answers: address.item().clone(),
+                        content: "body".to_owned(),
+                        authorship,
+                        send_authorization,
+                        kind: ReplyKind::Answer,
+                        via_node: None,
+                    },
+                ];
+                for event in events {
+                    let row = transparency_row(&room_entry(1, 1, event)).unwrap();
+                    let suffix = format!(
+                        "{}{}",
+                        if authorship == Authorship::AgentComposed {
+                            " [agent-composed]"
+                        } else {
+                            ""
+                        },
+                        if send_authorization == SendAuthorization::Automatic {
+                            " [auto-sent]"
+                        } else {
+                            ""
+                        },
+                    );
+                    assert_eq!(
+                        row.summary.contains("[agent-composed]"),
+                        authorship == Authorship::AgentComposed
+                    );
+                    assert_eq!(
+                        row.summary.contains("[auto-sent]"),
+                        send_authorization == SendAuthorization::Automatic
+                    );
+                    assert!(row.summary.ends_with(&suffix), "{}", row.summary);
+                }
+                let retract = RoomEvent::RemoteEnvelopeDispatched {
+                    peer: peer(),
+                    task: None,
+                    bytes: 4,
+                    act: DispatchAct::ItemRetract {
+                        item: "ri_question".to_owned(),
+                    },
+                    content_hash: None,
+                    endpoint: None,
+                    action: None,
+                    authorship,
+                    send_authorization,
+                };
+                assert_eq!(
+                    transparency_row(&room_entry(1, 1, retract))
+                        .unwrap()
+                        .summary,
+                    "item retract sent to peer (4 bytes) — item ri_question"
+                );
+            }
+        }
     }
 
     #[test]

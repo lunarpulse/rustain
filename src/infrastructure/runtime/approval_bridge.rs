@@ -172,7 +172,13 @@ pub async fn handle_action(state: &mut TuiState, action: &InputAction, runtime: 
                     },
                     _ => ApprovalOutcome::Reject { feedback: None },
                 };
-                let _ = runtime.resolve(&pending.id, outcome).await;
+                let _ = runtime
+                    .resolve(
+                        &pending.id,
+                        outcome,
+                        crate::domain::models::PermissionResolution::Operator,
+                    )
+                    .await;
                 advance(state);
             }
         }
@@ -214,6 +220,7 @@ pub async fn handle_action(state: &mut TuiState, action: &InputAction, runtime: 
                         ApprovalOutcome::Reject {
                             feedback: feedback.clone(),
                         },
+                        crate::domain::models::PermissionResolution::Operator,
                     )
                     .await;
                 if let Some(feedback) = feedback {

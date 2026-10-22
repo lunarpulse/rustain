@@ -120,6 +120,7 @@ async fn grant(persisted: bool) {
                     tool_name: "propose_team_message".into(),
                 }
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     response.await.expect("real grant resolution");

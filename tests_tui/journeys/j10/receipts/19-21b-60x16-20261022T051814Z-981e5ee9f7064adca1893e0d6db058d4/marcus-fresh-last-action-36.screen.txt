@@ -1,0 +1,16 @@
+│   Response mode: notify-and-wait│                         
+│   Notification urgency: immediate│                        
+│   Peers:│                                                 
+│   - jun-dev│                                              
+│   (122061a7efe7484fded0898fd88282eaf83e9a36cef78d6d08e2d│ 
+│   590aae6b59c0d3d): not granted│                          
+│   - lena-po│                                              
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready  log: 7
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

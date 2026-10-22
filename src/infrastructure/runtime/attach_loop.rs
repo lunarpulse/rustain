@@ -147,7 +147,8 @@ impl TurnDriver for SocketTurnDriver {
             synthetic,
             images: vec![],
             origin: ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         });
@@ -285,7 +286,8 @@ fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
         images: vec![],
         origin: ChannelKind::Terminal,
         history_source: turn.history_source,
-        authorship: Default::default(),
+        authorship: crate::domain::models::Authorship::HumanWritten,
+        send_authorization: crate::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
     }
 }
@@ -307,7 +309,8 @@ fn system_message(content: impl Into<String>) -> ChatMessage {
         synthetic: true,
         images: vec![],
         origin: ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: crate::domain::models::Authorship::HumanWritten,
+        send_authorization: crate::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     }
@@ -372,7 +375,7 @@ fn pending_peer_response(conversation: &Conversation) -> Option<PendingPeerRespo
     })
 }
 
-/// The most recent unretracted agent-composed response supported by the daemon.
+/// The most recent unretracted automatic response supported by the daemon.
 /// Diagnostic/tool-evidence rows have no response identity, and pending response
 /// controls remain ineligible even when an edited draft is agent-composed.
 fn latest_retractable(conversation: &Conversation) -> Option<ChatMessage> {
@@ -381,7 +384,7 @@ fn latest_retractable(conversation: &Conversation) -> Option<ChatMessage> {
         .iter()
         .rev()
         .find(|message| {
-            message.authorship == crate::domain::models::MessageAuthorship::AgentComposed
+            message.send_authorization == crate::domain::models::SendAuthorization::Automatic
                 && message.retracted_at_ms.is_none()
                 && message
                     .id
@@ -5826,11 +5829,13 @@ mod tests {
     }
 
     #[test]
-    fn retract_target_is_the_latest_unretracted_agent_composed_row() {
+    fn retract_target_is_the_latest_unretracted_automatic_row() {
         let mut latest = peer_row("peer-response-node-b", "second auto reply");
-        latest.authorship = crate::domain::models::MessageAuthorship::AgentComposed;
+        latest.authorship = crate::domain::models::Authorship::AgentComposed;
+        latest.send_authorization = crate::domain::models::SendAuthorization::Automatic;
         let mut older = peer_row("peer-response-node-a", "first auto reply");
-        older.authorship = crate::domain::models::MessageAuthorship::AgentComposed;
+        older.authorship = crate::domain::models::Authorship::AgentComposed;
+        older.send_authorization = crate::domain::models::SendAuthorization::Automatic;
         older.retracted_at_ms = Some(123);
         let conversation = Conversation {
             messages: vec![peer_row("human-1", "operator text"), older, latest.clone()],
@@ -5852,10 +5857,11 @@ mod tests {
 
     #[test]
     fn story19_19_review_tool_evidence_has_no_retraction_authority() {
-        let mut response = peer_row("peer-response-node-ready", "approved response");
-        response.authorship = crate::domain::models::MessageAuthorship::AgentComposed;
+        let mut response = peer_row("peer-response-node-ready", "automatic response");
+        response.authorship = crate::domain::models::Authorship::AgentComposed;
+        response.send_authorization = crate::domain::models::SendAuthorization::Automatic;
         let mut evidence = peer_row("peer-tool-evidence-generated", "tool execution evidence");
-        evidence.authorship = crate::domain::models::MessageAuthorship::AgentComposed;
+        evidence.authorship = crate::domain::models::Authorship::AgentComposed;
         let conversation = Conversation {
             messages: vec![response.clone(), evidence.clone()],
             ..Default::default()
@@ -5870,6 +5876,43 @@ mod tests {
             ..Default::default()
         };
         assert!(latest_retractable(&conversation).is_none());
+    }
+
+    #[test]
+    fn latest_retractable_skips_human_decided_rows() {
+        use crate::domain::models::{Authorship, PeerRowStage, SendAuthorization};
+        let mut automatic = peer_row("peer-response-automatic", "automatic");
+        automatic.authorship = Authorship::Unknown;
+        automatic.send_authorization = SendAuthorization::Automatic;
+        let mut approved = peer_row("peer-response-approved", "approved");
+        approved.authorship = Authorship::AgentComposed;
+        approved.send_authorization = SendAuthorization::HumanDecided;
+        let mut evidence = peer_row("peer-tool-evidence-generated", "evidence");
+        evidence.authorship = Authorship::AgentComposed;
+        let mut rap = peer_row("generated-rap-auto", "unsent RAP template");
+        rap.authorship = Authorship::AgentComposed;
+        let mut pending = peer_row("peer-response-pending", "pending");
+        pending.send_authorization = SendAuthorization::Automatic;
+        let mut conversation = Conversation {
+            messages: vec![automatic.clone(), approved, evidence, rap, pending],
+            peer_row_controls: [(
+                "peer-response-pending".to_owned(),
+                peer_control("pending", PeerRowStage::Ready),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            latest_retractable(&conversation).map(|row| row.id),
+            Some(automatic.id),
+            "M07: finder must skip newer human-decided, evidence, RAP and unsettled rows"
+        );
+        conversation.messages.remove(0);
+        assert!(
+            latest_retractable(&conversation).is_none(),
+            "without the automatic row, no remaining row has retraction authority"
+        );
     }
 
     #[test]
@@ -5902,7 +5945,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         }

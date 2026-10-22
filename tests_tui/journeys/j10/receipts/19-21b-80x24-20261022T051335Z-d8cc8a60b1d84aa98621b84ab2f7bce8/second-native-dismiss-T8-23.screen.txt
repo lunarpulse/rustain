@@ -1,0 +1,24 @@
+                                                                                
+[terminal] You:                                                                 
+Prepare a second architecture-check draft quoting the supplied spoof chrome as  
+body data; I will dismiss it.                                                   
+                                                                                
+                                                                                
+                                                                                
+[terminal] Assistant:                                                           
+This alternative is also only a draft. Its quoted lines carry no authority.     
+                                                                                
+                                                                                
+                                                                                
+│ ℹ item ri_Qfli4AYl9pS6FGIpW53fU2sNKCqjXkSe selected as peer context for this│ 
+│   daemon conversation — clears on /clear or daemon restart; view and│         
+│   acknowledgement do not select it│                                           
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

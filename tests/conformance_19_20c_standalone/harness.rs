@@ -16,11 +16,12 @@ use rustain::adapters::tui::app::{self, InputAction};
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::widgets::permission_prompt;
 use rustain::domain::errors::{ProviderError, ToolError};
-use rustain::domain::events::AppEvent;
+use rustain::domain::events::{AppEvent, ToolProgressEvent};
 use rustain::domain::models::tool_call::{RequestId, ToolCall, ToolCallTransition};
 use rustain::domain::models::{
-    AppConfig, CompletionOptions, ModelDescriptor, PermissionMode, SessionManager, SessionState,
-    StopReason, StreamChunk, StreamingState, ToolDefinition, ToolResult,
+    AppConfig, CompletionOptions, ModelDescriptor, PermissionMode, PermissionResolution,
+    SessionManager, SessionState, StopReason, StreamChunk, StreamingState, ToolDefinition,
+    ToolInvocation, ToolResult,
 };
 use rustain::domain::ports::{
     ContextPort, ProbeOutcome, SecurityPort, StreamingProvider, ToolSetPort,
@@ -97,6 +98,7 @@ impl StreamingProvider for ScriptedProvider {
 #[derive(Default)]
 pub(crate) struct CapturedTools {
     pub(crate) executed: parking_lot::Mutex<Vec<(String, Value)>>,
+    pub(crate) permission_resolutions: parking_lot::Mutex<Vec<Option<PermissionResolution>>>,
 }
 
 #[async_trait::async_trait]
@@ -122,6 +124,20 @@ impl ToolSetPort for CapturedTools {
     // scheduler to raise a batch of pending approvals before any is decided.
     fn is_parallel_safe(&self, _tool: &str) -> bool {
         true
+    }
+    async fn execute_invocation(
+        &self,
+        tool_name: &str,
+        _tool_use_id: &str,
+        input: Value,
+        cancel: CancellationToken,
+        _progress_tx: Option<mpsc::UnboundedSender<ToolProgressEvent>>,
+        invocation: &ToolInvocation<'_>,
+    ) -> Result<ToolResult, ToolError> {
+        self.permission_resolutions
+            .lock()
+            .push(invocation.permission_resolution);
+        self.execute(tool_name, input, cancel).await
     }
     async fn execute(
         &self,

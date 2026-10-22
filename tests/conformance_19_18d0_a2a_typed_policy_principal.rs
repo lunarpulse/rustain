@@ -316,8 +316,11 @@ impl InboundPeerRuntime for Recording {
             .await
     }
 
-    async fn take_result_text(&self, node_id: &AgentId) -> Option<String> {
-        InboundPeerRuntime::take_result_text(self.inner.as_ref(), node_id).await
+    async fn take_result(
+        &self,
+        node_id: &AgentId,
+    ) -> Option<rustain::domain::ports::StagedPeerResult> {
+        InboundPeerRuntime::take_result(self.inner.as_ref(), node_id).await
     }
 
     async fn disclosure_forbidden_fragments(&self) -> Vec<String> {

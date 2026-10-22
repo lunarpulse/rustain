@@ -1,0 +1,16 @@
+│   6e8f08fcfb9401 · task│                                  
+Proposed message (not sent) · architecture_update           
+To: lena-po, jun-dev                                        
+╔══════════════════════════════════════════════════════════╗
+║Your agent proposes a message. Nothing has been sent. Aw  ║
+║aiting your decision.                                     ║
+║To: lena-po, jun-dev                                      ║
+║Type: architecture_update                                 ║
+║… more not shown — [r] Review first                       ║
+║[y] Send to lena-po, jun-dev   [r] Review first   [n] Di  ║
+║smiss                                                     ║
+╚══════════════════════════════════════════════════════════╝
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready  log: 5
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

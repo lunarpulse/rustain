@@ -21,6 +21,7 @@ use crate::domain::models::{
     A2aIngressPrincipal, AgentId, ItemAddress, ItemPrincipal, NodeState, PeerId, PolicyPrincipal,
     RapTaskState,
 };
+use crate::domain::ports::StagedPeerResult;
 
 /// Whether a task is waiting on a human before it may run.
 ///
@@ -237,7 +238,7 @@ struct TaskState {
     rap: RapTaskState,
     pending: PendingAuth,
     /// The agent's answer, captured once the node reaches a terminal state.
-    result: Option<String>,
+    result: Option<StagedPeerResult>,
     /// Human-readable explanation for a non-obvious terminal state.
     detail: Option<String>,
     /// Recipient-owned durable address, present only after the received event
@@ -249,7 +250,7 @@ struct TaskState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSnapshot {
     pub state: RapTaskState,
-    pub result: Option<String>,
+    pub result: Option<StagedPeerResult>,
     pub detail: Option<String>,
     pub item_address: Option<ItemAddress>,
 }
@@ -440,7 +441,7 @@ impl InboundTask {
         self.state.write().await.detail = Some(detail.into());
     }
 
-    pub async fn set_result(&self, result: Option<String>) {
+    pub async fn set_result(&self, result: Option<StagedPeerResult>) {
         self.state.write().await.result = result;
     }
 

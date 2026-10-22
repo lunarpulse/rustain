@@ -155,7 +155,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         }
@@ -332,7 +333,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         };

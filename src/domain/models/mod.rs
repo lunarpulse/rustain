@@ -1,3 +1,5 @@
+pub mod provenance;
+pub use provenance::{Authorship, SendAuthorization};
 pub mod a2a_peer_spec;
 pub mod adapter_health;
 pub mod agent;
@@ -128,7 +130,7 @@ pub use agent_node::{
     abandonment_action,
 };
 #[allow(unused_imports)]
-pub use approval::{ApprovalOutcome, ApprovalScope};
+pub use approval::{ApprovalOutcome, ApprovalScope, PermissionResolution};
 #[allow(unused_imports)]
 pub use artifact::{
     ArtifactId, ArtifactKind, ArtifactRef, ContentHash, ContentHashError, EvidenceArtifact,
@@ -156,8 +158,7 @@ pub use config::{
 pub use content::ContentBlockType;
 pub use conversation::{
     ChatMessage, Conversation, ConversationSummary, ForkSource, HistorySource, ImageReference,
-    MessageAuthorship, PeerRowControl, PeerRowOperation, PeerRowStage, generate_conversation_id,
-    generate_message_id,
+    PeerRowControl, PeerRowOperation, PeerRowStage, generate_conversation_id, generate_message_id,
 };
 #[allow(unused_imports)]
 pub use credential::{
@@ -241,8 +242,8 @@ pub use policy_principal::{PinnedVia, PolicyPrincipal, PrincipalKind};
 pub use recipient_item::{
     A2aIngressPrincipal, ItemAddress, ItemId, ItemIdCollision, ItemPrincipal, ItemScope,
     MAX_REPLY_BYTES, REPLY_TURN_ID_PREFIX, RecipientItemAllocator, RecipientItemState,
-    RecipientItemView, ReplyAuthorship, ReplyKind, ReplyTurnId, ReplyTurnView, RetractOutcome,
-    TurnAddress, claim_reply_turn_id, fresh_reply_turn_candidate,
+    RecipientItemView, ReplyKind, ReplyTurnId, ReplyTurnView, RetractOutcome, TurnAddress,
+    claim_reply_turn_id, fresh_reply_turn_candidate,
 };
 pub use redacted_url::RedactedUrl;
 #[allow(unused_imports)]

@@ -287,6 +287,7 @@ async fn ac3_always_server_approval_binds_by_server_id_not_by_transport() {
             ApprovalOutcome::AlwaysAndSave {
                 scope: ApprovalScope::Server("mcp__remote".into()),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
 

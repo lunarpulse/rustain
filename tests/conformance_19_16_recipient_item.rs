@@ -1,7 +1,7 @@
 use rustain::adapters::policy::recipient_item::{JournalRecipientItemProjection, ThreadTurn};
 use rustain::domain::models::{
-    AgentId, ContentHash, DispatchAct, ItemAddress, ItemId, ItemPrincipal, JournalEntry, PeerId,
-    ReplyAuthorship, ReplyKind, ReplyTurnId, RoomEvent, TurnAddress,
+    AgentId, Authorship, ContentHash, DispatchAct, ItemAddress, ItemId, ItemPrincipal,
+    JournalEntry, PeerId, ReplyKind, ReplyTurnId, RoomEvent, TurnAddress,
 };
 
 fn peer(seed: u8) -> PeerId {
@@ -107,7 +107,8 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         content_hash: Some(content_hash),
         endpoint: None,
         action: None,
-        authorship: ReplyAuthorship::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
     };
     let mut legacy_dispatched =
         serde_json::to_value(&dispatched).expect("serialize outbound dispatch");
@@ -142,7 +143,8 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_answer")),
         answers: address.item().clone(),
         content: "durable answer".to_owned(),
-        authorship: ReplyAuthorship::AgentComposed,
+        authorship: Authorship::AgentComposed,
+        send_authorization: rustain::domain::models::SendAuthorization::HumanDecided,
         kind: ReplyKind::Answer,
         via_node: Some(AgentId::parse("reply-node").expect("valid reply node")),
     };
@@ -164,7 +166,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         RoomEvent::RecipientItemReplied {
             answers,
             content,
-            authorship: ReplyAuthorship::AgentComposed,
+            authorship: Authorship::AgentComposed,
             via_node: Some(via_node),
             ..
         } if answers.as_str() == "ri_question"
@@ -293,7 +295,8 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
         content_hash: None,
         endpoint: Some("cd".repeat(32)),
         action: None,
-        authorship: ReplyAuthorship::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
     };
     let encoded = serde_json::to_value(&unpinned).expect("serialize dispatch");
     assert_eq!(encoded["endpoint"], "cd".repeat(32));
@@ -309,7 +312,8 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
         content_hash: None,
         endpoint: None,
         action: None,
-        authorship: ReplyAuthorship::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
     };
     let row = serde_json::to_value(&pinned).expect("serialize dispatch");
     assert_eq!(
@@ -572,7 +576,8 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
             address: TurnAddress::answering(&address, ReplyTurnId::from_replay(id)),
             answers: address.item().clone(),
             content: format!("body {id}"),
-            authorship: ReplyAuthorship::HumanWritten,
+            authorship: Authorship::HumanWritten,
+            send_authorization: rustain::domain::models::SendAuthorization::HumanDecided,
             kind: ReplyKind::Answer,
             via_node: None,
         })
@@ -670,7 +675,8 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
         address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_default")),
         answers: address.item().clone(),
         content: "answer".to_owned(),
-        authorship: ReplyAuthorship::HumanWritten,
+        authorship: Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::HumanDecided,
         kind: ReplyKind::Answer,
         via_node: None,
     })
@@ -681,7 +687,8 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
         address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_defer")),
         answers: address.item().clone(),
         content: "Busy — defer 30m".to_owned(),
-        authorship: ReplyAuthorship::HumanWritten,
+        authorship: Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::HumanDecided,
         kind: ReplyKind::Defer { minutes: 30 },
         via_node: None,
     })

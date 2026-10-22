@@ -184,6 +184,7 @@ pub(crate) fn public_transcript_message(
         images: message.images.clone(),
         origin: message.origin,
         authorship: message.authorship,
+        send_authorization: message.send_authorization,
         retracted_at_ms: message.retracted_at_ms,
     }
 }
@@ -336,16 +337,38 @@ impl RawEvent {
                     return None;
                 }
                 let mut payload = payload.clone();
-                if let crate::domain::events::DomainEventPayload::Room(
-                    crate::domain::models::RoomEvent::RemoteEnvelopeDispatched {
-                        action,
-                        authorship,
-                        ..
-                    },
-                ) = &mut payload
-                {
-                    *action = None;
-                    *authorship = crate::domain::models::ReplyAuthorship::Unknown;
+                match &mut payload {
+                    crate::domain::events::DomainEventPayload::Room(
+                        crate::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+                            action,
+                            authorship,
+                            send_authorization,
+                            ..
+                        },
+                    ) => {
+                        *action = None;
+                        *authorship = crate::domain::models::Authorship::Unknown;
+                        *send_authorization = crate::domain::models::SendAuthorization::Unknown;
+                    }
+                    crate::domain::events::DomainEventPayload::Room(
+                        crate::domain::models::RoomEvent::PeerDisclosure {
+                            authorship,
+                            send_authorization,
+                            ..
+                        },
+                    ) => {
+                        *authorship = crate::domain::models::Authorship::Unknown;
+                        *send_authorization = crate::domain::models::SendAuthorization::Unknown;
+                    }
+                    crate::domain::events::DomainEventPayload::Room(
+                        crate::domain::models::RoomEvent::RecipientItemReplied {
+                            send_authorization,
+                            ..
+                        },
+                    ) => {
+                        *send_authorization = crate::domain::models::SendAuthorization::Unknown;
+                    }
+                    _ => {}
                 }
                 RawEvent {
                     conversation_id: None,
@@ -602,7 +625,8 @@ mod tests {
                 peer: peer.clone(),
                 task: Some("legacy-task-1".to_owned()),
                 bytes: 19,
-                authorship: crate::domain::models::ReplyAuthorship::Unknown,
+                authorship: crate::domain::models::Authorship::AgentComposed,
+                send_authorization: crate::domain::models::SendAuthorization::Automatic,
                 act: crate::domain::models::DispatchAct::ItemRetract {
                     item: "peer-item-1".to_owned(),
                 },
@@ -621,7 +645,8 @@ mod tests {
                 content_hash,
                 endpoint,
                 action,
-                ..
+                authorship,
+                send_authorization,
             },
         )) = raw.kind
         else {
@@ -639,6 +664,63 @@ mod tests {
         assert_eq!(content_hash, None);
         assert_eq!(endpoint.as_deref(), Some("sha256:origin-digest"));
         assert_eq!(action, None, "sender-local action correlation is stripped");
+        assert_eq!(authorship, crate::domain::models::Authorship::Unknown);
+        assert_eq!(
+            send_authorization,
+            crate::domain::models::SendAuthorization::Unknown
+        );
+    }
+
+    #[test]
+    fn disclosure_and_reply_raw_projection_respects_provenance_boundaries() {
+        use crate::domain::models::{
+            AgentId, Authorship, ItemAddress, ItemId, PeerId, ReplyKind, ReplyTurnId, RoomEvent,
+            SendAuthorization, TurnAddress,
+        };
+        let peer = PeerId::from_public_key(&[0x2a; 32]).unwrap();
+        let address =
+            ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay("ri_question"));
+        for event in [
+            RoomEvent::PeerDisclosure {
+                peer: Some(peer),
+                node: AgentId::root(),
+                task: None,
+                disclosed_bytes: 4,
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::Automatic,
+            },
+            RoomEvent::RecipientItemReplied {
+                address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_answer")),
+                answers: address.item().clone(),
+                content: "body".to_owned(),
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
+                kind: ReplyKind::Answer,
+                via_node: None,
+            },
+        ] {
+            let is_reply = matches!(&event, RoomEvent::RecipientItemReplied { .. });
+            let original = serde_json::to_value(&event).unwrap();
+            let raw = RawEvent::from_app_event(&AppEvent::DomainEvent(
+                crate::domain::events::DomainEventPayload::Room(event),
+            ))
+            .unwrap();
+            let RawEventKind::DomainEvent(crate::domain::events::DomainEventPayload::Room(
+                projected,
+            )) = raw.kind
+            else {
+                panic!("expected room event");
+            };
+            let value = serde_json::to_value(projected).unwrap();
+            assert!(value.get("send_authorization").is_none());
+            if is_reply {
+                assert_eq!(value["authorship"], "agent-composed");
+            } else {
+                assert!(value.get("authorship").is_none());
+            }
+            assert!(original.get("send_authorization").is_some());
+            assert_eq!(original["authorship"], "agent-composed");
+        }
     }
 
     #[tokio::test]

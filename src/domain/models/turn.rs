@@ -358,7 +358,21 @@ pub fn tool_call_id_for(turn_id: &TurnId, pid: PartId) -> String {
 /// - `model` is empty (`ChatMessage` does not carry model).
 /// - `started_at` is `msg.created_at * 1000` (seconds → millis).
 pub fn migrate_chat_message_to_turn(msg: &ChatMessage) -> Turn {
-    let mut turn = Turn::new(String::new(), msg.created_at.saturating_mul(1000));
+    // Story 19.20a: rendering and mirror replacement join on the original row id.
+    let mut turn = Turn {
+        id: if msg.id.is_empty() {
+            generate_turn_id()
+        } else {
+            TurnId(msg.id.clone())
+        },
+        parts: Vec::new(),
+        started_at: msg.created_at.saturating_mul(1000),
+        model: String::new(),
+        role: MessageRole::Assistant,
+        history_source: super::conversation::HistorySource::Local,
+        stop_reason: msg.stop_reason.clone(),
+        next_part_id: 0,
+    };
     turn.history_source = if msg.is_peer_display() {
         super::conversation::HistorySource::PeerDisplay
     } else {
@@ -530,7 +544,7 @@ mod tests {
         let local = ChatMessage {
             id: "peer-response-prefix-is-not-authority".into(),
             content: "[peer response] ordinary local text".into(),
-            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            authorship: crate::domain::models::Authorship::AgentComposed,
             ..Default::default()
         };
         assert!(!local.is_peer_display());
@@ -554,11 +568,16 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         };
         let turn = migrate_chat_message_to_turn(&msg);
+        assert_eq!(
+            turn.id.0, msg.id,
+            "migration retains the mirror join identity"
+        );
         assert_eq!(turn.parts.len(), 1);
         assert!(matches!(&turn.parts[0], TurnPart::Prose { text, .. } if text == "Hello world"));
         assert_eq!(turn.started_at, 1_700_000_000);
@@ -590,7 +609,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         };
@@ -629,7 +649,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         };
@@ -665,7 +686,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         };

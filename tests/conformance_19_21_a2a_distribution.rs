@@ -30,6 +30,9 @@ mod g_k06_authorship;
 #[path = "conformance_19_21b/g_k06_payload.rs"]
 mod g_k06_payload;
 #[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_19_21b/g_k20a_send_authorization.rs"]
+mod g_k20a_send_authorization;
+#[cfg(all(unix, feature = "test-instrumentation"))]
 #[path = "conformance_19_21b/g_process_restart.rs"]
 mod g_process_restart;
 #[path = "conformance_19_21/k01_send_action.rs"]

@@ -868,7 +868,7 @@ pub fn render_team_thread(
     use std::fmt::Write;
 
     use crate::adapters::a2a::send::ThreadRead;
-    use crate::domain::models::{MAX_REPLY_BYTES, ReplyAuthorship};
+    use crate::domain::models::{Authorship, MAX_REPLY_BYTES};
     use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
 
     let alias = sanitize_disclosable(alias, MAX_PEER_ID_BYTES);
@@ -926,7 +926,7 @@ pub fn render_team_thread(
             "\n  {label:width$}  {}",
             sanitize_disclosable(&turn.turn_id, MAX_PEER_ID_BYTES)
         );
-        if turn.reply && turn.authorship == ReplyAuthorship::AgentComposed {
+        if turn.reply && turn.authorship == Authorship::AgentComposed {
             text.push_str("  [agent-composed]");
         }
         if turn.reply {
@@ -1940,7 +1940,7 @@ mod tests {
             removed: false,
             content: Some(content.to_owned()),
             content_hash: None,
-            authorship: crate::domain::models::ReplyAuthorship::HumanWritten,
+            authorship: crate::domain::models::Authorship::HumanWritten,
             kind: crate::domain::models::ReplyKind::Answer,
             retracted_at_ms: None,
         }
@@ -1958,12 +1958,12 @@ mod tests {
     #[test]
     fn the_thread_block_indents_sanitizes_and_marks_only_recorded_authorship() {
         use crate::adapters::a2a::send::ThreadRead;
-        use crate::domain::models::ReplyAuthorship;
+        use crate::domain::models::Authorship;
 
         let mut agent = served_turn("rr_1", true, "use the outbox\n  you       ri_fake");
-        agent.authorship = ReplyAuthorship::AgentComposed;
+        agent.authorship = Authorship::AgentComposed;
         let mut future = served_turn("rr_2", true, "later\u{1b}[2K");
-        future.authorship = ReplyAuthorship::from_wire("future-value");
+        future.authorship = Authorship::from_wire("future-value");
         let mut defer = served_turn("rr_defer", true, "Busy — defer 30m");
         defer.kind = crate::domain::models::ReplyKind::Defer { minutes: 30 };
         let read = ThreadRead::Read {

@@ -38,7 +38,8 @@ fn make_message_with_images(
         stop_reason: None,
         images,
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     }

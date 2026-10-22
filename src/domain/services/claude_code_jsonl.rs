@@ -164,7 +164,8 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                             synthetic: false,
                             images: vec![],
                             origin: crate::domain::models::ChannelKind::Terminal,
-                            authorship: Default::default(),
+                            authorship: crate::domain::models::Authorship::HumanWritten,
+                            send_authorization: crate::domain::models::SendAuthorization::Unknown,
                             retracted_at_ms: None,
                             history_source: Default::default(),
                         });
@@ -218,7 +219,9 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                                     synthetic: false,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
-                                    authorship: Default::default(),
+                                    authorship: crate::domain::models::Authorship::HumanWritten,
+                                    send_authorization:
+                                        crate::domain::models::SendAuthorization::Unknown,
                                     retracted_at_ms: None,
                                     history_source: Default::default(),
                                 });
@@ -351,7 +354,8 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                         synthetic: false,
                         images: vec![],
                         origin: crate::domain::models::ChannelKind::Terminal,
-                        authorship: Default::default(),
+                        authorship: crate::domain::models::Authorship::HumanWritten,
+                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
                         retracted_at_ms: None,
                         history_source: Default::default(),
                     });
@@ -371,7 +375,8 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                         synthetic: false,
                         images: vec![],
                         origin: crate::domain::models::ChannelKind::Terminal,
-                        authorship: Default::default(),
+                        authorship: crate::domain::models::Authorship::HumanWritten,
+                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
                         retracted_at_ms: None,
                         history_source: Default::default(),
                     });

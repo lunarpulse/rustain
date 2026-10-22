@@ -794,6 +794,7 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
             authorship,
             kind,
             via_node,
+            ..
         } => {
             snapshot
                 .replies
@@ -884,7 +885,8 @@ mod tests {
             answers: address.item().clone(),
             content: "Busy — defer 30m".to_owned(),
             kind,
-            authorship: crate::domain::models::ReplyAuthorship::HumanWritten,
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             via_node: None,
         };
         let mut entries = vec![entry(1, received)];
@@ -1093,7 +1095,7 @@ mod tests {
     }
 
     fn thread_fixture() -> (Vec<RoomEvent>, crate::domain::models::ItemPrincipal) {
-        use crate::domain::models::{ReplyAuthorship, ReplyTurnId, TurnAddress};
+        use crate::domain::models::{Authorship, ReplyTurnId, TurnAddress};
 
         let asker = PeerId::from_public_key(&[31; 32]).unwrap();
         let other = PeerId::from_public_key(&[32; 32]).unwrap();
@@ -1115,7 +1117,8 @@ mod tests {
             ),
             answers: ItemId::from_replay(answered),
             content: format!("reply {turn}"),
-            authorship: ReplyAuthorship::HumanWritten,
+            authorship: Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             kind: ReplyKind::Answer,
             via_node: None,
         };

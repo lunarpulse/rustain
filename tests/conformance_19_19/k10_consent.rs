@@ -783,7 +783,8 @@ async fn k10_context_is_interactive_process_local_not_channel_cron_or_preloaded(
             synthetic: false,
             images: Vec::new(),
             origin: rustain::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: rustain::domain::models::Authorship::HumanWritten,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
         });
     let (domain_tx, _domain_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -832,7 +833,8 @@ fn history_message(
         synthetic: false,
         images: Vec::new(),
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
     }
 }

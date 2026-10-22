@@ -89,7 +89,8 @@ fn make_conv(assistant_turns: usize) -> Conversation {
             synthetic: false,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: rustain::domain::models::Authorship::HumanWritten,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         });
@@ -319,7 +320,8 @@ fn ac4_approve_normal_transitions_mode_and_injects_synthetic() {
         synthetic: true,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     };
@@ -350,7 +352,8 @@ fn ac4_reject_routes_feedback_and_stays_in_plan() {
         synthetic: true,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     };
@@ -516,7 +519,8 @@ fn ac8_reminder_envelope_not_displayed() {
         synthetic: false,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     };
@@ -553,7 +557,8 @@ fn ac9_synthetic_message_metadata() {
         synthetic: true,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     };

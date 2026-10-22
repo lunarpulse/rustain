@@ -128,6 +128,7 @@ fn jump_and_reconcile(
         viewport_height,
         clock,
         &tool_block_states,
+        &[],
     );
 
     let post_layout = chat_pane::build_layout_metrics(
@@ -139,6 +140,7 @@ fn jump_and_reconcile(
         viewport_height,
         clock,
         &tool_block_states,
+        &[],
     );
 
     let event = ViewEvent::JumpTurn {
@@ -178,6 +180,7 @@ fn build_verify_layout(
         viewport_height,
         clock,
         &tool_block_states,
+        &[],
     )
 }
 

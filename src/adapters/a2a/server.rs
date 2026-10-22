@@ -1424,8 +1424,11 @@ async fn task_projection(
     peer_id: &PeerId,
 ) -> Result<serde_json::Value, String> {
     let snapshot = task.snapshot().await;
-    let disclosing_result = snapshot.result.is_some();
-    let text = snapshot.result.as_deref().or(snapshot.detail.as_deref());
+    let text = snapshot
+        .result
+        .as_ref()
+        .map(|result| result.text.as_str())
+        .or(snapshot.detail.as_deref());
     let projection = projection_for(
         state,
         &task.id,
@@ -1434,7 +1437,7 @@ async fn task_projection(
         snapshot.item_address.as_ref(),
     )
     .await;
-    if disclosing_result
+    if let Some(result) = snapshot.result.as_ref()
         && let Some(disclosed_bytes) = disclosed_text_bytes(&projection)
         && task.claim_result_disclosure().await
     {
@@ -1445,6 +1448,8 @@ async fn task_projection(
                 node: task.node_id.clone(),
                 task_id: task.id.clone(),
                 disclosed_bytes,
+                authorship: result.authorship,
+                send_authorization: result.send_authorization,
             })
             .await
         {
@@ -1704,7 +1709,7 @@ async fn launch(
     task.advance(initial).await;
     if initial.is_terminal() {
         if initial == RapTaskState::Completed {
-            task.set_result(runtime.take_result_text(&task.node_id).await)
+            task.set_result(runtime.take_result(&task.node_id).await)
                 .await;
         } else if initial == RapTaskState::Failed {
             task.set_detail(FAILURE_DETAIL).await;
@@ -1741,7 +1746,7 @@ async fn launch(
                     // and all of which a helpful error message would disclose.
                     task.set_detail(FAILURE_DETAIL).await;
                 }
-                let result = runtime.take_result_text(&task.node_id).await;
+                let result = runtime.take_result(&task.node_id).await;
                 if projected == RapTaskState::Completed {
                     task.set_result(result).await;
                 }
@@ -1757,7 +1762,7 @@ async fn launch(
                 // leaving a zombie `working` on the wire forever.
                 tracing::warn!(task = %task.id, "A2A inbound node ended without a terminal state");
                 task.set_detail(FAILURE_DETAIL).await;
-                let _ = runtime.take_result_text(&task.node_id).await;
+                let _ = runtime.take_result(&task.node_id).await;
                 task.advance(RapTaskState::Failed).await;
                 if let Some(record) = pending.as_ref() {
                     remove_pending_task(&state, record).await;

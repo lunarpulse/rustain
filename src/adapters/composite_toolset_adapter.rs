@@ -82,7 +82,7 @@ pub struct CompositeToolsetAdapter {
     subagent_provider: std::sync::OnceLock<Arc<crate::adapters::subagent::SubagentProvider>>,
     /// Story 17.4a — cached AgentCard inventory provider, injected after startup composition.
     #[cfg(feature = "a2a")]
-    a2a_provider: std::sync::OnceLock<Arc<dyn CapabilityProvider>>,
+    a2a_provider: std::sync::OnceLock<Arc<crate::adapters::a2a::provider::A2aProvider>>,
     /// Standalone proposal tool, deliberately outside capability discovery.
     #[cfg(feature = "a2a")]
     team_proposal_tool:
@@ -172,7 +172,7 @@ impl CompositeToolsetAdapter {
 
     /// Story 17.4a — wire the discovery-only A2A provider after composition.
     #[cfg(feature = "a2a")]
-    pub fn set_a2a_provider(&self, provider: Arc<dyn CapabilityProvider>) {
+    pub fn set_a2a_provider(&self, provider: Arc<crate::adapters::a2a::provider::A2aProvider>) {
         if self.a2a_provider.set(provider.clone()).is_err() {
             return;
         }
@@ -856,6 +856,21 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 let _ = (cancel, progress_tx);
                 return tool.execute(tool_use_id, input, invocation).await;
             }
+        }
+        #[cfg(feature = "a2a")]
+        if let Some(a2a_provider) = self.a2a_provider.get()
+            && let Some(id) = crate::domain::models::CapabilityId::from_a2a_wire_name(tool_name)
+        {
+            let _ = (tool_use_id, progress_tx);
+            return a2a_provider
+                .invoke_with_permission_resolution(
+                    &id,
+                    input,
+                    cancel,
+                    invocation.permission_resolution,
+                )
+                .await
+                .map_err(|error| ToolError::ExecutionFailed(error.to_string()));
         }
         self.execute_with_id(tool_name, tool_use_id, input, cancel, progress_tx)
             .await

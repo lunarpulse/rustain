@@ -680,6 +680,9 @@ fn project_attach_frame(mut frame: DaemonFrame, tier: ConnectionTier) -> DaemonF
     let mut remaining = Vec::new();
     if let Some((messages, entries)) = transcript_parts(&mut frame) {
         for (message_index, message) in messages.iter_mut().enumerate() {
+            if tier == ConnectionTier::Peer {
+                message.send_authorization = crate::domain::models::SendAuthorization::Unknown;
+            }
             for call_index in 0..message.tool_calls.len() {
                 let call = &message.tool_calls[call_index];
                 if entries
@@ -899,6 +902,8 @@ enum PeerRowMutation {
     ReplaceContent {
         row_id: String,
         content: String,
+        authorship: crate::domain::models::Authorship,
+        send_authorization: crate::domain::models::SendAuthorization,
         control: Option<PeerRowControl>,
     },
     Remove {
@@ -1017,7 +1022,11 @@ async fn commit_peer_rows_serialized(
                 old_message
             }
             PeerRowMutation::ReplaceContent {
-                content, control, ..
+                content,
+                control,
+                authorship,
+                send_authorization,
+                ..
             } => {
                 let index = old_index.expect("existing row checked before revision allocation");
                 let message = &mut conversation.messages[index];
@@ -1025,7 +1034,8 @@ async fn commit_peer_rows_serialized(
                 let mut original = message.clone();
                 original.content = old_content;
                 message.content = content;
-                message.authorship = crate::domain::models::MessageAuthorship::HumanWritten;
+                message.authorship = authorship;
+                message.send_authorization = send_authorization;
                 message.retracted_at_ms = None;
                 message.history_source = crate::domain::models::HistorySource::PeerDisplay;
                 let replacement = message.clone();
@@ -1314,7 +1324,8 @@ impl TeamSendPayload {
                 message_type: *message_type,
                 reply_to: None,
                 subject: subject.as_deref(),
-                authorship: crate::domain::models::ReplyAuthorship::HumanWritten,
+                authorship: crate::domain::models::Authorship::HumanWritten,
+                send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             },
             Self::Agent(proposal) => crate::adapters::a2a::send::SendRequest {
                 recipients: &proposal.recipients,
@@ -1322,7 +1333,8 @@ impl TeamSendPayload {
                 message_type: Some(proposal.message_type),
                 reply_to: None,
                 subject: None,
-                authorship: crate::domain::models::ReplyAuthorship::AgentComposed,
+                authorship: crate::domain::models::Authorship::AgentComposed,
+                send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             },
         }
     }
@@ -1431,7 +1443,8 @@ pub struct AttachServer {
     /// last assistant message" is not reliably *this* task's answer. Capturing
     /// at completion is; guessing later is how a peer ends up reading another
     /// channel's reply.
-    inbound_results: Arc<Mutex<std::collections::HashMap<AgentId, String>>>,
+    inbound_results:
+        Arc<Mutex<std::collections::HashMap<AgentId, crate::domain::ports::StagedPeerResult>>>,
 }
 
 struct PreparedPeerNode {
@@ -2415,7 +2428,8 @@ impl AttachServer {
             content: buffer.text,
             tool_calls: buffer.tools,
             stop_reason: Some(stop_reason.clone()),
-            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            authorship: crate::domain::models::Authorship::AgentComposed,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             history_source: crate::domain::models::HistorySource::PeerDisplay,
             created_at: crate::domain::models::session_meta::now_unix(),
             ..Default::default()
@@ -2620,7 +2634,8 @@ impl AttachServer {
             synthetic: false,
             images: vec![],
             origin,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         });
@@ -2652,7 +2667,8 @@ impl AttachServer {
             synthetic: false,
             images: vec![],
             origin: ChannelKind::Cron,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         });
@@ -3278,14 +3294,16 @@ impl AttachServer {
             .resolve(node_id.as_str(), resolution)
             .await
             .ok_or_else(|| "peer draft resolution was rejected".to_owned())?;
-        let (content, authorship, sent) = match state {
+        let (content, authorship, send_authorization, sent) = match state {
             super::response_modes::DraftState::Sent {
                 content,
                 authorship,
-            } => (content, authorship, true),
+                send_authorization,
+            } => (content, authorship, send_authorization, true),
             super::response_modes::DraftState::Rejected => (
                 String::new(),
-                super::response_modes::DraftAuthorship::HumanWritten,
+                crate::domain::models::Authorship::HumanWritten,
+                crate::domain::models::SendAuthorization::Unknown,
                 false,
             ),
             _ => return Err("peer draft did not reach a terminal resolution".to_owned()),
@@ -3297,7 +3315,14 @@ impl AttachServer {
         // The reply turn precedes `PeerDraftResolved`, allowing retries after
         // a partial journal failure to reuse the one real via_node turn.
         let recorded_turn = match self
-            .reply_turn_for_resolution(node_id, &content, authorship, sent, preloaded)
+            .reply_turn_for_resolution(
+                node_id,
+                &content,
+                authorship,
+                send_authorization,
+                sent,
+                preloaded,
+            )
             .await
         {
             Ok(turn) => turn,
@@ -3315,7 +3340,7 @@ impl AttachServer {
         if let Err(error) = journal
             .record_event(crate::domain::models::RoomEvent::PeerDraftResolved {
                 node: node_id.clone(),
-                agent_composed: authorship == super::response_modes::DraftAuthorship::AgentComposed,
+                agent_composed: authorship == crate::domain::models::Authorship::AgentComposed,
                 sent,
             })
             .await
@@ -3351,15 +3376,9 @@ impl AttachServer {
             (row, conversation.peer_row_controls.get(&row_id).cloned())
         };
         if sent {
+            row.send_authorization = send_authorization;
             row.content = content.clone();
-            row.authorship = match authorship {
-                super::response_modes::DraftAuthorship::AgentComposed => {
-                    crate::domain::models::MessageAuthorship::AgentComposed
-                }
-                super::response_modes::DraftAuthorship::HumanWritten => {
-                    crate::domain::models::MessageAuthorship::HumanWritten
-                }
-            };
+            row.authorship = authorship;
             row.synthetic = false;
         } else {
             row.content = format!("[draft rejected]\n{}", row.content);
@@ -3394,10 +3413,14 @@ impl AttachServer {
 
         self.node_tree.set_state(node_id, NodeState::Running).await;
         if sent {
-            self.inbound_results
-                .lock()
-                .await
-                .insert(node_id.clone(), content);
+            self.inbound_results.lock().await.insert(
+                node_id.clone(),
+                crate::domain::ports::StagedPeerResult {
+                    text: content,
+                    authorship,
+                    send_authorization,
+                },
+            );
             self.node_tree
                 .set_state(node_id, NodeState::Completed)
                 .await;
@@ -3426,13 +3449,13 @@ impl AttachServer {
         &self,
         node_id: &AgentId,
         content: &str,
-        authorship: super::response_modes::DraftAuthorship,
+        authorship: crate::domain::models::Authorship,
+        send_authorization: crate::domain::models::SendAuthorization,
         sent: bool,
         preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
     ) -> Result<Option<RecipientReplyReceipt>, String> {
         use crate::domain::models::{
-            ReplyAuthorship, RoomEvent, TurnAddress, claim_reply_turn_id,
-            fresh_reply_turn_candidate,
+            RoomEvent, TurnAddress, claim_reply_turn_id, fresh_reply_turn_candidate,
         };
 
         let reader = self
@@ -3493,15 +3516,9 @@ impl AttachServer {
                 answers: item.address.item().clone(),
                 content: content.to_owned(),
                 kind: crate::domain::models::ReplyKind::Answer,
-                authorship: match authorship {
-                    super::response_modes::DraftAuthorship::AgentComposed => {
-                        ReplyAuthorship::AgentComposed
-                    }
-                    super::response_modes::DraftAuthorship::HumanWritten => {
-                        ReplyAuthorship::HumanWritten
-                    }
-                },
+                authorship,
                 via_node: Some(node_id.clone()),
+                send_authorization,
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -3519,7 +3536,8 @@ impl AttachServer {
         &self,
         _node_id: &AgentId,
         _content: &str,
-        _authorship: super::response_modes::DraftAuthorship,
+        _authorship: crate::domain::models::Authorship,
+        _send_authorization: crate::domain::models::SendAuthorization,
         _sent: bool,
         _preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
     ) -> Result<Option<RecipientReplyReceipt>, String> {
@@ -3946,8 +3964,8 @@ impl AttachServer {
         #[cfg(feature = "a2a")]
         {
             use crate::domain::models::{
-                MAX_REPLY_BYTES, RecipientItemState, ReplyAuthorship, ReplyKind, RoomEvent,
-                TurnAddress, claim_reply_turn_id, fresh_reply_turn_candidate,
+                Authorship, MAX_REPLY_BYTES, RecipientItemState, ReplyKind, RoomEvent, TurnAddress,
+                claim_reply_turn_id, fresh_reply_turn_candidate,
             };
 
             let _reply_guard = self.peer_reply_serial.lock().await;
@@ -4073,7 +4091,8 @@ impl AttachServer {
                     answers: item.address.item().clone(),
                     content: text,
                     kind: ReplyKind::Answer,
-                    authorship: ReplyAuthorship::HumanWritten,
+                    authorship: Authorship::HumanWritten,
+                    send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
                     via_node: None,
                 })
                 .await
@@ -4201,7 +4220,8 @@ impl AttachServer {
                     answers: item.address.item().clone(),
                     content: "Busy — defer 30m".to_owned(),
                     kind: ReplyKind::Defer { minutes: 30 },
-                    authorship: crate::domain::models::ReplyAuthorship::HumanWritten,
+                    authorship: crate::domain::models::Authorship::HumanWritten,
+                    send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
                     via_node: None,
                 })
                 .await
@@ -4319,6 +4339,8 @@ impl AttachServer {
             mutations.push(PeerRowMutation::ReplaceContent {
                 row_id: message.id.clone(),
                 content: content.to_owned(),
+                authorship: crate::domain::models::Authorship::HumanWritten,
+                send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
                 control: Some(settled),
             });
         }
@@ -5180,7 +5202,14 @@ impl AttachServer {
                     } else {
                         outcome
                     };
-                    runtime.approval.resolve(&request_id, outcome).await;
+                    runtime
+                        .approval
+                        .resolve(
+                            &request_id,
+                            outcome,
+                            crate::domain::models::PermissionResolution::Operator,
+                        )
+                        .await;
                 }
             }
             ClientFrame::InputResponse { node, responses } => {
@@ -5925,7 +5954,9 @@ impl AttachServer {
                                 role: MessageRole::Assistant,
                                 content: response.clone(),
                                 created_at: crate::domain::models::session_meta::now_unix(),
-                                authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+                                authorship: crate::domain::models::Authorship::AgentComposed,
+                                send_authorization:
+                                    crate::domain::models::SendAuthorization::Unknown,
                                 ..Default::default()
                             },
                             control: Some(peer_row_control(
@@ -5952,10 +5983,14 @@ impl AttachServer {
                         miss.elapsed_ms
                     )
                 })?;
-                self.inbound_results
-                    .lock()
-                    .await
-                    .insert(recipient.clone(), response);
+                self.inbound_results.lock().await.insert(
+                    recipient.clone(),
+                    crate::domain::ports::StagedPeerResult {
+                        text: response,
+                        authorship: crate::domain::models::Authorship::AgentComposed,
+                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
+                    },
+                );
                 self.node_tree
                     .set_state(&recipient, NodeState::Running)
                     .await;
@@ -6433,7 +6468,14 @@ impl AttachServer {
                 }
             }
         } else if let Some(runtime) = runtime {
-            runtime.approval.resolve(&request_id, outcome).await;
+            runtime
+                .approval
+                .resolve(
+                    &request_id,
+                    outcome,
+                    crate::domain::models::PermissionResolution::Operator,
+                )
+                .await;
         }
     }
 
@@ -6478,6 +6520,7 @@ impl AttachServer {
                                         .to_owned(),
                                 ),
                             },
+                            crate::domain::models::PermissionResolution::Policy,
                         )
                         .await;
                 }
@@ -6889,7 +6932,11 @@ async fn apply_unattended_tool_policy(
 ) {
     if review.risk == ToolRisk::Safe {
         approval
-            .resolve(&review.id, crate::domain::models::ApprovalOutcome::Once)
+            .resolve(
+                &review.id,
+                crate::domain::models::ApprovalOutcome::Once,
+                crate::domain::models::PermissionResolution::Policy,
+            )
             .await;
     } else {
         approval
@@ -6901,6 +6948,7 @@ async fn apply_unattended_tool_policy(
                             .into(),
                     ),
                 },
+                crate::domain::models::PermissionResolution::Policy,
             )
             .await;
         blocked.fetch_add(1, Ordering::SeqCst);
@@ -7046,6 +7094,7 @@ async fn run_approval_gate(
                                             .to_owned(),
                                     ),
                                 },
+                                crate::domain::models::PermissionResolution::Policy,
                             )
                             .await;
                         blocked.fetch_add(1, Ordering::SeqCst);
@@ -7166,7 +7215,8 @@ async fn record_blocked_action(
         synthetic: true,
         images: vec![],
         origin: ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: crate::domain::models::Authorship::HumanWritten,
+        send_authorization: crate::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source,
     });
@@ -7191,7 +7241,8 @@ struct InboundTurnContext {
     /// The daemon has ONE conversation; turns must not interleave on it.
     turn_serial: Arc<Mutex<()>>,
     active_channel_origin: Arc<Mutex<ChannelKind>>,
-    inbound_results: Arc<Mutex<std::collections::HashMap<AgentId, String>>>,
+    inbound_results:
+        Arc<Mutex<std::collections::HashMap<AgentId, crate::domain::ports::StagedPeerResult>>>,
     pending_drafts: Arc<super::response_modes::PendingDraftController>,
     peer_reply_serial: Arc<Mutex<()>>,
     registry: Arc<Mutex<ConnRegistry>>,
@@ -7555,10 +7606,15 @@ impl InboundTurnContext {
                     NodeState::Failed
                 } else {
                     if !answer.trim().is_empty() {
-                        self.inbound_results
-                            .lock()
-                            .await
-                            .insert(node_id.clone(), answer);
+                        self.inbound_results.lock().await.insert(
+                            node_id.clone(),
+                            crate::domain::ports::StagedPeerResult {
+                                text: answer,
+                                authorship: crate::domain::models::Authorship::AgentComposed,
+                                send_authorization:
+                                    crate::domain::models::SendAuthorization::Automatic,
+                            },
+                        );
                     }
                     NodeState::Completed
                 };
@@ -8001,7 +8057,8 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                                 None => response.clone(),
                             },
                             created_at: crate::domain::models::session_meta::now_unix(),
-                            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+                            authorship: crate::domain::models::Authorship::AgentComposed,
+                            send_authorization: crate::domain::models::SendAuthorization::Automatic,
                             ..Default::default()
                         },
                         control: Some(peer_row_control(
@@ -8034,10 +8091,14 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                             miss.elapsed_ms
                         ))
                     })?;
-                    self.inbound_results
-                        .lock()
-                        .await
-                        .insert(task.node_id.clone(), response);
+                    self.inbound_results.lock().await.insert(
+                        task.node_id.clone(),
+                        crate::domain::ports::StagedPeerResult {
+                            text: response,
+                            authorship: crate::domain::models::Authorship::AgentComposed,
+                            send_authorization: crate::domain::models::SendAuthorization::Automatic,
+                        },
+                    );
                     self.node_tree
                         .set_state(&task.node_id, NodeState::Running)
                         .await;
@@ -8283,7 +8344,10 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
         })
     }
 
-    async fn take_result_text(&self, node_id: &AgentId) -> Option<String> {
+    async fn take_result(
+        &self,
+        node_id: &AgentId,
+    ) -> Option<crate::domain::ports::StagedPeerResult> {
         self.inbound_results.lock().await.remove(node_id)
     }
 
@@ -10435,7 +10499,11 @@ mod tests {
             .expect("fixed auto response completes at admission");
         assert_eq!(*status.borrow(), NodeState::Completed);
         assert_eq!(
-            server.take_result_text(&node_id).await.as_deref(),
+            server
+                .take_result(&node_id)
+                .await
+                .map(|result| result.text)
+                .as_deref(),
             Some("Acknowledged.")
         );
         let row = conversation
@@ -10453,7 +10521,11 @@ mod tests {
         );
         assert_eq!(
             row.authorship,
-            crate::domain::models::MessageAuthorship::AgentComposed
+            crate::domain::models::Authorship::AgentComposed
+        );
+        assert_eq!(
+            row.send_authorization,
+            crate::domain::models::SendAuthorization::Automatic
         );
         assert!(
             !conversation.lock().await.messages.iter().any(|message| {
@@ -10473,8 +10545,124 @@ mod tests {
             .expect("persisted auto response remains addressable");
         assert_eq!(
             reloaded_row.authorship,
-            crate::domain::models::MessageAuthorship::AgentComposed,
+            crate::domain::models::Authorship::AgentComposed,
             "agent authorship must persist on the auto response"
+        );
+    }
+
+    #[tokio::test]
+    async fn rap_auto_response_records_no_send() {
+        use crate::adapters::daemon::response_modes::{
+            RetractionError, plan_auto_response_retraction,
+        };
+        use crate::adapters::rap::VerifiedPeerConsumer as _;
+        use crate::adapters::tui::{state::TabRenderState, theme::Theme, widgets::chat_pane};
+        use crate::domain::models::{Authorship, SendAuthorization, StreamingState};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, storage) = mock_core(tmp.path(), vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "rap-provenance".into(),
+            ..Default::default()
+        }));
+        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let server = Arc::new(AttachServer::new(core, conversation, domain_tx));
+        let node = AgentId::new();
+        // Nearest test-visible seam on the production RAP consumer path (Rule 2),
+        // not the A2A start path or an inner response helper. No delivery claim.
+        DaemonPeerConsumer {
+            server: Arc::downgrade(&server),
+        }
+        .ingest_with_policy(
+            &node,
+            AgentMessage::new("RAP question"),
+            &test_signer(92).identity().peer_id,
+            crate::domain::ports::PeerResponsePolicy {
+                mode: crate::domain::models::ResponseMode::NotifyAndAuto,
+                auto_response: Some("RAP_UNSENT_BODY_END".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let reloaded = storage
+            .load_conversation("rap-provenance")
+            .await
+            .unwrap()
+            .unwrap();
+        let row = reloaded
+            .messages
+            .iter()
+            .find(|row| row.content == "RAP_UNSENT_BODY_END")
+            .expect("RAP consumer persists the generated response");
+        assert!(!row.id.is_empty());
+        assert!(
+            !row.id.starts_with("peer-response-"),
+            "RAP row keeps its generated id"
+        );
+        assert_eq!(row.authorship, Authorship::AgentComposed);
+        assert_eq!(
+            row.send_authorization,
+            SendAuthorization::Unknown,
+            "M39: RAP template records no send authorization"
+        );
+        assert!(
+            matches!(
+                plan_auto_response_retraction(row, 1, true, 1_700_000_005_000),
+                Err(RetractionError::NotAutomatic)
+            ),
+            "unsent RAP response must be refused as NotAutomatic"
+        );
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        let mut cache = TabRenderState::default();
+        terminal
+            .draw(|frame| {
+                chat_pane::render_with_search(
+                    frame,
+                    frame.area(),
+                    &reloaded,
+                    None,
+                    &StreamingState::default(),
+                    &Default::default(),
+                    &crate::domain::clock::MockClock::at_wall_ms(1_700_000_005_000),
+                    0,
+                    false,
+                    &Theme::dark(),
+                    &mut cache,
+                    &Default::default(),
+                    &Default::default(),
+                    None,
+                    None,
+                    &[],
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+            })
+            .unwrap();
+        let painted = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(160)
+            .map(|line| line.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        assert!(
+            painted
+                .iter()
+                .any(|line| line.contains("RAP_UNSENT_BODY_END")),
+            "body must not be clipped"
+        );
+        assert!(painted.iter().any(|line| line.contains("[agent-composed]")));
+        assert!(
+            !painted
+                .iter()
+                .any(|line| line.contains("[auto-sent]") || line.contains("[✗] Retract")),
+            "RAP unsent response has no marker line"
         );
     }
 
@@ -10500,7 +10688,11 @@ mod tests {
             .expect("template auto response completes at admission");
         assert_eq!(*status.borrow(), NodeState::Completed);
         assert_eq!(
-            server.take_result_text(&node_id).await.as_deref(),
+            server
+                .take_result(&node_id)
+                .await
+                .map(|result| result.text)
+                .as_deref(),
             Some(crate::adapters::daemon::response_modes::DEFAULT_AUTO_RESPONSE_TEMPLATE)
         );
         assert!(
@@ -10522,7 +10714,7 @@ mod tests {
         );
         assert_eq!(
             row.authorship,
-            crate::domain::models::MessageAuthorship::AgentComposed
+            crate::domain::models::Authorship::AgentComposed
         );
         assert!(
             !conversation.lock().await.messages.iter().any(|message| {
@@ -10542,7 +10734,7 @@ mod tests {
             .expect("persisted template auto response remains addressable");
         assert_eq!(
             reloaded_row.authorship,
-            crate::domain::models::MessageAuthorship::AgentComposed,
+            crate::domain::models::Authorship::AgentComposed,
             "agent authorship must persist on the template auto response"
         );
     }
@@ -11375,7 +11567,10 @@ mod tests {
             ))
         }
 
-        async fn take_result_text(&self, _node_id: &AgentId) -> Option<String> {
+        async fn take_result(
+            &self,
+            _node_id: &AgentId,
+        ) -> Option<crate::domain::ports::StagedPeerResult> {
             None
         }
 
@@ -11677,7 +11872,11 @@ mod tests {
 
         runtime
             .approval
-            .resolve(&request_id, ApprovalOutcome::Once)
+            .resolve(
+                &request_id,
+                ApprovalOutcome::Once,
+                crate::domain::models::PermissionResolution::Operator,
+            )
             .await;
         assert_eq!(
             first.decision.await.unwrap(),
@@ -11775,7 +11974,11 @@ mod tests {
         };
         runtime
             .approval
-            .resolve(&other_request, ApprovalOutcome::Reject { feedback: None })
+            .resolve(
+                &other_request,
+                ApprovalOutcome::Reject { feedback: None },
+                crate::domain::models::PermissionResolution::Operator,
+            )
             .await;
         assert_eq!(
             unrelated.decision.await.unwrap(),
@@ -12130,7 +12333,11 @@ mod tests {
             };
             runtime
                 .approval
-                .resolve(&id, ApprovalOutcome::Reject { feedback: None })
+                .resolve(
+                    &id,
+                    ApprovalOutcome::Reject { feedback: None },
+                    crate::domain::models::PermissionResolution::Operator,
+                )
                 .await;
             let guard =
                 tokio::time::timeout(std::time::Duration::from_secs(3), server.turn_serial.lock())
@@ -12386,7 +12593,11 @@ mod tests {
         );
         runtime
             .approval
-            .resolve(&request_id, ApprovalOutcome::Reject { feedback: None })
+            .resolve(
+                &request_id,
+                ApprovalOutcome::Reject { feedback: None },
+                crate::domain::models::PermissionResolution::Operator,
+            )
             .await;
         assert_eq!(decision.await.unwrap(), InboundApprovalDecision::Decline);
     }
@@ -12776,7 +12987,8 @@ mod tests {
                 id: format!("peer-response-{}", auto_node.as_str()),
                 role: MessageRole::Assistant,
                 content: "retained response".to_owned(),
-                authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+                authorship: crate::domain::models::Authorship::AgentComposed,
+                send_authorization: crate::domain::models::SendAuthorization::Automatic,
                 ..Default::default()
             }],
             ..Default::default()
@@ -12791,6 +13003,8 @@ mod tests {
                 node: auto_node.clone(),
                 task: None,
                 disclosed_bytes: 17,
+                authorship: crate::domain::models::Authorship::AgentComposed,
+                send_authorization: crate::domain::models::SendAuthorization::Automatic,
             })
             .await
             .expect("seed disclosure");
@@ -12862,7 +13076,7 @@ mod tests {
         assert_eq!(draft.content, "human answer");
         assert_eq!(
             draft.authorship,
-            crate::domain::models::MessageAuthorship::HumanWritten
+            crate::domain::models::Authorship::HumanWritten
         );
 
         let failed_auto_node = AgentId::from_validated("failed-auto-node");
@@ -12870,7 +13084,8 @@ mod tests {
             id: format!("peer-response-{}", failed_auto_node.as_str()),
             role: MessageRole::Assistant,
             content: "still visible".to_owned(),
-            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            authorship: crate::domain::models::Authorship::AgentComposed,
+            send_authorization: crate::domain::models::SendAuthorization::Automatic,
             ..Default::default()
         });
         journal
@@ -12879,6 +13094,8 @@ mod tests {
                 node: failed_auto_node.clone(),
                 task: None,
                 disclosed_bytes: 13,
+                authorship: crate::domain::models::Authorship::AgentComposed,
+                send_authorization: crate::domain::models::SendAuthorization::Automatic,
             })
             .await
             .expect("seed failed-node disclosure");
@@ -12981,7 +13198,7 @@ mod tests {
         assert_eq!(resumed.content, "manual response after reattach");
         assert_eq!(
             resumed.authorship,
-            crate::domain::models::MessageAuthorship::HumanWritten
+            crate::domain::models::Authorship::HumanWritten
         );
     }
 
@@ -13591,12 +13808,14 @@ mod tests {
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         // Server issues a challenge first; the version check precedes proof work,
         // so a wrong declared version is rejected before the proof is examined.
+        // A v8 client accepts the new field but its old renderer would label
+        // human-approved drafts auto-sent; v9 must reject it before registration.
         let signer = test_signer(1);
         let _ = read_attach_challenge(&mut stream).await;
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: 7,
+                protocol_version: 8,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -13609,8 +13828,8 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, 7);
-                assert_eq!(daemon, 8);
+                assert_eq!(client, 8);
+                assert_eq!(daemon, 9);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }
@@ -13768,8 +13987,14 @@ mod tests {
                 None,
             )
             .await;
+        let resolved = rx2.await.unwrap();
+        assert_eq!(
+            resolved.resolution,
+            crate::domain::models::PermissionResolution::Policy,
+            "unattended Safe policy must not claim an operator answer"
+        );
         assert!(
-            matches!(rx2.await.unwrap().outcome, ApprovalOutcome::Once),
+            matches!(resolved.outcome, ApprovalOutcome::Once),
             "Safe tool auto-proceeds unattended"
         );
 
@@ -15402,7 +15627,13 @@ mod tests {
             writer_rx.try_recv().is_err(),
             "only the winning gate sends a transfer"
         );
-        approval.resolve(&request_id, ApprovalOutcome::Once).await;
+        approval
+            .resolve(
+                &request_id,
+                ApprovalOutcome::Once,
+                crate::domain::models::PermissionResolution::Operator,
+            )
+            .await;
         assert!(matches!(
             decision.await.unwrap().outcome,
             ApprovalOutcome::Once
@@ -15648,17 +15879,24 @@ mod tests {
         let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
         let server = AttachServer::new(core, conversation, domain_tx);
         let node_id = AgentId::new();
-        server
-            .inbound_results
-            .lock()
-            .await
-            .insert(node_id.clone(), "one-time answer".to_owned());
+        server.inbound_results.lock().await.insert(
+            node_id.clone(),
+            crate::domain::ports::StagedPeerResult {
+                text: "one-time answer".to_owned(),
+                authorship: crate::domain::models::Authorship::AgentComposed,
+                send_authorization: crate::domain::models::SendAuthorization::Automatic,
+            },
+        );
 
         assert_eq!(
-            server.take_result_text(&node_id).await.as_deref(),
+            server
+                .take_result(&node_id)
+                .await
+                .map(|result| result.text)
+                .as_deref(),
             Some("one-time answer")
         );
-        assert_eq!(server.take_result_text(&node_id).await, None);
+        assert_eq!(server.take_result(&node_id).await, None);
     }
 
     #[tokio::test]

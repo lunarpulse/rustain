@@ -263,6 +263,7 @@ fn reconcile_fold_toggle<F>(
             vp_height,
             &*clock,
             &tool_block_states,
+            &tab_manager.active_tab().session_meta.bookmarks,
         )
     };
     let prev_focused_turn_top = pre_layout.focused_turn_top;
@@ -286,6 +287,7 @@ fn reconcile_fold_toggle<F>(
             vp_height,
             &*clock,
             &tool_block_states,
+            &tab_manager.active_tab().session_meta.bookmarks,
         )
     };
     let resolved = tab_manager.active_tab_mut().view_state.reconcile(
@@ -1289,7 +1291,8 @@ pub async fn run(
                                                         synthetic: true,
                                                         images: vec![],
                                                         origin: crate::domain::models::ChannelKind::Terminal,
-                                                        authorship: Default::default(),
+                                                        authorship: crate::domain::models::Authorship::HumanWritten,
+                                                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
                                                         retracted_at_ms: None,
                                                         history_source: Default::default(),
                                                     }],
@@ -1481,17 +1484,17 @@ pub async fn run(
                                     // Cancel active feedback input flow first (AC5)
                                     if let Some(fi) = state.pending_feedback_input.take() {
                                         let pending = fi.pending_permission;
-                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel).await;
+                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
                                         state.focus = FocusState::Input;
                                     }
                                     // Cancel any pending permission before aborting
                                     if let Some(pending) = state.pending_permission.take() {
-                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel).await;
+                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
                                         state.focus = FocusState::Input;
                                     }
                                     // Cancel all queued permission requests
                                     while let Some(queued) = state.permission_queue.pop() {
-                                        let _ = approval_runtime.resolve(&queued.id, ApprovalOutcome::Cancel).await;
+                                        let _ = approval_runtime.resolve(&queued.id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
                                     }
                                     // Decline any pending skill trust prompt
                                     if let Some(pending) = state.pending_skill_trust.take() {
@@ -3319,7 +3322,8 @@ pub async fn run(
                                                 synthetic: false,
                                                 images: vec![],
                                                 origin: crate::domain::models::ChannelKind::Terminal,
-                                                authorship: Default::default(),
+                                                authorship: crate::domain::models::Authorship::HumanWritten,
+                                                send_authorization: crate::domain::models::SendAuthorization::Unknown,
                                                 retracted_at_ms: None,
                                                 history_source: Default::default(),
                                             });
@@ -4603,7 +4607,7 @@ pub async fn run(
                                     let layout = {
                                         let tool_block_states = state.tool_block_states.clone();
                                         let rs = state.tab_render_state(state.active_tab_id);
-                                        chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states)
+                                        chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks)
                                     };
                                     let scroll_offset = state.scroll_snapshot;
                                     let total_h = layout.total_content_height;
@@ -4684,7 +4688,7 @@ pub async fn run(
                                     if let Some(t) = target {
                                         tab_manager.active_tab_mut().view_state.set_focused_turn(Some(t.id.clone()));
                                         // Set Pinned mode via reconcile (correctly anchors the turn)
-                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states) };
+                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks) };
                                         let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: t.id.clone() }), &layout);
                                         // Compute scroll position using the same render-driven approach
                                         // as {}/{}.  Try the TurnId→MessageId mapping (rebuild_messages_mirror
@@ -4737,7 +4741,7 @@ pub async fn run(
                                         let width = state.terminal_width;
                                         let theme = state.theme.clone();
                                         tab_manager.active_tab_mut().view_state.set_focused_turn(Some(t.id.clone()));
-                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let clock = tab_manager.active_tab().clock.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states) };
+                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let clock = tab_manager.active_tab().clock.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks) };
                                         let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: t.id.clone() }), &layout);
                                         // Use render-driven message_boundaries with ID-match + fallback
                                         let msg_idx = conversation.messages.iter().position(|m| m.id == t.id.0)
@@ -4787,7 +4791,7 @@ pub async fn run(
                                         let tool_block_states = state.tool_block_states.clone();
                                         let layout = {
                                             let rs = state.tab_render_state(state.active_tab_id);
-                                            chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states)
+                                            chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks)
                                         };
                                         let scroll_offset = state.scroll_snapshot;
                                         let total_h = layout.total_content_height;
@@ -4803,7 +4807,7 @@ pub async fn run(
                                     };
                                     if let Some(turn_id) = target {
                                         tab_manager.active_tab_mut().view_state.set_focused_turn(Some(turn_id.clone()));
-                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states) };
+                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks) };
                                         let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: turn_id.clone() }), &layout);
                                         // Use render-driven message_boundaries with ID-match + content fallback
                                         let msg_idx = conversation.messages.iter().position(|m| m.id == turn_id.0)
@@ -6019,7 +6023,8 @@ pub async fn run(
                                     synthetic: true,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
-                                    authorship: Default::default(),
+                                    authorship: crate::domain::models::Authorship::HumanWritten,
+                                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
                                     retracted_at_ms: None,
                                     history_source: Default::default(),
                                 };
@@ -6046,7 +6051,8 @@ pub async fn run(
                                     synthetic: true,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
-                                    authorship: Default::default(),
+                                    authorship: crate::domain::models::Authorship::HumanWritten,
+                                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
                                     retracted_at_ms: None,
                                     history_source: Default::default(),
                                 };
@@ -6076,7 +6082,8 @@ pub async fn run(
                                     synthetic: true,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
-                                    authorship: Default::default(),
+                                    authorship: crate::domain::models::Authorship::HumanWritten,
+                                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
                                     retracted_at_ms: None,
                                     history_source: Default::default(),
                                 };
@@ -6126,7 +6133,8 @@ pub async fn run(
                                             synthetic: false,
                                             images: vec![],
                                             origin: crate::domain::models::ChannelKind::Terminal,
-                                            authorship: Default::default(),
+                                            authorship: crate::domain::models::Authorship::HumanWritten,
+                                            send_authorization: crate::domain::models::SendAuthorization::Unknown,
                                             retracted_at_ms: None,
                                             history_source: Default::default(),
                                         };
@@ -6147,7 +6155,8 @@ pub async fn run(
                                         synthetic: false,
                                         images: vec![],
                                         origin: crate::domain::models::ChannelKind::Terminal,
-                                        authorship: Default::default(),
+                                        authorship: crate::domain::models::Authorship::HumanWritten,
+                                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
                                         retracted_at_ms: None,
                                         history_source: Default::default(),
                                     };
@@ -6167,7 +6176,8 @@ pub async fn run(
                                     synthetic: false,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
-                                    authorship: Default::default(),
+                                    authorship: crate::domain::models::Authorship::HumanWritten,
+                                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
                                     retracted_at_ms: None,
                                     history_source: Default::default(),
                                 };
@@ -6187,7 +6197,8 @@ pub async fn run(
                                     synthetic: false,
                                     images: vec![],
                                     origin: crate::domain::models::ChannelKind::Terminal,
-                                    authorship: Default::default(),
+                                    authorship: crate::domain::models::Authorship::HumanWritten,
+                                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
                                     retracted_at_ms: None,
                                     history_source: Default::default(),
                                 };
@@ -10589,7 +10600,8 @@ mod tests {
             synthetic: false,
             images,
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         }
@@ -10608,7 +10620,8 @@ mod tests {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         }

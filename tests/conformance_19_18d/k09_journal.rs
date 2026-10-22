@@ -16,8 +16,8 @@
 use std::path::Path;
 
 use rustain::domain::models::{
-    AgentId, ItemAddress, ItemId, ItemPrincipal, JournalEntry, JournalRecord, OrchestrationRoomId,
-    PeerId, ReplyAuthorship, ReplyKind, ReplyTurnId, RoomEvent, TurnAddress,
+    AgentId, Authorship, ItemAddress, ItemId, ItemPrincipal, JournalEntry, JournalRecord,
+    OrchestrationRoomId, PeerId, ReplyKind, ReplyTurnId, RoomEvent, TurnAddress,
 };
 use rustain::domain::ports::RoomJournalReader;
 use rustain::infrastructure::subagent::WorkspaceJournalReader;
@@ -141,7 +141,8 @@ fn replied_with_kind(address: TurnAddress, kind: ReplyKind) -> RoomEvent {
         address,
         answers: item("ri_bound"),
         content: "done".to_owned(),
-        authorship: ReplyAuthorship::default(),
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         kind,
         via_node: Some(AgentId::root()),
     }

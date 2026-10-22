@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::{
-    A2aPeerSpec, Capability, CapabilityError, CapabilityId, ProviderCapabilities, ToolResult,
-    TransportKind,
+    A2aPeerSpec, Capability, CapabilityError, CapabilityId, PermissionResolution,
+    ProviderCapabilities, SendAuthorization, ToolResult, TransportKind,
 };
 use crate::domain::ports::CapabilityProvider;
 
@@ -39,6 +39,99 @@ impl A2aProvider {
 
     pub fn delegation_runtime(&self) -> Option<&Arc<super::driver::A2aDelegationRuntime>> {
         self.delegation.get()
+    }
+
+    /// Carry the invocation's permission-gate origin into delegation authorization.
+    /// Calls without a gate decision retain unknown authorization.
+    pub async fn invoke_with_permission_resolution(
+        &self,
+        capability_id: &CapabilityId,
+        input: serde_json::Value,
+        cancel: CancellationToken,
+        resolution: Option<PermissionResolution>,
+    ) -> Result<ToolResult, CapabilityError> {
+        let send_authorization = match resolution {
+            Some(PermissionResolution::Operator) => SendAuthorization::HumanDecided,
+            Some(PermissionResolution::Policy) => SendAuthorization::Automatic,
+            None => SendAuthorization::Unknown,
+        };
+        // Until the composition root injects the delegation runtime, delegation
+        // is intentionally unavailable (Story 17.4b) — discovery still works.
+        let Some(runtime) = self.delegation.get() else {
+            return Err(CapabilityError::InvocationFailed(
+                capability_id.to_string(),
+                "A2A task delegation is intentionally unavailable until Story 17.4b".to_owned(),
+            ));
+        };
+
+        let (spec, client) = self
+            .peers
+            .iter()
+            .find(|(spec, _)| spec.id == capability_id.server)
+            .ok_or_else(|| {
+                CapabilityError::InvocationFailed(
+                    capability_id.to_string(),
+                    format!("unknown A2A peer {:?}", capability_id.server),
+                )
+            })?;
+
+        // Slot-type migration only: the model rail keeps today's refusal for every
+        // non-`Ready` state (`A28` item 5). Its RPCs still get origin binding,
+        // because that check lives in `post_jsonrpc`.
+        let (card, trust) = client.ready_card().await.ok_or_else(|| {
+            CapabilityError::InvocationFailed(
+                capability_id.to_string(),
+                "A2A peer AgentCard is not cached; refresh discovery first".to_owned(),
+            )
+        })?;
+        let endpoint = super::endpoint::resolve_jsonrpc_endpoint(&card).map_err(|error| {
+            CapabilityError::InvocationFailed(capability_id.to_string(), error.to_string())
+        })?;
+
+        // Story 19.18c `PQ1` — while the key is unusable a credentialed peer
+        // is refused before `delegate`: no dispatch row, no POST.
+        let item_key = runtime.outbound_item_key(spec).map_err(|error| {
+            CapabilityError::InvocationFailed(capability_id.to_string(), error.to_string())
+        })?;
+        // Story 19.18c `A9` — build the message FIRST, then bind the transport
+        // to its one `(messageId, capability)`, then share it: the lifecycle's
+        // polls and cancels present the capability only for that id, never for
+        // an id the peer answered with. ⛔ No interior mutability.
+        let (message, own_task) = super::driver::build_message(
+            &input,
+            super::driver::MessageCarriers {
+                item_key: item_key.as_deref(),
+                ..super::driver::MessageCarriers::default()
+            },
+        );
+        let transport = super::driver::TaskClient::new(client.clone(), endpoint.url().to_owned());
+        let transport = Arc::new(match own_task {
+            Some(own_task) => transport.with_own_task(own_task),
+            None => transport,
+        });
+        match runtime
+            .delegate(
+                spec,
+                trust,
+                &capability_id.tool,
+                transport,
+                message,
+                cancel,
+                send_authorization,
+            )
+            .await
+        {
+            Ok(result) => Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| result.to_string()),
+                is_error: false,
+            }),
+            Err(error) => Err(CapabilityError::InvocationFailed(
+                capability_id.to_string(),
+                error.to_string(),
+            )),
+        }
     }
 }
 
@@ -115,75 +208,8 @@ impl CapabilityProvider for A2aProvider {
         input: serde_json::Value,
         cancel: CancellationToken,
     ) -> Result<ToolResult, CapabilityError> {
-        // Until the composition root injects the delegation runtime, delegation
-        // is intentionally unavailable (Story 17.4b) — discovery still works.
-        let Some(runtime) = self.delegation.get() else {
-            return Err(CapabilityError::InvocationFailed(
-                capability_id.to_string(),
-                "A2A task delegation is intentionally unavailable until Story 17.4b".to_owned(),
-            ));
-        };
-
-        let (spec, client) = self
-            .peers
-            .iter()
-            .find(|(spec, _)| spec.id == capability_id.server)
-            .ok_or_else(|| {
-                CapabilityError::InvocationFailed(
-                    capability_id.to_string(),
-                    format!("unknown A2A peer {:?}", capability_id.server),
-                )
-            })?;
-
-        // Slot-type migration only: the model rail keeps today's refusal for every
-        // non-`Ready` state (`A28` item 5). Its RPCs still get origin binding,
-        // because that check lives in `post_jsonrpc`.
-        let (card, trust) = client.ready_card().await.ok_or_else(|| {
-            CapabilityError::InvocationFailed(
-                capability_id.to_string(),
-                "A2A peer AgentCard is not cached; refresh discovery first".to_owned(),
-            )
-        })?;
-        let endpoint = super::endpoint::resolve_jsonrpc_endpoint(&card).map_err(|error| {
-            CapabilityError::InvocationFailed(capability_id.to_string(), error.to_string())
-        })?;
-
-        // Story 19.18c `PQ1` — while the key is unusable a credentialed peer
-        // is refused before `delegate`: no dispatch row, no POST.
-        let item_key = runtime.outbound_item_key(spec).map_err(|error| {
-            CapabilityError::InvocationFailed(capability_id.to_string(), error.to_string())
-        })?;
-        // Story 19.18c `A9` — build the message FIRST, then bind the transport
-        // to its one `(messageId, capability)`, then share it: the lifecycle's
-        // polls and cancels present the capability only for that id, never for
-        // an id the peer answered with. ⛔ No interior mutability.
-        let (message, own_task) = super::driver::build_message(
-            &input,
-            super::driver::MessageCarriers {
-                item_key: item_key.as_deref(),
-                ..super::driver::MessageCarriers::default()
-            },
-        );
-        let transport = super::driver::TaskClient::new(client.clone(), endpoint.url().to_owned());
-        let transport = Arc::new(match own_task {
-            Some(own_task) => transport.with_own_task(own_task),
-            None => transport,
-        });
-        match runtime
-            .delegate(spec, trust, &capability_id.tool, transport, message, cancel)
+        self.invoke_with_permission_resolution(capability_id, input, cancel, None)
             .await
-        {
-            Ok(result) => Ok(ToolResult {
-                tool_use_id: String::new(),
-                content: serde_json::to_string_pretty(&result)
-                    .unwrap_or_else(|_| result.to_string()),
-                is_error: false,
-            }),
-            Err(error) => Err(CapabilityError::InvocationFailed(
-                capability_id.to_string(),
-                error.to_string(),
-            )),
-        }
     }
 }
 

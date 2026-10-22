@@ -23,6 +23,13 @@ struct ToolProvider {
     terminal: ToolTerminal,
 }
 
+pub(super) fn evidence_provider(managed_path: String) -> Arc<dyn StreamingProvider> {
+    Arc::new(ToolProvider {
+        managed_path,
+        ..Default::default()
+    })
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 enum ToolTerminal {
     #[default]
@@ -131,7 +138,7 @@ impl SecurityPort for YoloSecurity {
     fn set_mode(&self, _mode: PermissionMode) {}
 }
 
-fn actual_tool_runtime(
+pub(super) fn actual_tool_runtime(
     workspace: &std::path::Path,
     storage: Arc<dyn StoragePort>,
     provider: Arc<dyn StreamingProvider>,

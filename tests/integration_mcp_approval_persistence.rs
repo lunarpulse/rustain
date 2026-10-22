@@ -63,6 +63,7 @@ async fn r4_always_for_mcp_server_persists_to_toml_with_canonical_key() {
             ApprovalOutcome::AlwaysAndSave {
                 scope: ApprovalScope::Server(ECHO_SCOPE_KEY.into()),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
 
@@ -123,6 +124,7 @@ async fn r4_persisted_approval_auto_approves_future_tools_on_same_server() {
             ApprovalOutcome::AlwaysAndSave {
                 scope: ApprovalScope::Server(ECHO_SCOPE_KEY.into()),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
     }
@@ -192,6 +194,7 @@ async fn r4_persisted_approval_does_not_leak_to_other_servers() {
         ApprovalOutcome::AlwaysAndSave {
             scope: ApprovalScope::Server(ECHO_SCOPE_KEY.into()),
         },
+        rustain::domain::models::PermissionResolution::Operator,
     )
     .await;
 

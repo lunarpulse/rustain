@@ -117,6 +117,10 @@ jobs:
           # to prevent — release.yml could lose `a2a,p2p` with every lane green
           # (Story 19.5 A11, code review D2). Text assertions, microseconds.
           cargo test --test conformance_release_workflow
+          # Story 19.20a: default-lane provenance target must execute, not only compile.
+          cargo test --test conformance_19_20a_provenance
+          # Story 19.20a PF2: execute the extended standalone fixture, previously compile-only.
+          cargo test --features test-instrumentation --test conformance_19_20c_standalone
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest

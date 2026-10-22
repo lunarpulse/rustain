@@ -79,9 +79,11 @@ fn forbidden(value: &Value) {
                 assert!(
                     !normalized.contains("proposal")
                         && !normalized.contains("authorship")
+                        && !normalized.contains("send_authorization")
+                        && !normalized.contains("sendauthorization")
                         && normalized != "subject"
                         && normalized != "context",
-                    "M36 attached: proposal wire must have no subject, context or authorship"
+                    "M36 attached: proposal wire must have no subject, context, authorship or send authorization"
                 );
                 forbidden(child);
             }

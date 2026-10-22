@@ -422,6 +422,7 @@ struct Host {
     server: Arc<AttachServer>,
     storage: Arc<dyn StoragePort>,
     node_tree: NodeTree,
+    domain_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     _domain_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     requests: RequestTrace,
     _singleton: Option<rustain::infrastructure::subagent::DaemonSingletonLock>,
@@ -440,13 +441,18 @@ impl Host {
     }
 
     async fn compose(
-        journal: Journal,
+        mut journal: Journal,
         listener: std::net::TcpListener,
         keys: Arc<tempfile::TempDir>,
         options: HostOptions,
         restarted: bool,
     ) -> Self {
         let (domain_tx, domain_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        // Match production before applying wrappers, including on every restart.
+        journal.room = Arc::new(NodeRoomJournal::new(
+            journal.node.clone(),
+            Some(domain_tx.clone()),
+        ));
         let node_tree = NodeTree::with_event_tx(
             domain_tx.clone(),
             Arc::new(|| chrono::Utc::now().timestamp_millis()),
@@ -537,7 +543,7 @@ impl Host {
         let server = AttachServer::new_with_node_tree_bus_policy_and_journal(
             core,
             Arc::new(tokio::sync::Mutex::new(conversation)),
-            domain_tx,
+            domain_tx.clone(),
             node_tree.clone(),
             bus,
             delivery,
@@ -595,6 +601,7 @@ impl Host {
             server,
             storage,
             node_tree,
+            domain_tx,
             _domain_rx: Some(domain_rx),
             requests,
             _singleton: singleton,
@@ -1786,7 +1793,7 @@ async fn k02_auto_response_retraction_replaces_both_clients_persisted_mark() {
     let target = writer_view
         .messages
         .iter()
-        .find(|row| row.authorship == rustain::domain::models::MessageAuthorship::AgentComposed)
+        .find(|row| row.send_authorization == rustain::domain::models::SendAuthorization::Automatic)
         .expect("K02: auto template has an actual live retractable row")
         .id
         .clone();
@@ -1819,8 +1826,8 @@ async fn k02_auto_response_retraction_replaces_both_clients_persisted_mark() {
             "K02: persisted retract replacement reaches both continuously attached clients"
         );
         assert!(
-            !view.messages.iter().any(|row| row.authorship
-                == rustain::domain::models::MessageAuthorship::AgentComposed
+            !view.messages.iter().any(|row| row.send_authorization
+                == rustain::domain::models::SendAuthorization::Automatic
                 && row.retracted_at_ms.is_none()),
             "K02: another Ctrl+X has no surviving retract target"
         );
@@ -2587,7 +2594,7 @@ async fn k03_socket_defer_is_durable_and_does_not_consume_the_answer() {
             content,
             kind: rustain::domain::models::ReplyKind::Defer { minutes: 30 },
             via_node: None,
-            authorship: rustain::domain::models::ReplyAuthorship::HumanWritten,
+            authorship: rustain::domain::models::Authorship::HumanWritten,
             ..
         } if reply_address.turn().as_str() == deferred_turn && content == "Busy — defer 30m"
     )));
@@ -3248,13 +3255,10 @@ async fn k06_wait_host_restart_keeps_defer_and_direct_answer_without_reviving_ta
         .unwrap();
     assert_eq!(control.stage, PeerRowStage::Settled);
     assert!(!control.node_resolvable);
-    assert!(
-        conversation
-            .messages
-            .iter()
-            .any(|message| message.content == "direct answer after restart"
-                && message.authorship == rustain::domain::models::MessageAuthorship::HumanWritten)
-    );
+    assert!(conversation.messages.iter().any(|message| message.content
+        == "direct answer after restart"
+        && message.authorship == rustain::domain::models::Authorship::HumanWritten
+        && message.send_authorization == rustain::domain::models::SendAuthorization::HumanDecided));
 }
 
 #[path = "conformance_19_19/k07_view.rs"]
@@ -3271,6 +3275,8 @@ mod k10_context;
 mod k10_tools;
 #[path = "conformance_19_19/k11_authority.rs"]
 mod k11_authority;
+#[path = "conformance_19_19/k20a_authorship.rs"]
+mod k20a_authorship;
 async fn attach_user_turn(stream: &mut tokio::net::UnixStream, text: &str) {
     write_frame(
         stream,

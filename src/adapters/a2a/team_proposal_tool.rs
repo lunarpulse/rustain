@@ -195,7 +195,8 @@ fn parse_input(
         message_type: Some(message_type),
         reply_to: None,
         subject: None,
-        authorship: crate::domain::models::ReplyAuthorship::AgentComposed,
+        authorship: crate::domain::models::Authorship::AgentComposed,
+        send_authorization: crate::domain::models::SendAuthorization::Unknown,
     };
     validate_send_request(runtime, &request)
         .map_err(|error| invalid(&format!("invalid recipients: {error}")))?;

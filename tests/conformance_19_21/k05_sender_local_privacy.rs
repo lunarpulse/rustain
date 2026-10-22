@@ -3,7 +3,7 @@ use crate::attached_harness::{AttachedClient, AttachedDaemon, RecipientHost};
 use crate::harness::read_room_events;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{AttachMode, ConnectionTier, DaemonFrame};
-use rustain::domain::models::{ReplyAuthorship, RoomEvent};
+use rustain::domain::models::{Authorship, RoomEvent};
 use rustain::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
 #[tokio::test]
@@ -68,7 +68,7 @@ async fn peer_raw_events_omit_sender_action_facts_but_keep_sanitized_legacy_disp
                 content_hash,
                 endpoint,
                 action: Some(action_ref),
-                authorship: ReplyAuthorship::HumanWritten,
+                authorship: Authorship::HumanWritten,
                 ..
             } if action_ref.action == action => Some((
                 peer.clone(),

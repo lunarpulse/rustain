@@ -12,10 +12,9 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::domain::errors::ToolError;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
-    A2aPeerSource, A2aPeerSpec, Capability, CapabilityError, CapabilityId, ProviderCapabilities,
-    RedactedUrl, ToolDefinition, ToolResult, TransportKind, TrustTier,
+    A2aPeerSource, A2aPeerSpec, RedactedUrl, ToolDefinition, ToolResult, TrustTier,
 };
-use rustain::domain::ports::{CapabilityProvider, RoomJournal, ToolSetPort};
+use rustain::domain::ports::{RoomJournal, ToolSetPort};
 use rustain::infrastructure::subagent::{NodeJournal, NodeRoomJournal, NodeTree};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
@@ -39,51 +38,25 @@ impl ToolSetPort for EmptyBuiltin {
     }
 }
 
-struct CachedA2a;
-
-#[async_trait]
-impl CapabilityProvider for CachedA2a {
-    fn protocol(&self) -> &str {
-        "a2a"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            supports_streaming: false,
-            supports_list_changed: false,
-            supports_native_retrieval: None,
-            max_tool_count: None,
-            transport_kind: TransportKind::Http,
-        }
-    }
-
-    async fn discover(&self) -> Result<Vec<Capability>, CapabilityError> {
-        Ok(vec![Capability {
-            id: CapabilityId {
-                protocol: "a2a".to_owned(),
-                server: "peer".to_owned(),
-                tool: "scan".to_owned(),
-            },
-            name: "Scan".to_owned(),
-            description: "Remote scan".to_owned(),
-            input_schema: serde_json::json!({"type":"object"}),
-            parallel_safe: false,
-            trust: TrustTier::Unverified,
-        }])
-    }
-
-    async fn invoke(
-        &self,
-        _capability_id: &CapabilityId,
-        _input: serde_json::Value,
-        _cancel: CancellationToken,
-    ) -> Result<ToolResult, CapabilityError> {
-        unreachable!("composition registration never invokes providers")
-    }
-}
-
 #[tokio::test]
 async fn a2a_inventory_enters_the_llm_surface_under_namespaced_wire_names() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/agent-card.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"name":"Peer","skills":[{"id":"scan","name":"Scan","description":"Remote scan"}]}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let peer = A2aPeerSpec::new(
+        "peer",
+        RedactedUrl::from(server.uri()),
+        A2aPeerSource::Workspace,
+    );
+    let client = Arc::new(A2aClientAdapter::new(&peer, None).unwrap());
+    client.refresh_agent_card(&peer).await.unwrap();
     let composite = CompositeToolsetAdapter::new(
         Arc::new(EmptyBuiltin),
         Vec::new(),
@@ -93,7 +66,7 @@ async fn a2a_inventory_enters_the_llm_surface_under_namespaced_wire_names() {
         None,
         None,
     );
-    composite.set_a2a_provider(Arc::new(CachedA2a));
+    composite.set_a2a_provider(Arc::new(A2aProvider::new(vec![(peer, client)])));
     composite
         .populate_registry()
         .await

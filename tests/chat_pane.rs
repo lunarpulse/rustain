@@ -89,7 +89,8 @@ fn test_chat_pane_shows_user_message() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     }]);
@@ -141,7 +142,8 @@ fn test_chat_pane_shows_assistant_message() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     }]);
@@ -278,7 +280,8 @@ fn test_chat_pane_user_message_before_typing_indicator() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     }]);
@@ -343,7 +346,8 @@ fn test_chat_pane_error_displays_in_red() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     }]);
@@ -469,7 +473,8 @@ fn test_feedback_block_visible_with_auto_scroll() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: rustain::domain::models::Authorship::HumanWritten,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         })
@@ -558,7 +563,8 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     }]);
@@ -743,7 +749,8 @@ fn bare_message(id: &str, role: MessageRole, content: &str) -> ChatMessage {
         stop_reason: None,
         images: vec![],
         origin: rustain::domain::models::ChannelKind::Terminal,
-        authorship: Default::default(),
+        authorship: rustain::domain::models::Authorship::HumanWritten,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         retracted_at_ms: None,
         history_source: Default::default(),
     }

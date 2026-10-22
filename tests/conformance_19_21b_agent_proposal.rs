@@ -31,6 +31,8 @@ mod k03_review;
 mod k06_authorship;
 #[path = "conformance_19_21b/k06_payload.rs"]
 mod k06_payload;
+#[path = "conformance_19_21b/k20a_send_authorization.rs"]
+mod k20a_send_authorization;
 #[path = "conformance_19_21b/observed_host.rs"]
 mod observed_host;
 #[path = "conformance_19_21b/permission_guard.rs"]

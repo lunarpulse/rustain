@@ -1,0 +1,1645 @@
+[
+  {
+    "name": "boot-discovery-and-attachment-complete",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 0
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 0
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 0
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 0
+    }
+  },
+  {
+    "name": "distribution-settled-before-explicit-operator-turn",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 0
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 0
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 1
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_0iye2604bkho5",
+            "recipients": [
+              {
+                "alias": "marcus-arch",
+                "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+              }
+            ],
+            "message_type": "story_assignment",
+            "subject": "adr-047",
+            "body_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "body_bytes": 254
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_0iye2604bkho5",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "bytes": 254,
+            "content_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "action": {
+              "action": "sa_0iye2604bkho5",
+              "index": 0
+            },
+            "authorship": "human-written",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "alias": "lena-po",
+            "message_type": "story_assignment",
+            "content": "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically.",
+            "capability_hash": "64ed2dd7e1505ebe13419c29837662bc76bba43b5c431ca5c0d3bbf1c5cf0107"
+          }
+        ],
+        "recipient_item_acknowledged": [
+          {
+            "event": "recipient_item_acknowledged",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "alias": "lena-po"
+          }
+        ],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 0
+    }
+  },
+  {
+    "name": "first-card-before-any-decision",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 0
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 0
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 1
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_0iye2604bkho5",
+            "recipients": [
+              {
+                "alias": "marcus-arch",
+                "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+              }
+            ],
+            "message_type": "story_assignment",
+            "subject": "adr-047",
+            "body_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "body_bytes": 254
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_0iye2604bkho5",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "bytes": 254,
+            "content_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "action": {
+              "action": "sa_0iye2604bkho5",
+              "index": 0
+            },
+            "authorship": "human-written",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "alias": "lena-po",
+            "message_type": "story_assignment",
+            "content": "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically.",
+            "capability_hash": "64ed2dd7e1505ebe13419c29837662bc76bba43b5c431ca5c0d3bbf1c5cf0107"
+          }
+        ],
+        "recipient_item_acknowledged": [
+          {
+            "event": "recipient_item_acknowledged",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "alias": "lena-po"
+          }
+        ],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 2
+    },
+    "zero_effect_from": "distribution-settled-before-explicit-operator-turn"
+  },
+  {
+    "name": "first-full-review-before-human-send",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 0
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 0
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 1
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_0iye2604bkho5",
+            "recipients": [
+              {
+                "alias": "marcus-arch",
+                "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+              }
+            ],
+            "message_type": "story_assignment",
+            "subject": "adr-047",
+            "body_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "body_bytes": 254
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_0iye2604bkho5",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "bytes": 254,
+            "content_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "action": {
+              "action": "sa_0iye2604bkho5",
+              "index": 0
+            },
+            "authorship": "human-written",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "alias": "lena-po",
+            "message_type": "story_assignment",
+            "content": "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically.",
+            "capability_hash": "64ed2dd7e1505ebe13419c29837662bc76bba43b5c431ca5c0d3bbf1c5cf0107"
+          }
+        ],
+        "recipient_item_acknowledged": [
+          {
+            "event": "recipient_item_acknowledged",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "alias": "lena-po"
+          }
+        ],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 2
+    },
+    "zero_effect_from": "distribution-settled-before-explicit-operator-turn"
+  },
+  {
+    "name": "human-send-settled-before-board-or-log-traffic",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 1
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 1
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 1
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_0iye2604bkho5",
+            "recipients": [
+              {
+                "alias": "marcus-arch",
+                "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+              }
+            ],
+            "message_type": "story_assignment",
+            "subject": "adr-047",
+            "body_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "body_bytes": 254
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_0iye2604bkho5",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "bytes": 254,
+            "content_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "action": {
+              "action": "sa_0iye2604bkho5",
+              "index": 0
+            },
+            "authorship": "human-written",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_hP4pzybRzcSj3FA6dqAs-yHCYtiZttKY",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "71cb3432fa2b3a344d8d40ad2cc2e108a8b20499e5d9296d89ebee7aa4f861f1"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_6nun2Zo3xPSRkFodG04FNgTbzMjpr_e9",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "9961af48df4f4a85cc2460a1457c4866ba80ec96c0a77194a69a7f0bfa277622"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_9sna32yv5g0wd",
+            "recipients": [
+              {
+                "alias": "lena-po",
+                "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+              },
+              {
+                "alias": "jun-dev",
+                "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb"
+              }
+            ],
+            "message_type": "architecture_update",
+            "body_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "body_bytes": 542
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          },
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 1,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd",
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 0
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          },
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb",
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 1
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "alias": "lena-po",
+            "message_type": "story_assignment",
+            "content": "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically.",
+            "capability_hash": "64ed2dd7e1505ebe13419c29837662bc76bba43b5c431ca5c0d3bbf1c5cf0107"
+          }
+        ],
+        "recipient_item_acknowledged": [
+          {
+            "event": "recipient_item_acknowledged",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "alias": "lena-po"
+          }
+        ],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 2
+    }
+  },
+  {
+    "name": "legitimate-board-and-log-traffic-complete",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 2
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 2
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 1
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_0iye2604bkho5",
+            "recipients": [
+              {
+                "alias": "marcus-arch",
+                "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+              }
+            ],
+            "message_type": "story_assignment",
+            "subject": "adr-047",
+            "body_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "body_bytes": 254
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_0iye2604bkho5",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "bytes": 254,
+            "content_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "action": {
+              "action": "sa_0iye2604bkho5",
+              "index": 0
+            },
+            "authorship": "human-written",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_hP4pzybRzcSj3FA6dqAs-yHCYtiZttKY",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "71cb3432fa2b3a344d8d40ad2cc2e108a8b20499e5d9296d89ebee7aa4f861f1"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_6nun2Zo3xPSRkFodG04FNgTbzMjpr_e9",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "9961af48df4f4a85cc2460a1457c4866ba80ec96c0a77194a69a7f0bfa277622"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_9sna32yv5g0wd",
+            "recipients": [
+              {
+                "alias": "lena-po",
+                "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+              },
+              {
+                "alias": "jun-dev",
+                "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb"
+              }
+            ],
+            "message_type": "architecture_update",
+            "body_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "body_bytes": 542
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          },
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 1,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd",
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 0
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          },
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb",
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 1
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "alias": "lena-po",
+            "message_type": "story_assignment",
+            "content": "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically.",
+            "capability_hash": "64ed2dd7e1505ebe13419c29837662bc76bba43b5c431ca5c0d3bbf1c5cf0107"
+          }
+        ],
+        "recipient_item_acknowledged": [
+          {
+            "event": "recipient_item_acknowledged",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "alias": "lena-po"
+          }
+        ],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 2
+    }
+  },
+  {
+    "name": "second-proposal-after-read-traffic-baseline",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 2
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 2
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 1
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_0iye2604bkho5",
+            "recipients": [
+              {
+                "alias": "marcus-arch",
+                "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+              }
+            ],
+            "message_type": "story_assignment",
+            "subject": "adr-047",
+            "body_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "body_bytes": 254
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_0iye2604bkho5",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "bytes": 254,
+            "content_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "action": {
+              "action": "sa_0iye2604bkho5",
+              "index": 0
+            },
+            "authorship": "human-written",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_hP4pzybRzcSj3FA6dqAs-yHCYtiZttKY",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "71cb3432fa2b3a344d8d40ad2cc2e108a8b20499e5d9296d89ebee7aa4f861f1"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_6nun2Zo3xPSRkFodG04FNgTbzMjpr_e9",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "9961af48df4f4a85cc2460a1457c4866ba80ec96c0a77194a69a7f0bfa277622"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_9sna32yv5g0wd",
+            "recipients": [
+              {
+                "alias": "lena-po",
+                "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+              },
+              {
+                "alias": "jun-dev",
+                "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb"
+              }
+            ],
+            "message_type": "architecture_update",
+            "body_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "body_bytes": 542
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          },
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 1,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd",
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 0
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          },
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb",
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 1
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "alias": "lena-po",
+            "message_type": "story_assignment",
+            "content": "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically.",
+            "capability_hash": "64ed2dd7e1505ebe13419c29837662bc76bba43b5c431ca5c0d3bbf1c5cf0107"
+          }
+        ],
+        "recipient_item_acknowledged": [
+          {
+            "event": "recipient_item_acknowledged",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "alias": "lena-po"
+          }
+        ],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 2
+    }
+  },
+  {
+    "name": "second-spoof-card-before-decision",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 2
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 2
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 1
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_0iye2604bkho5",
+            "recipients": [
+              {
+                "alias": "marcus-arch",
+                "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+              }
+            ],
+            "message_type": "story_assignment",
+            "subject": "adr-047",
+            "body_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "body_bytes": 254
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_0iye2604bkho5",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "bytes": 254,
+            "content_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "action": {
+              "action": "sa_0iye2604bkho5",
+              "index": 0
+            },
+            "authorship": "human-written",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_hP4pzybRzcSj3FA6dqAs-yHCYtiZttKY",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "71cb3432fa2b3a344d8d40ad2cc2e108a8b20499e5d9296d89ebee7aa4f861f1"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_6nun2Zo3xPSRkFodG04FNgTbzMjpr_e9",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "9961af48df4f4a85cc2460a1457c4866ba80ec96c0a77194a69a7f0bfa277622"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_9sna32yv5g0wd",
+            "recipients": [
+              {
+                "alias": "lena-po",
+                "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+              },
+              {
+                "alias": "jun-dev",
+                "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb"
+              }
+            ],
+            "message_type": "architecture_update",
+            "body_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "body_bytes": 542
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          },
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 1,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd",
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 0
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          },
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb",
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 1
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "alias": "lena-po",
+            "message_type": "story_assignment",
+            "content": "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically.",
+            "capability_hash": "64ed2dd7e1505ebe13419c29837662bc76bba43b5c431ca5c0d3bbf1c5cf0107"
+          }
+        ],
+        "recipient_item_acknowledged": [
+          {
+            "event": "recipient_item_acknowledged",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "alias": "lena-po"
+          }
+        ],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 4
+    },
+    "zero_effect_from": "second-proposal-after-read-traffic-baseline"
+  },
+  {
+    "name": "second-spoof-full-review-before-dismiss",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 2
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 2
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 1
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_0iye2604bkho5",
+            "recipients": [
+              {
+                "alias": "marcus-arch",
+                "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+              }
+            ],
+            "message_type": "story_assignment",
+            "subject": "adr-047",
+            "body_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "body_bytes": 254
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_0iye2604bkho5",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "bytes": 254,
+            "content_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "action": {
+              "action": "sa_0iye2604bkho5",
+              "index": 0
+            },
+            "authorship": "human-written",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_hP4pzybRzcSj3FA6dqAs-yHCYtiZttKY",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "71cb3432fa2b3a344d8d40ad2cc2e108a8b20499e5d9296d89ebee7aa4f861f1"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_6nun2Zo3xPSRkFodG04FNgTbzMjpr_e9",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "9961af48df4f4a85cc2460a1457c4866ba80ec96c0a77194a69a7f0bfa277622"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_9sna32yv5g0wd",
+            "recipients": [
+              {
+                "alias": "lena-po",
+                "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+              },
+              {
+                "alias": "jun-dev",
+                "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb"
+              }
+            ],
+            "message_type": "architecture_update",
+            "body_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "body_bytes": 542
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          },
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 1,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd",
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 0
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          },
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb",
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 1
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "alias": "lena-po",
+            "message_type": "story_assignment",
+            "content": "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically.",
+            "capability_hash": "64ed2dd7e1505ebe13419c29837662bc76bba43b5c431ca5c0d3bbf1c5cf0107"
+          }
+        ],
+        "recipient_item_acknowledged": [
+          {
+            "event": "recipient_item_acknowledged",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "alias": "lena-po"
+          }
+        ],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 4
+    },
+    "zero_effect_from": "second-proposal-after-read-traffic-baseline"
+  },
+  {
+    "name": "second-native-dismiss-zero-effects",
+    "http": {
+      "lena-po": {
+        "get": 2,
+        "post": 2
+      },
+      "jun-dev": {
+        "get": 3,
+        "post": 2
+      },
+      "marcus-arch": {
+        "get": 3,
+        "post": 1
+      }
+    },
+    "events": {
+      "lena-po": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_0iye2604bkho5",
+            "recipients": [
+              {
+                "alias": "marcus-arch",
+                "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+              }
+            ],
+            "message_type": "story_assignment",
+            "subject": "adr-047",
+            "body_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "body_bytes": 254
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_0iye2604bkho5",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e",
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "bytes": 254,
+            "content_hash": "233f2c70926e0f1ca191072ed7a798473ff488d2a5c51335647f55f7fbf8c737",
+            "action": {
+              "action": "sa_0iye2604bkho5",
+              "index": 0
+            },
+            "authorship": "human-written",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_hP4pzybRzcSj3FA6dqAs-yHCYtiZttKY",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "71cb3432fa2b3a344d8d40ad2cc2e108a8b20499e5d9296d89ebee7aa4f861f1"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "jun-dev": {
+        "team_send_action_recorded": [],
+        "team_send_recipient_settled": [],
+        "remote_envelope_dispatched": [],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_6nun2Zo3xPSRkFodG04FNgTbzMjpr_e9",
+              "boundPeer": "12201e80cc87ffe852b5cde7d07f953c6df76390ce6424ba21fa2cffd884ab15554e"
+            },
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "alias": "marcus-arch",
+            "message_type": "architecture_update",
+            "content": "ADR-047 conflict: publication races persistence.\nThe assignment publishes before durable append.\nADR-047 requires persist, then publish.\nA crash between those steps loses the item.\nLena: amend the story acceptance order.\nJun: keep the owner lock through publication.\nDo not acknowledge on arrival or passive View.\nRetain the peer-tainted context boundary.\nReview is local; only an operator may Send.\nPreserve ordered recipients and exact UTF-8 bytes.\nR\u00e9sum\u00e9: preserve na\u00efve input and e\u0301.\nDecision: persist the row before showing its card.",
+            "capability_hash": "9961af48df4f4a85cc2460a1457c4866ba80ec96c0a77194a69a7f0bfa277622"
+          }
+        ],
+        "recipient_item_acknowledged": [],
+        "recipient_item_replied": []
+      },
+      "marcus-arch": {
+        "team_send_action_recorded": [
+          {
+            "event": "team_send_action_recorded",
+            "action": "sa_9sna32yv5g0wd",
+            "recipients": [
+              {
+                "alias": "lena-po",
+                "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+              },
+              {
+                "alias": "jun-dev",
+                "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb"
+              }
+            ],
+            "message_type": "architecture_update",
+            "body_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "body_bytes": 542
+          }
+        ],
+        "team_send_recipient_settled": [
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 0,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          },
+          {
+            "event": "team_send_recipient_settled",
+            "action": "sa_9sna32yv5g0wd",
+            "index": 1,
+            "settlement": {
+              "outcome": "awaiting_approval"
+            }
+          }
+        ],
+        "remote_envelope_dispatched": [
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd",
+            "task": "rustain-1792676974530255535-01c19cd4cc1d9f65",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 0
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          },
+          {
+            "event": "remote_envelope_dispatched",
+            "peer": "1220372d036441dab106a7109937aeeb988c5db23425a0d4c64ae00a6f6e3ca94afb",
+            "task": "rustain-1792676974530298095-3fab528805df5e48",
+            "bytes": 542,
+            "content_hash": "3aa2dd10a004a2482c30d2a243fd45ffdd473c685022cdd6c1b4bf9db0971d47",
+            "action": {
+              "action": "sa_9sna32yv5g0wd",
+              "index": 1
+            },
+            "authorship": "agent-composed",
+            "send_authorization": "human-decided"
+          }
+        ],
+        "recipient_item_received": [
+          {
+            "event": "recipient_item_received",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "task": "rustain-1792676943978713007-056159f9a7479968",
+            "alias": "lena-po",
+            "message_type": "story_assignment",
+            "content": "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically.",
+            "capability_hash": "64ed2dd7e1505ebe13419c29837662bc76bba43b5c431ca5c0d3bbf1c5cf0107"
+          }
+        ],
+        "recipient_item_acknowledged": [
+          {
+            "event": "recipient_item_acknowledged",
+            "address": {
+              "principal": {
+                "kind": "a2a_bound"
+              },
+              "item": "ri_ym57OgIlUYWGTeAoXGVxPQ6ktLPwbPP7",
+              "boundPeer": "1220d3eebae6191ff29ce3e35d5a718d303719f789b2dd30d7d93417561450a01bbd"
+            },
+            "alias": "lena-po"
+          }
+        ],
+        "recipient_item_replied": []
+      }
+    },
+    "provider_turns": {
+      "lena-po": 0,
+      "jun-dev": 0,
+      "marcus-arch": 4
+    },
+    "zero_effect_from": "second-proposal-after-read-traffic-baseline"
+  }
+]

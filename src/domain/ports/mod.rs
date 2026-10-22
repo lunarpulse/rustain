@@ -125,7 +125,7 @@ pub use event_emitter::EventEmitter;
 pub use execution_sandbox::{ExecutionSandbox, ExecutionSandboxError};
 pub use inbound_peer_runtime::{
     InboundApprovalDecision, InboundApprovalTicket, InboundPeerError, InboundPeerRuntime,
-    InboundPeerTask,
+    InboundPeerTask, StagedPeerResult,
 };
 pub use isolation_provider::IsolationProvider;
 pub use ledger_journal_sink::{LedgerJournalError, LedgerJournalSink};

@@ -264,7 +264,8 @@ fn test_e2e_new_command_creates_fresh_session() {
             stop_reason: None,
             images: vec![],
             origin: rustain::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: rustain::domain::models::Authorship::HumanWritten,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         });

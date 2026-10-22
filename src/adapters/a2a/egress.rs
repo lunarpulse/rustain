@@ -8,7 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
 use crate::domain::events::AppEvent;
 use crate::domain::models::A2aPeerSpec;
-use crate::domain::ports::{CapabilityProvider, RoomJournal};
+use crate::domain::ports::RoomJournal;
 use crate::infrastructure::subagent::NodeTree;
 
 use super::client::A2aClientAdapter;
@@ -118,7 +118,7 @@ impl A2aEgress {
         composite: &CompositeToolsetAdapter,
         proposal_sink: Option<Arc<dyn crate::domain::ports::TeamProposalSink>>,
     ) {
-        composite.set_a2a_provider(self.provider.clone() as Arc<dyn CapabilityProvider>);
+        composite.set_a2a_provider(self.provider.clone());
         composite.set_team_proposal_tool(Arc::new(
             super::team_proposal_tool::TeamProposalTool::new(self.runtime.clone(), proposal_sink),
         ));
@@ -668,7 +668,8 @@ mod item_capability_tests {
             content_hash: None,
             endpoint: endpoint.map(str::to_owned),
             action: None,
-            authorship: crate::domain::models::ReplyAuthorship::Unknown,
+            authorship: crate::domain::models::Authorship::Unknown,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
         }
     }
 

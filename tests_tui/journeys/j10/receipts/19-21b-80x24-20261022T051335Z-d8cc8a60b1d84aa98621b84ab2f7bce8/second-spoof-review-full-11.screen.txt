@@ -1,0 +1,24 @@
+│   rustain-1792646047172583740-498253ba2fa6c0f9 · received│                    
+│ ℹ 2026-10-22 05:13:36Z ← inbound ⏸ awaiting-approval · peer│                  
+│   12205c2d06236be4738bbe138442c5e343868cbfae9a58834631ede8c14446d3419d ·│     
+│   task rustain-1792646016612400501-d57683bb9334f575 · task parked awaiting│   
+│   operator approval│                                                          
+│   2026-10-22 05:13:36Z ← inbound ↓ item-received · peer│                      
+│   12205c2d06236be4738bbe138442c5e343868cbfae9a58834631ede8c14446d3419d ·│     
+│   task ri_Qfli4AYl9pS6FGIpW53fU2sNKCqjXkSe · recipient item received│         
+│   2026-10-22 05:13:36Z ← inbound ✓ accepted · peer│                           
+│   12205c2d06236be4738bbe138442c5e343868cbfae9a58834631ede8c14446d3419d ·│     
+│   task rustain-1792646016612400501-d57683bb9334f575 · task accepted and│      
+│   executing│                                                                  
+    ╔══════════════════════════════════════════════════════════════════════╗    
+    ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║    
+    ║decision.                                                             ║    
+    ║To: lena-po, jun-dev                                                  ║    
+    ║Type: architecture_update                                             ║    
+    ║… more not shown — [r] Review first                                   ║    
+    ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║    
+    ╚══════════════════════════════════════════════════════════════════════╝    
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

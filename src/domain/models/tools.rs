@@ -20,6 +20,7 @@ pub struct ToolDefinition {
 pub struct ToolInvocation<'a> {
     pub conversation_id: &'a str,
     pub route: Option<super::turn::TurnRoute>,
+    pub permission_resolution: Option<super::approval::PermissionResolution>,
 }
 
 /// Tracking info for an in-progress or completed tool call.

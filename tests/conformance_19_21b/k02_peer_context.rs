@@ -107,7 +107,13 @@ async fn k02_live_peer_context_prompts_write_but_never_sends_a_proposal() {
                 panic!("expected a real Write approval request, got {event:?}");
             };
             assert_eq!(tool, "Write");
-            approval.resolve(&id, ApprovalOutcome::Once).await;
+            approval
+                .resolve(
+                    &id,
+                    ApprovalOutcome::Once,
+                    rustain::domain::models::PermissionResolution::Operator,
+                )
+                .await;
             write.await;
         })
         .await

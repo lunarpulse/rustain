@@ -590,6 +590,8 @@ fn assert_no_forbidden_wire_fields(value: &Value) {
                 assert!(
                     !["subject", "context"].contains(&normalized.as_str())
                         && !normalized.contains("authorship")
+                        && !normalized.contains("send_authorization")
+                        && !normalized.contains("sendauthorization")
                         && !normalized.contains("proposal"),
                     "forbidden wire field {key}"
                 );
@@ -612,6 +614,8 @@ fn assert_no_forbidden_headers(headers: &axum::http::HeaderMap) {
         assert!(
             !["subject", "context"].contains(&normalized.as_str())
                 && !normalized.contains("authorship")
+                && !normalized.contains("send_authorization")
+                && !normalized.contains("sendauthorization")
                 && !normalized.contains("proposal"),
             "forbidden wire header {name}"
         );

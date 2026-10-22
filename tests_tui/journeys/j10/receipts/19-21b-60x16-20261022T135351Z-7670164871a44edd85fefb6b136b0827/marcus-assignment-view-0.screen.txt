@@ -1,0 +1,16 @@
+│  item actions · ri_pNkghY1dh0oDqnwgjoPMHKkrwGkodgtn       
+│  story_assignment                                         
+│  story_assignment · 1220b709672efedfb27bd1daefab89b42f337c
+│  d4101eb4cb1f0fdd1151e78f4a0efd                           
+│  received thread · 1220b709672efedfb27bd1daefab89b42f337cd
+│  4101eb4cb1f0fdd1151e78f4a0efd · ri_pNkghY1dh0oDqnwgjoPMHK
+│  krwGkodgtn                                               
+│  Context received: 1 text body · 254 bytes                
+│  [r] Respond  [a] Acknowledge  [n] Decline  [c] Use as con
+│  text                                                     
+│  [Tab] Item/Response actions                              
+│    Ctrl+D/Ctrl+C: detach[PgUp/PgDn] Scroll  [Esc] Close   
+ (daemon) [F] │ attached │ Normal │ Ready             log: 4
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

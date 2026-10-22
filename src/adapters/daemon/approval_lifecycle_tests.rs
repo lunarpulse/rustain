@@ -903,21 +903,13 @@ async fn story19_20c_channel_never_delivered_approval_records_unattended_denial(
         "denial returns to the actual provider"
     );
     response_rx.await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !host
-            .server
-            .approval_gate
-            .issues
-            .lock()
-            .await
-            .issued
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("gate finishes durable unattended record");
+    // Gate tasks share issuance state: another task can retire the request
+    // before the denying task finishes its asynchronous storage write.
+    // Join every gate before asserting the record is durable on disk.
+    host.server
+        .approval_gate
+        .shutdown(&host.server.registry)
+        .await;
     assert!(!host.workspace.path().join("exact.txt").exists());
     assert_eq!(host.server.blocked_waiting.load(Ordering::SeqCst), 1);
     let conversation = host

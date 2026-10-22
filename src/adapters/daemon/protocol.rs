@@ -44,9 +44,9 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// older client/daemon is rejected with [`ProtocolError::VersionMismatch`]
 /// rather than mis-parsing (forward-compat for 12.3/12.4).
 ///
-/// v8 (Story 19.20c): exact approval input chunks, approval refusals, typed
-/// withheld tool inputs, over-cap frame notices, retained-approval count.
-pub const PROTOCOL_VERSION: u32 = 8;
+/// v9 (Story 19.20a): separate authorship and send authorization; reject older
+/// renderers that would label human-approved drafts as automatic sends.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -553,7 +553,7 @@ pub enum ClientFrame {
         node: String,
         action: PeerDraftAction,
     },
-    /// Same-host, append-only retraction of one persisted agent-composed row.
+    /// Same-host, append-only retraction of one persisted automatic send.
     /// Only a trusted-local read-write attachment may dispatch it.
     /// `target_seq` is `None` on every normal dispatch: the daemon derives the
     /// journaled disclosure seq itself and merely validates a supplied value.

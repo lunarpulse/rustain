@@ -1,0 +1,16 @@
+│ Résumé: preserve naïve input and é.                       
+│ Decision: persist the row before showing its card.        
+│ ℹ     lena-po  awaiting their approval│                   
+│       jun-dev  awaiting their approval│                   
+│ ℹ Team interaction policy│                                
+│   Response mode: notify-and-wait│                         
+│   Notification urgency: immediate│                        
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready  log: 7
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

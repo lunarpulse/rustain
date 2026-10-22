@@ -5,6 +5,7 @@
 //! ingress in Story 19.16 is legal only through AD-1825's pseudonymous
 //! provenance narrowing; Story 19.18d adds the operator-bound pin
 //! ([`ItemPrincipal::A2aBound`]), a third provenance kept apart from both.
+use super::provenance::Authorship;
 
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeStruct;
@@ -563,47 +564,6 @@ impl TurnAddress {
     }
 }
 
-/// Story 19.18 `A14` — who authored a reply turn: a carried value recorded
-/// with the act, ⛔ never inferred from response mode or text. A value
-/// written by a newer build folds to [`Self::Unknown`], which renders no mark.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ReplyAuthorship {
-    HumanWritten,
-    AgentComposed,
-    #[default]
-    #[serde(other)]
-    Unknown,
-}
-
-impl ReplyAuthorship {
-    /// Whether this row carries no known authorship provenance.
-    #[must_use]
-    pub const fn is_unknown(&self) -> bool {
-        matches!(self, Self::Unknown)
-    }
-
-    /// The wire token the thread read serves.
-    #[must_use]
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            Self::HumanWritten => "human-written",
-            Self::AgentComposed => "agent-composed",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    /// Parse a served token; anything unnamed is [`Self::Unknown`].
-    #[must_use]
-    pub fn from_wire(token: &str) -> Self {
-        match token {
-            "human-written" => Self::HumanWritten,
-            "agent-composed" => Self::AgentComposed,
-            _ => Self::Unknown,
-        }
-    }
-}
-
 /// Semantic kind of a durable reply turn. The journal field is additive:
 /// older records decode as `Answer`, while unfamiliar or malformed values
 /// conservatively become `Unknown`.
@@ -858,7 +818,7 @@ pub struct ReplyTurnView {
     /// The item this turn answers — always an item, never another turn.
     pub answers: ItemId,
     pub content: String,
-    pub authorship: ReplyAuthorship,
+    pub authorship: Authorship,
     pub kind: ReplyKind,
     /// The peer-response node whose card this turn resolved, when it came
     /// through a draft resolution (`Q1`). At most one turn per node.

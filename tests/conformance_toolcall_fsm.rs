@@ -176,7 +176,11 @@ async fn ac3_transition_with_approval() {
         _ => panic!("expected Requested event"),
     };
     approval_runtime
-        .resolve(&id, rustain::domain::models::ApprovalOutcome::Once)
+        .resolve(
+            &id,
+            rustain::domain::models::ApprovalOutcome::Once,
+            rustain::domain::models::PermissionResolution::Operator,
+        )
         .await;
 
     let result = handle.await.unwrap();
@@ -339,6 +343,7 @@ async fn ac3_transition_user_rejection_with_feedback() {
             rustain::domain::models::ApprovalOutcome::Reject {
                 feedback: Some("nope".into()),
             },
+            rustain::domain::models::PermissionResolution::Operator,
         )
         .await;
 
@@ -513,7 +518,11 @@ async fn ac6_policy_ask_routes_to_approval_runtime() {
         _ => panic!("expected Requested event"),
     };
     approval_runtime
-        .resolve(&id, rustain::domain::models::ApprovalOutcome::Once)
+        .resolve(
+            &id,
+            rustain::domain::models::ApprovalOutcome::Once,
+            rustain::domain::models::PermissionResolution::Operator,
+        )
         .await;
 
     let result = handle.await.unwrap();

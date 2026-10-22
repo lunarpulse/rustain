@@ -512,7 +512,8 @@ impl RustainAcpAgent {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         }
@@ -531,7 +532,8 @@ impl RustainAcpAgent {
             synthetic: true,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         }
@@ -674,7 +676,8 @@ impl RustainAcpAgent {
             synthetic: false,
             images: vec![],
             origin: crate::domain::models::ChannelKind::Terminal,
-            authorship: Default::default(),
+            authorship: crate::domain::models::Authorship::HumanWritten,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
             retracted_at_ms: None,
             history_source: Default::default(),
         });
@@ -984,11 +987,11 @@ impl RustainAcpAgent {
                                 Ok(response) => response,
                                 Err(error) => {
                                     // P-3: reject before propagating an RPC error.
-                                    approval.resolve(&review.id, crate::domain::models::ApprovalOutcome::Reject { feedback: None }).await;
+                                    approval.resolve(&review.id, crate::domain::models::ApprovalOutcome::Reject { feedback: None }, crate::domain::models::PermissionResolution::Policy).await;
                                     return Err(error);
                                 }
                             };
-                            approval.resolve(&review.id, permission_response_to_outcome(response, &tool_name)).await;
+                            approval.resolve(&review.id, permission_response_to_outcome(response, &tool_name), crate::domain::models::PermissionResolution::Operator).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("ACP approval broadcast lagged {n} events");

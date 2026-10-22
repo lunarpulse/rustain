@@ -1,4 +1,5 @@
 //! Daemon-owned response-mode state.
+use crate::domain::models::{Authorship, SendAuthorization};
 
 use std::collections::HashMap;
 
@@ -62,7 +63,7 @@ pub(crate) struct AutoResponseRetractionPlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RetractionError {
     DifferentHost,
-    NotAgentComposed,
+    NotAutomatic,
     /// ⚠ Refused aloud, while the cross-host `x-rustain-items/retract` answers
     /// an already-marked item with success and no second append (Story 19.16d,
     /// `RetractOutcome::AlreadyMarked`): a local keypress on a spent control is
@@ -84,8 +85,8 @@ pub(crate) fn plan_auto_response_retraction(
     if target_seq == 0 {
         return Err(RetractionError::InvalidTarget);
     }
-    if message.authorship != crate::domain::models::MessageAuthorship::AgentComposed {
-        return Err(RetractionError::NotAgentComposed);
+    if message.send_authorization != crate::domain::models::SendAuthorization::Automatic {
+        return Err(RetractionError::NotAutomatic);
     }
     if message.retracted_at_ms.is_some() {
         return Err(RetractionError::AlreadyRetracted);
@@ -106,12 +107,6 @@ pub(crate) const AWAITING_RESPONSE_PLACEHOLDER: &str = "[awaiting your response]
 pub(crate) const DRAFT_APPROVAL_PREFIX: &str =
     "[y] Approve  [e] Edit  [n] Reject  [write] My own\n";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DraftAuthorship {
-    AgentComposed,
-    HumanWritten,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DraftState {
     Drafting {
@@ -122,7 +117,8 @@ pub(crate) enum DraftState {
     },
     Sent {
         content: String,
-        authorship: DraftAuthorship,
+        authorship: Authorship,
+        send_authorization: SendAuthorization,
     },
     Rejected,
 }
@@ -205,16 +201,19 @@ impl PendingDraftController {
         let next = match resolution {
             DraftResolution::Approve => DraftState::Sent {
                 content: std::mem::take(content),
-                authorship: DraftAuthorship::AgentComposed,
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
             },
             DraftResolution::Edit(edited) => DraftState::Sent {
                 content: edited,
-                authorship: DraftAuthorship::AgentComposed,
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
             },
             DraftResolution::Reject => DraftState::Rejected,
             DraftResolution::WriteOwn(human) => DraftState::Sent {
                 content: human,
-                authorship: DraftAuthorship::HumanWritten,
+                authorship: Authorship::HumanWritten,
+                send_authorization: SendAuthorization::HumanDecided,
             },
         };
         *state = next;
@@ -256,9 +255,10 @@ pub(crate) fn pending_draft_content(persisted: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AutoResponseSurface, DraftAuthorship, DraftResolution, DraftState, PendingDraftController,
-        RetractionError, auto_response_surface, plan_auto_response_retraction,
+        AutoResponseSurface, DraftResolution, DraftState, PendingDraftController, RetractionError,
+        auto_response_surface, plan_auto_response_retraction,
     };
+    use crate::domain::models::{Authorship, SendAuthorization};
 
     #[tokio::test]
     async fn draft_controller_buffers_and_preserves_agent_authorship_after_edit() {
@@ -278,14 +278,16 @@ mod tests {
                 .await,
             Some(DraftState::Sent {
                 content: "edited answer".to_owned(),
-                authorship: DraftAuthorship::AgentComposed,
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
             })
         );
         assert_eq!(
             controller.resolve("task-1", DraftResolution::Reject).await,
             Some(DraftState::Sent {
                 content: "edited answer".to_owned(),
-                authorship: DraftAuthorship::AgentComposed,
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
             }),
             "a settled resolution is idempotent"
         );
@@ -305,7 +307,25 @@ mod tests {
                 .await,
             Some(DraftState::Sent {
                 content: "human response".to_owned(),
-                authorship: DraftAuthorship::HumanWritten,
+                authorship: Authorship::HumanWritten,
+                send_authorization: SendAuthorization::HumanDecided,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_draft_records_agent_composition_and_human_send_decision() {
+        let controller = PendingDraftController::default();
+        assert!(controller.begin("approved").await);
+        assert!(controller.complete("approved", "generated").await);
+        assert_eq!(
+            controller
+                .resolve("approved", DraftResolution::Approve)
+                .await,
+            Some(DraftState::Sent {
+                content: "generated".to_owned(),
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
             })
         );
     }
@@ -327,7 +347,8 @@ mod tests {
             id: "auto-row".to_owned(),
             role: crate::domain::models::MessageRole::Assistant,
             content: "keep this content".to_owned(),
-            authorship: crate::domain::models::MessageAuthorship::AgentComposed,
+            authorship: crate::domain::models::Authorship::AgentComposed,
+            send_authorization: crate::domain::models::SendAuthorization::Automatic,
             ..Default::default()
         };
         assert!(matches!(
@@ -353,12 +374,37 @@ mod tests {
             plan_auto_response_retraction(&row, 7, true, 456),
             Err(RetractionError::AlreadyRetracted)
         ));
-        row.authorship = crate::domain::models::MessageAuthorship::HumanWritten;
+        row.send_authorization = crate::domain::models::SendAuthorization::HumanDecided;
         row.retracted_at_ms = None;
         assert!(matches!(
             plan_auto_response_retraction(&row, 7, true, 456),
-            Err(RetractionError::NotAgentComposed)
+            Err(RetractionError::NotAutomatic)
         ));
+    }
+
+    #[test]
+    fn k03_retraction_authorization_is_independent_of_authorship() {
+        use crate::domain::models::{Authorship, ChatMessage, SendAuthorization};
+        let mut row = ChatMessage {
+            authorship: Authorship::Unknown,
+            send_authorization: SendAuthorization::Automatic,
+            ..Default::default()
+        };
+        assert!(
+            plan_auto_response_retraction(&row, 7, true, 123).is_ok(),
+            "Unknown authorship + Automatic authorization must remain retractable"
+        );
+        row.authorship = Authorship::AgentComposed;
+        for authorization in [SendAuthorization::Unknown, SendAuthorization::HumanDecided] {
+            row.send_authorization = authorization;
+            assert!(
+                matches!(
+                    plan_auto_response_retraction(&row, 7, true, 123),
+                    Err(RetractionError::NotAutomatic)
+                ),
+                "AgentComposed + {authorization:?} must refuse retraction with NotAutomatic"
+            );
+        }
     }
 
     #[test]

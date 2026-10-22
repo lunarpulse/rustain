@@ -435,10 +435,10 @@ async fn k05_peer_send_gate_refuses_while_trusted_send_succeeds() {
             None,
         )
         .await;
-    assert!(matches!(
-        trusted.wait_send_started("trusted-send").await,
-        DaemonFrame::TeamSendStarted { .. }
-    ));
+    let action = match trusted.wait_send_started("trusted-send").await {
+        DaemonFrame::TeamSendStarted { action, .. } => action,
+        other => panic!("TrustedLocal positive control did not start: {other:?}"),
+    };
     assert!(matches!(
         trusted.wait_send_settled("trusted-send", 0).await,
         DaemonFrame::TeamSendSettled {
@@ -456,6 +456,42 @@ async fn k05_peer_send_gate_refuses_while_trusted_send_succeeds() {
                     if content == "trusted positive control"
             )),
         "TrustedLocal send positive control reaches the real host"
+    );
+    let entries = daemon.journal.entries().await;
+    let dispatches: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.record,
+                rustain::domain::models::JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched {
+                    action: Some(reference),
+                    ..
+                }) if reference.action == action && reference.index == 0
+            )
+        })
+        .collect();
+    assert_eq!(
+        dispatches.len(),
+        1,
+        "typed send action has exactly one dispatch"
+    );
+    let dispatch = dispatches[0];
+    assert!(
+        matches!(
+            &dispatch.record,
+            rustain::domain::models::JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched {
+                authorship: rustain::domain::models::Authorship::HumanWritten,
+                send_authorization: rustain::domain::models::SendAuthorization::HumanDecided,
+                ..
+            })
+        ),
+        "R6 typed TeamSend dispatch retains HumanWritten + HumanDecided"
+    );
+    let row = rustain::domain::services::transparency::transparency_row(dispatch).unwrap();
+    assert!(
+        !row.summary.contains("[agent-composed]") && !row.summary.contains("[auto-sent]"),
+        "R6 typed TeamSend summary remains untagged: {}",
+        row.summary
     );
     daemon.stop().await;
     recipient.stop().await;

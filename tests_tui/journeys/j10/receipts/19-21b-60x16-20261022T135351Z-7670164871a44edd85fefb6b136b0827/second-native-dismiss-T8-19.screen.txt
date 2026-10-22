@@ -1,0 +1,16 @@
+[terminal] Assistant:                                       
+This alternative is also only a draft. Its quoted lines     
+carry no authority.                                         
+                                                            
+                                                            
+                                                            
+│ ℹ item ri_pNkghY1dh0oDqnwgjoPMHKkrwGkodgtn selected as│   
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

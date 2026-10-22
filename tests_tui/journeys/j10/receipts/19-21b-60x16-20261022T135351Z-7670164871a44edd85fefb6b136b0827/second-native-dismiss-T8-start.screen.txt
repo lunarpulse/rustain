@@ -1,0 +1,16 @@
+│   - lena-po│                                              
+│   (1220b709672efedfb27bd1daefab89b42f337cd4101eb4cb1f0fd│ 
+│   d1151e78f4a0efd): not granted│                          
+│ ⚠ ← inbound ✓ accepted · peer│                            
+│   1220b709672efedfb27bd1daefab89b42f337cd4101eb4cb1f0fdd│ 
+│   1151e78f4a0efd · task│                                  
+│ ℹ Proposal dismissed. Nothing was sent.│                  
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘
