@@ -67,7 +67,14 @@ jobs:
         # features proved by gates 18 and 19. Measured 2026-08-30 on x86_64-linux:
         # all four release-only features produce 34,263,656 B (32.68 MiB), within
         # NFR9's amended 35 MiB / 36,700,160-byte guard below.
-        run: cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p
+        run: |
+          set -o pipefail
+          cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p 2>&1 | tee build-output.log
+
+      # Job logs are not public; the first compiler error becomes an annotation.
+      - name: Annotate build failure
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py build-output.log
 
       - name: Stage asset
         shell: bash

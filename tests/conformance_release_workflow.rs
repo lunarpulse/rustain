@@ -6,7 +6,9 @@
 //! is a different repository and is absent from the CI checkout (A8).
 
 const WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
-const RELEASE_BUILD: &str = "run: cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p";
+/// The build command, matched as a line prefix: the step tees its output for
+/// the failure annotation, which must not loosen the feature-list pin.
+const RELEASE_BUILD: &str = "cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p ";
 /// NFR9's byte bound. ⚑ AMENDED 2026-08-31 by Story 9.9 (owner ruling,
 /// measurement-driven): 36,700,160 → 39,845,888. The Streamable HTTP client
 /// transport measured 38,154,880 B on the shipped feature set — the transport
@@ -24,7 +26,9 @@ const SMOKE_SCRIPT: &str = ".github/scripts/release-smoke.sh";
 #[test]
 fn release_build_ships_a2a_and_p2p_with_the_measured_size_bound() {
     assert!(
-        WORKFLOW.lines().any(|line| line.trim() == RELEASE_BUILD),
+        WORKFLOW
+            .lines()
+            .any(|line| line.trim_start().starts_with(RELEASE_BUILD)),
         "release build must name self-update, relay-server, a2a, and p2p explicitly"
     );
     assert_eq!(

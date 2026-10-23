@@ -233,6 +233,13 @@ async fn k05_orphan_phases_across_restarts() {
     let (host_ask, window) = restart_phase(host, unbound_spec("ask")).await;
     host = host_ask;
     assert_orphans(&window, 0, "ask-mode seeding start");
+    // Since 19.20c an admission raised with no attached writer meets the
+    // unattended policy and is declined at once, which removed the pending
+    // record before the crash whenever the gate won the race (it did on the
+    // 4-vCPU CI runner: the pending file read `[]`). An attached writer keeps
+    // the request retained and pending — the 19.18e parked-task tests attach
+    // one for the same reason.
+    let ask_operator = host.attach_operator().await;
     let k = host.client(K_P1A);
     park_in_flight(&host, &k, "k05-flight").await;
 
@@ -241,12 +248,11 @@ async fn k05_orphan_phases_across_restarts() {
     // counted as orphans): ri_a+ri_b+ri_c+ri_ctl = 4.
     // `M04` is killed by phases (2)–(6), where the line must exist.
     let flight_cursor = log_cursor();
-    // Recorded for the failure message only: this assertion has failed on a
-    // 4-vCPU CI runner and nowhere locally, and job logs are not public.
     let pending_before =
         std::fs::read_to_string(host.journal.path.join(".rustain/a2a-pending.json"))
             .unwrap_or_else(|error| format!("<unreadable: {error}>"));
     let (host_1, window) = restart_phase_after_crash(host, unbound_spec("ask")).await;
+    drop(ask_operator);
     host = host_1;
     assert_orphans(&window, 0, "phase (1)");
     assert!(

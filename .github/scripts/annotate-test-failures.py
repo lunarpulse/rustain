@@ -52,7 +52,8 @@ def cargo_failures(text: str):
     if not names:
         error = re.search(r"^error(\[E\d+\])?: .*$", text, re.M)
         if error:
-            yield "build", error.group(0)
+            following = text[error.start():].splitlines()[:12]
+            yield "build", "\n".join(following)
 
 
 def junit_failures(path: Path):
