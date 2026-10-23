@@ -84,12 +84,16 @@ jobs:
       # unowned or if no invocation below enables the features a gated root needs.
       - name: Test
         run: |
-          cargo test --all-targets --no-fail-fast
+          set -o pipefail
+          cargo test --all-targets --no-fail-fast 2>&1 | tee test-output.log
           # Roots gated on `test-instrumentation` alone (the CLI config/session
           # targets in `cli`, the standalone approval/response-mode keystones in
           # `a2a`) compile out of the default build; run those binaries with the
           # feature on and nothing else, so the keystones execute without `a2a`.
-          cargo test --features test-instrumentation --test cli --test a2a
+          cargo test --features test-instrumentation --test cli --test a2a 2>&1 | tee -a test-output.log
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py test-output.log
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest
@@ -130,8 +134,11 @@ jobs:
       # by `the_ci_a2a_lane_enables_the_zero_mutation_ratchet`.
       - name: Test with a2a feature (lib + whole suite)
         run: |
-          cargo test --lib --features a2a,test-instrumentation
-          cargo test --features a2a,test-instrumentation --all-targets --no-fail-fast
+          set -o pipefail
+          cargo test --features a2a,test-instrumentation --all-targets --no-fail-fast 2>&1 | tee test-output.log
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py test-output.log
 
       - name: Execute the real cron proposal front-door consumers
         run: |
@@ -192,8 +199,12 @@ jobs:
       # `every_integration_test_root_runs_in_a_ci_lane_with_its_features` checks it.
       - name: Test with p2p feature (lib + whole suite)
         run: |
-          cargo test --lib --features p2p
-          cargo test --features p2p,p2p-test-utils,relay-server --all-targets --no-fail-fast
+          set -o pipefail
+          cargo test --lib --features p2p 2>&1 | tee test-output.log
+          cargo test --features p2p,p2p-test-utils,relay-server --all-targets --no-fail-fast 2>&1 | tee -a test-output.log
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py test-output.log
   mcp:
     name: MCP Feature
     runs-on: ubuntu-latest
@@ -218,8 +229,11 @@ jobs:
       # DF-17-4a-6: runtime, startup and ACP reference MCP-gated adapters.
       - name: Test with the fake MCP server (lib + whole suite)
         run: |
-          cargo test --lib --features mcp
-          cargo test --features test-fake-mcp --all-targets --no-fail-fast
+          set -o pipefail
+          cargo test --features test-fake-mcp --all-targets --no-fail-fast 2>&1 | tee test-output.log
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py test-output.log
 
   vector-search:
     name: Heavy Feature Lanes (vector-search, wasm-sandbox)
@@ -324,9 +338,12 @@ jobs:
             receipt-checker-evidence/**/restored.json
 
       - name: Run non-API Python TUI tests
-        run: pytest tests_tui/ -m "not requires_api and not a2a_binary" -n auto --timeout=120 -v
+        run: pytest tests_tui/ -m "not requires_api and not a2a_binary" -n auto --timeout=120 -v --junitxml=tui-results.xml
         env:
           RUST_LOG: debug
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py receipt-policy-results.xml tui-results.xml
 
   tui-act2:
     name: Story 19.19 Executing Act 2
@@ -358,6 +375,9 @@ jobs:
           assert {case.attrib["name"] for case in cases} == expected and len(cases) == 2, cases
           assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required Act 2 case skipped/failed/errored"
           PY
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py act2-results.xml
       - name: Retain actual capture receipts, evidence, and named-case results
         if: always()
         uses: actions/upload-artifact@v4
@@ -440,6 +460,9 @@ jobs:
               assert sum(name.startswith(prefix) for name in names) == count, (prefix, names)
           assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required canonical receipt control skipped/failed/errored"
           PY
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py proposal-modes-results.xml act1-results.xml receipt-checker-results.xml
       - name: Retain actual Act 1 receipts, evidence, and named-case results
         if: always()
         uses: actions/upload-artifact@v4
@@ -517,6 +540,9 @@ jobs:
           assert len(cases) == 9 and {case.attrib["name"] for case in cases} == expected, cases
           assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required conflict integrity control skipped/failed/errored"
           PY
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py conflict-native-results.xml conflict-integrity-results.xml
       - name: Retain allowlisted conflict capture and integrity evidence
         if: always()
         uses: actions/upload-artifact@v4
