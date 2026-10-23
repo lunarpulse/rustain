@@ -1,5 +1,8 @@
 [toolchain]
-# stable 고정 — devcontainer 이미지의 .env RUST_VERSION 과 무관하게 재현 가능한 컴파일러.
-channel = "stable"
+# Exact pin (Grand Plan P0-5). A floating `stable` let the CI runner's clippy
+# drift ahead of local toolchains, which is why clippy was demoted to advisory
+# in ci.yml. Local and CI now resolve the same lint set, so clippy blocks again.
+# Bump deliberately: change this line, fix the new lints, commit both together.
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

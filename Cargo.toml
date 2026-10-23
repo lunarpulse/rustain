@@ -385,3 +385,21 @@ lto = true
 strip = true
 codegen-units = 1
 panic = "abort"
+
+# Grand Plan P0-2 (docs/rustain-grand-plan-2026-10-22.md §4, Rule C).
+# Full DWARF for 272 integration binaries was most of the link work and disk
+# footprint. Debug builds carry no debuginfo; test builds keep line tables so
+# panics and backtraces still name file:line.
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = "line-tables-only"
+
+# Local release probes (feature-unification check, size estimates) link in
+# under a minute with thin LTO. The shipped artifact is still built with
+# `release` (fat LTO, one codegen unit) by .github/workflows/release.yml.
+[profile.release-local]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
