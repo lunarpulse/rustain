@@ -1,8 +1,8 @@
 use rustain::domain::events::DomainInputEvent;
 use rustain::domain::models::{JournalRecord, RoomEvent};
 
-use crate::observed_host::{HttpCounts, ObservedHost};
-use crate::proposal_harness::ProposalFixture;
+use super::observed_host::{HttpCounts, ObservedHost};
+use super::proposal_harness::ProposalFixture;
 
 pub(crate) async fn assert_pending_without_egress(
     fixture: &ProposalFixture,

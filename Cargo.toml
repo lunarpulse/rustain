@@ -7,6 +7,9 @@ description = "A fast, extensible, terminal-native AI coding agent"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/lunarpulse/rustain"
+# Grand Plan P0-3: integration tests are explicit area binaries (tests/<area>/main.rs);
+# autodiscovery would compile every tests/*.rs root a second time as its own target.
+autotests = false
 [lib]
 name = "rustain"
 path = "src/lib.rs"
@@ -25,6 +28,139 @@ required-features = ["test-fake-mcp"]
 name = "startup-panic-harness"
 path = "tests/common/startup_panic_harness.rs"
 test = false
+
+# ── Integration test binaries (Grand Plan P0-3) ──────────────────────────────
+# Area binaries consolidate the former per-file roots; see tests/<area>/main.rs.
+
+[[test]]
+name = "core"
+path = "tests/core/main.rs"
+
+[[test]]
+name = "tui"
+path = "tests/tui/main.rs"
+
+[[test]]
+name = "skills"
+path = "tests/skills/main.rs"
+
+[[test]]
+name = "profile"
+path = "tests/profile/main.rs"
+
+[[test]]
+name = "cli"
+path = "tests/cli/main.rs"
+
+[[test]]
+name = "memory"
+path = "tests/memory/main.rs"
+
+[[test]]
+name = "daemon"
+path = "tests/daemon/main.rs"
+
+[[test]]
+name = "acp"
+path = "tests/acp/main.rs"
+
+[[test]]
+name = "mcp"
+path = "tests/mcp/main.rs"
+
+[[test]]
+name = "orchestration"
+path = "tests/orchestration/main.rs"
+
+[[test]]
+name = "a2a"
+path = "tests/a2a/main.rs"
+
+[[test]]
+name = "p2p"
+path = "tests/p2p/main.rs"
+
+# Standalone roots: cwd-mutating or documented `--test-threads=1` targets.
+# Roots below either install a process-global `tracing` subscriber and assert on its
+# log, or read/reset process-global `test-instrumentation` counters (PROVIDER_CTOR_COUNT,
+# load_count, lock acquisitions, TAINT_GATE_*). Exact-value assertions on process state
+# are only sound with the process to themselves, so each keeps its own binary.
+
+[[test]]
+name = "a2a_server_exec"
+path = "tests/a2a_server_exec.rs"
+
+[[test]]
+name = "cli_config"
+path = "tests/cli_config.rs"
+
+[[test]]
+name = "cli_config_override"
+path = "tests/cli_config_override.rs"
+
+[[test]]
+name = "cli_session_delete"
+path = "tests/cli_session_delete.rs"
+
+[[test]]
+name = "cli_session_list"
+path = "tests/cli_session_list.rs"
+
+[[test]]
+name = "conformance_17_2a_node_journal"
+path = "tests/conformance_17_2a_node_journal.rs"
+
+[[test]]
+name = "conformance_18_3a_d_apply"
+path = "tests/conformance_18_3a_d_apply.rs"
+
+[[test]]
+name = "conformance_18_3c_response_modes"
+path = "tests/conformance_18_3c_response_modes.rs"
+
+[[test]]
+name = "conformance_19_21b_agent_proposal"
+path = "tests/conformance_19_21b_agent_proposal.rs"
+
+[[test]]
+name = "conformance_acp"
+path = "tests/conformance_acp.rs"
+
+[[test]]
+name = "conformance_fork_join_executor"
+path = "tests/conformance_fork_join_executor.rs"
+
+[[test]]
+name = "conformance_multi_agent_security"
+path = "tests/conformance_multi_agent_security.rs"
+
+[[test]]
+name = "conformance_19_18c_a2a_item_capability"
+path = "tests/conformance_19_18c_a2a_item_capability.rs"
+
+[[test]]
+name = "conformance_19_18d_a2a_peer_binding"
+path = "tests/conformance_19_18d_a2a_peer_binding.rs"
+
+[[test]]
+name = "conformance_19_18e_a2a_task_continuity"
+path = "tests/conformance_19_18e_a2a_task_continuity.rs"
+
+[[test]]
+name = "a2a_config"
+path = "tests/a2a_config.rs"
+
+[[test]]
+name = "conformance_18_3a_e_apply_surface"
+path = "tests/conformance_18_3a_e_apply_surface.rs"
+
+[[test]]
+name = "conformance_18_3a_f_resolution"
+path = "tests/conformance_18_3a_f_resolution.rs"
+
+[[test]]
+name = "conformance_mcp_config"
+path = "tests/conformance_mcp_config.rs"
 
 [[test]]
 name = "scheduler_overhead"

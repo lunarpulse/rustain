@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::harness::{GateRoomJournal, Host, Sender};
+use super::harness::{GateRoomJournal, Host, Sender};
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::tui::handlers::team_command::TeamBoardSelector;
 use rustain::adapters::tui::state::TuiState;
@@ -13,7 +13,7 @@ use rustain::infrastructure::runtime::transparency_bridge::team_board_message;
 #[tokio::test]
 async fn k03_interrupted_send_is_honest_after_sender_restart() {
     let landed = Host::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
-    let interrupted_journal = crate::harness::Journal::open().await;
+    let interrupted_journal = super::harness::Journal::open().await;
     let gate = Arc::new(GateRoomJournal::new(
         interrupted_journal.room.clone(),
         |event| matches!(event, RoomEvent::RecipientItemReceived { .. }),

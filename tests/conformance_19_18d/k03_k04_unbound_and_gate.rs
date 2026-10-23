@@ -11,7 +11,7 @@
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::{A2aPeerSource, A2aPeerSpec};
 
-use crate::harness::{
+use super::harness::{
     BoundHost, HostSpec, K_P1A, K_P1A_ENV, K_P1B, K_P2, K_U, Sender, item_id_for_task, listed_ids,
     received_row_for_task, sender_key, served_ids, setup, stranger, wire,
 };
@@ -100,7 +100,7 @@ async fn k03_an_unbound_key_keeps_the_pre_binding_wire_and_thread_gate() {
     let retracted = unbound.items_retract(9, &ri_u, None).await;
     assert!(retracted.json["error"].is_null(), "{}", retracted.body);
     assert_legacy_shape(&retracted.body, &retracted.json, "K_U retract");
-    let marks = crate::harness::raw_payloads(&closed.journal, "recipient_item_retracted");
+    let marks = super::harness::raw_payloads(&closed.journal, "recipient_item_retracted");
     assert_eq!(marks.len(), 1, "{marks:?}");
     assert_eq!(marks[0]["address"]["principal"]["kind"], "a2a_pseudonym");
     assert_eq!(marks[0]["address"]["item"], ri_u.as_str());

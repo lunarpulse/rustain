@@ -9,8 +9,7 @@ use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::input_box;
 use rustain::domain::models::FocusState;
 
-mod common;
-
+use crate::common;
 fn render_input_box(
     width: u16,
     height: u16,

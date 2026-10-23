@@ -1,5 +1,5 @@
-use crate::attached_harness::{AttachedClient, AttachedDaemon};
-use crate::g_harness::*;
+use super::attached_harness::{AttachedClient, AttachedDaemon};
+use super::g_harness::*;
 use rustain::adapters::daemon::protocol::{
     ClientFrame, ConnectionTier, DaemonFrame, TeamBoardRequest, ToolInputWithheld,
 };
@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 #[tokio::test]
 async fn model_delegation_through_attached_turn_is_agent_composed() {
-    let host = crate::attached_harness::RecipientHost::start(
+    let host = super::attached_harness::RecipientHost::start(
         rustain::adapters::a2a::admission::A2aAdmissionPolicy::Allow,
     )
     .await;
@@ -41,7 +41,7 @@ async fn model_delegation_through_attached_turn_is_agent_composed() {
     let mut writer =
         AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
     daemon.runtime.security.set_mode(PermissionMode::Yolo);
-    let name = tokio::time::timeout(crate::attached_harness::FIXTURE_TIMEOUT, async {
+    let name = tokio::time::timeout(super::attached_harness::FIXTURE_TIMEOUT, async {
         loop {
             if let Some(tool) = daemon
                 .runtime
@@ -93,7 +93,7 @@ async fn model_delegation_through_attached_turn_is_agent_composed() {
         "M47 attached: shared team log must tag model delegation agent-composed"
     );
     assert_eq!(
-        crate::harness::read_room_events(&host.journal)
+        super::harness::read_room_events(&host.journal)
             .await
             .iter()
             .filter(|(_, event)| matches!(event, RoomEvent::RecipientItemReceived { .. }))

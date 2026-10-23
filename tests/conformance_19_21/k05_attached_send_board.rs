@@ -1,8 +1,8 @@
 //! Story 19.21 K05 — signed-socket send/board parity and authority keystones.
-use crate::attached_harness::{
+use super::attached_harness::{
     AttachedClient, AttachedDaemon, RecipientHost, standalone_attached_parity,
 };
-use crate::harness::read_room_events;
+use super::harness::read_room_events;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{
     AttachMode, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION, ProtocolError,
@@ -568,7 +568,7 @@ async fn k05_old_signed_attach_versions_are_rejected_and_current_control_succeed
         .await
         .expect("connect daemon");
     let challenge = tokio::time::timeout(
-        crate::attached_harness::FIXTURE_TIMEOUT,
+        super::attached_harness::FIXTURE_TIMEOUT,
         read_frame::<_, DaemonFrame>(&mut stream),
     )
     .await
@@ -598,7 +598,7 @@ async fn k05_old_signed_attach_versions_are_rejected_and_current_control_succeed
     .await
     .expect("write fixed-v4 attach");
     let frame = tokio::time::timeout(
-        crate::attached_harness::FIXTURE_TIMEOUT,
+        super::attached_harness::FIXTURE_TIMEOUT,
         read_frame::<_, DaemonFrame>(&mut stream),
     )
     .await
@@ -619,7 +619,7 @@ async fn k05_old_signed_attach_versions_are_rejected_and_current_control_succeed
         .await
         .expect("connect v5 client");
     let nonce = match tokio::time::timeout(
-        crate::attached_harness::FIXTURE_TIMEOUT,
+        super::attached_harness::FIXTURE_TIMEOUT,
         read_frame::<_, DaemonFrame>(&mut older),
     )
     .await
@@ -657,7 +657,7 @@ async fn k05_old_signed_attach_versions_are_rejected_and_current_control_succeed
         .await
         .expect("connect previous-version client");
     let nonce = match tokio::time::timeout(
-        crate::attached_harness::FIXTURE_TIMEOUT,
+        super::attached_harness::FIXTURE_TIMEOUT,
         read_frame::<_, DaemonFrame>(&mut previous),
     )
     .await
@@ -688,7 +688,7 @@ async fn k05_old_signed_attach_versions_are_rejected_and_current_control_succeed
     .await
     .expect("write previous-version attach");
     let frame = tokio::time::timeout(
-        crate::attached_harness::FIXTURE_TIMEOUT,
+        super::attached_harness::FIXTURE_TIMEOUT,
         read_frame::<_, DaemonFrame>(&mut previous),
     )
     .await
@@ -791,7 +791,7 @@ async fn k05_attached_board_withholds_unnameable_row_but_keeps_six_addressed_fiv
         matches!(event, RoomEvent::RecipientItemReceived { .. })
     })
     .await;
-    let future = crate::k02_board_rules::controlled_peer("future", false, Some("escalated")).await;
+    let future = super::k02_board_rules::controlled_peer("future", false, Some("escalated")).await;
     let mut preflight_peer = preflight_host.peer("preflight");
     preflight_peer.auth = Some("RUSTAIN_19_21_INTENTIONALLY_UNSET_CREDENTIAL".into());
     let peers = vec![

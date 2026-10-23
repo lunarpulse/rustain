@@ -12,11 +12,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rustain::adapters::a2a::ITEM_CAPABILITY_METADATA_KEY;
 use serde_json::json;
 
-use crate::harness::{
+use super::harness::{
     BoundHost, K_P1A, K_P1A_ENV, K_P1B, K_P1B_ENV, PENDING_WARN, adopting, lines_with, log_cursor,
     log_since, server, setup, spec, stranger, wait_pending_record, wire_state,
 };
-use crate::{assert_never_bytes, assert_restart_projection};
+use super::{assert_never_bytes, assert_restart_projection};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn k05_an_adopted_capability_bearing_task_needs_its_capability() {

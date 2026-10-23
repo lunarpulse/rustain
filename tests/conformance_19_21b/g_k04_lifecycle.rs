@@ -1,6 +1,6 @@
-use crate::attached_harness::{AttachedClient, AttachedDaemon, FIXTURE_TIMEOUT};
-use crate::g_harness::*;
-use crate::observed_host::{HttpCounts, ObservedHost};
+use super::attached_harness::{AttachedClient, AttachedDaemon, FIXTURE_TIMEOUT};
+use super::g_harness::*;
+use super::observed_host::{HttpCounts, ObservedHost};
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{
     AttachMode, ClientFrame, ConnectionTier, DaemonFrame, ProtocolError, TeamProposalCloseOutcome,
@@ -273,7 +273,7 @@ async fn duplicated_send_consumes_snapshot_under_one_lock() {
         "M26: duplicate Send must produce exactly one POST"
     );
     assert_eq!(
-        crate::harness::read_room_events(&daemon.journal)
+        super::harness::read_room_events(&daemon.journal)
             .await
             .iter()
             .filter(|(_, e)| matches!(e, RoomEvent::TeamSendActionRecorded { .. }))
@@ -327,7 +327,7 @@ async fn accepted_proposal_send_survives_eof_without_replacement() {
         HttpCounts { get: 0, post: 1 },
         "live typed send positive control"
     );
-    let control_events = crate::harness::read_room_events(&daemon.journal).await;
+    let control_events = super::harness::read_room_events(&daemon.journal).await;
     assert_eq!(
         control_events
             .iter()
@@ -398,7 +398,7 @@ async fn accepted_proposal_send_survives_eof_without_replacement() {
         HttpCounts { get: 0, post: 1 },
         "DETACHED-SEND: accepted pre-EOF Send must POST exactly once"
     );
-    let events = crate::harness::read_room_events(&daemon.journal).await;
+    let events = super::harness::read_room_events(&daemon.journal).await;
     let sent = &events[control_events.len()..];
     assert_eq!(
         sent.iter()
@@ -474,7 +474,7 @@ async fn accepted_proposal_send_survives_eof_without_replacement() {
         "reattachment must not resend"
     );
     assert_eq!(
-        crate::harness::read_room_events(&daemon.journal)
+        super::harness::read_room_events(&daemon.journal)
             .await
             .iter()
             .filter(|(_, event)| matches!(event, RoomEvent::TeamSendActionRecorded { .. }))

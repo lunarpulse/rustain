@@ -7,11 +7,25 @@ Run these tests before marking an epic as done. Estimated time: under 5 minutes.
 - **`cargo test --all-targets --no-fail-fast`** — the WHOLE suite, not a hand-picked target list.
   ⚠ **This wording is deliberate and was paid for.** Stories 19-3, 19-7, 19-8 and 19-1 each reported "gates green" from a narrow `--test <target>` enumeration, and all four missed that `conformance_18_3a_f_resolution` was red — a hard gate in CI's `check` job with no `continue-on-error`, so CI was red for four consecutive stories while every story record said otherwise. A ratchet you do not run is not a ratchet. `--no-fail-fast` matters too: without it the first failure hides the rest.
 - **Ratchet targets, which a narrow run is most likely to skip.** Both of these pin `event_loop.rs` line growth, and they must agree:
-  - `cargo test --test conformance` — `EVENT_LOOP_BASELINE_LINES` + soft/hard budget, plus the async-lock ratchet
+  - `cargo test --test core conformance::` — `EVENT_LOOP_BASELINE_LINES` + soft/hard budget, plus the async-lock ratchet (`tests/conformance.rs` is a module of the `core` area binary)
   - `cargo test --test conformance_18_3a_f_resolution -- --test-threads=1` — the resolve-verb budget (same effective ceiling by construction)
 - `cargo clippy --all-targets -- -D warnings` — **strict, not advisory.** A story's own files must be warning-free.
 - `cargo fmt --check`
-- `cargo build --release`
+- `cargo check --release --features self-update,relay-server,a2a,p2p` — the feature-unification probe (17.5a R-11). Release *builds* are CI's job (`release.yml`, nightly captures); a story does not run `cargo build --release` (Grand Plan Rule B).
+
+### Integration-test layout (Grand Plan P0-3)
+
+`tests/*.rs` roots are **not** autodiscovered (`autotests = false`). Each root is a
+module of one area binary — `tests/{core,tui,skills,profile,cli,memory,daemon,acp,mcp,orchestration,a2a,p2p}/main.rs` —
+loaded via `#[path = "../<root>.rs"]`, so 272 roots link as 12 area binaries plus 19
+standalone roots. A root stays standalone when it needs the process to itself: it
+mutates the cwd, needs `--test-threads=1`, installs a process-global `tracing`
+subscriber, or asserts exact values of process-global `test-instrumentation`
+counters (`PROVIDER_CTOR_COUNT`, `load_count`, lock acquisitions, `TAINT_GATE_*`). Run one
+root with a module filter: `cargo test --test a2a conformance_19_17_a2a_fanout::`.
+Adding a root = add one `#[path]`/`mod` pair to exactly one area `main.rs`; the lib
+guards in `src/domain/ports/capability_provider.rs` fail if a root is unowned, owned
+twice, or feature-gated without a CI invocation that enables its feature.
 
 ### Pinned complete-function metric
 
@@ -27,7 +41,7 @@ python3 -m pip install -r tools/ci/requirements-metrics.txt
 python3 .github/scripts/event-loop-complexity.py src/infrastructure/runtime/event_loop.rs
 python3 .github/scripts/test_event_loop_complexity.py
 python3 .github/scripts/test_ratchet_signoff_guard.py
-cargo test --locked --test conformance
+cargo test --locked --test core conformance::
 ```
 
 `rust-legacy-condition-tokens-v1` measures the entire single top-level `run` with
@@ -151,6 +165,6 @@ These manual tests complement the automated suite:
 | `tests/init_wizard.rs` | 12 | Init wizard, TTY detection, config creation |
 | `tests/session_persistence.rs` | 3 | Save/load round-trip, atomic writes |
 | `tests/title_generation.rs` | 22 | Auto-title trigger, post-processing |
-| All integration tests | 33 files | Full feature coverage |
+| All integration roots | 272 roots in 12 area binaries + 4 standalone (`autotests = false`) | Full feature coverage |
 
 Run all automated targets: `cargo test --all-targets --no-fail-fast`

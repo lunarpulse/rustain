@@ -17,8 +17,7 @@
 //! TUI E2E (deferred — gated on the Ctrl+X chord-UI investigation).
 
 #![cfg(feature = "test-fake-mcp")]
-mod common;
-
+use crate::common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;

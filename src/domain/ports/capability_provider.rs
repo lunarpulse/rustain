@@ -175,129 +175,289 @@ mod a2a_conformance {
         );
     }
 
-    #[test]
-    fn every_a2a_integration_test_is_wired_into_the_ci_a2a_lane() {
-        // Story 17.4b standing ruling. Before the `a2a` lane existed, all nine
-        // tests/a2a_*.rs files compiled but NEVER executed in CI (the Check job runs
-        // `cargo test --lib` only) — nine test files that were a false green.
-        //
-        // The lane names its targets explicitly (`--test <name>`), which is precise but
-        // would silently rot the moment someone adds a tenth file. This guard makes that
-        // rot impossible: it runs under `cargo test --lib`, so it fails in the DEFAULT
-        // lane even for a contributor who never builds `--features a2a`.
-        //
-        // Adding a new A2A integration test? Add `--test <name>` to the `a2a` job in
-        // .github/workflows/ci.yml. That is the whole contract.
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // ── Integration-test wiring (Grand Plan P0-3, docs/rustain-grand-plan-2026-10-22.md §4) ──
+    //
+    // Integration tests are explicit area binaries (`tests/<area>/main.rs`) that load
+    // the former `tests/*.rs` roots via `#[path]`; `autotests = false` keeps cargo from
+    // compiling each root a second time as its own target. The two guards below
+    // replace the retired per-lane name lists (a2a / p2p / mcp): a root that no
+    // binary names never compiles, and a gated root whose feature no CI invocation
+    // enables never runs — both the false green those lists existed to prevent.
+    // They run under `cargo test --lib`, so they fail the DEFAULT lane.
 
-        let mut targets = Vec::new();
-        for entry in std::fs::read_dir(root.join("tests"))
-            .expect("tests/ must be readable")
-            .flatten()
-        {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "rs")
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                // Story 18.2: transparency targets ride the same contract. They
-                // are feature-independent, but CI's default lane runs
-                // `cargo test --lib` only — an integration target named in no
-                // lane never executes, which is the false green this guard
-                // exists to prevent.
-                && (stem.contains("a2a") || stem.contains("transparency"))
-            {
-                targets.push(stem.to_owned());
-            }
-        }
-        targets.sort();
-        assert!(
-            !targets.is_empty(),
-            "expected A2A integration tests under tests/"
-        );
-
-        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
-            .expect(".github/workflows/ci.yml must be readable");
-
-        let missing: Vec<&String> = targets
-            .iter()
-            .filter(|stem| !ci.contains(&format!("--test {stem}")))
-            .collect();
-
-        assert!(
-            missing.is_empty(),
-            "A2A integration tests exist that the CI `a2a` lane never runs — a test that \
-             never executes is a false green. Add `--test <name>` to the `a2a` job in \
-             .github/workflows/ci.yml for: {missing:?}"
-        );
+    struct TestTarget {
+        name: String,
+        path: String,
     }
 
-    /// Story 18.4, AC6 — a p2p integration target not named by the dedicated
-    /// feature lane is a false green. Keep this sibling guard separate from the
-    /// A2A guard above: each guard owns exactly one CI lane.
-    #[test]
-    fn every_p2p_integration_test_is_wired_into_the_ci_p2p_lane() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    fn declared_test_targets(manifest: &str) -> Vec<TestTarget> {
         let mut targets = Vec::new();
+        let mut current: Option<(Option<String>, Option<String>)> = None;
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                if let Some((Some(name), Some(path))) = current.take() {
+                    targets.push(TestTarget { name, path });
+                }
+                current = (line == "[[test]]").then_some((None, None));
+                continue;
+            }
+            let Some(entry) = current.as_mut() else {
+                continue;
+            };
+            let value = |key: &str| {
+                line.strip_prefix(key)
+                    .map(str::trim_start)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .map(|rest| rest.trim().trim_matches('"').to_owned())
+            };
+            if let Some(name) = value("name") {
+                entry.0 = Some(name);
+            } else if let Some(path) = value("path") {
+                entry.1 = Some(path);
+            }
+        }
+        if let Some((Some(name), Some(path))) = current {
+            targets.push(TestTarget { name, path });
+        }
+        targets
+    }
+
+    /// `#[path = "../<stem>.rs"]` module references of an area binary.
+    fn area_roots(main_rs: &str) -> Vec<String> {
+        main_rs
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("#[path = \"../")
+                    .and_then(|rest| rest.strip_suffix(".rs\"]"))
+            })
+            .filter(|stem| !stem.contains('/'))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// root stem -> names of the `[[test]]` targets that compile it.
+    fn root_owners(
+        root: &std::path::Path,
+        manifest: &str,
+    ) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut owners: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for target in declared_test_targets(manifest) {
+            if let Some(stem) = target
+                .path
+                .strip_prefix("tests/")
+                .and_then(|rest| rest.strip_suffix(".rs"))
+                && !stem.contains('/')
+            {
+                owners
+                    .entry(stem.to_owned())
+                    .or_default()
+                    .push(target.name.clone());
+            } else if target.path.ends_with("/main.rs") {
+                let main_rs = std::fs::read_to_string(root.join(&target.path))
+                    .unwrap_or_else(|error| panic!("{} must be readable: {error}", target.path));
+                for stem in area_roots(&main_rs) {
+                    assert!(
+                        root.join("tests").join(format!("{stem}.rs")).is_file(),
+                        "{} names tests/{stem}.rs, which does not exist",
+                        target.path
+                    );
+                    owners.entry(stem).or_default().push(target.name.clone());
+                }
+            }
+        }
+        owners
+    }
+
+    #[test]
+    fn every_integration_test_root_is_owned_by_one_area_binary() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+        assert!(
+            manifest.contains("\nautotests = false\n"),
+            "Cargo.toml must keep `autotests = false`: with autodiscovery every tests/*.rs \
+             root is compiled twice — once in its area binary and once as its own target"
+        );
+        let owners = root_owners(root, &manifest);
+
+        let mut unowned = Vec::new();
+        let mut shared = Vec::new();
         for entry in std::fs::read_dir(root.join("tests"))
-            .expect("tests/ must be readable")
+            .expect("tests/")
             .flatten()
         {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "rs")
                 && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-                && stem.contains("p2p")
             {
-                targets.push(stem.to_owned());
+                match owners.get(stem) {
+                    None => unowned.push(stem.to_owned()),
+                    Some(names) if names.len() > 1 => shared.push(format!("{stem} <- {names:?}")),
+                    Some(_) => {}
+                }
             }
         }
-        targets.sort();
         assert!(
-            !targets.is_empty(),
-            "expected p2p integration tests under tests/"
+            unowned.is_empty(),
+            "tests/*.rs roots that no area binary compiles (add one `#[path = \"../<stem>.rs\"] \
+             mod <stem>;` to exactly one tests/<area>/main.rs, or a [[test]] entry): {unowned:?}"
         );
-
-        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
-            .expect(".github/workflows/ci.yml must be readable");
-        let lane: String = ci
-            .lines()
-            .skip_while(|line| *line != "  p2p:")
-            .skip(1)
-            .take_while(|line| {
-                line.is_empty() || !line.starts_with("  ") || line.starts_with("    ")
-            })
-            .collect();
-        assert!(!lane.is_empty(), "dedicated p2p CI job");
-        let missing: Vec<&String> = targets
-            .iter()
-            .filter(|stem| !lane.contains(&format!("--test {stem}")))
-            .collect();
         assert!(
-            missing.is_empty(),
-            "p2p integration tests exist that the CI `p2p` lane never runs: {missing:?}"
+            shared.is_empty(),
+            "tests/*.rs roots compiled by more than one binary (their tests would run twice): \
+             {shared:?}"
         );
     }
 
-    /// Story 18.1b, R1 — the async-lock ratchet was never executed by CI.
-    ///
-    /// `MAX_KNOWN_STD_SYNC_LOCKS` lives in `tests/conformance.rs`, and until this
-    /// story **no workflow ran `--test conformance`**: the Check job runs
-    /// `cargo test --lib`, and every feature lane names its targets explicitly.
-    /// The policy the whole codebase is held to was a manual-only gate, and an
-    /// untagged `std::sync::Mutex` in `adapters/` or `infrastructure/` could
-    /// merge with all lanes green.
-    ///
-    /// This story adds a task map and per-request server state, so it owns the
-    /// subject matter and closes the gap. The guard runs under `cargo test --lib`
-    /// so it fails the DEFAULT lane if someone removes the wiring.
+    struct CiInvocation {
+        features: std::collections::BTreeSet<String>,
+        no_default_features: bool,
+        /// `None` = `--all-targets`; otherwise the `--test` names (empty for `--lib`).
+        targets: Option<std::collections::BTreeSet<String>>,
+    }
+
+    /// Every `cargo test` invocation in ci.yml, with `\` continuations joined.
+    fn ci_test_invocations(ci: &str) -> Vec<CiInvocation> {
+        let mut joined = Vec::new();
+        let mut pending = String::new();
+        for line in ci.lines() {
+            let line = line.trim();
+            if line.starts_with('#') && pending.is_empty() {
+                continue;
+            }
+            if let Some(head) = line.strip_suffix('\\') {
+                pending.push_str(head);
+                pending.push(' ');
+                continue;
+            }
+            pending.push_str(line);
+            joined.push(std::mem::take(&mut pending));
+        }
+        joined
+            .iter()
+            .filter(|command| command.contains("cargo test") && !command.contains("--no-run"))
+            .map(|command| {
+                let words: Vec<&str> = command.split_whitespace().collect();
+                let mut invocation = CiInvocation {
+                    features: Default::default(),
+                    no_default_features: false,
+                    targets: Some(Default::default()),
+                };
+                let mut index = 0;
+                while index < words.len() {
+                    let word = words[index];
+                    if word == "--" {
+                        break;
+                    }
+                    let feature_list =
+                        word.strip_prefix("--features=")
+                            .map(str::to_owned)
+                            .or_else(|| {
+                                (word == "--features").then(|| {
+                                    index += 1;
+                                    words.get(index).copied().unwrap_or_default().to_owned()
+                                })
+                            });
+                    if let Some(list) = feature_list {
+                        invocation.features.extend(
+                            list.split([',', ' '])
+                                .filter(|f| !f.is_empty())
+                                .map(str::to_owned),
+                        );
+                    } else if word == "--no-default-features" {
+                        invocation.no_default_features = true;
+                    } else if word == "--all-targets" {
+                        invocation.targets = None;
+                    } else if word == "--test" {
+                        index += 1;
+                        if let (Some(targets), Some(name)) =
+                            (invocation.targets.as_mut(), words.get(index))
+                        {
+                            targets.insert((*name).to_owned());
+                        }
+                    }
+                    index += 1;
+                }
+                invocation
+            })
+            .collect()
+    }
+
+    /// `feature = "x"` names in a root's leading `#![cfg(...)]` attribute, and whether
+    /// the predicate is an `any(...)` (one suffices) or a conjunction (all required).
+    fn root_feature_requirement(source: &str) -> Option<(Vec<String>, bool)> {
+        let cfg = source
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("#![cfg("))?;
+        let any = cfg.starts_with("#![cfg(any(");
+        let features: Vec<String> = cfg
+            .split("feature = \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .map(str::to_owned)
+            .collect();
+        (!features.is_empty()).then_some((features, any))
+    }
+
+    fn default_features(manifest: &str) -> std::collections::BTreeSet<String> {
+        let features_section = manifest.split("\n[features]\n").nth(1).unwrap_or_default();
+        let default = features_section
+            .split("default = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .unwrap_or_default();
+        default
+            .split(',')
+            .map(|item| item.trim().trim_matches('"').to_owned())
+            .filter(|item| !item.is_empty())
+            .collect()
+    }
+
     #[test]
-    fn the_async_lock_ratchet_is_executed_by_ci() {
-        let ci = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
-        )
-        .expect(".github/workflows/ci.yml must be readable");
+    fn every_integration_test_root_runs_in_a_ci_lane_with_its_features() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+            .expect(".github/workflows/ci.yml must be readable");
+        let invocations = ci_test_invocations(&ci);
         assert!(
-            ci.contains("--test conformance\n") || ci.contains("--test conformance "),
-            "no CI job runs `--test conformance`, so MAX_KNOWN_STD_SYNC_LOCKS is a \
-             manual-only gate again and an untagged std::sync lock can merge green"
+            !invocations.is_empty(),
+            "no `cargo test` invocation found in ci.yml"
+        );
+        let defaults = default_features(&manifest);
+
+        let mut unexecuted = Vec::new();
+        for (stem, owners) in root_owners(root, &manifest) {
+            let source = std::fs::read_to_string(root.join("tests").join(format!("{stem}.rs")))
+                .unwrap_or_else(|error| panic!("tests/{stem}.rs must be readable: {error}"));
+            let requirement = root_feature_requirement(&source);
+            let executed = invocations.iter().any(|invocation| {
+                let runs_binary = invocation
+                    .targets
+                    .as_ref()
+                    .is_none_or(|targets| owners.iter().any(|owner| targets.contains(owner)));
+                let enabled = |feature: &String| {
+                    invocation.features.contains(feature)
+                        || (!invocation.no_default_features && defaults.contains(feature))
+                };
+                let features_satisfied = match &requirement {
+                    None => true,
+                    Some((features, true)) => features.iter().any(enabled),
+                    Some((features, false)) => features.iter().all(enabled),
+                };
+                runs_binary && features_satisfied
+            });
+            if !executed {
+                unexecuted.push(format!("{stem} (binary {owners:?}, needs {requirement:?})"));
+            }
+        }
+        assert!(
+            unexecuted.is_empty(),
+            "integration roots that no ci.yml `cargo test` invocation executes with their \
+             features enabled — a test that never runs is a false green:\n{}",
+            unexecuted.join("\n")
         );
     }
 
@@ -317,100 +477,6 @@ mod a2a_conformance {
             ci.contains("--features a2a,test-instrumentation"),
             "the CI a2a lane must run with `test-instrumentation`, or AC2b's \
              zero-mutation ratchet and AC7b's signing counter are compiled out"
-        );
-    }
-
-    #[test]
-    fn every_mcp_integration_test_is_wired_into_the_ci_mcp_lane() {
-        // Story 17.5a. The default CI job runs only `cargo test --lib`, which
-        // leaves integration targets false-green unless the MCP lane names them.
-        //
-        // Select by observable MCP behavior, not filename: a target either
-        // exercises production adapter/client code, starts the in-tree fake
-        // server with an MCP spec, or verifies MCP's canonical approval
-        // namespace. The narrow exclusions avoid unrelated tests that merely
-        // inspect the MCP error type or mention the fake in a comment.
-        //
-        // Adding a behavioral MCP target? Add `--test <name>` to the `mcp` job in
-        // .github/workflows/ci.yml. This guard runs under `cargo test --lib`, so
-        // the omission fails in the default lane too.
-        fn exercises_mcp_surface(content: &str) -> bool {
-            let exercises_adapter = content.contains("rustain::adapters::mcp::")
-                && !content.contains("rustain::adapters::mcp::error::McpError");
-            let spawns_fake =
-                content.contains("fake-mcp-server") && content.contains("McpServerSpec");
-            let verifies_approval_namespace =
-                content.contains("mcp__") && content.contains("ApprovalSource");
-
-            exercises_adapter
-                || content.contains("McpClientAdapter")
-                || spawns_fake
-                || verifies_approval_namespace
-        }
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut targets = Vec::new();
-        for entry in std::fs::read_dir(root.join("tests"))
-            .expect("tests/ must be readable")
-            .flatten()
-        {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "rs")
-                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-                && exercises_mcp_surface(
-                    &std::fs::read_to_string(&path).unwrap_or_else(|error| {
-                        panic!("{} must be readable: {error}", path.display())
-                    }),
-                )
-            {
-                targets.push(stem.to_owned());
-            }
-        }
-        targets.sort();
-        assert!(
-            !targets.is_empty(),
-            "expected behavioral MCP integration tests under tests/"
-        );
-
-        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
-            .expect(".github/workflows/ci.yml must be readable");
-        let mut in_mcp_lane = false;
-        let mut ci_targets = Vec::new();
-        for line in ci.lines() {
-            if line == "  mcp:" {
-                in_mcp_lane = true;
-                continue;
-            }
-            if in_mcp_lane && line.starts_with("  ") && !line.starts_with("    ") {
-                break;
-            }
-            if in_mcp_lane
-                && let Some(target) = line
-                    .trim_start()
-                    .strip_prefix("--test ")
-                    .and_then(|rest| rest.split_whitespace().next())
-            {
-                ci_targets.push(target);
-            }
-        }
-        assert!(
-            in_mcp_lane,
-            "expected an `mcp` job in .github/workflows/ci.yml"
-        );
-
-        // Parsing complete `--test` arguments makes `conformance_mcp` distinct
-        // from `conformance_mcp_config`; a substring check would not.
-        let missing: Vec<&str> = targets
-            .iter()
-            .map(String::as_str)
-            .filter(|stem| !ci_targets.iter().any(|target| target == stem))
-            .collect();
-
-        assert!(
-            missing.is_empty(),
-            "MCP integration tests exist that the CI `mcp` lane never runs — a test that \
-             never executes is a false green. Add `--test <name>` to the `mcp` job in \
-             .github/workflows/ci.yml for: {missing:?}"
         );
     }
 

@@ -1,6 +1,6 @@
-use crate::attached_harness::{AttachedClient, AttachedDaemon};
-use crate::g_harness::*;
-use crate::observed_host::{HttpCounts, ObservedHost};
+use super::attached_harness::{AttachedClient, AttachedDaemon};
+use super::g_harness::*;
+use super::observed_host::{HttpCounts, ObservedHost};
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{ClientFrame, ConnectionTier, DaemonFrame};
 use rustain::domain::models::{
@@ -99,7 +99,7 @@ fn forbidden(value: &Value) {
 #[cfg(feature = "cron")]
 #[tokio::test]
 async fn interleaved_cron_keeps_attached_proposal_on_invoking_conversation() {
-    use crate::attached_harness::FIXTURE_TIMEOUT;
+    use super::attached_harness::FIXTURE_TIMEOUT;
     use rustain::adapters::noop::NoOpChannel;
     use rustain::adapters::scheduler::cron::CronSchedulerAdapter;
     use rustain::domain::models::{ApprovalOutcome, StopReason, StreamChunk};

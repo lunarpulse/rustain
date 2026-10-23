@@ -18,8 +18,7 @@
 //! Reviewers should read the unified diff carefully — the diagnostic surface
 //! is broader but the snapshot is cheaper to maintain than 8 separate files.
 
-#[path = "common/render_helpers.rs"]
-mod common;
+use crate::render_helpers as common;
 
 use common::*;
 use rustain::domain::clock::MockClock;

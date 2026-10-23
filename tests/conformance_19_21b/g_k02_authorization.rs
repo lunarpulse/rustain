@@ -1,6 +1,6 @@
-use crate::attached_harness::{AttachedClient, AttachedDaemon};
-use crate::g_harness::*;
-use crate::observed_host::ObservedHost;
+use super::attached_harness::{AttachedClient, AttachedDaemon};
+use super::g_harness::*;
+use super::observed_host::ObservedHost;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{ClientFrame, ConnectionTier};
 use rustain::adapters::daemon::server::TeamSendTestHooks;
@@ -194,7 +194,7 @@ async fn detach_safe_gate_does_not_authorize_pending_proposal() {
             None,
         )
         .await;
-    let response = tokio::time::timeout(crate::attached_harness::FIXTURE_TIMEOUT, response)
+    let response = tokio::time::timeout(super::attached_harness::FIXTURE_TIMEOUT, response)
         .await
         .expect("daemon no-writer Safe gate resolves")
         .expect("Safe response");
@@ -311,7 +311,7 @@ async fn real_subagent_cannot_raise_on_attached_parent_surface() {
 async fn selected_peer_context_never_authorizes_proposal() {
     use rustain::adapters::daemon::protocol::DaemonFrame;
     use rustain::domain::models::{JournalRecord, RoomEvent};
-    let (daemon, mut writer, host, inbound) = crate::g_k05_liveness::fixture_with_remote().await;
+    let (daemon, mut writer, host, inbound) = super::g_k05_liveness::fixture_with_remote().await;
     const MARKER: &str = "SELECTED_PEER_CONTEXT_MUST_NOT_LEAK_f3d1";
     let received = inbound
         .sender("remote-drafter")
@@ -319,7 +319,7 @@ async fn selected_peer_context_never_authorizes_proposal() {
         .await;
     assert!(received.json["error"].is_null());
     daemon.wait_for_received_task("selected-peer-context").await;
-    crate::g_k05_liveness::peer_ready(&daemon).await;
+    super::g_k05_liveness::peer_ready(&daemon).await;
     let item = daemon
         .journal
         .entries()

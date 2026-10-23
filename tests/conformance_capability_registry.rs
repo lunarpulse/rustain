@@ -5,8 +5,8 @@
 //!
 //! Fake-mcp-server tests are `#[serial]`-annotated per Story 9.1 / 9.2 convention.
 
-mod common;
-
+#[cfg(feature = "test-fake-mcp")]
+use crate::common;
 use std::sync::Arc;
 
 #[cfg(feature = "test-fake-mcp")]

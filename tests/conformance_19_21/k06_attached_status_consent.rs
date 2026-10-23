@@ -1,10 +1,10 @@
 //! Story 19.21 K06 — attached status and consent boundaries.
 
-use crate::attached_harness::{
+use super::attached_harness::{
     AppendGateJournal, AttachedClient, AttachedDaemon, FIXTURE_TIMEOUT, InboundSenderIdentity,
     is_consent_event, mint_request_key,
 };
-use crate::harness::Journal;
+use super::harness::Journal;
 use rustain::adapters::daemon::protocol::{
     AttachMode, ClientFrame, ConnectionTier, DaemonFrame, ProtocolError, RecipientAction,
     RecipientActionOutcome, RecipientActionTarget,
@@ -28,7 +28,7 @@ async fn k06_toml_implied_consent_admits_the_pinned_sender_without_a_journal_gra
         ),
     )
     .expect("write TOML sender consent");
-    let peers = vec![crate::attached_harness::pinned_peer_for_inbound_sender(
+    let peers = vec![super::attached_harness::pinned_peer_for_inbound_sender(
         &identity,
     )];
     let daemon = AttachedDaemon::start_with_journal(journal, peers, None).await;
@@ -342,7 +342,7 @@ async fn k06_failed_consent_revoke_append_preserves_admission() {
 
 #[tokio::test]
 async fn k06_attached_status_uses_daemon_composed_roster_and_never_starts_a_model_turn() {
-    let peer = crate::attached_harness::RecipientHost::start(
+    let peer = super::attached_harness::RecipientHost::start(
         rustain::adapters::a2a::admission::A2aAdmissionPolicy::Allow,
     )
     .await;

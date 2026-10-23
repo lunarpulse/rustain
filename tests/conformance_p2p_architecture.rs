@@ -268,19 +268,6 @@ fn p2p_feature_is_isolated_and_pins_the_i_roh_stack() {
     );
 }
 
-#[test]
-fn p2p_ci_lane_names_the_current_targets() {
-    let ci = source(".github/workflows/ci.yml");
-    let lane: String = ci
-        .lines()
-        .skip_while(|line| *line != "  p2p:")
-        .skip(1)
-        .take_while(|line| line.is_empty() || !line.starts_with("  ") || line.starts_with("    "))
-        .collect();
-    assert!(lane.contains("--features p2p"));
-    assert!(lane.contains("--test conformance_p2p_architecture"));
-}
-
 // ── RETIRED 2026-08-14 by Story 18.4b ───────────────────────────────────────
 //
 // `p2p_has_no_event_loop_palette_or_slash_command_surface` asserted that

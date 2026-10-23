@@ -2,7 +2,7 @@ use crossterm::event::KeyCode;
 use rustain::domain::models::PermissionResolution;
 use serde_json::json;
 
-use crate::harness::Fixture;
+use super::harness::Fixture;
 
 #[tokio::test]
 async fn k06d_standalone_operator_and_policy_resolutions_reach_the_invocation() {

@@ -26,7 +26,7 @@
 #![cfg(all(feature = "p2p", feature = "p2p-test-utils"))]
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -61,15 +61,6 @@ use tokio_util::sync::CancellationToken;
 const DEADLINE: Duration = Duration::from_secs(30);
 
 // ── Harness ─────────────────────────────────────────────────────────────────
-
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
-}
-
-fn source(relative: &str) -> String {
-    std::fs::read_to_string(root().join(relative))
-        .unwrap_or_else(|error| panic!("read {relative}: {error}"))
-}
 
 fn signing_key(seed: u8) -> ed25519_dalek::SigningKey {
     ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
@@ -2392,15 +2383,3 @@ fn task7_the_sign_seam_refuses_an_out_of_range_sequence_and_a_bad_prev_hash() {
 }
 
 // ── Task 8 — the lane registration ratchet (per-story copy) ─────────────────
-
-/// A target wired into nothing compiles, passes locally, and is never run by
-/// CI — a false green, not a workaround. This story's copy; ⛔ sibling stories'
-/// copies do not cover this file.
-#[test]
-fn task8_conformance_18_4a_p2p_topic_is_named_by_a_lane_that_runs_it() {
-    let ci = source(".github/workflows/ci.yml");
-    assert!(
-        ci.contains("--test conformance_18_4a_p2p_topic"),
-        "this target must be named in the p2p lane"
-    );
-}

@@ -10,7 +10,7 @@
 use rustain::adapters::tui::app::InputAction;
 use rustain::domain::events::DomainKey;
 
-mod e2e_harness;
+use crate::e2e_harness;
 use e2e_harness::TestHarness;
 
 // ═══════════════════════════════════════════════════════════════════════════

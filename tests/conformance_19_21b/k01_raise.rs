@@ -4,8 +4,8 @@ use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::domain::models::{AgentToolRestriction, PermissionMode, ResponseMode, ToolPolicy};
 use serde_json::{Value, json};
 
-use crate::observed_host::{HttpCounts, ObservedHost};
-use crate::proposal_harness::ProposalFixture;
+use super::observed_host::{HttpCounts, ObservedHost};
+use super::proposal_harness::ProposalFixture;
 
 const TOOL: &str = "propose_team_message";
 const BODY: &str = "ADR-047 finds a race.\nKeep the owner lock around publication.\nRésumé: preserve naïve input. 🧭";

@@ -1,6 +1,7 @@
 #![cfg(feature = "a2a")]
 #![allow(dead_code)]
 
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_21/harness.rs"]
 mod inherited;
 #[path = "conformance_19_21b/k01_boundaries.rs"]
@@ -33,11 +34,13 @@ mod k06_authorship;
 mod k06_payload;
 #[path = "conformance_19_21b/k20a_send_authorization.rs"]
 mod k20a_send_authorization;
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_21b/observed_host.rs"]
 mod observed_host;
 #[path = "conformance_19_21b/permission_guard.rs"]
 mod permission_guard;
 #[path = "conformance_19_21b/proposal_harness.rs"]
 mod proposal_harness;
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_21b/tool_provider.rs"]
 mod tool_provider;

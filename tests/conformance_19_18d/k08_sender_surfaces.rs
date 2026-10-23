@@ -29,7 +29,7 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::A2aPeerSpec;
 
-use crate::harness::{
+use super::harness::{
     BoundHost, HostSpec, Item, K_P1A, K_P1A_ENV, K_U, K_U_ENV, Operator, SETTLE, Sender,
     sender_key, setup, wire,
 };

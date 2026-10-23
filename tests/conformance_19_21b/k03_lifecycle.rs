@@ -5,8 +5,8 @@ use rustain::domain::models::FocusState;
 use rustain::domain::models::{JournalRecord, PermissionMode, ResponseMode, RoomEvent};
 use serde_json::json;
 
-use crate::observed_host::{HttpCounts, ObservedHost};
-use crate::proposal_harness::ProposalFixture;
+use super::observed_host::{HttpCounts, ObservedHost};
+use super::proposal_harness::ProposalFixture;
 
 const PROPOSAL: &str = "Exact proposed body.";
 

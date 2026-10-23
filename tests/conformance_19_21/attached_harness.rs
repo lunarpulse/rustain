@@ -2,7 +2,7 @@
 //! All socket and HTTP work enters through production `AttachServer::run` and
 //! the production signed-card A2A server. Fixture timeouts are hang guards only.
 
-use crate::harness::Journal;
+use super::harness::Journal;
 use arc_swap::ArcSwap;
 use base64::Engine as _;
 use futures::{StreamExt, stream::BoxStream};
@@ -786,7 +786,7 @@ impl AttachedDaemon {
     pub async fn wait_for_received_task(&self, task: &str) {
         tokio::time::timeout(FIXTURE_TIMEOUT, async {
             loop {
-                if crate::harness::read_room_events(&self.journal)
+                if super::harness::read_room_events(&self.journal)
                     .await
                     .iter()
                     .any(|(_, event)| {
@@ -1713,7 +1713,7 @@ pub async fn standalone_attached_parity(
         1_800_000_000_000,
     ));
     let mut standalone =
-        crate::harness::Sender::start_with_clock(standalone_peers.clone(), clock.clone()).await;
+        super::harness::Sender::start_with_clock(standalone_peers.clone(), clock.clone()).await;
     let mut state = rustain::adapters::tui::state::TuiState::new(100, 40);
     let command = format!(
         "/team send --type story_assignment --subject {subject} {} {text}",
@@ -1721,7 +1721,7 @@ pub async fn standalone_attached_parity(
     );
     standalone.command(&mut state, &command).await;
     standalone.settle(&mut state, aliases.len()).await;
-    let standalone_events = crate::harness::read_room_events(&standalone.journal).await;
+    let standalone_events = super::harness::read_room_events(&standalone.journal).await;
     let standalone_id = send_action_id(&standalone_events);
     let standalone_facts = normalized_send_facts(&standalone_events, &standalone_id);
     let selector = rustain::adapters::tui::handlers::team_command::TeamBoardSelector::Action(
@@ -1772,7 +1772,7 @@ pub async fn standalone_attached_parity(
             "attached parity settlement: {frame:?}"
         );
     }
-    let attached_events = crate::harness::read_room_events(&daemon.journal).await;
+    let attached_events = super::harness::read_room_events(&daemon.journal).await;
     let attached_facts = normalized_send_facts(&attached_events, &attached_id);
     let selector = rustain::adapters::tui::handlers::team_command::TeamBoardSelector::Action(
         attached_id.clone(),

@@ -16,6 +16,7 @@
 
 #![cfg(feature = "a2a")]
 
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_18d/harness.rs"]
 mod harness;
 

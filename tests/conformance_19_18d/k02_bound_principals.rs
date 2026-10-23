@@ -19,7 +19,7 @@
 //! half: any site that falls back to a pseudonym splits P1A from P1B or from
 //! the journal address below.
 
-use crate::harness::{
+use super::harness::{
     BoundHost, HostSpec, K_P1A, K_P1B, K_P1C, K_P2, P1_X, P2_X, Reply, bound_item_address,
     bound_turn_address, follow_up_metadata, frame_turn, item_id_for_task, listed_ids, pin_hex,
     raw_payloads, received_row_for_task, replied_rows, served_ids, setup,
@@ -129,7 +129,7 @@ async fn k02_bound_keys_are_per_pin_principals_across_every_verb() {
 
     // ── 3. P2 cannot read, follow, retract, poll or cancel P1's items; every
     // miss is byte-identical to a never-existing id under the same JSON-RPC id.
-    let rows_before = crate::harness::room_events(&host.journal).await.len();
+    let rows_before = super::harness::room_events(&host.journal).await.len();
     let never_thread = p2.items_thread(7, "ri_never", None).await.body;
     assert!(never_thread.contains("-32001"), "{never_thread}");
     let never_retract = p2.items_retract(9, "ri_never", None).await.body;
@@ -165,7 +165,7 @@ async fn k02_bound_keys_are_per_pin_principals_across_every_verb() {
     assert_eq!(p1a.items_thread(7, &ri_2, None).await.body, never_thread);
     assert_eq!(p1a.tasks_get(11, "m2", None).await.body, never_get);
     assert_eq!(
-        crate::harness::room_events(&host.journal).await.len(),
+        super::harness::room_events(&host.journal).await.len(),
         rows_before,
         "no refused probe wrote a journal row"
     );

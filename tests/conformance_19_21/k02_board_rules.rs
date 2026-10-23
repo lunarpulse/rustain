@@ -1,4 +1,4 @@
-use crate::harness::{
+use super::harness::{
     GateRoomJournal, Host, Sender, acknowledge_received_item, folded_actions, read_room_events,
 };
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
@@ -374,7 +374,7 @@ async fn k02_action_board_applies_settlement_and_remote_rules() {
     let delivered = Host::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let declined = Host::start(A2aAdmissionPolicy::Deny, ResponseMode::NotifyAndWait).await;
     let refused = Host::start(A2aAdmissionPolicy::Ask, ResponseMode::NotifyAndWait).await;
-    let gate_journal = crate::harness::Journal::open().await;
+    let gate_journal = super::harness::Journal::open().await;
     let gate = std::sync::Arc::new(GateRoomJournal::new(gate_journal.room.clone(), |event| {
         matches!(event, RoomEvent::RecipientItemReceived { .. })
     }));
@@ -495,7 +495,7 @@ async fn k02_action_board_applies_settlement_and_remote_rules() {
 /// first send's real host item was acknowledged and durably journaled.
 #[tokio::test]
 async fn k02_new_action_does_not_inherit_older_peer_acknowledgement() {
-    let journal = crate::harness::Journal::open().await;
+    let journal = super::harness::Journal::open().await;
     let gate = std::sync::Arc::new(GateRoomJournal::new(journal.room.clone(), |event| {
         matches!(
             event,
@@ -793,7 +793,7 @@ async fn k02_identity_precheck_uses_pin_and_preserves_send_time_alias() {
 #[tokio::test]
 async fn k02_unknown_settlement_from_newer_journal_is_stated() {
     let landed = Host::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
-    let interrupted_journal = crate::harness::Journal::open().await;
+    let interrupted_journal = super::harness::Journal::open().await;
     let gate = std::sync::Arc::new(GateRoomJournal::new(
         interrupted_journal.room.clone(),
         |event| matches!(event, RoomEvent::RecipientItemReceived { content, .. } if content == "held unknown"),
@@ -904,7 +904,7 @@ async fn k02_unknown_settlement_from_newer_journal_is_stated() {
 async fn k02_action_board_reconciles_latest_facts_after_held_sibling_read() {
     let declined = interleaving_peer("declined", true).await;
     let correlated = interleaving_peer("correlated", false).await;
-    let journal = crate::harness::Journal::open().await;
+    let journal = super::harness::Journal::open().await;
     let settlement_gate = std::sync::Arc::new(GateRoomJournal::new(
         journal.room.clone(),
         index_zero_settlement,

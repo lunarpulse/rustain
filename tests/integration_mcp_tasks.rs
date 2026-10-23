@@ -12,8 +12,7 @@
 //! missing-binary panic says so).
 
 #![cfg(feature = "test-fake-mcp")]
-mod common;
-
+use crate::common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;

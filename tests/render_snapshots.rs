@@ -17,8 +17,7 @@
 //! cargo insta accept   # after reviewing .snap.new files
 //! ```
 
-#[path = "common/render_helpers.rs"]
-mod common;
+use crate::render_helpers as common;
 
 use common::*;
 use rustain::domain::clock::MockClock;

@@ -583,16 +583,26 @@ async fn killed_process_orphan_is_reaped_but_live_and_unowned_siblings_survive()
 
     // P12: spawn a LIVE sibling process holding its own owned scratch.
     let live_child_report = report_dir.path().join("live-child-path");
+    // libtest names this test by its module path inside the area binary
+    // (`conformance_cow_mergeback::killed_…`); `module_path!()` additionally
+    // carries the crate name, which libtest omits.
+    let self_test_path = {
+        let module = module_path!();
+        let module = module.split_once("::").map_or("", |(_, rest)| rest);
+        let name = "killed_process_orphan_is_reaped_but_live_and_unowned_siblings_survive";
+        if module.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{module}::{name}")
+        }
+    };
     let mut live_child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "killed_process_orphan_is_reaped_but_live_and_unowned_siblings_survive",
-            "--nocapture",
-        ])
+        .args(["--exact", &self_test_path, "--nocapture"])
         .env(LIVE_CHILD_MODE, "1")
         .env("RUSTAIN_COW_WORKSPACE", workspace.path())
         .env("RUSTAIN_COW_REPORT", &live_child_report)
         .spawn()
+        .map(crate::common::process::ChildGuard::new)
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while !live_child_report.exists() {
@@ -608,15 +618,12 @@ async fn killed_process_orphan_is_reaped_but_live_and_unowned_siblings_survive()
     // Dead orphan: spawn, let it create+leak a scratch, then SIGKILL it.
     let report = report_dir.path().join("child-path");
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "killed_process_orphan_is_reaped_but_live_and_unowned_siblings_survive",
-            "--nocapture",
-        ])
+        .args(["--exact", &self_test_path, "--nocapture"])
         .env(CHILD_MODE, "1")
         .env("RUSTAIN_COW_WORKSPACE", workspace.path())
         .env("RUSTAIN_COW_REPORT", &report)
         .spawn()
+        .map(crate::common::process::ChildGuard::new)
         .unwrap();
 
     tokio::time::timeout(std::time::Duration::from_secs(10), async {

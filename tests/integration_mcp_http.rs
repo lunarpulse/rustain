@@ -13,8 +13,7 @@
 
 #![cfg(all(feature = "mcp", feature = "test-fake-mcp"))]
 
-mod common;
-
+use crate::common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

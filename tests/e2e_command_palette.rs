@@ -11,7 +11,7 @@ use rustain::adapters::tui::app::InputAction;
 use rustain::domain::events::DomainKey;
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 
-mod e2e_harness;
+use crate::e2e_harness;
 use e2e_harness::TestHarness;
 
 // ═══════════════════════════════════════════════════════════════════════════

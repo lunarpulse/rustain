@@ -6,7 +6,7 @@ use rustain::domain::services::approval_runtime::{ApprovalRuntimeEvent, ReviewSc
 use rustain::infrastructure::runtime::approval_bridge;
 use serde_json::json;
 
-use crate::harness::{Fixture, VIEWPORTS, press, request_id, text};
+use super::harness::{Fixture, VIEWPORTS, press, request_id, text};
 
 #[tokio::test]
 async fn k05_review_decision_targets_pinned_request_not_queue() {

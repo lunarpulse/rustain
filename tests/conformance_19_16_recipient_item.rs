@@ -707,5 +707,6 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
 
 // Story 19.18d K09 (AC9, A4, P14, F10): the durable-journal cases, shared with
 // the 19.18d CI target.
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_18d/k09_journal.rs"]
 mod k09_journal;

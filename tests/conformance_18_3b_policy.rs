@@ -130,6 +130,7 @@ fn ac5_daemon_startup_reports_policy_conflicts_through_the_log() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
+        .map(crate::common::process::ChildGuard::new)
         .expect("spawn `rustain daemon start --foreground`");
 
     let outcome = wait_for_log(
@@ -216,6 +217,7 @@ fn ac5_positive_control_a_clean_pair_reports_zero_conflicts() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
+        .map(crate::common::process::ChildGuard::new)
         .expect("spawn daemon");
 
     let outcome = wait_for_log(
@@ -262,6 +264,7 @@ fn ac5_a_malformed_policy_file_stops_the_daemon() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
+        .map(crate::common::process::ChildGuard::new)
         .expect("spawn daemon");
 
     let deadline = Instant::now() + Duration::from_secs(30);

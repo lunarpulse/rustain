@@ -1,5 +1,5 @@
-use crate::inherited::Host;
-use crate::proposal_harness::ProposalFixture;
+use super::inherited::Host;
+use super::proposal_harness::ProposalFixture;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::tui::app::InputAction;
 use rustain::domain::events::DomainInputEvent;
@@ -82,7 +82,7 @@ async fn k20a_approved_proposal_is_agent_composed_human_decided() {
         row.summary
     );
     assert_eq!(
-        crate::inherited::read_room_events(&host.journal)
+        super::inherited::read_room_events(&host.journal)
             .await
             .iter()
             .filter(|(_, e)| matches!(e, RoomEvent::RecipientItemReceived { .. }))

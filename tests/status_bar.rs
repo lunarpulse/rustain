@@ -1,8 +1,7 @@
 // Covers: FR38 (status bar), NFR2 (redraw), AC2 (status bar widget tests)
 //! Dedicated rendering tests for the status bar widget.
 
-mod common;
-
+use crate::common;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 

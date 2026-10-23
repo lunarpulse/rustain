@@ -1,5 +1,5 @@
-use crate::attached_harness::{AttachedClient, AttachedDaemon};
-use crate::g_harness::*;
+use super::attached_harness::{AttachedClient, AttachedDaemon};
+use super::g_harness::*;
 use rustain::adapters::daemon::protocol::{AttachMode, ClientFrame, ConnectionTier, DaemonFrame};
 use rustain::adapters::daemon::server::TeamSendTestHooks;
 use rustain::domain::models::{AppConfig, PermissionMode};

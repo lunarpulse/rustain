@@ -12,8 +12,8 @@ use rustain::domain::models::{
 };
 use serde_json::json;
 
-use crate::observed_host::{HttpCounts, ObservedHost};
-use crate::proposal_harness::ProposalFixture;
+use super::observed_host::{HttpCounts, ObservedHost};
+use super::proposal_harness::ProposalFixture;
 
 async fn raise(f: &mut ProposalFixture, body: &str) {
     let result = f

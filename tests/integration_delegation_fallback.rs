@@ -16,7 +16,7 @@ use rustain::domain::ports::EventEmitter;
 use rustain::domain::services::plan_runtime::PlanRuntime;
 use rustain::infrastructure::subagent::SubagentSpool;
 
-mod common;
+use crate::common;
 use common::stub_subagent::FailingSubagentRunner;
 
 fn make_task(number: u32, title: &str, description: &str) -> PlanTask {

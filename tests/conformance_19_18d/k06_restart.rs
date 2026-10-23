@@ -33,7 +33,7 @@ use rustain::domain::models::AgentId;
 use rustain::domain::ports::InboundPeerRuntime;
 use tokio_util::sync::CancellationToken;
 
-use crate::harness::{
+use super::harness::{
     BoundHost, HostSpec, K_P1A, K_P1B, K_P1C, K_P2, K_U, ORPHAN_WARN, P1_X, PENDING_WARN,
     assert_not_found_like, detail, lines_with, listed_ids, log_cursor, log_since,
     no_live_inbound_node, pin_hex, received_row_for_task, received_rows, send_and_admit,

@@ -2,7 +2,7 @@ use rustain::domain::clock::Clock;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::harness::{
+use super::harness::{
     GateRoomJournal, Host, Journal, RecordingRoomJournal, RejectAppend, Sender, folded_actions,
     read_room_events,
 };

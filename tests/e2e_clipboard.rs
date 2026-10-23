@@ -10,7 +10,7 @@
 use rustain::domain::events::DomainKey;
 use rustain::domain::models::{FocusState, MessageRole};
 
-mod e2e_harness;
+use crate::e2e_harness;
 use e2e_harness::TestHarness;
 
 // ═══════════════════════════════════════════════════════════════════════════

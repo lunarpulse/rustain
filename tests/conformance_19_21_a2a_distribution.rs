@@ -1,7 +1,10 @@
-#![cfg(feature = "a2a")]
+// The attached-rail harness composes the daemon through `TeamSendTestHooks`, which
+// exists only under `test-instrumentation`; the CI a2a lane always enables it.
+#![cfg(all(feature = "a2a", feature = "test-instrumentation"))]
 
 #[path = "conformance_19_21/attached_harness.rs"]
 mod attached_harness;
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_21/harness.rs"]
 mod inherited;
 use inherited as harness;
@@ -58,8 +61,10 @@ mod k06_attached_status_consent;
 #[path = "conformance_19_21/k07_k08_recipient.rs"]
 mod k07_k08_recipient;
 #[cfg(all(unix, feature = "test-instrumentation"))]
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_21b/observed_host.rs"]
 mod observed_host;
 #[cfg(all(unix, feature = "test-instrumentation"))]
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_21b/tool_provider.rs"]
 mod tool_provider;

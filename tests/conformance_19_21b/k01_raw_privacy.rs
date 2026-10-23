@@ -2,9 +2,9 @@ use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::domain::models::ResponseMode;
 use serde_json::json;
 
-use crate::k02_matrix::{approve_once, assert_pending_without_egress};
-use crate::observed_host::ObservedHost;
-use crate::proposal_harness::ProposalFixture;
+use super::k02_matrix::{approve_once, assert_pending_without_egress};
+use super::observed_host::ObservedHost;
+use super::proposal_harness::ProposalFixture;
 
 #[tokio::test]
 async fn private_ready_reaches_local_card_but_never_raw_observers() {

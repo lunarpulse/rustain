@@ -7,10 +7,10 @@ use rustain::domain::ports::{SecurityPort, StreamingProvider, SubagentRunner};
 use rustain::infrastructure::subagent::{NodeTree, SubagentSpool};
 use tokio_util::sync::CancellationToken;
 
-use crate::k02_matrix::{approve_once, assert_pending_without_egress};
-use crate::observed_host::ObservedHost;
-use crate::proposal_harness::ProposalFixture;
-use crate::tool_provider::tool_provider;
+use super::k02_matrix::{approve_once, assert_pending_without_egress};
+use super::observed_host::ObservedHost;
+use super::proposal_harness::ProposalFixture;
+use super::tool_provider::tool_provider;
 
 #[tokio::test]
 async fn allow_subagent_write_does_not_auto_send_parent_proposal() {
@@ -162,7 +162,7 @@ async fn k01_subagent_proposal_is_denied_by_real_runner() {
         assert!(host.journal().entries().await.is_empty());
         assert_eq!(
             host.counts(),
-            crate::observed_host::HttpCounts { get: 0, post: 0 }
+            super::observed_host::HttpCounts { get: 0, post: 0 }
         );
         host.stop().await;
     }

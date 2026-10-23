@@ -15,8 +15,7 @@
 
 #![cfg(feature = "meta-search")]
 
-mod common;
-
+use crate::common;
 use common::eval_corpus::build_production_index;
 use common::eval_partition::{Partition, load_query_set_partitioned};
 use proptest::prelude::*;

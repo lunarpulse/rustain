@@ -2,7 +2,7 @@ use crossterm::event::KeyCode;
 use rustain::adapters::tui::app::InputAction;
 use serde_json::{Value, json};
 
-use crate::harness::{Fixture, VIEWPORTS, text};
+use super::harness::{Fixture, VIEWPORTS, text};
 
 fn long_input(tool: &str, suffix: &str) -> (Value, Vec<String>) {
     let late = format!(

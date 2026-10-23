@@ -9,8 +9,8 @@ use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::{ResponseMode, StreamingState, TeamProposalDecision, ViewState};
 use serde_json::json;
 
-use crate::observed_host::{HttpCounts, ObservedHost};
-use crate::proposal_harness::ProposalFixture;
+use super::observed_host::{HttpCounts, ObservedHost};
+use super::proposal_harness::ProposalFixture;
 
 #[tokio::test]
 async fn k03_overflow_keeps_complete_aliases_and_gates_send_until_footer() {

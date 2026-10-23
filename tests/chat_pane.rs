@@ -1,8 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-mod common;
-
+use crate::common;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 

@@ -1,5 +1,5 @@
-use crate::harness::*;
-use crate::k02_board_rules::controlled_peer;
+use super::harness::*;
+use super::k02_board_rules::controlled_peer;
 
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::tui::state::TuiState;

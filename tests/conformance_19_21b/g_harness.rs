@@ -1,5 +1,5 @@
-use crate::attached_harness::{AttachedClient, AttachedDaemon};
-use crate::observed_host::{HttpCounts, ObservedHost};
+use super::attached_harness::{AttachedClient, AttachedDaemon};
+use super::observed_host::{HttpCounts, ObservedHost};
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{ClientFrame, ConnectionTier, DaemonFrame};
 use rustain::domain::models::{
@@ -87,7 +87,7 @@ pub async fn zero(daemon: &AttachedDaemon, hosts: &[&ObservedHost], diagnostic: 
             "{diagnostic}"
         );
     }
-    let events = crate::harness::read_room_events(&daemon.journal).await;
+    let events = super::harness::read_room_events(&daemon.journal).await;
     assert!(
         !events.iter().any(|(_, event)| matches!(
             event,
@@ -122,7 +122,7 @@ pub async fn send_once(
         HttpCounts { get: 0, post: 1 },
         "human Send must POST exactly once"
     );
-    let events = crate::harness::read_room_events(&daemon.journal).await;
+    let events = super::harness::read_room_events(&daemon.journal).await;
     assert_eq!(
         events
             .iter()
@@ -151,7 +151,7 @@ pub async fn child(daemon: &AttachedDaemon, name: &'static str, value: Value) {
         raw_tx,
     });
     let runner = rustain::adapters::subagent::InProcessSubagentRunner::new(
-        crate::tool_provider::tool_provider(name, value),
+        super::tool_provider::tool_provider(name, value),
         daemon.runtime.storage.clone(),
         daemon.runtime.security.clone(),
         daemon.runtime.tools.clone(),
@@ -190,7 +190,7 @@ pub async fn child(daemon: &AttachedDaemon, name: &'static str, value: Value) {
         .await
         .expect("real child launch");
     let mut status = child.status_rx;
-    tokio::time::timeout(crate::attached_harness::FIXTURE_TIMEOUT, async {
+    tokio::time::timeout(super::attached_harness::FIXTURE_TIMEOUT, async {
         while let Some(state) = status.recv().await {
             if state.is_terminal() {
                 assert_eq!(

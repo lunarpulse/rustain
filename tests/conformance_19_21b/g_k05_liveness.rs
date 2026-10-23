@@ -1,9 +1,9 @@
-use crate::attached_harness::{
+use super::attached_harness::{
     AttachedClient, AttachedDaemon, InboundSenderIdentity, pinned_peer_for_inbound_sender,
 };
-use crate::g_harness::*;
-use crate::harness::Journal;
-use crate::observed_host::ObservedHost;
+use super::g_harness::*;
+use super::harness::Journal;
+use super::observed_host::ObservedHost;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{ClientFrame, ConnectionTier, DaemonFrame};
 use rustain::domain::models::{ResponseMode, RoomEvent};
@@ -12,7 +12,7 @@ pub(crate) async fn fixture_with_remote() -> (
     AttachedDaemon,
     AttachedClient,
     ObservedHost,
-    crate::attached_harness::InboundHttpHost,
+    super::attached_harness::InboundHttpHost,
 ) {
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let journal = Journal::open().await;
@@ -37,7 +37,7 @@ pub(crate) async fn fixture_with_remote() -> (
 }
 
 pub(crate) async fn peer_ready(daemon: &AttachedDaemon) {
-    tokio::time::timeout(crate::attached_harness::FIXTURE_TIMEOUT, async {
+    tokio::time::timeout(super::attached_harness::FIXTURE_TIMEOUT, async {
         loop {
             if daemon
                 .conversation
@@ -70,7 +70,7 @@ async fn remote_notify_and_draft_tool_attempt_is_denied() {
         "real remote turn must be admitted: {result:?}"
     );
     daemon.wait_for_received_task("remote-tool-attempt").await;
-    tokio::time::timeout(crate::attached_harness::FIXTURE_TIMEOUT, async {
+    tokio::time::timeout(super::attached_harness::FIXTURE_TIMEOUT, async {
         loop {
             let event = transitions
                 .recv()
@@ -173,7 +173,7 @@ async fn pending_proposal_does_not_hold_daemon_turn_mutex() {
     .await;
     send_once(&daemon, &mut writer, &host, &id).await;
     assert!(
-        crate::harness::read_room_events(&daemon.journal)
+        super::harness::read_room_events(&daemon.journal)
             .await
             .iter()
             .any(|(_, event)| matches!(event, RoomEvent::RecipientItemReceived { .. })),

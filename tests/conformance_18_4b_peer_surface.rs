@@ -1460,50 +1460,6 @@ fn the_palette_entry_names_every_sub_verb() {
     }
 }
 
-/// AC7 mutant (b): a new test target is added but wired into no lane, so it
-/// compiles, passes locally, and CI never runs it.
-#[test]
-fn both_new_test_targets_are_named_by_a_lane_that_runs_them() {
-    let ci = std::fs::read_to_string(".github/workflows/ci.yml").expect("read");
-
-    // The default-feature target belongs to the `check` job's enumeration.
-    let check: String = ci
-        .lines()
-        .skip_while(|line| !line.contains("name: Test"))
-        .take_while(|line| !line.starts_with("  skills-validation:"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        check.contains("--test conformance_18_4b_peer_surface"),
-        "the default-feature target must be in the check job's enumeration"
-    );
-    // Its stem must NOT contain `p2p`, or the p2p wiring guard would demand it
-    // be in the p2p lane instead.
-    assert!(
-        !"conformance_18_4b_peer_surface".contains("p2p"),
-        "this target is default-feature and must not be matched by the p2p guard"
-    );
-
-    // The p2p-gated target belongs to the `p2p` lane, and its stem contains
-    // `p2p` so the wiring guard enforces exactly that.
-    let lane: String = ci
-        .lines()
-        .skip_while(|line| *line != "  p2p:")
-        .skip(1)
-        .take_while(|line| line.is_empty() || !line.starts_with("  ") || line.starts_with("    "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        lane.contains("--test conformance_p2p_peer_admission"),
-        "the p2p-gated target must be in the p2p lane"
-    );
-    assert!("conformance_p2p_peer_admission".contains("p2p"));
-    assert!(
-        std::path::Path::new("tests/conformance_p2p_peer_admission.rs").exists(),
-        "positive control: the p2p-gated target must exist"
-    );
-}
-
 /// The cut-1 scope fence is retired **by name**, with a record of why.
 #[test]
 fn the_cut_one_scope_fence_is_retired_by_name() {

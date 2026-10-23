@@ -1,4 +1,4 @@
-use crate::harness::{Journal, Sender};
+use super::harness::{Journal, Sender};
 use arc_swap::ArcSwap;
 use futures::{StreamExt, stream::BoxStream};
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;

@@ -19,8 +19,7 @@
 //! All tests require the `test-fake-mcp` feature because they exercise a real stdio child.
 
 #![cfg(feature = "test-fake-mcp")]
-mod common;
-
+use crate::common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

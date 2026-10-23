@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::observed_host::{HttpCounts, ObservedHost};
-use crate::proposal_harness::ProposalFixture;
+use super::observed_host::{HttpCounts, ObservedHost};
+use super::proposal_harness::ProposalFixture;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(45);
 const BODY_A: &str = "A's conversation-bound architecture draft.";

@@ -7,8 +7,6 @@
 //! running TUI; adding unit tests for it would require full filesystem
 //! setup which we avoid in this lib-level E2E layer.
 
-mod common;
-
 use rustain::adapters::command_registry::CommandRegistry;
 use rustain::domain::models::conversation::{ChatMessage, Conversation};
 use rustain::domain::models::{MessageRole, SessionMeta, ToolCallInfo, ToolResultInfo};

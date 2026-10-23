@@ -5,8 +5,7 @@
 //! `chat_pane::build_layout_metrics` + `view_state.reconcile` with `MockClock`;
 //! asserts post-state `scroll_offset` / `focused_turn` / `mode` directly.
 
-#[path = "common/render_helpers.rs"]
-mod common;
+use crate::render_helpers as common;
 
 use common::*;
 use rustain::adapters::tui::state::TabRenderState;

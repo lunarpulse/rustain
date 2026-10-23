@@ -4,8 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-mod common;
-
+use crate::common;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;

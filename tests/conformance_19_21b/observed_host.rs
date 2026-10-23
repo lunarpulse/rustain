@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use crate::inherited::{Host, Journal};
+use super::inherited::{Host, Journal};
 use axum::{
     body::{Body, to_bytes},
     extract::{Request, State},

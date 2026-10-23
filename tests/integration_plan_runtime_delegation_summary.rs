@@ -18,7 +18,7 @@ use rustain::domain::ports::EventEmitter;
 use rustain::domain::services::plan_runtime::{PlanRuntime, TaskTurnOutcome};
 use rustain::infrastructure::subagent::SubagentSpool;
 
-mod common;
+use crate::common;
 use common::stub_subagent::StubSubagentRunner;
 
 struct CapturedEvents {

@@ -3,8 +3,7 @@
 //! Validates the 5-stage markdown pipeline end-to-end through chat_pane rendering.
 //! Uses TestHarness to simulate streaming responses and verify visual output.
 
-mod e2e_harness;
-
+use crate::e2e_harness;
 use e2e_harness::TestHarness;
 use ratatui::style::Modifier;
 

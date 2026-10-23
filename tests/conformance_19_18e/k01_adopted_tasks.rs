@@ -13,13 +13,13 @@
 use rustain::adapters::a2a::RECIPIENT_ITEM_METADATA_KEY;
 use serde_json::json;
 
-use crate::harness::{
+use super::harness::{
     BoundHost, K_P1A, K_P1A_ENV, K_P1B, K_P1B_ENV, K_P2, K_P2_ENV, K_U, K_U_ENV, ORPHAN_WARN, P1_X,
     PENDING_WARN, adopting, lines_with, listed_ids, log_cursor, log_since, no_live_inbound_node,
     park_in_flight, pin_hex, send_and_admit, send_and_leave_pending, server, setup, spec,
     status_rows, wait_pending_record,
 };
-use crate::{assert_never_bytes, assert_restart_projection};
+use super::{assert_never_bytes, assert_restart_projection};
 
 /// The seed config: `K_P1A` and `K_U` unbound on an `ask` host.
 fn unbound_seed() -> serde_json::Value {

@@ -8,9 +8,9 @@ use rustain::domain::ports::ApprovalPersistencePort;
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use serde_json::json;
 
-use crate::k02_matrix::{approve_once, assert_pending_without_egress};
-use crate::observed_host::{HttpCounts, ObservedHost};
-use crate::proposal_harness::ProposalFixture;
+use super::k02_matrix::{approve_once, assert_pending_without_egress};
+use super::observed_host::{HttpCounts, ObservedHost};
+use super::proposal_harness::ProposalFixture;
 
 const TOOL: &str = "propose_team_message";
 const R1: &str = "Proposal shown to the operator. Nothing has been sent; the operator decides whether to send it to lena-po.";

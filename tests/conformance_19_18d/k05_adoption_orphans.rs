@@ -26,7 +26,7 @@
 //! 4, phase (6) = 5) are over a journal whose only bound item is phase (4)'s
 //! `new`.
 
-use crate::harness::{
+use super::harness::{
     BoundHost, HostSpec, K_P1A, K_P1A_ENV, K_P1B, K_P1B_ENV, K_P2, K_P2_ENV, K_U, K_U_ENV, Listen,
     P1_X, SETTLE, Sender, adopting, bound_item_address, follow_up_metadata, host_log_since,
     item_id_for_task, items, listed_ids, log_cursor, log_since, park_in_flight, pin_hex,

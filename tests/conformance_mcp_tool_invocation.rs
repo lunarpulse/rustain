@@ -2,8 +2,8 @@
 //!
 //! Exercises AC-1 through AC-8 using the fake-mcp-server binary
 //! and pure-unit tests on the projection helpers.
-mod common;
-
+#[cfg(feature = "test-fake-mcp")]
+use crate::common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

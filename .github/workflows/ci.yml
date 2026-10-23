@@ -17,11 +17,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Use the same `@stable` toolchain as every other job in this file (they pass).
-      # An earlier `@1.94` pin (AI-12.1) resolved to a different 1.94.x lint set than
-      # local and broke the `-D warnings` gate; if a future clippy bump adds lints, fix
-      # them rather than re-pinning to a ref that drifts from contributors' `stable`.
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain is pinned by rust-toolchain.toml (Grand Plan P0-5); the action ref
+      # matches it so the runner installs exactly one toolchain. Bump both together.
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
 
       - uses: actions/setup-python@v5
@@ -51,29 +50,20 @@ jobs:
           rustup target add aarch64-apple-darwin
           cargo check --target aarch64-apple-darwin
 
-      # Clippy ADVISORY (Epic 12 retro AI-12.1). The local baseline is burned to 0 across
-      # all feature lanes, but the GitHub runner's `stable` clippy drifts ahead of local
-      # toolchains and emits lints we can't reproduce/fix locally — as a hard `-D warnings`
-      # gate that constantly failed and BLOCKED downstream jobs/workflows. So it now runs
-      # `continue-on-error: true`: warnings are surfaced in the log (and shown as a
-      # tolerated/non-blocking step) without failing the Check job. Keep the local habit of
-      # `cargo clippy -- -D warnings` clean; do not let CI version-drift block the pipeline.
-      # vector-search clippy lives in nightly-vector-search.yml (its ort/fastembed build
-      # pulls network and would slow per-PR CI).
-      - name: Clippy (advisory — default)
-        continue-on-error: true
+      # Clippy is BLOCKING again (Grand Plan P0-5). It was advisory while
+      # rust-toolchain.toml floated on `stable` and the runner's lint set drifted
+      # from local; the exact pin removes that drift. vector-search clippy lives in
+      # nightly-vector-search.yml (its ort/fastembed build pulls network).
+      - name: Clippy (default)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Clippy (advisory — telegram+cron)
-        continue-on-error: true
+      - name: Clippy (telegram+cron)
         run: cargo clippy --all-targets --features "telegram cron" -- -D warnings
 
-      - name: Clippy (advisory — a2a)
-        continue-on-error: true
+      - name: Clippy (a2a)
         run: cargo clippy --all-targets --features a2a -- -D warnings
 
-      - name: Clippy (advisory — p2p)
-        continue-on-error: true
+      - name: Clippy (p2p)
         run: cargo clippy --all-targets --features p2p -- -D warnings
 
       - name: Format
@@ -86,47 +76,27 @@ jobs:
               exit 1
           fi
 
+      # The whole default suite, not an enumeration (Grand Plan P0-3/P0-5). Integration
+      # tests are area binaries (tests/<area>/main.rs, Cargo.toml [[test]]); the lib
+      # guards `every_integration_test_root_is_owned_by_one_area_binary` and
+      # `every_integration_test_root_runs_in_a_ci_lane_with_its_features`
+      # (src/domain/ports/capability_provider.rs) fail this job if a root is
+      # unowned or if no invocation below enables the features a gated root needs.
       - name: Test
         run: |
-          cargo test --no-run --tests
-          cargo test --lib
-          cargo test --test conformance_18_3b_policy
-          cargo test --features test-instrumentation --test conformance_18_3c_response_modes
-          cargo test --test conformance_18_3d_consent
-          cargo test --test conformance_18_3a_room
-          cargo test --test conformance_18_3a_b_addressing
-          cargo test --test conformance_18_3a_c_artifacts
-          cargo test --test e2e_help_overlay
-          cargo test --test conformance_18_3a_d_apply
-          cargo test --test conformance_18_3a_e_apply_surface -- --test-threads=1
-          cargo test --test conformance_18_3a_f_resolution -- --test-threads=1
-          # Story 18.4b. Default-feature target, so it belongs to THIS job's
-          # explicit enumeration. Its stem deliberately omits `p2p` — the
-          # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` guard
-          # filters `tests/` by `stem.contains("p2p")` and would otherwise
-          # demand a `--features p2p` lane this target does not need.
-          cargo test --test conformance_18_4b_peer_surface
-          # Story 18.4d. Same reasoning as the line above: a default-feature
-          # target whose stem omits `p2p`, so it belongs to this job's explicit
-          # enumeration rather than the `--features p2p` lane.
-          cargo test --test conformance_18_4d_reach_and_ping
-          # Story 19.5. Same reasoning again: a default-feature target whose stem
-          # matches none of the a2a/p2p/mcp wiring guards, so nothing forces it into
-          # a feature lane and `cargo test --no-run --tests` above only COMPILES it.
-          # Unwired, the release-workflow ratchet is the very false green it exists
-          # to prevent — release.yml could lose `a2a,p2p` with every lane green
-          # (Story 19.5 A11, code review D2). Text assertions, microseconds.
-          cargo test --test conformance_release_workflow
-          # Story 19.20a: default-lane provenance target must execute, not only compile.
-          cargo test --test conformance_19_20a_provenance
-          # Story 19.20a PF2: execute the extended standalone fixture, previously compile-only.
-          cargo test --features test-instrumentation --test conformance_19_20c_standalone
+          cargo test --all-targets --no-fail-fast
+          # Roots gated on `test-instrumentation` alone (the CLI config/session
+          # targets in `cli`, the standalone approval/response-mode keystones in
+          # `a2a`) compile out of the default build; run those binaries with the
+          # feature on and nothing else, so the keystones execute without `a2a`.
+          cargo test --features test-instrumentation --test cli --test a2a
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
 
       - name: Test with skills-validation feature (lib only)
@@ -137,7 +107,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
 
       - uses: actions/setup-python@v5
@@ -147,81 +118,35 @@ jobs:
       - name: Install pinned source-metric parser
         run: python3 -m pip install -r tools/ci/requirements-metrics.txt
 
-      # Story 17.4b standing ruling. Before this lane, all nine tests/a2a_*.rs files
-      # compiled but NEVER executed: the Check job runs `cargo test --lib` only, so the
-      # feature-gated files were cfg'd away and the ungated ones simply were not in the
-      # lib target. Nine test files that were a false green.
-      #
-      # Targets are named explicitly rather than via a blanket `cargo test --features
-      # a2a` so this lane stays fast and cannot be destabilised by unrelated integration
-      # suites. The list is kept honest by the lib guard
-      # `every_a2a_integration_test_is_wired_into_the_ci_a2a_lane`
-      # (src/domain/ports/capability_provider.rs) — adding a tests/*a2a*.rs file without
-      # adding it here fails the DEFAULT lane.
-      #
-      # Story 18.1b, R1: `--test conformance` is added here. It was in NO workflow, so
-      # `MAX_KNOWN_STD_SYNC_LOCKS` — the async-lock ratchet the whole codebase is
-      # supposed to be held to — was a manual-only gate and an untagged
-      # `std::sync::Mutex` could merge with every lane green. This story adds a task
-      # map and a server state holding locks, so it owns the gap it would otherwise
-      # widen.
+      # Story 17.4b standing ruling: every A2A integration test must EXECUTE in CI,
+      # not merely compile. Since Grand Plan P0-3 the a2a-gated roots live in the
+      # `a2a` area binary (tests/a2a/main.rs) and the whole suite runs here under the
+      # feature; the lib guard `every_integration_test_root_runs_in_a_ci_lane_with_its_features`
+      # fails the DEFAULT lane if a gated root has no invocation that enables it.
       #
       # `test-instrumentation` is REQUIRED, not incidental: AC2b's zero-mutation
       # ratchet and AC7b's card-signing counter are both cfg'd behind it, and without
       # it those keystones would silently degrade to their behavioural halves. Pinned
       # by `the_ci_a2a_lane_enables_the_zero_mutation_ratchet`.
-      - name: Test with a2a feature (lib + every A2A integration target)
+      - name: Test with a2a feature (lib + whole suite)
         run: |
           cargo test --lib --features a2a,test-instrumentation
-          cargo test --features a2a,test-instrumentation \
-            --test a2a_card \
-            --test a2a_client \
-            --test a2a_composition \
-            --test a2a_config \
-            --test a2a_fixtures \
-            --test a2a_lifecycle \
-            --test a2a_jws \
-            --test a2a_provider \
-            --test a2a_server \
-            --test a2a_server_exec \
-            --test a2a_trust_registry \
-            --test conformance \
-            --test conformance_17_2a_node_journal \
-            --test conformance_19_16d_retract \
-            --test conformance_19_16f_retract_surface \
-            --test conformance_19_17_a2a_fanout \
-            --test conformance_19_18_a2a_reply_thread \
-            --test conformance_19_18c_a2a_item_capability \
-            --test conformance_19_18d0_a2a_typed_policy_principal \
-            --test conformance_19_18d_a2a_peer_binding \
-            --test conformance_19_18e_a2a_task_continuity \
-            --test conformance_19_19_a2a_consultation \
-            --test conformance_19_21_a2a_distribution \
-            --test conformance_19_21b_agent_proposal \
-            --test conformance_a2a_architecture \
-            --test conformance_18_3c_response_modes \
-            --test conformance_18_3a_c_artifacts \
-            --test conformance_transparency \
-            --test conformance_transparency_surfacing \
-            --test conformance_18_3a_d_apply \
-            --test conformance_18_3a_e_apply_surface \
-            --test conformance_18_3a_f_resolution \
-            --test conformance_cow_mergeback
+          cargo test --features a2a,test-instrumentation --all-targets --no-fail-fast
 
       - name: Execute the real cron proposal front-door consumers
         run: |
           set -o pipefail
           cargo test --locked --features a2a,test-instrumentation,cron \
-            --test conformance_19_21_a2a_distribution -- --exact \
-            g_entrypoints::cron_scheduler_job_denies_proposal_with_trusted_writer \
-            g_k06_payload::interleaved_cron_keeps_attached_proposal_on_invoking_conversation \
+            --test a2a -- --exact \
+            conformance_19_21_a2a_distribution::g_entrypoints::cron_scheduler_job_denies_proposal_with_trusted_writer \
+            conformance_19_21_a2a_distribution::g_k06_payload::interleaved_cron_keeps_attached_proposal_on_invoking_conversation \
             | tee cron-proposal-results.txt
           python3 - <<'PY'
           import pathlib, re
           text = pathlib.Path("cron-proposal-results.txt").read_text()
           names = [
-              "g_entrypoints::cron_scheduler_job_denies_proposal_with_trusted_writer",
-              "g_k06_payload::interleaved_cron_keeps_attached_proposal_on_invoking_conversation",
+              "conformance_19_21_a2a_distribution::g_entrypoints::cron_scheduler_job_denies_proposal_with_trusted_writer",
+              "conformance_19_21_a2a_distribution::g_k06_payload::interleaved_cron_keeps_attached_proposal_on_invoking_conversation",
           ]
           assert re.search(r"^running 2 tests$", text, re.M), "Cron proposal consumers selected zero/wrong tests"
           for name in names:
@@ -235,24 +160,13 @@ jobs:
           name: story-19-21g-cron
           path: cron-proposal-results.txt
 
-      # The other half of the contract: the ungated guards assert that A2A is OFF by
-      # default and that only config parsing compiles without the feature. Those claims
-      # are only meaningful in a build that does NOT enable `a2a`.
-      - name: Test A2A off-by-default guards (no feature)
-        run: |
-          cargo test \
-            --test a2a_config \
-            --test a2a_trust_registry \
-            --test conformance_a2a_architecture \
-            --test conformance_transparency \
-            --test conformance_transparency_surfacing
-
   p2p:
     name: P2P Feature
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
 
       # Run only bans: aggregate `cargo deny check` is intentionally excluded because this
@@ -264,112 +178,60 @@ jobs:
           cargo deny check bans
 
       # The default Check job never enables this non-default transport feature.
-      # Targets are explicit; the default-lane sibling guard
-      # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` prevents a
-      # newly added tests/*p2p*.rs target from becoming a false green.
-      - name: Test with p2p feature (lib + every P2P integration target)
+      # The p2p-gated roots live in the `p2p` area binary (tests/p2p/main.rs); the
+      # relay targets additionally need `p2p-test-utils` (hermetic relay fixture,
+      # `bind_without_direct_paths` — `debug_assertions`-gated, so this stays a
+      # debug-profile run) and the relay-server target needs `relay-server`. One
+      # invocation with the union runs them all; the lib guard
+      # `every_integration_test_root_runs_in_a_ci_lane_with_its_features` checks it.
+      - name: Test with p2p feature (lib + whole suite)
         run: |
           cargo test --lib --features p2p
-          cargo test --features p2p \
-            --test conformance_p2p_architecture \
-            --test conformance_p2p_dial_verdict \
-            --test conformance_p2p_ingress \
-            --test conformance_p2p_transport \
-            --test conformance_p2p_peer_admission \
-            --test conformance_p2p_reach
-          # Story 18.4c — the relay target needs the hermetic relay fixture,
-          # which lives behind `iroh/test-utils`. `--features p2p` is the whole
-          # feature list of the command above, so dropping this target into it
-          # would not fail an assertion: it would fail to COMPILE, and the lane
-          # would go red on a build error. It therefore runs under its own
-          # feature key, in this same job, where the default-lane wiring guard
-          # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` sees it.
-          cargo test --features p2p-test-utils \
-            --test conformance_p2p_relay
-          # Story 18.4c-b — the relay SERVER target. Same reason as above, one
-          # feature further: it needs `relay-server` (the embedded iroh-relay
-          # server it spawns through rustain's own builder) AND `p2p-test-utils`
-          # (the client's `bind_without_direct_paths` + the self-signed-CA
-          # override, both of which are also `debug_assertions`-gated, so this
-          # command must stay a debug-profile run). Its stem contains `p2p`, so
-          # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` forces it
-          # to be named here.
-          cargo test --features p2p-test-utils,relay-server \
-            --test conformance_p2p_relay_server
-          # Story 18.4a — Topic replication, equivocation, taint and the
-          # relay-only convergence keystone. Its stem contains `p2p`, so
-          # `every_p2p_integration_test_is_wired_into_the_ci_p2p_lane` forces it
-          # to be named here; it needs `p2p-test-utils` for the hermetic relay
-          # fixture and `bind_without_direct_paths` (the `clear_ip_transports`
-          # seam, additionally `debug_assertions`-gated, so this command must
-          # stay a debug-profile run).
-          cargo test --features p2p-test-utils \
-            --test conformance_18_4a_p2p_topic
-
+          cargo test --features p2p,p2p-test-utils,relay-server --all-targets --no-fail-fast
   mcp:
     name: MCP Feature
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
 
-      # Story 17.5a. The Check job runs `cargo test --lib`, so MCP integration
-      # targets would otherwise compile but never execute. Keep this explicit list
-      # fast and honest: the lib guard
-      # `every_mcp_integration_test_is_wired_into_the_ci_mcp_lane`
-      # (src/domain/ports/capability_provider.rs) fails when a behavioral MCP
-      # target is added without a matching `--test` entry here.
-      - name: Test with mcp feature (lib + every MCP integration target)
+      # Story 17.5a: MCP integration targets must execute, not merely compile.
+      # MCP itself is a default feature, so the Check job's whole-suite run already
+      # covers the surface WITHOUT the fake server; this lane adds `test-fake-mcp`,
+      # which turns on the fake-server-backed roots in the `mcp` area binary
+      # (tests/mcp/main.rs) and the fake-backed cases in `cli`/`orchestration`.
+      # A true MCP-off build (`--no-default-features`) is pre-existing broken by
+      # DF-17-4a-6: runtime, startup and ACP reference MCP-gated adapters.
+      - name: Test with the fake MCP server (lib + whole suite)
         run: |
           cargo test --lib --features mcp
-          cargo test --features test-fake-mcp \
-            --test doctor_health \
-            --test conformance_acp_mcp \
-            --test conformance_mcp_config \
-            --test conformance_mcp_lifecycle \
-            --test conformance_mcp_profile_swap \
-            --test conformance_mcp_status_panel \
-            --test conformance_mcp_tool_invocation \
-            --test integration_mcp_http \
-            --test integration_mcp_approval_persistence \
-            --test integration_mcp_env_expansion \
-            --test integration_mcp_resilience \
-            --test integration_mcp_routing \
-            --test integration_mcp_tasks \
-            --test unit_mcp_content_rendering \
-            --test unit_mcp_unsupported_transport \
-            --test conformance_capability_registry
-
-      # MCP is enabled by default, but the fake server is not: these targets
-      # exercise the MCP surface without `test-fake-mcp`. A true MCP-off build
-      # (`--no-default-features`) is pre-existing broken by DF-17-4a-6: runtime,
-      # startup, and ACP reference MCP-gated adapters before any target compiles.
-      - name: Test MCP targets without test-fake-mcp (default features)
-        run: |
-          cargo test \
-            --test conformance_mcp_config \
-            --test conformance_mcp_profile_swap \
-            --test conformance_mcp_status_panel \
-            --test integration_mcp_approval_persistence \
-            --test integration_mcp_env_expansion \
-            --test unit_mcp_content_rendering \
-            --test unit_mcp_unsupported_transport
+          cargo test --features test-fake-mcp --all-targets --no-fail-fast
 
   vector-search:
-    name: Vector Search Feature
+    name: Heavy Feature Lanes (vector-search, wasm-sandbox)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
 
-      # Compiles fastembed/ort + reqwest + bm25 and runs vector-search lib tests
-      # plus the vector_search integration test (mockito-based, no real network).
-      # The #[ignore] real-model / network tests do NOT run here — they are
-      # exercised by the nightly-vector-search workflow.
+      # Compiles fastembed/ort + reqwest + bm25 and runs the vector-search lib
+      # tests plus the `memory` area binary, which owns tests/vector_search.rs
+      # and tests/regression_removal_integrity.rs (mockito-based, no real
+      # network). The #[ignore] real-model / network tests do NOT run here —
+      # they are exercised by the nightly-vector-search workflow.
       - name: Test with vector-search feature
-        run: cargo test --features vector-search --test vector_search
+        run: cargo test --features vector-search --test memory
+
+      # tests/wasm_execution_sandbox.rs (module of `orchestration`) is gated on
+      # `wasm-sandbox` and, until Grand Plan P0-3, ran in no workflow at all — a
+      # false green the lib guard now refuses. wasmtime is heavy, so it rides this
+      # already-heavy lane rather than Check.
+      - name: Test with wasm-sandbox feature
+        run: "cargo test --features wasm-sandbox --test orchestration wasm_execution_sandbox::"
   macos-unit:
     name: macOS Unit Tests (daemon/ProcInspector)
     runs-on: macos-latest
@@ -378,7 +240,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
 
       - name: Detect daemon-related path changes
@@ -400,16 +262,19 @@ jobs:
           cargo test --lib adapters::daemon::pidfile
           cargo test --lib adapters::daemon::procargs
 
+      # tests/daemon_crash_recovery.rs is a module of the `daemon` area binary;
+      # the filter keeps this job to that module's non-ignored tests.
       - name: Run macOS daemon integration tests (non-ignored)
         if: steps.filter.outputs.daemon-paths == 'true' || github.event_name == 'push'
-        run: cargo test --test daemon_crash_recovery
+        run: "cargo test --test daemon daemon_crash_recovery::"
   tui-tests:
     name: Python TUI Tests
     runs-on: ubuntu-latest
     needs: [check]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
 
       - name: Build rustain binary
@@ -457,7 +322,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
       - name: Build A2A release capture binary
         run: cargo build --release --features a2a
@@ -494,7 +360,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
       - name: Build four-feature release capture binary
         run: cargo build --release --features self-update,relay-server,a2a,p2p
@@ -585,7 +452,8 @@ jobs:
       RUSTAIN_CONFLICT_CAPTURE_RUN_ID: conflict-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
       - name: Build four-feature release capture binary
         run: cargo build --locked --release --features self-update,relay-server,a2a,p2p

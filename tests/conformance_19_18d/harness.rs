@@ -1,7 +1,7 @@
 //! Story 19.18d — the SHARED keystone harness (`F14`).
 //!
 //! Every 19.18d front-door keystone module builds on this file
-//! (`crate::harness::…`). Rule 2 (`A21`) is enforced HERE, once:
+//! (`super::harness::…`). Rule 2 (`A21`) is enforced HERE, once:
 //!
 //! 1. ONE `<workspace>/.rustain/a2a.json` is written per host start: the roster
 //!    under `agents` and the caller's `server` block (`serde_json::Value`).

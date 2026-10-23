@@ -2,8 +2,8 @@ use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::domain::models::{PermissionMode, ResponseMode, SemanticMessageType};
 use serde_json::json;
 
-use crate::observed_host::{HttpCounts, ObservedHost};
-use crate::proposal_harness::ProposalFixture;
+use super::observed_host::{HttpCounts, ObservedHost};
+use super::proposal_harness::ProposalFixture;
 
 const R2: &str = "Not proposed: no operator surface is attached to approve it. Nothing was sent.";
 

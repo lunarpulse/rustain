@@ -3,8 +3,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use crate::harness::{Journal, Sender, read_room_events};
-use crate::k02_board_rules::{controlled_peer, list_request_count};
+use super::harness::{Journal, Sender, read_room_events};
+use super::k02_board_rules::{controlled_peer, list_request_count};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::{JournalEntry, RoomEvent};
 use rustain::domain::ports::{RoomJournalError, RoomJournalReader};

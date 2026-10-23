@@ -1,7 +1,7 @@
 //! Story 19.21 K05 — attached-rail send lifecycle keystones.
 
-use crate::attached_harness::{AppendGateJournal, AttachedClient, AttachedDaemon, RecipientHost};
-use crate::harness::{Journal, read_room_events};
+use super::attached_harness::{AppendGateJournal, AttachedClient, AttachedDaemon, RecipientHost};
+use super::harness::{Journal, read_room_events};
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{AttachMode, ClientFrame, ConnectionTier, DaemonFrame};
 use rustain::adapters::daemon::server::{
@@ -524,7 +524,7 @@ async fn full_targeted_queue_emits_terminal_error_then_eof_and_never_reroutes() 
         .await
         .expect("half-close origin writer");
     let terminal_frame = tokio::time::timeout(
-        crate::attached_harness::FIXTURE_TIMEOUT,
+        super::attached_harness::FIXTURE_TIMEOUT,
         rustain::adapters::daemon::protocol::read_frame::<_, DaemonFrame>(&mut origin.stream),
     )
     .await
@@ -553,7 +553,7 @@ async fn full_targeted_queue_emits_terminal_error_then_eof_and_never_reroutes() 
         "M41: full targeted output must close with its explicit terminal error"
     );
     let eof = tokio::time::timeout(
-        crate::attached_harness::FIXTURE_TIMEOUT,
+        super::attached_harness::FIXTURE_TIMEOUT,
         rustain::adapters::daemon::protocol::read_frame::<_, DaemonFrame>(&mut origin.stream),
     )
     .await

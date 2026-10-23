@@ -11,12 +11,12 @@
 use rustain::adapters::a2a::exec::{CANCEL_DETAIL, RESTART_DETAIL};
 use serde_json::json;
 
-use crate::harness::{
+use super::harness::{
     BoundHost, K_P1A, K_P1A_ENV, K_P1B, K_P1B_ENV, ORPHAN_WARN, PENDING_WARN, SETTLE, adopting,
     detail, lines_with, log_cursor, log_since, park_in_flight, send_and_admit, server, setup, spec,
     wire_state,
 };
-use crate::{assert_never_bytes, assert_restart_projection};
+use super::{assert_never_bytes, assert_restart_projection};
 
 /// `K02` — a binding without `adoptPreBinding` adopts nothing: both keys of
 /// the pin answer the original key's recovered tasks as never-existing.

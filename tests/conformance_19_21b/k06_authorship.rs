@@ -10,7 +10,7 @@ use rustain::infrastructure::subagent::NodeJournal;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use crate::inherited::{Host, Sender, read_room_events};
+use super::inherited::{Host, Sender, read_room_events};
 
 const SETTLE: Duration = Duration::from_secs(45);
 

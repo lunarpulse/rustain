@@ -41,8 +41,8 @@
 //! (mirrors the 14-9 injected-clock/id-source precedent reused across the ACP
 //! conformance suite).
 
-mod common;
-
+#[cfg(feature = "test-fake-mcp")]
+use crate::common;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;

@@ -11,7 +11,7 @@
 //! This test invokes the `code-reviewer` capability with EXACTLY the payload its
 //! schema advertises (`{"prompt": ...}`) and asserts success. It fails today.
 
-mod common;
+use crate::common;
 use common::stub_subagent::StubSubagentRunner;
 
 use std::sync::Arc;

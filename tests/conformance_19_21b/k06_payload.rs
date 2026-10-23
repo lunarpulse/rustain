@@ -5,8 +5,8 @@ use rustain::domain::models::{JournalRecord, ResponseMode, RoomEvent};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::observed_host::{HttpCounts, ObservedHost};
-use crate::proposal_harness::ProposalFixture;
+use super::observed_host::{HttpCounts, ObservedHost};
+use super::proposal_harness::ProposalFixture;
 
 const BODY: &str = " \tArchitecture note — café 🛰️\n\tsecond row\nlast row \t ";
 const CONVERSATION_MARKER: &str = "CONVERSATION_CONTEXT_MUST_NOT_LEAK_7ef4";

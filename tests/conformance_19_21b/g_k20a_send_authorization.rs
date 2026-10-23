@@ -1,5 +1,5 @@
-use crate::attached_harness::{AttachedClient, AttachedDaemon, FIXTURE_TIMEOUT, RecipientHost};
-use crate::g_harness::{completed, fence};
+use super::attached_harness::{AttachedClient, AttachedDaemon, FIXTURE_TIMEOUT, RecipientHost};
+use super::g_harness::{completed, fence};
 use rustain::adapters::daemon::protocol::{ClientFrame, ConnectionTier, DaemonFrame};
 use rustain::domain::models::{
     ApprovalOutcome, Authorship, JournalRecord, PermissionMode, RoomEvent, SendAuthorization,
@@ -137,7 +137,7 @@ async fn g_k20a_delegation_authorization_follows_the_gate() {
             row.summary
         );
         assert_eq!(
-            crate::harness::read_room_events(&host.journal)
+            super::harness::read_room_events(&host.journal)
                 .await
                 .iter()
                 .filter(|(_, e)| matches!(e, RoomEvent::RecipientItemReceived { .. }))

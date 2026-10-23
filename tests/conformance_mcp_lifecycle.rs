@@ -2,8 +2,8 @@
 //! Conformance tests for MCP lifecycle — Story 9.1 reconnect & shutdown.
 //!
 //! Uses the `fake-mcp-server` binary to exercise real stdio MCP sessions.
-mod common;
-
+#[cfg(feature = "test-fake-mcp")]
+use crate::common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

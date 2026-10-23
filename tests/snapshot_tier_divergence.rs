@@ -2,8 +2,7 @@
 //! vs codex/gemini-cli/opencode (UX-DR-COLLAPSED-TIER, ADR-16-01 §Consequences).
 //! Re-record only when ADR-16-01 §Q3 LLM-polish lands.
 
-#[path = "common/render_helpers.rs"]
-mod common;
+use crate::render_helpers as common;
 
 use common::*;
 use rustain::domain::clock::MockClock;

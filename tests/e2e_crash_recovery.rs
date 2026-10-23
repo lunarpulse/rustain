@@ -4,8 +4,7 @@
 //! SessionManager state machine, context rebuild via API messages,
 //! and recovery prompt input handling.
 
-mod e2e_harness;
-
+use crate::e2e_harness;
 use e2e_harness::TestHarness;
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::domain::models::{

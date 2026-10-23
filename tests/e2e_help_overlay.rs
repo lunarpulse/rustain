@@ -14,7 +14,7 @@ use rustain::domain::models::FocusState;
 use rustain::domain::models::visual::OverlayType;
 use serial_test::serial;
 
-mod e2e_harness;
+use crate::e2e_harness;
 use e2e_harness::TestHarness;
 
 // ═══════════════════════════════════════════════════════════════════════════

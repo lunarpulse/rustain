@@ -12,9 +12,9 @@ use rustain::domain::models::{
 use rustain::domain::services::approval_runtime::ApprovalRuntimeEvent;
 use serde_json::json;
 
-use crate::k02_matrix::{approve_once, assert_pending_without_egress};
-use crate::observed_host::ObservedHost;
-use crate::proposal_harness::ProposalFixture;
+use super::k02_matrix::{approve_once, assert_pending_without_egress};
+use super::observed_host::ObservedHost;
+use super::proposal_harness::ProposalFixture;
 
 // The standalone context path consumes replicated peer summaries. The exact
 // recipient-item [c] selection front door belongs to the held attached slice.

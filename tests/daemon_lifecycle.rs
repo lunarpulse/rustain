@@ -110,6 +110,7 @@ async fn daemon_composition_starts_a2a_agent_card_discovery_for_configured_peers
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
+        .map(crate::common::process::ChildGuard::new)
         .unwrap();
     // 18.9b-a review patch — poll (bounded) for the daemon's card GET instead
     // of a fixed 250 ms sleep: wiremock verifies `.expect(1)` at server drop,
@@ -203,6 +204,7 @@ async fn daemon_root_loads_the_item_capability_key_and_never_rewrites_a_bad_one(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
+            .map(crate::common::process::ChildGuard::new)
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
         while server
@@ -300,6 +302,7 @@ async fn base_profile_daemon_with_peers_upgrades_toolset_and_discloses() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
+        .map(crate::common::process::ChildGuard::new)
         .unwrap();
 
     // Boot discovery still fires: egress composition happens before the

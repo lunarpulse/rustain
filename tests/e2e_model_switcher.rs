@@ -20,7 +20,7 @@ use rustain::domain::models::FocusState;
 use rustain::domain::models::provider::ModelDescriptor;
 use rustain::domain::models::visual::OverlayType;
 
-mod e2e_harness;
+use crate::e2e_harness;
 use e2e_harness::TestHarness;
 
 fn model(id: &str, display: &str, provider: &str, ctx: u32) -> ModelDescriptor {

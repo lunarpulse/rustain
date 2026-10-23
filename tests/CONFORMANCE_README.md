@@ -67,15 +67,16 @@ Guidelines:
 ## Running Conformance Tests
 
 ```bash
-# Default: architecture conformance only (any pending-story skeletons are ignored)
-cargo test --test conformance
+# Architecture conformance (tests/conformance.rs is a module of the `core` area binary):
+cargo test --test core conformance::
 
-# A specific behavioral file, including any skeletons it still carries:
-cargo test --test conformance_subject -- --include-ignored   # runs ignored ones too
-cargo test --test conformance_subject                        # skips ignored (CI-safe)
+# A specific behavioral file, including any skeletons it still carries
+# (roots are modules of their area binary — see TESTING.md "Integration-test layout"):
+cargo test --test a2a conformance_subject:: -- --include-ignored   # runs ignored ones too
+cargo test --test a2a conformance_subject::                        # skips ignored (CI-safe)
 
-# All conformance tests in one go:
-cargo test --tests conformance
+# Every conformance test in every area binary:
+cargo test --all-targets conformance
 ```
 
 ## Relationship to Story ACs

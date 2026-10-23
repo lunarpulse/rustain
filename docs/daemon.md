@@ -200,7 +200,7 @@ A recycled/foreign PID is treated as **stale** (reclaimable), never `Running` â€
 - **Real init system â€” systemd** (`nightly-daemon.yml` `daemon-systemd` job):
 
   ```sh
-  cargo test --test daemon_crash_recovery daemon_real_systemd_recovery_system -- --ignored --nocapture
+  cargo test --test daemon daemon_crash_recovery::daemon_real_systemd_recovery_system -- --ignored --nocapture
   ```
 
   Uses `--system` scope + passwordless `sudo` on `ubuntu-latest` (no user session
@@ -211,7 +211,7 @@ A recycled/foreign PID is treated as **stale** (reclaimable), never `Running` â€
 - **Real init system â€” launchd** (`nightly-daemon.yml` `daemon-launchd` job):
 
   ```sh
-  cargo test --test daemon_crash_recovery daemon_real_launchd_recovery -- --ignored --nocapture
+  cargo test --test daemon daemon_crash_recovery::daemon_real_launchd_recovery -- --ignored --nocapture
   ```
 
   Bootstraps the plist into `gui/$(id -u)`, `kill -9`s the daemon, asserts launchd
@@ -220,7 +220,7 @@ A recycled/foreign PID is treated as **stale** (reclaimable), never `Running` â€
 - **Local `--user` test** (for real-session/local runs):
 
   ```sh
-  cargo test --test daemon_crash_recovery daemon_real_systemd_recovery -- --ignored --nocapture
+  cargo test --test daemon daemon_crash_recovery::daemon_real_systemd_recovery -- --ignored --nocapture
   ```
 
 ### CI lane signal policy

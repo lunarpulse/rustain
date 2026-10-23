@@ -8,6 +8,7 @@ pub mod eval_report_writer;
 pub mod eval_types;
 #[cfg(feature = "test-fake-mcp")]
 pub mod fake_mcp_http_server;
+pub mod process;
 pub mod stub_subagent;
 #[cfg(feature = "test-fake-mcp")]
 #[allow(dead_code)] // used only by targets that spawn the fake-mcp-server

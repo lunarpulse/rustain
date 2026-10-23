@@ -14,12 +14,14 @@
 #[path = "conformance_19_18d/k07_resolver.rs"]
 mod k07_resolver;
 
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_18d/k09_journal.rs"]
 mod k09_journal;
 
 #[path = "conformance_19_18d/process_runs.rs"]
 mod process_runs;
 
+#[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_18d/harness.rs"]
 mod harness;
 

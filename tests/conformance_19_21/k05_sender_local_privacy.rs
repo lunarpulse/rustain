@@ -1,6 +1,6 @@
 //! Story 19.21 R01 — sender-local action facts stay off raw Peer-tier wire events.
-use crate::attached_harness::{AttachedClient, AttachedDaemon, RecipientHost};
-use crate::harness::read_room_events;
+use super::attached_harness::{AttachedClient, AttachedDaemon, RecipientHost};
+use super::harness::read_room_events;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::daemon::protocol::{AttachMode, ConnectionTier, DaemonFrame};
 use rustain::domain::models::{Authorship, RoomEvent};
@@ -90,7 +90,7 @@ async fn peer_raw_events_omit_sender_action_facts_but_keep_sanitized_legacy_disp
         .record_event(RoomEvent::Unrecognized)
         .await
         .expect("append the domain-stream fence");
-    tokio::time::timeout(crate::attached_harness::FIXTURE_TIMEOUT, async {
+    tokio::time::timeout(super::attached_harness::FIXTURE_TIMEOUT, async {
         loop {
             let frame = peer.collect_one().await;
             if matches!(

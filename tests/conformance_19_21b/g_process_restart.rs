@@ -24,9 +24,9 @@ use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
-use crate::attached_harness::{AttachedClient, FIXTURE_TIMEOUT};
-use crate::g_harness::{BODY, completed, decide, fence, input, proposal};
-use crate::observed_host::{HttpCounts, ObservedHost};
+use super::attached_harness::{AttachedClient, FIXTURE_TIMEOUT};
+use super::g_harness::{BODY, completed, decide, fence, input, proposal};
+use super::observed_host::{HttpCounts, ObservedHost};
 
 #[derive(Clone, Default)]
 struct ProviderState {

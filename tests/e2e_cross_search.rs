@@ -5,8 +5,7 @@
 //! scan (`run_cross_search`) is covered by unit tests in
 //! `domain/services/cross_search.rs`.
 
-mod common;
-
+use crate::common;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 

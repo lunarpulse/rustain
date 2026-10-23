@@ -51,7 +51,7 @@ use rustain::domain::services::approval_runtime::ApprovalRuntimeEvent;
 use rustain::domain::services::peer_admission::BOUND_KEY_CONSENT_LINE;
 use rustain::infrastructure::runtime::transparency_bridge::team_command;
 
-use crate::harness::{
+use super::harness::{
     BoundHost, HostSpec, K_P1A, K_P1B, K_P1C, K_P2, K_P2_ENV, K_U, K_U_ENV, Operator, RawClient,
     Reply, Roster, SETTLE, bound_item_address, item_id_for_task, listed_ids, operator_app_state,
     pin_of, raw_payloads, received_row_for_task, setup, status_rows,
@@ -459,8 +459,8 @@ async fn k11_always_allow_persists_a_typed_pinned_grant_that_every_key_of_the_pi
     );
     let mut operator = host.attach_operator().await;
     let mut events = host.approval_events().await;
-    let pin_p1 = pin_of(crate::harness::P1_X);
-    let pin_p2 = pin_of(crate::harness::P2_X);
+    let pin_p1 = pin_of(super::harness::P1_X);
+    let pin_p2 = pin_of(super::harness::P2_X);
     let (p1a, p1b, p1c) = (host.client(K_P1A), host.client(K_P1B), host.client(K_P1C));
 
     // K_P1A asks; nothing is granted until the operator answers.
@@ -600,7 +600,7 @@ async fn k11_a_typed_pinned_grant_from_a_rap_card_answer_is_reused_by_bound_a2a_
         &mut events,
         &host.client(K_P2),
         "p2a",
-        &PolicyPrincipal::bound_a2a(pin_of(crate::harness::P2_X)),
+        &PolicyPrincipal::bound_a2a(pin_of(super::harness::P2_X)),
     )
     .await;
     drop(operator);
@@ -660,8 +660,8 @@ async fn await_wire_state(client: &RawClient, task: &str, wanted: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn k11_an_override_reaches_the_bound_pin_and_a_conflicted_pair_applies_neither() {
     setup();
-    let pin_p1 = pin_of(crate::harness::P1_X);
-    let pin_p2 = pin_of(crate::harness::P2_X);
+    let pin_p1 = pin_of(super::harness::P1_X);
+    let pin_p2 = pin_of(super::harness::P2_X);
     let bound_p1 = PolicyPrincipal::bound_a2a(pin_p1.clone());
     let bound_p2 = PolicyPrincipal::bound_a2a(pin_p2.clone());
     let unbound = SubmitterKey::from_api_key(K_U).policy_principal();
@@ -1060,7 +1060,7 @@ async fn k14_iv_untrusting_the_pin_makes_its_bound_keys_prompt_again() {
     let mut host = BoundHost::start(wait_spec()).await;
     let mut operator = host.attach_operator().await;
     let mut events = host.approval_events().await;
-    let pin = pin_of(crate::harness::P1_X);
+    let pin = pin_of(super::harness::P1_X);
     let bound = PolicyPrincipal::bound_a2a(pin.clone());
 
     expect_prompt(&host, &mut events, &host.client(K_P1A), "r1", &bound).await;
@@ -1097,8 +1097,8 @@ async fn k14_iv_untrusting_the_pin_makes_its_bound_keys_prompt_again() {
 #[tokio::test(flavor = "multi_thread")]
 async fn k14_v_bound_provenance_is_carried_in_memory_and_survives_restart_reseeding() {
     setup();
-    let pin = pin_of(crate::harness::P1_X);
-    let pin_p2 = pin_of(crate::harness::P2_X);
+    let pin = pin_of(super::harness::P1_X);
+    let pin_p2 = pin_of(super::harness::P2_X);
     let mut host = BoundHost::start(wait_spec()).await;
     let mut operator = host.attach_operator().await;
     let mut events = host.approval_events().await;

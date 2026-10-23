@@ -1,14 +1,14 @@
 //! Production noninteractive entrypoints, with a real trusted socket writer.
 //! Neither test constructs a TurnRoute or calls a scheduler/tool bypass.
 
-use crate::attached_harness::FIXTURE_TIMEOUT;
-use crate::g_harness::{completed, fence, fixture, input, proposal, send_once, submit, zero};
+use super::attached_harness::FIXTURE_TIMEOUT;
+use super::g_harness::{completed, fence, fixture, input, proposal, send_once, submit, zero};
 use rustain::adapters::daemon::protocol::DaemonFrame;
 use rustain::domain::models::{ChannelKind, ChannelTurnRequest};
 
 const OPERATOR_ONLY: &str = "propose_team_message is only available to the operator's own agent";
 
-fn results_since(daemon: &crate::attached_harness::AttachedDaemon, before: usize) -> String {
+fn results_since(daemon: &super::attached_harness::AttachedDaemon, before: usize) -> String {
     daemon.requests.lock()[before..]
         .iter()
         .flat_map(|(messages, _)| messages.iter())

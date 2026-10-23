@@ -777,21 +777,6 @@ fn ac9_nfr74_the_new_domain_values_carry_no_transport_identity() {
     );
 }
 
-/// Task 8 — both new targets are named by a lane that runs them. A target wired
-/// into nothing compiles, passes locally, and is never run by CI.
-#[test]
-fn both_new_test_targets_are_named_by_a_lane_that_runs_them() {
-    let ci = source(".github/workflows/ci.yml");
-    assert!(
-        ci.contains("--test conformance_18_4d_reach_and_ping"),
-        "this default-lane target must be named in the check job"
-    );
-    assert!(
-        ci.contains("--test conformance_p2p_reach"),
-        "the p2p-lane target must be named in the p2p job"
-    );
-}
-
 /// AC4 — `Unreachable` keeps its one meaning: an address-book miss, never a
 /// network verdict. Mutant (b): returning it for a live-address dial failure.
 #[test]

@@ -10,10 +10,7 @@ use rustain::domain::models::{
     Conversation, FeedbackAction, FeedbackBlock, FeedbackLevel, generate_conversation_id,
 };
 
-mod e2e_harness;
-
-mod common;
-
+use crate::e2e_harness;
 // ── Feedback block rendering via TestHarness ─────────────────────
 
 // Covers: AC3 — context-warning block renders in chat pane
