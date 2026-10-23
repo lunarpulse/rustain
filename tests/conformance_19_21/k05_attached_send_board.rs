@@ -100,6 +100,29 @@ fn normalize_generated_fact_ids(facts: &[String]) -> Vec<String> {
         })
         .collect()
 }
+
+/// Settlements are journaled as each recipient answers, so their relative
+/// order is the order the hosts replied in — not a property of either rail
+/// (reproduced: 1 run in 30 on two CPUs swaps `index: 0` and `index: 1`).
+/// Sort each contiguous run of `TeamSendRecipientSettled` facts; everything
+/// else, including the action record and dispatch order, stays exact.
+fn settlements_in_index_order(mut facts: Vec<String>) -> Vec<String> {
+    let mut start = 0;
+    while start < facts.len() {
+        let is_settlement = |fact: &String| fact.starts_with("TeamSendRecipientSettled");
+        if !is_settlement(&facts[start]) {
+            start += 1;
+            continue;
+        }
+        let end = facts[start..]
+            .iter()
+            .position(|fact| !is_settlement(fact))
+            .map_or(facts.len(), |offset| start + offset);
+        facts[start..end].sort();
+        start = end;
+    }
+    facts
+}
 fn normalize_rendered_ids(rows: &str) -> String {
     let mut normalized = String::with_capacity(rows.len());
     for line in rows.lines() {
@@ -128,8 +151,10 @@ async fn k05_attached_typed_labelled_send_matches_standalone_and_preserves_multi
     // recipient order, body hash/bytes, message type, and settlement facts remain exact.
     assert_endpoint_consistency(&parity.standalone_facts);
     assert_endpoint_consistency(&parity.attached_facts);
-    let standalone_facts = normalize_generated_fact_ids(&parity.standalone_facts);
-    let attached_facts = normalize_generated_fact_ids(&parity.attached_facts);
+    let standalone_facts =
+        settlements_in_index_order(normalize_generated_fact_ids(&parity.standalone_facts));
+    let attached_facts =
+        settlements_in_index_order(normalize_generated_fact_ids(&parity.attached_facts));
     assert_eq!(
         standalone_facts, attached_facts,
         "attached typed send must journal the same action and settlement facts"
