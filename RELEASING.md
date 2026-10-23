@@ -29,11 +29,11 @@ P1/P2 targets may be added incrementally, but the frozen target-triple artifact-
 
 ## Federation Features in Published Assets
 
-A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them** — verify with `git show v0.1.3:.github/workflows/release.yml` — and they are on in every release built after Story 19.5; source builds need `--features a2a,p2p`. Automated and manual release builds must also include `self-update` and `relay-server`; the authoritative release feature set is `self-update,relay-server,a2a,p2p`.
+A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5; verify with `git show v0.1.3:.github/workflows/release.yml` against `git show v0.2.0:.github/workflows/release.yml`); source builds need `--features a2a,p2p`. Automated and manual release builds must also include `self-update` and `relay-server`; the authoritative release feature set is `self-update,relay-server,a2a,p2p`.
 
 ⛔ **After cutting a tag:** name the actual version at the four federation-feature doc sites — this file, `README.md`, `docs/a2a.md`, `docs/p2p.md`. They state the boundary they can prove (`v0.1.3` and earlier do not carry the features) because the next tag is not derivable from the tree; the tagger is the first person who knows it.
 
-The release pipeline asserts each published binary is **≤ 35 MiB (36,700,160 bytes)**. The size check lives in CI, not runtime. The existing release profile (`Cargo.toml` `[profile.release]`) already uses `lto = true`, `strip = true`, `codegen-units = 1`, `panic = "abort"` to minimize size.
+The release pipeline asserts each published binary is **≤ 38 MiB (39,845,888 bytes)** (NFR9 as amended by measurement; `tests/conformance_release_workflow.rs` pins the number). The size check lives in CI, not runtime. The existing release profile (`Cargo.toml` `[profile.release]`) already uses `lto = true`, `strip = true`, `codegen-units = 1`, `panic = "abort"` to minimize size.
 
 ## Signing Scheme: minisign
 

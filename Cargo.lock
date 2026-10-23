@@ -6258,7 +6258,7 @@ dependencies = [
 
 [[package]]
 name = "rustain"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",

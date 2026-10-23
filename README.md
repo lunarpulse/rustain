@@ -222,7 +222,7 @@ cargo build --features vector-search                       # with local embeddin
 cargo build --features a2a,p2p                             # federation from source
 ```
 
-A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them** — they are on in every release built after this change; source builds need `--features a2a,p2p`. See [`docs/a2a.md`](docs/a2a.md) and [`docs/p2p.md`](docs/p2p.md).
+A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** — source builds need `--features a2a,p2p`. See [`docs/a2a.md`](docs/a2a.md) and [`docs/p2p.md`](docs/p2p.md).
 
 ### TUI peer-send quick start
 

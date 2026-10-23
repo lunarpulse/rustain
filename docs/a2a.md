@@ -2,7 +2,7 @@
 
 Rustain discovers allowlisted A2A peers and registers their AgentCard skills in the internal capability inventory (Story 17.4a), and serves its own signed card plus a task lifecycle to allowlisted callers (`--serve-a2a`, and the daemon's inbound path). A2A skills still do not appear in the LLM-facing `@` dropdown; § Task lifecycle below is the authority on what a caller can invoke.
 
-A2A is off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain it** — it is on in every release built after Story 19.5; source builds need `--features a2a`:
+A2A is off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain it; `v0.2.0` and later do** (Story 19.5); source builds need `--features a2a`:
 
 ```bash
 cargo build --features a2a
