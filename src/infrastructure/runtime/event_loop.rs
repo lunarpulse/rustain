@@ -1423,7 +1423,7 @@ pub async fn run(
                                     };
                                     // Merge pending images (clipboard paste) with mention images (@ file references)
                                     // Covers: FR112 (AC1, AC2)
-                                    let mut all_images: Vec<ImageAttachment> = state.pending_images.drain(..).collect();
+                                    let mut all_images: Vec<ImageAttachment> = std::mem::take(&mut state.pending_images);
                                     all_images.extend(mention_images);
                                     state.image_indicator = None;
 
@@ -2317,7 +2317,7 @@ pub async fn run(
 
                                     // Merge pending images with mention images
                                     // Covers: FR112 (AC1, AC2)
-                                    let mut all_images: Vec<ImageAttachment> = state.pending_images.drain(..).collect();
+                                    let mut all_images: Vec<ImageAttachment> = std::mem::take(&mut state.pending_images);
                                     all_images.extend(mention_images);
                                     state.image_indicator = None;
 
@@ -3295,7 +3295,7 @@ pub async fn run(
                                     // with is_streaming = true but no task producing chunks → stuck.
                                     if streaming.is_streaming {
                                         // Finalize active tool calls with [aborted]
-                                        for (_, tc) in streaming.active_tool_calls.iter_mut() {
+                                        for tc in streaming.active_tool_calls.values_mut() {
                                             if tc.result.is_none() {
                                                 tc.result = Some(crate::domain::models::ToolResultInfo {
                                                     content: "[aborted]".to_string(),

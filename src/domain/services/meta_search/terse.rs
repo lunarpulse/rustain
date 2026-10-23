@@ -63,7 +63,7 @@ pub fn compute_terse(desc: &str, name: &str) -> String {
     while cut > 0 && !trimmed.is_char_boundary(cut) {
         cut -= 1;
     }
-    format!("{}…", &trimmed[..cut].trim_end())
+    format!("{}…", trimmed[..cut].trim_end())
 }
 
 #[cfg(test)]

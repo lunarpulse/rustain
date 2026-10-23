@@ -34,7 +34,7 @@ pub fn finalize_streaming_turn(
     active_turn: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
     // AC12: finalize active tool calls with [aborted] before clearing.
-    for (_, tc) in streaming.active_tool_calls.iter_mut() {
+    for tc in streaming.active_tool_calls.values_mut() {
         if tc.result.is_none() {
             tc.result = Some(ToolResultInfo {
                 content: "[aborted]".to_string(),

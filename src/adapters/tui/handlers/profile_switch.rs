@@ -332,6 +332,10 @@ pub async fn handle_profile_switch_requested(
     }
 }
 
+// Both arms carry the same `AppEvent` back to the event loop (success vs failure
+// notice); boxing only the `Err` side would make the two paths asymmetric for no
+// runtime benefit on a once-per-swap call.
+#[allow(clippy::result_large_err)]
 pub async fn handle_profile_swap_continuation(
     diffs: Vec<PortDiff>,
     agent_core: Arc<AgentCore>,

@@ -3501,7 +3501,7 @@ impl AttachServer {
                 crate::domain::models::MAX_REPLY_BYTES
             ));
         }
-        let Some(item) = crate::adapters::a2a::exec::recipient_item_for_node(&projection, node_id)
+        let Some(item) = crate::adapters::a2a::exec::recipient_item_for_node(projection, node_id)
         else {
             tracing::info!(node = %node_id, "peer response resolved for a node with no recipient item; no reply turn recorded");
             return Ok(None);

@@ -107,7 +107,7 @@ impl ProviderRegistry {
             .read()
             .expect("ProviderRegistry lock poisoned");
         let mut result = Vec::new();
-        for (_id, provider) in providers.iter() {
+        for provider in providers.values() {
             for model in provider.list_models() {
                 if model.capabilities.contains(capability) {
                     result.push(model);
@@ -124,7 +124,7 @@ impl ProviderRegistry {
             .read()
             .expect("ProviderRegistry lock poisoned");
         let mut models = Vec::new();
-        for (_id, provider) in providers.iter() {
+        for provider in providers.values() {
             models.extend(provider.list_models());
         }
         models

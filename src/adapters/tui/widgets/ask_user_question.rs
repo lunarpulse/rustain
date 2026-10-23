@@ -56,7 +56,7 @@ pub fn render_ask_user_lines(
     } else {
         // Editable input with cursor
         let prompt = "> ";
-        let display_text = format!("{}{}_", prompt, &state.input_buffer);
+        let display_text = format!("{}{}_", prompt, state.input_buffer);
         let input_line = format!("║ {:<width$} ║", display_text, width = inner_width);
         lines.push(Line::from(Span::styled(
             input_line,

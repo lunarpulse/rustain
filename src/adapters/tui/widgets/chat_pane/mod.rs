@@ -2020,7 +2020,7 @@ fn render_with_search_impl(
 
     #[cfg(debug_assertions)]
     {
-        for (k, _) in tab_render_state.height_cache.entries.iter() {
+        for k in tab_render_state.height_cache.entries.keys() {
             debug_assert!(
                 turn_map.contains_key(k.turn_id.0.as_str()),
                 "HeightCache entry references phantom turn {} not in conversation.turns",
