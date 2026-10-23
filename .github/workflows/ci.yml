@@ -168,6 +168,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The whole-suite run includes the `core` binary's fail-closed complexity metric.
+      - name: Install pinned source-metric parser
+        run: python3 -m pip install -r tools/ci/requirements-metrics.txt
 
       # Run only bans: aggregate `cargo deny check` is intentionally excluded because this
       # repository has no `[licenses]` allowlist and its baseline `lru 0.16.3` advisory makes
@@ -196,6 +202,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The whole-suite run includes the `core` binary's fail-closed complexity metric.
+      - name: Install pinned source-metric parser
+        run: python3 -m pip install -r tools/ci/requirements-metrics.txt
 
       # Story 17.5a: MCP integration targets must execute, not merely compile.
       # MCP itself is a default feature, so the Check job's whole-suite run already

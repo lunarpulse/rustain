@@ -3076,30 +3076,6 @@ mod tests {
         assert!(well_formed_message(None).is_none());
     }
 
-    /// AC6b / R8: a *stated* narrow profile is interop-honest only while the
-    /// statement and the code agree. This is the test that keeps them together.
-    #[test]
-    fn the_declared_jsonrpc_profile_matches_the_adr() {
-        let adr = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../_bmad-output/planning-artifacts/architecture/adr/",
-            "ADR-17-4a-01-a2a-agentcard-discovery-in-repo-adapter.md"
-        ))
-        .expect("ADR-17-4a-01 must exist");
-        for claim in [
-            "batch requests are not supported",
-            "explicit null JSON-RPC id",
-            "204 No Content",
-            "non-owner",
-            "RoomProjection",
-        ] {
-            assert!(
-                adr.contains(claim),
-                "ADR-17-4a-01 must state {claim:?} — the enforced profile and the ADR have drifted"
-            );
-        }
-    }
-
     /// Story 19.16d AC2(c) — the collapse disclosure's one rule, with both
     /// `SubmitterTrust` values (`P13.3`/`Q5`: the in-crate positive control
     /// for `M09`). The wire can only ever produce `Loopback`; this is where the

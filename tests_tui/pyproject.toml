@@ -16,6 +16,13 @@ dev = [
     "pytest-rerunfailures>=14.0",
 ]
 
+# tests_tui is a test directory, not a library. `pip install -e "./tests_tui[dev]"`
+# (ci.yml, README) exists only to install the dependencies above, so package
+# discovery is off — with `fixtures/` and `journeys/` beside the test modules,
+# setuptools' flat-layout discovery refuses to build at all.
+[tool.setuptools]
+packages = []
+
 [tool.pytest.ini_options]
 testpaths = ["."]
 python_files = ["test_*.py"]
