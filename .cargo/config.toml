@@ -1,9 +1,0 @@
-# Grand Plan P0-2 (docs/rustain-grand-plan-2026-10-22.md §4, Rule C).
-#
-# mold links the integration-test binaries in a fraction of the time ld/lld
-# takes; with debuginfo trimmed in Cargo.toml's profiles, linking was the
-# dominant cost of `cargo test --all-targets`. Linux only — macOS keeps the
-# system linker. Install: `apt install mold` / `pacman -S mold`; CI uses
-# rui314/setup-mold. An explicit RUSTFLAGS environment variable overrides this.
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
