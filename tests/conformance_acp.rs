@@ -3750,6 +3750,11 @@ async fn acp_list_sessions_returns_persisted_session() {
     use rustain::adapters::acp::run::serve_acp_with_core_factory;
     use rustain::domain::models::AppConfig;
 
+    // This test sends a real `session/prompt`, so its turn increments the
+    // process-global RUN_TURN_CALLS that the golden-transcript test asserts
+    // exactly; hold the same lock every prompting test holds.
+    #[cfg(feature = "test-instrumentation")]
+    let _run_turn_guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let ws = workspace.path().to_path_buf();
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);

@@ -484,12 +484,15 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
         guarded = _turns(stub, "jun")[-1]
         assert guarded["request_observations"]["needle_present"]["adr_body"] is True, guarded
         assert "Write" in guarded["tool_names"] and guarded["tool_results"] == 0, guarded
-        assert jun.wait_for_screen("[approval needed]", timeout=30), jun.get_screen_text()
+        # Since 19.20c the attached writer receives the real approval card (exact
+        # input, `[y] Allow` / `[r] Review`) instead of the old "[approval needed]
+        # … approve from the local TUI" notice. Nothing decides it here: the
+        # native evidence is still actual blocking/canary protection in Normal;
+        # the Rust K10b suite separately proves Yolo differential + Reject.
+        assert jun.wait_for_screen("[y] Allow", timeout=30), jun.get_screen_text()
+        assert "Write" in jun.get_screen_text(), jun.get_screen_text()
         save(jun, "jun-selected-peer-tool-blocked")
         assert canary.read_text() == "unchanged native canary\n"
-        # Attached generic tool approval is a notice, not a fabricated approval
-        # card. Native evidence is actual blocking/canary protection in Normal;
-        # the Rust K10b suite separately proves Yolo differential + Reject.
         _stop(daemons["jun"])
         assert canary.read_text() == "unchanged native canary\n"
         assert _sha(binary) == binary_sha, "binary changed during native capture"

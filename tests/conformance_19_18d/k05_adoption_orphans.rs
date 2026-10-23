@@ -241,6 +241,11 @@ async fn k05_orphan_phases_across_restarts() {
     // counted as orphans): ri_a+ri_b+ri_c+ri_ctl = 4.
     // `M04` is killed by phases (2)–(6), where the line must exist.
     let flight_cursor = log_cursor();
+    // Recorded for the failure message only: this assertion has failed on a
+    // 4-vCPU CI runner and nowhere locally, and job logs are not public.
+    let pending_before =
+        std::fs::read_to_string(host.journal.path.join(".rustain/a2a-pending.json"))
+            .unwrap_or_else(|error| format!("<unreadable: {error}>"));
     let (host_1, window) = restart_phase_after_crash(host, unbound_spec("ask")).await;
     host = host_1;
     assert_orphans(&window, 0, "phase (1)");
@@ -252,9 +257,16 @@ async fn k05_orphan_phases_across_restarts() {
     );
     // Positive control for the counts: the in-flight task WAS recovered (no
     // item minted for it) — and K still reaches its failed projection.
+    let since_crash = log_since(flight_cursor);
     assert!(
-        log_since(flight_cursor).contains("A2A approval-pending task failed by host restart"),
-        "the pending record was reconciled at this restart"
+        since_crash.contains("A2A approval-pending task failed by host restart"),
+        "the pending record was reconciled at this restart — pending file before the crash: \
+         {pending_before:?}; A2A/pending log lines since: {:?}",
+        since_crash
+            .lines()
+            .filter(|line| line.contains("A2A") || line.contains("pending"))
+            .map(|line| line.chars().take(200).collect::<String>())
+            .collect::<Vec<_>>()
     );
     let k = host.client(K_P1A);
     let flight = k.tasks_get(11, "k05-flight", None).await;
