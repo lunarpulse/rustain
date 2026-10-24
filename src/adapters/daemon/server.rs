@@ -53,6 +53,8 @@ use crate::domain::ports::StoragePort;
 use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntimeEvent};
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
+mod peer_rows;
+use peer_rows::{rap_rooted_peer, snapshot_peer_row_controls};
 mod rap_inbound;
 use rap_inbound::DaemonPeerConsumer;
 mod team;
@@ -1255,40 +1257,6 @@ fn peer_row_control(
     }
 }
 
-async fn snapshot_peer_row_controls(
-    conversation: &Conversation,
-    pending_drafts: &super::response_modes::PendingDraftController,
-) -> std::collections::BTreeMap<String, PeerRowControl> {
-    if conversation.peer_row_controls.is_empty() {
-        return std::collections::BTreeMap::new();
-    }
-    let mut controls = std::collections::BTreeMap::new();
-    for message in &conversation.messages {
-        let Some(stored) = conversation.peer_row_controls.get(&message.id) else {
-            continue;
-        };
-        let mut control = stored.clone();
-        let phase = pending_drafts.phase(&control.node_id).await;
-        control.node_resolvable = match (control.stage, phase) {
-            (
-                PeerRowStage::AwaitingOperator | PeerRowStage::Ready,
-                Some(super::response_modes::DraftPhase::Ready),
-            )
-            | (PeerRowStage::Drafting, Some(super::response_modes::DraftPhase::Drafting)) => true,
-            (PeerRowStage::AwaitingOperator | PeerRowStage::Ready, None) => {
-                control.item_address.is_none()
-            }
-            _ => false,
-        };
-        controls.insert(message.id.clone(), control);
-    }
-    controls
-}
-
-fn rap_rooted_peer(node: &AgentId) -> Option<PeerId> {
-    PeerId::parse(node.as_str().split('/').next()?).ok()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PeerDraftResolutionOutcome {
     Applied {
@@ -2131,6 +2099,15 @@ impl AttachServer {
         cron_completion_rx: Option<mpsc::UnboundedReceiver<CronCompletion>>,
         shutdown: CancellationToken,
     ) {
+        // Story 19.20 review: settlement is best-effort. A failed commit rolls
+        // the rows back (still unresolvable, as before 19.20) and the next
+        // start retries; it must never leave the daemon without its socket.
+        if let Err(error) = self.settle_interrupted_drafts().await {
+            tracing::warn!(
+                %error,
+                "failed to settle interrupted peer drafts; serving them unsettled"
+            );
+        }
         // The single forwarder task: fold → fan out (drains the one mpsc
         // `domain_rx`; connections do NOT each subscribe). Channel turns enter
         // this same forwarder so their response callback is resolved by the same
@@ -9045,7 +9022,7 @@ mod tests {
         })
     }
 
-    fn mock_core(
+    pub(super) fn mock_core(
         workspace: &Path,
         chunks: Vec<StreamChunk>,
     ) -> (Arc<DaemonCore>, Arc<dyn StoragePort>) {
@@ -9100,7 +9077,7 @@ mod tests {
     /// `storage` handle is wired into both the [`DaemonCore`] and the per-turn
     /// runtime factory, so a wrapping storage observes every save the daemon
     /// issues — `run_turn`'s pre-turn snapshot and the forwarder's commit alike.
-    fn mock_core_with_storage(
+    pub(super) fn mock_core_with_storage(
         workspace: &Path,
         chunks: Vec<StreamChunk>,
         memory: Arc<dyn crate::domain::ports::MemoryPort>,
@@ -9930,8 +9907,8 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingJournal {
-        events: Mutex<Vec<crate::domain::models::RoomEvent>>,
+    pub(super) struct RecordingJournal {
+        pub(super) events: Mutex<Vec<crate::domain::models::RoomEvent>>,
         fail: std::sync::atomic::AtomicBool,
     }
 
@@ -9975,7 +9952,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn journaled_server(
+    pub(super) fn journaled_server(
         core: Arc<DaemonCore>,
         conversation: Arc<Mutex<Conversation>>,
         domain_tx: mpsc::UnboundedSender<AppEvent>,
@@ -10103,6 +10080,8 @@ mod tests {
                 in_reply_to: None,
                 capability_hash: None,
                 reply_capability_matched: false,
+                authorship: crate::domain::models::Authorship::Unknown,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
             })
             .await
             .unwrap();
@@ -10206,6 +10185,8 @@ mod tests {
                     in_reply_to: None,
                     capability_hash: None,
                     reply_capability_matched: false,
+                    authorship: crate::domain::models::Authorship::Unknown,
+                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
                 })
                 .await
                 .unwrap();
@@ -12024,6 +12005,8 @@ mod tests {
                 in_reply_to: None,
                 capability_hash: None,
                 reply_capability_matched: false,
+                authorship: crate::domain::models::Authorship::Unknown,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
             })
             .await
             .unwrap();
@@ -12446,7 +12429,7 @@ mod tests {
 
     /// A deterministic identity for tests: one signing key per `seed` byte, no
     /// disk I/O or wall clock. Distinct seeds → distinct peer ids.
-    fn test_signer(seed: u8) -> AgentSigner {
+    pub(super) fn test_signer(seed: u8) -> AgentSigner {
         AgentSigner::from_signing_key(ed25519_dalek::SigningKey::from_bytes(&[seed; 32]))
     }
 
@@ -12462,7 +12445,7 @@ mod tests {
     /// Happy-path server-first attach over a single stream (lockstep, no split):
     /// read the challenge, build a proof with `signer`, send the proof-bearing
     /// `Attach`, and return the daemon's response frame.
-    async fn attach_with_proof(
+    pub(super) async fn attach_with_proof(
         stream: &mut UnixStream,
         read_only_ok: bool,
         tier: ConnectionTier,

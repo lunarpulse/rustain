@@ -2660,6 +2660,8 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
             in_reply_to: None,
             capability_hash: None,
             reply_capability_matched: false,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         },
     )
     .await
@@ -3528,6 +3530,8 @@ async fn ac4_a_restart_never_rebinds_an_orphaned_task_to_a_removed_item() {
             in_reply_to: None,
             capability_hash: None,
             reply_capability_matched: false,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         },
     )
     .await

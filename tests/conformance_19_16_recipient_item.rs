@@ -14,6 +14,8 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
     let events = [
         RoomEvent::RecipientItemReceived {
             message_type: rustain::domain::models::SemanticMessageType::Unknown,
+            authorship: Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
             address: address.clone(),
             task: "sender-message-1".to_owned(),
             alias: None,
@@ -60,6 +62,116 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
     }
 }
 
+/// Story 19.20: a future record precedes a known-good follower so torn-tail
+/// recovery cannot conceal a provenance decoding failure.
+#[tokio::test]
+async fn received_provenance_journal_preserves_legacy_bytes_and_tolerates_future_tokens() {
+    use rustain::domain::models::{JournalRecord, OrchestrationRoomId, SendAuthorization};
+    use rustain::domain::ports::RoomJournalReader;
+    use rustain::infrastructure::subagent::{NodeJournal, WorkspaceJournalReader};
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let room = OrchestrationRoomId::parse("room-received-provenance").expect("room id");
+    let rooms = workspace.path().join(".rustain").join("rooms");
+    std::fs::create_dir_all(&rooms).expect("rooms directory");
+    let path = rooms.join(format!("{}.jsonl", room.as_str()));
+    let legacy_address = ItemAddress::from_a2a_ingress(peer(23), ItemId::from_replay("ri_legacy"));
+    let future_address = ItemAddress::from_a2a_ingress(peer(23), ItemId::from_replay("ri_future"));
+    let legacy_line = format!(
+        r#"{{"schema_version":1,"seq":1,"recorded_at_ms":1,"record":{{"kind":"room","payload":{{"event":"recipient_item_received","address":{},"task":"legacy-task","alias":null,"content":"legacy body"}}}}}}"#,
+        serde_json::to_string(&legacy_address).expect("legacy address")
+    );
+    let future_line = format!(
+        r#"{{"schema_version":1,"seq":2,"recorded_at_ms":2,"record":{{"kind":"room","payload":{{"event":"recipient_item_received","address":{},"task":"future-task","alias":null,"content":"future body","authorship":"future-author","send_authorization":"future-decision"}}}}}}"#,
+        serde_json::to_string(&future_address).expect("future address")
+    );
+    let follower = entry(
+        3,
+        RoomEvent::ConsentRevoked {
+            sender: None,
+            revoked_at: 3,
+        },
+    );
+    let original_bytes = format!(
+        "{legacy_line}\n{future_line}\n{}\n",
+        serde_json::to_string(&follower).expect("known-good follower")
+    );
+    std::fs::write(&path, &original_bytes).expect("write legacy and future records");
+
+    let reader = WorkspaceJournalReader::open(workspace.path(), room.clone());
+    let replayed = reader
+        .load_entries()
+        .await
+        .expect("future provenance must not produce CorruptRecord");
+    assert_eq!(replayed.len(), 3, "future record and follower both survive");
+    assert_eq!(
+        serde_json::to_string(&replayed[0]).expect("serialize legacy record"),
+        legacy_line,
+        "omitted facts preserve the legacy journal line byte-for-byte"
+    );
+    for record in &replayed[..2] {
+        assert!(matches!(
+            &record.record,
+            JournalRecord::Room(RoomEvent::RecipientItemReceived {
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+                ..
+            })
+        ));
+    }
+    assert_eq!(replayed[2], follower);
+    assert_eq!(
+        std::fs::read(&path).expect("read unmodified journal"),
+        original_bytes.as_bytes(),
+        "loading future tokens must not repair or discard journal bytes"
+    );
+
+    let valid_address = ItemAddress::from_a2a_ingress(peer(23), ItemId::from_replay("ri_valid"));
+    let valid = RoomEvent::RecipientItemReceived {
+        address: valid_address.clone(),
+        task: "valid-task".to_owned(),
+        alias: Some("sender".to_owned()),
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        content: "valid body".to_owned(),
+        in_reply_to: None,
+        capability_hash: None,
+        reply_capability_matched: false,
+        authorship: Authorship::AgentComposed,
+        send_authorization: SendAuthorization::Automatic,
+    };
+    let journal = NodeJournal::open(workspace.path(), room)
+        .await
+        .expect("open writer");
+    let appended = journal
+        .append_room(valid.clone())
+        .await
+        .expect("append valid facts");
+    assert_eq!(appended.seq, 4, "future record keeps its sequence position");
+    let replayed = reader.load_entries().await.expect("reload real journal");
+    assert_eq!(replayed.len(), 4);
+    assert_eq!(replayed[3], appended);
+    assert!(matches!(
+        &replayed[3].record,
+        JournalRecord::Room(event) if event == &valid
+    ));
+    assert!(
+        std::fs::read(&path)
+            .expect("read appended journal")
+            .starts_with(original_bytes.as_bytes()),
+        "appending valid facts leaves historical lines byte-identical"
+    );
+
+    let projection = JournalRecipientItemProjection::from_entries(&replayed);
+    for address in [&legacy_address, &future_address] {
+        let item = projection.get(address).expect("unknown facts still fold");
+        assert_eq!(item.authorship, Authorship::Unknown);
+        assert_eq!(item.send_authorization, SendAuthorization::Unknown);
+    }
+    let item = projection.get(&valid_address).expect("valid facts fold");
+    assert_eq!(item.authorship, Authorship::AgentComposed);
+    assert_eq!(item.send_authorization, SendAuthorization::Automatic);
+}
+
 #[test]
 fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none() {
     let address = ItemAddress::from_a2a_ingress(peer(18), ItemId::from_replay("ri_question"));
@@ -67,6 +179,8 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
 
     let received = RoomEvent::RecipientItemReceived {
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         address: address.clone(),
         task: "follow-up-task".to_owned(),
         alias: Some("peer eighteen".to_owned()),
@@ -231,6 +345,8 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
     let hash = "ab".repeat(32);
     let received = RoomEvent::RecipientItemReceived {
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         address: address.clone(),
         task: "rustain-1-00000000000000aa".to_owned(),
         alias: None,
@@ -249,6 +365,8 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
 
     let legacy = RoomEvent::RecipientItemReceived {
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         address: address.clone(),
         task: "sender-task".to_owned(),
         alias: None,
@@ -382,6 +500,8 @@ fn recipient_item_fold_replays_acknowledgement_and_is_idempotent() {
     let address = ItemAddress::from_a2a_ingress(peer(10), ItemId::from_replay("ri_replay"));
     let received = RoomEvent::RecipientItemReceived {
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         address: address.clone(),
         task: "sender-task".to_owned(),
         alias: None,
@@ -436,6 +556,8 @@ fn replacing_from_the_journal_discards_an_in_memory_divergence() {
     let address = ItemAddress::from_a2a_ingress(peer(11), ItemId::from_replay("ri_refold"));
     let received = RoomEvent::RecipientItemReceived {
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         address: address.clone(),
         task: "sender-task".to_owned(),
         alias: None,
@@ -477,6 +599,8 @@ fn find_by_task_binds_the_newest_item_when_a_message_id_is_resent() {
         ItemAddress::from_a2a_ingress(principal_peer.clone(), ItemId::from_replay("ri_second"));
     let received = |address: ItemAddress| RoomEvent::RecipientItemReceived {
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         address,
         task: "resent-message-id".to_owned(),
         alias: None,
@@ -563,6 +687,8 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
     let address = ItemAddress::from_a2a_ingress(principal.clone(), ItemId::from_replay("ri_root"));
     let root = RoomEvent::RecipientItemReceived {
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        authorship: Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         address: address.clone(),
         task: "task".to_owned(),
         alias: None,

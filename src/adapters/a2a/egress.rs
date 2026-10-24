@@ -723,7 +723,10 @@ mod item_capability_tests {
             &serde_json::json!({ "message": "q" }),
             super::super::driver::MessageCarriers {
                 item_key: Some(&key),
-                ..Default::default()
+                reply_to: None,
+                reply_capability: None,
+                authorship: crate::domain::models::Authorship::Unknown,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
             },
         );
         let own_id = message["message"]["messageId"]

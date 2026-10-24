@@ -7,6 +7,10 @@
 pub(crate) const MESSAGE_TYPE_METADATA_KEY: &str = "x-rustain-message-type";
 #[cfg(feature = "a2a")]
 pub const RECIPIENT_ITEM_METADATA_KEY: &str = "x-rustain-item-id";
+#[cfg(feature = "a2a")]
+pub const AUTHORSHIP_METADATA_KEY: &str = "x-rustain-authorship";
+#[cfg(feature = "a2a")]
+pub const SEND_AUTHORIZATION_METADATA_KEY: &str = "x-rustain-send-authorization";
 /// Story 19.16b `AC1(a)` / `A20` — the cross-host acknowledgement read verb.
 ///
 /// Namespaced, because `message` and `tasks` are A2A **spec** nouns while

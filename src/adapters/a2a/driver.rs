@@ -30,10 +30,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::events::{AppEvent, DomainEventPayload};
 use crate::domain::models::{
-    A2aPeerSpec, AgentId, AgentMetrics, CapabilityTokenId, ContentHash, CorrelationId, Direction,
-    MessageKind, NodeState, Op, PeerId, RapTaskState, RefuseReason, RejectReason, RoomEvent,
-    SemanticMessageType, SendActionId, SendActionRecipient, SendActionRef, SendSettlement,
-    SubagentEnvelope, SubagentEvent, TrustTier, semantic_message_type_metadata,
+    A2aPeerSpec, AgentId, AgentMetrics, Authorship, CapabilityTokenId, ContentHash, CorrelationId,
+    Direction, MessageKind, NodeState, Op, PeerId, RapTaskState, RefuseReason, RejectReason,
+    RoomEvent, SemanticMessageType, SendActionId, SendActionRecipient, SendActionRef,
+    SendAuthorization, SendSettlement, SubagentEnvelope, SubagentEvent, TrustTier,
+    semantic_message_type_metadata,
 };
 use crate::domain::ports::{RoomJournal, RoomJournalError};
 use crate::domain::services::peer_text::sanitize_peer_text_line;
@@ -1353,6 +1354,7 @@ impl A2aDelegationRuntime {
         transport: Arc<dyn A2aTaskTransport>,
         message: serde_json::Value,
         cancel: CancellationToken,
+        authorship: Authorship,
         send_authorization: crate::domain::models::SendAuthorization,
     ) -> Result<serde_json::Value, DelegationError> {
         let runtime = self.clone();
@@ -1367,6 +1369,7 @@ impl A2aDelegationRuntime {
                     transport,
                     message,
                     cancel,
+                    authorship,
                     send_authorization,
                 )
                 .await
@@ -1383,6 +1386,7 @@ impl A2aDelegationRuntime {
         transport: Arc<dyn A2aTaskTransport>,
         message: serde_json::Value,
         cancel: CancellationToken,
+        authorship: Authorship,
         send_authorization: crate::domain::models::SendAuthorization,
     ) -> Result<serde_json::Value, DelegationError> {
         let peer = spec.resolved_identity();
@@ -1403,7 +1407,7 @@ impl A2aDelegationRuntime {
             endpoint: endpoint.clone(),
             // The model rail records no operator send action (19.21 `AC1(i)`).
             action: None,
-            authorship: crate::domain::models::Authorship::AgentComposed,
+            authorship,
             send_authorization,
         })
         .await?;
@@ -1990,7 +1994,7 @@ fn mint_message_id(now: u64, last: &AtomicU64, rng: &mut impl rand_core::RngCore
 
 /// The carriers [`build_message`] writes from **Rust parameters only** —
 /// ⛔ never from `input`, which carries model-controlled tool arguments.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct MessageCarriers<'a> {
     /// Story 19.18 `AC7(b)` — the id a follow-up answers
     /// ([`super::REPLY_TO_METADATA_KEY`]); the model rail passes `None`.
@@ -2001,6 +2005,8 @@ pub struct MessageCarriers<'a> {
     /// Story 19.18c `A10` — the capability of the reference's nearest item
     /// ([`super::REPLY_CAPABILITY_METADATA_KEY`]).
     pub reply_capability: Option<&'a ItemCapability>,
+    pub authorship: Authorship,
+    pub send_authorization: SendAuthorization,
 }
 
 /// Build an A2A `message/send` params object from the tool input. The JSON-RPC
@@ -2041,6 +2047,18 @@ pub fn build_message(
         .unwrap_or(0);
     let message_id = mint_message_id(nanos, &LAST_MESSAGE_NANOS, &mut rand_core::OsRng);
     let mut metadata = serde_json::Map::new();
+    if !carriers.authorship.is_unknown() {
+        metadata.insert(
+            super::AUTHORSHIP_METADATA_KEY.to_owned(),
+            serde_json::Value::String(carriers.authorship.wire_name().to_owned()),
+        );
+    }
+    if !carriers.send_authorization.is_unknown() {
+        metadata.insert(
+            super::SEND_AUTHORIZATION_METADATA_KEY.to_owned(),
+            serde_json::Value::String(carriers.send_authorization.wire_name().to_owned()),
+        );
+    }
     if let Some(token) = message_type {
         metadata.insert(
             super::MESSAGE_TYPE_METADATA_KEY.to_owned(),
@@ -2143,7 +2161,13 @@ mod tests {
                 "message": "review this",
                 "message_type": "consultation"
             }),
-            MessageCarriers::default(),
+            MessageCarriers {
+                reply_to: None,
+                item_key: None,
+                reply_capability: None,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+            },
         );
         assert_eq!(
             typed.pointer("/message/metadata/x-rustain-message-type"),
@@ -2152,7 +2176,13 @@ mod tests {
 
         let (untyped, _) = build_message(
             &serde_json::json!({ "message": "review this" }),
-            MessageCarriers::default(),
+            MessageCarriers {
+                reply_to: None,
+                item_key: None,
+                reply_capability: None,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+            },
         );
         assert_eq!(
             untyped.pointer("/message/metadata/x-rustain-message-type"),
@@ -2161,9 +2191,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_message_carries_explicit_provenance_and_omits_unknown() {
+        for (authorship, send_authorization) in [
+            (Authorship::HumanWritten, SendAuthorization::HumanDecided),
+            (Authorship::AgentComposed, SendAuthorization::HumanDecided),
+            (Authorship::AgentComposed, SendAuthorization::Automatic),
+            (Authorship::AgentComposed, SendAuthorization::Unknown),
+            (Authorship::Unknown, SendAuthorization::Unknown),
+        ] {
+            let (message, _) = build_message(
+                &serde_json::json!({"message": "provenance"}),
+                MessageCarriers {
+                    reply_to: None,
+                    item_key: None,
+                    reply_capability: None,
+                    authorship,
+                    send_authorization,
+                },
+            );
+            let metadata = &message["message"]["metadata"];
+            assert_eq!(
+                metadata
+                    .get("x-rustain-authorship")
+                    .and_then(serde_json::Value::as_str),
+                (!authorship.is_unknown()).then_some(authorship.wire_name()),
+            );
+            assert_eq!(
+                metadata
+                    .get("x-rustain-send-authorization")
+                    .and_then(serde_json::Value::as_str),
+                (!send_authorization.is_unknown()).then_some(send_authorization.wire_name()),
+            );
+        }
+    }
+
     /// Story 19.18 `AC7(b)`, amended by Story 19.18c `A18` (19.17 `AC3(e)`'s
     /// byte-identity pin) — every carrier comes ONLY from `MessageCarriers`.
-    /// Model-controlled `input` naming any of the three carriers never
+    /// Model-controlled `input` naming any carrier never
     /// produces one; without a key the model rail's metadata is `{}`; with a
     /// key it is exactly the item capability of the message it minted.
     #[test]
@@ -2175,8 +2240,21 @@ mod tests {
             "inReplyTo": "rr_forged",
             "x-rustain-item-capability": "forged",
             "x-rustain-reply-capability": "forged",
+            "x-rustain-authorship": "agent-composed",
+            "x-rustain-send-authorization": "automatic",
+            "authorship": "agent-composed",
+            "send_authorization": "automatic",
         });
-        let (model, own) = build_message(&hostile, MessageCarriers::default());
+        let (model, own) = build_message(
+            &hostile,
+            MessageCarriers {
+                reply_to: None,
+                item_key: None,
+                reply_capability: None,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+            },
+        );
         assert!(own.is_none());
         assert_eq!(
             model.pointer("/message/metadata"),
@@ -2186,7 +2264,10 @@ mod tests {
             &hostile,
             MessageCarriers {
                 item_key: Some(&key),
-                ..MessageCarriers::default()
+                reply_to: None,
+                reply_capability: None,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
             },
         );
         let message_id = keyed["message"]["messageId"].as_str().expect("id");
@@ -2204,7 +2285,9 @@ mod tests {
             MessageCarriers {
                 reply_to: Some("rr_1"),
                 reply_capability: Some(&reply),
-                ..MessageCarriers::default()
+                item_key: None,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
             },
         );
         assert_eq!(
@@ -2227,7 +2310,10 @@ mod tests {
             &serde_json::json!({ "message": "q" }),
             MessageCarriers {
                 item_key: Some(&key),
-                ..MessageCarriers::default()
+                reply_to: None,
+                reply_capability: None,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
             },
         );
         let id = message["message"]["messageId"].as_str().expect("id");
@@ -2254,7 +2340,13 @@ mod tests {
                 "message": "review this",
                 "message_type": "urgent_escalation"
             }),
-            MessageCarriers::default(),
+            MessageCarriers {
+                reply_to: None,
+                item_key: None,
+                reply_capability: None,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+            },
         );
         assert_eq!(
             dropped.pointer("/message/metadata/x-rustain-message-type"),
@@ -2271,7 +2363,13 @@ mod tests {
                 "message": "review this",
                 "message_type": ""
             }),
-            MessageCarriers::default(),
+            MessageCarriers {
+                reply_to: None,
+                item_key: None,
+                reply_capability: None,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+            },
         );
         assert_eq!(
             empty.pointer("/message/metadata/x-rustain-message-type"),
@@ -2614,6 +2712,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -2678,6 +2777,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -2733,6 +2833,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -2815,6 +2916,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -2866,6 +2968,7 @@ mod tests {
                     }
                 }),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -2926,6 +3029,7 @@ mod tests {
                 Arc::new(Scripted::new(&["working", "completed"])),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await;
@@ -2960,6 +3064,7 @@ mod tests {
                 transport.clone(),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -3032,6 +3137,7 @@ mod tests {
             Arc::new(Scripted::new(&["working", "completed"])),
             serde_json::json!({}),
             CancellationToken::new(),
+            Authorship::AgentComposed,
             crate::domain::models::SendAuthorization::Unknown,
         );
         let right = rt.delegate(
@@ -3041,6 +3147,7 @@ mod tests {
             Arc::new(Scripted::new(&["working", "completed"])),
             serde_json::json!({}),
             CancellationToken::new(),
+            Authorship::AgentComposed,
             crate::domain::models::SendAuthorization::Unknown,
         );
         let (left, right) = tokio::join!(left, right);
@@ -3081,6 +3188,7 @@ mod tests {
                     transport,
                     serde_json::json!({}),
                     cancel,
+                    Authorship::AgentComposed,
                     crate::domain::models::SendAuthorization::Unknown,
                 )
                 .await
@@ -3119,6 +3227,7 @@ mod tests {
                     transport,
                     serde_json::json!({}),
                     CancellationToken::new(),
+                    Authorship::AgentComposed,
                     crate::domain::models::SendAuthorization::Unknown,
                 )
                 .await
@@ -3151,6 +3260,7 @@ mod tests {
                 Arc::new(Scripted::new(&["working", "completed"])),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -3164,6 +3274,7 @@ mod tests {
                 Arc::new(Scripted::new(&["working", "completed"])),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -3190,6 +3301,7 @@ mod tests {
                 transport.clone(),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -3299,6 +3411,7 @@ mod tests {
                 Arc::new(HostileIds::new()),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
@@ -3384,6 +3497,7 @@ mod tests {
                 Arc::new(Scripted::new(&["working", "rejected"])),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                Authorship::AgentComposed,
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await

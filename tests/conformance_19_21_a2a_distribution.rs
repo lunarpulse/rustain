@@ -8,6 +8,10 @@ mod attached_harness;
 #[path = "conformance_19_21/harness.rs"]
 mod inherited;
 use inherited as harness;
+#[path = "conformance_19_20/act5_k01_wire_carrier.rs"]
+mod act5_k01_wire_carrier;
+#[path = "conformance_19_20/act5_k02_handoff.rs"]
+mod act5_k02_handoff;
 #[path = "conformance_19_21c/c_k01_thread.rs"]
 mod c_k01_thread;
 #[path = "conformance_19_21c/c_k02_followup.rs"]

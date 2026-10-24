@@ -318,6 +318,8 @@ pub struct RecipientItemView {
     pub task: String,
     pub alias: Option<String>,
     pub message_type: super::SemanticMessageType,
+    pub authorship: super::Authorship,
+    pub send_authorization: super::SendAuthorization,
     /// The content lives **inside** [`RecipientItemState`]
     /// (`DF-19-16C-ITEM-VIEW-FIELD-COUNT`'s fix): a removal replaces the
     /// variant and the content goes with it — unrepresentable, not asserted.

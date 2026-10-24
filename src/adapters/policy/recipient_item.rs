@@ -707,6 +707,8 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
             task,
             alias,
             message_type,
+            authorship,
+            send_authorization,
             content,
             in_reply_to,
             capability_hash,
@@ -719,6 +721,8 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
                     task: task.clone(),
                     alias: alias.clone(),
                     message_type: *message_type,
+                    authorship: *authorship,
+                    send_authorization: *send_authorization,
                     state: RecipientItemState::Received {
                         content: content.clone(),
                     },
@@ -848,6 +852,8 @@ mod tests {
             in_reply_to: None,
             capability_hash: None,
             reply_capability_matched: false,
+            authorship: crate::domain::models::Authorship::Unknown,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
         });
         reset_recipient_item_transition_count();
         projection.apply(&RoomEvent::RecipientItemAcknowledged {
@@ -876,6 +882,8 @@ mod tests {
             in_reply_to: None,
             capability_hash: None,
             reply_capability_matched: false,
+            authorship: crate::domain::models::Authorship::Unknown,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
         };
         let reply = |turn: &str, kind: ReplyKind| RoomEvent::RecipientItemReplied {
             address: TurnAddress::answering(
@@ -1003,6 +1011,8 @@ mod tests {
                     address: address.clone(),
                     task: "sender-task".to_owned(),
                     message_type: crate::domain::models::SemanticMessageType::Unknown,
+                    authorship: crate::domain::models::Authorship::Unknown,
+                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
                     alias: Some("arrival-alias".to_owned()),
                     content: "peer content".to_owned(),
                     in_reply_to: None,
@@ -1071,6 +1081,8 @@ mod tests {
             in_reply_to: None,
             capability_hash: None,
             reply_capability_matched: false,
+            authorship: crate::domain::models::Authorship::Unknown,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
         };
         let entries = vec![
             entry(1, received(&acked)),
@@ -1109,6 +1121,8 @@ mod tests {
                 in_reply_to: reply_to.map(str::to_owned),
                 capability_hash: None,
                 reply_capability_matched: false,
+                authorship: crate::domain::models::Authorship::Unknown,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
             };
         let reply = |answered: &str, turn: &str| RoomEvent::RecipientItemReplied {
             address: TurnAddress::answering(
@@ -1264,6 +1278,8 @@ mod tests {
             in_reply_to: Some(reply_to.to_owned()),
             capability_hash: None,
             reply_capability_matched: false,
+            authorship: crate::domain::models::Authorship::Unknown,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
         };
         let projection = JournalRecipientItemProjection::from_entries(&[
             entry(1, item("ri_a", "ri_b")),

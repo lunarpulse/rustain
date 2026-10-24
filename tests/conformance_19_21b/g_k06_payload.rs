@@ -333,7 +333,23 @@ async fn approved_snapshot_matches_attached_typed_send_exactly() {
                 .and_then(Value::as_str),
             Some("architecture_update")
         );
-        forbidden(&wire);
+        // Story 19.20 adds only the two recorded message/send facts; the
+        // recursive privacy assertion still rejects them everywhere else.
+        let mut private_wire = wire.clone();
+        let metadata = private_wire
+            .pointer_mut("/params/message/metadata")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        assert_eq!(
+            metadata.remove("x-rustain-authorship"),
+            Some(json!("agent-composed"))
+        );
+        assert_eq!(
+            metadata.remove("x-rustain-send-authorization"),
+            Some(json!("human-decided"))
+        );
+        forbidden(&private_wire);
         let received = host.journal().entries().await;
         let contents: Vec<_> = received
             .iter()

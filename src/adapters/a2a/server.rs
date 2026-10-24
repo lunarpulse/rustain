@@ -66,6 +66,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::policy::recipient_item::ThreadTurn;
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
+use crate::domain::models::provenance::{Authorship, SendAuthorization};
 use crate::domain::models::{
     A2aPeerSpec, AppConfig, CapabilityRegistry, ItemPrincipal, ItemScope, PeerId, PolicyPrincipal,
     RapTaskState, RecipientItemAllocator, RetractOutcome, RoomEvent, SemanticMessageType,
@@ -1074,6 +1075,22 @@ async fn message_send(
         ));
     }
     let facts = IngressFacts {
+        authorship: Authorship::from_wire(
+            params
+                .get("message")
+                .and_then(|message| message.get("metadata"))
+                .and_then(|metadata| metadata.get(super::AUTHORSHIP_METADATA_KEY))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        ),
+        send_authorization: SendAuthorization::from_wire(
+            params
+                .get("message")
+                .and_then(|message| message.get("metadata"))
+                .and_then(|metadata| metadata.get(super::SEND_AUTHORIZATION_METADATA_KEY))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        ),
         in_reply_to: reference.as_ref().map(|reference| reference.id.clone()),
         capability_hash: item_capability
             .as_ref()
@@ -1126,8 +1143,11 @@ async fn message_send(
 
 /// Story 19.18c — what `message_send` validated before admission, carried to
 /// `launch` as one value so the four signatures grow by one parameter.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct IngressFacts {
+    /// Story 19.20 — sender-reported facts retained across deferred approval.
+    authorship: Authorship,
+    send_authorization: SendAuthorization,
     /// Story 19.18 `AC5(c)` — the resolved follow-up reference, stored raw.
     in_reply_to: Option<String>,
     /// `sha256` hex of the presented item capability; `None` is legacy.
@@ -1678,6 +1698,8 @@ async fn launch(
     let received = RoomEvent::RecipientItemReceived {
         address: address.clone(),
         message_type,
+        authorship: facts.authorship,
+        send_authorization: facts.send_authorization,
         task: task.id.clone(),
         // Story 19.18d `P2`/`F11` — the matched bound slot's alias (display
         // attribution only); `None` for loopback and unbound keys.

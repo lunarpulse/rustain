@@ -622,6 +622,8 @@ async fn k07_view_keeps_distinct_principals_and_unrelated_threads_separate() {
             in_reply_to: Some(first_id.clone()),
             capability_hash: None,
             reply_capability_matched: false,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         })
         .await
         .expect("journal linked cross-principal control");

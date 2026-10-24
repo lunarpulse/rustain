@@ -159,20 +159,20 @@ fn daemon_runtime(
     })
 }
 
-struct Recipient {
-    journal: Journal,
+pub(super) struct Recipient {
+    pub(super) journal: Journal,
     endpoint: String,
     cancel: CancellationToken,
     http: tokio::task::JoinHandle<anyhow::Result<()>>,
     socket_cancel: CancellationToken,
     socket_task: tokio::task::JoinHandle<()>,
-    requests: RequestCount,
+    pub(super) requests: RequestCount,
     started: Arc<tokio::sync::Notify>,
     _keys: tempfile::TempDir,
 }
 
 impl Recipient {
-    async fn start(mode: ResponseMode) -> Self {
+    pub(super) async fn start(mode: ResponseMode) -> Self {
         let journal = Journal::open().await;
         let workspace = journal.workspace.path().to_path_buf();
         let requests = Arc::new(parking_lot::Mutex::new(0));
@@ -276,7 +276,7 @@ impl Recipient {
         }
     }
 
-    fn peer(&self, alias: &str) -> rustain::domain::models::A2aPeerSpec {
+    pub(super) fn peer(&self, alias: &str) -> rustain::domain::models::A2aPeerSpec {
         rustain::domain::models::A2aPeerSpec::new(
             alias,
             rustain::domain::models::RedactedUrl::from(self.endpoint.clone()),
@@ -284,7 +284,7 @@ impl Recipient {
         )
     }
 
-    async fn attach(&self, read_only: bool) -> tokio::net::UnixStream {
+    pub(super) async fn attach(&self, read_only: bool) -> tokio::net::UnixStream {
         let mut stream =
             tokio::net::UnixStream::connect(self.journal.workspace.path().join("daemon.sock"))
                 .await
@@ -328,7 +328,7 @@ impl Recipient {
         stream
     }
 
-    async fn stop(self) {
+    pub(super) async fn stop(self) {
         self.socket_cancel.cancel();
         self.socket_task.abort();
         self.cancel.cancel();
@@ -336,7 +336,7 @@ impl Recipient {
     }
 }
 
-async fn frame(stream: &mut tokio::net::UnixStream) -> DaemonFrame {
+pub(super) async fn frame(stream: &mut tokio::net::UnixStream) -> DaemonFrame {
     tokio::time::timeout(IO_TIMEOUT, read_frame::<_, DaemonFrame>(stream))
         .await
         .expect("daemon socket frame timeout")
@@ -562,7 +562,10 @@ fn local_view_app_state(workspace: &Path) -> AppState {
     .0
 }
 
-async fn local_view(workspace: &Path, item_id: &str) -> rustain::adapters::tui::state::TuiState {
+pub(super) async fn local_view(
+    workspace: &Path,
+    item_id: &str,
+) -> rustain::adapters::tui::state::TuiState {
     let app = local_view_app_state(workspace);
     let mut state = rustain::adapters::tui::state::TuiState::new(130, 30);
     state.input_buffer = format!("/team view {item_id}");
@@ -679,7 +682,7 @@ async fn send_story(sender: &mut Sender, recipient: &Recipient, body: &str) {
     );
 }
 
-async fn acknowledge(stream: &mut tokio::net::UnixStream, item_id: &str) {
+pub(super) async fn acknowledge(stream: &mut tokio::net::UnixStream, item_id: &str) {
     write_frame(
         stream,
         &ClientFrame::AcknowledgeRecipientItem {

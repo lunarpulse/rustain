@@ -356,6 +356,13 @@ impl RawEvent {
                             send_authorization,
                             ..
                         },
+                    )
+                    | crate::domain::events::DomainEventPayload::Room(
+                        crate::domain::models::RoomEvent::RecipientItemReceived {
+                            authorship,
+                            send_authorization,
+                            ..
+                        },
                     ) => {
                         *authorship = crate::domain::models::Authorship::Unknown;
                         *send_authorization = crate::domain::models::SendAuthorization::Unknown;
@@ -726,6 +733,69 @@ mod tests {
             assert!(original.get("send_authorization").is_some());
             assert_eq!(original["authorship"], "agent-composed");
         }
+    }
+
+    #[tokio::test]
+    async fn received_raw_projection_omits_provenance_and_retains_domain_facts() {
+        use crate::domain::events::DomainEventPayload;
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, PeerId, RoomEvent, SemanticMessageType,
+            SendAuthorization,
+        };
+
+        let event = RoomEvent::RecipientItemReceived {
+            address: ItemAddress::from_a2a_ingress(
+                PeerId::from_public_key(&[0x2b; 32]).unwrap(),
+                ItemId::from_replay("ri_received"),
+            ),
+            task: "received-task".to_owned(),
+            alias: Some("sender".to_owned()),
+            content: "received body".to_owned(),
+            message_type: SemanticMessageType::Unknown,
+            in_reply_to: None,
+            capability_hash: None,
+            reply_capability_matched: false,
+            authorship: Authorship::AgentComposed,
+            send_authorization: SendAuthorization::Automatic,
+        };
+        let original = serde_json::to_value(&event).unwrap();
+        assert_eq!(original["authorship"], "agent-composed");
+        assert_eq!(original["send_authorization"], "automatic");
+        let (bus, mut domain) = EventBus::new(16);
+        let mut raw = bus.subscribe_raw();
+        bus.emit_domain(AppEvent::DomainEvent(DomainEventPayload::Room(
+            event.clone(),
+        )))
+        .unwrap();
+
+        let projected = raw
+            .try_recv()
+            .expect("received event reaches raw subscribers");
+        let encoded = serde_json::to_value(&projected).unwrap();
+        let RawEventKind::DomainEvent(DomainEventPayload::Room(projected)) = projected.kind else {
+            panic!("expected received room event");
+        };
+        let mut expected = original.clone();
+        expected.as_object_mut().unwrap().remove("authorship");
+        expected
+            .as_object_mut()
+            .unwrap()
+            .remove("send_authorization");
+        assert_eq!(serde_json::to_value(projected).unwrap(), expected);
+        let encoded = serde_json::to_string(&encoded).unwrap();
+        assert!(!encoded.contains("authorship"));
+        assert!(!encoded.contains("send_authorization"));
+        let AppEvent::DomainEvent(DomainEventPayload::Room(retained)) = domain
+            .try_recv()
+            .expect("source event reaches domain channel")
+        else {
+            panic!("expected retained received event");
+        };
+        assert_eq!(
+            retained, event,
+            "raw projection must not mutate source facts"
+        );
+        assert_eq!(serde_json::to_value(retained).unwrap(), original);
     }
 
     #[tokio::test]

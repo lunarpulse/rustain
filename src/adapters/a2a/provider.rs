@@ -50,6 +50,7 @@ impl A2aProvider {
         cancel: CancellationToken,
         resolution: Option<PermissionResolution>,
     ) -> Result<ToolResult, CapabilityError> {
+        let authorship = crate::domain::models::Authorship::AgentComposed;
         let send_authorization = match resolution {
             Some(PermissionResolution::Operator) => SendAuthorization::HumanDecided,
             Some(PermissionResolution::Policy) => SendAuthorization::Automatic,
@@ -101,7 +102,10 @@ impl A2aProvider {
             &input,
             super::driver::MessageCarriers {
                 item_key: item_key.as_deref(),
-                ..super::driver::MessageCarriers::default()
+                reply_to: None,
+                reply_capability: None,
+                authorship,
+                send_authorization,
             },
         );
         let transport = super::driver::TaskClient::new(client.clone(), endpoint.url().to_owned());
@@ -117,6 +121,7 @@ impl A2aProvider {
                 transport,
                 message,
                 cancel,
+                authorship,
                 send_authorization,
             )
             .await

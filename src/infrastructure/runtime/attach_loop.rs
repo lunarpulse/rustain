@@ -5202,6 +5202,8 @@ mod tests {
                 in_reply_to: None,
                 capability_hash: None,
                 reply_capability_matched: false,
+                authorship: crate::domain::models::Authorship::Unknown,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
             })
             .await
             .unwrap();
@@ -5453,7 +5455,186 @@ mod tests {
         use crate::adapters::tui::widgets::recipient_surface::RecipientSurfaceAction;
         use crate::domain::models::SemanticMessageType;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for message_type in [
+            SemanticMessageType::StoryAssignment,
+            SemanticMessageType::BugReport,
+        ] {
+            let workspace = tempfile::tempdir().unwrap();
+            let journal =
+                crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+                    workspace.path(),
+                )
+                .await
+                .unwrap();
+            let address = append_received_test_item(
+                &journal,
+                "ri_story_assignment",
+                message_type,
+                "A locally journaled story assignment.",
+            )
+            .await;
+            let row_id = "story-assignment-row".to_owned();
+            let conversation = Conversation {
+                messages: vec![peer_row(&row_id, "pending story assignment")],
+                peer_row_controls: [(
+                    row_id,
+                    crate::domain::models::PeerRowControl {
+                        node_id: "story-assignment-node".to_owned(),
+                        item_address: Some(address.clone()),
+                        message_type,
+                        sender_label: "test sender".to_owned(),
+                        stage: crate::domain::models::PeerRowStage::AwaitingOperator,
+                        node_resolvable: true,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Conversation::default()
+            };
+            let mut state = TuiState::new(80, 24);
+            let mut input = String::new();
+            let (tx, mut rx) = mpsc::unbounded_channel();
 
+            crate::infrastructure::runtime::recipient_surface::open_received_surface(
+                workspace.path(),
+                Some(&conversation),
+                address.item().as_str(),
+                &mut state,
+                RecipientSurfaceAccess::Writer,
+                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+            .unwrap();
+            let actions = recipient_surface_actions(&state, &conversation, false);
+            assert!(actions.contains(&Some(RecipientSurfaceAction::Acknowledge)));
+            recipient_surface_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                workspace.path(),
+                &conversation,
+                &mut input,
+                &mut state,
+                Some(&tx),
+            )
+            .await;
+            assert!(
+                rx.try_recv().is_err(),
+                "opening/viewing a received story assignment does not acknowledge it"
+            );
+
+            recipient_surface_key(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                workspace.path(),
+                &conversation,
+                &mut input,
+                &mut state,
+                Some(&tx),
+            )
+            .await;
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(ClientFrame::AcknowledgeRecipientItem { item_id })
+                    if item_id == address.item().as_str()
+            ));
+            assert!(
+                recipient_surface_actions(&state, &conversation, false)
+                    .contains(&Some(RecipientSurfaceAction::Context)),
+                "after acknowledgement, the open surface still offers [c] Use as context"
+            );
+            recipient_surface_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                workspace.path(),
+                &conversation,
+                &mut input,
+                &mut state,
+                Some(&tx),
+            )
+            .await;
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(ClientFrame::SetRecipientContext {
+                    item_id,
+                    selected: true
+                }) if item_id == address.item().as_str()
+            ));
+            crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                &mut state,
+                &mut input,
+                crate::adapters::daemon::protocol::RecipientAction::ContextSelect,
+                crate::adapters::daemon::protocol::RecipientActionTarget::Item {
+                    item_id: address.item().as_str().to_owned(),
+                },
+                crate::adapters::daemon::protocol::RecipientActionOutcome::ContextSelection {
+                    selected: true,
+                    changed: true,
+                },
+            );
+            recipient_surface_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                workspace.path(),
+                &conversation,
+                &mut input,
+                &mut state,
+                Some(&tx),
+            )
+            .await;
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(ClientFrame::SetRecipientContext {
+                    item_id,
+                    selected: false
+                }) if item_id == address.item().as_str()
+            ));
+
+            crate::infrastructure::runtime::recipient_surface::open_received_surface(
+                workspace.path(),
+                Some(&conversation),
+                address.item().as_str(),
+                &mut state,
+                RecipientSurfaceAccess::ReadOnly,
+                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+            .unwrap();
+            assert!(
+                state
+                    .recipient_surface
+                    .as_ref()
+                    .is_some_and(|surface| surface.can_toggle_target),
+                "read-only item surface retains its [Tab] View item control"
+            );
+            assert!(
+                !recipient_surface_actions(&state, &conversation, true)
+                    .contains(&Some(RecipientSurfaceAction::Acknowledge)),
+                "read-only item surfaces do not offer acknowledgement"
+            );
+
+            crate::infrastructure::runtime::recipient_surface::open_received_surface(
+                workspace.path(),
+                Some(&conversation),
+                address.item().as_str(),
+                &mut state,
+                RecipientSurfaceAccess::Writer,
+                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+            .unwrap();
+            if let Some(surface) = state.recipient_surface.as_mut() {
+                surface.item_state = Some("removed");
+            }
+            assert!(
+                !recipient_surface_actions(&state, &conversation, false)
+                    .contains(&Some(RecipientSurfaceAction::Acknowledge)),
+                "removed items do not offer acknowledgement"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn story19_20_bug_report_discuss_survives_settled_or_absent_control() {
+        use crate::adapters::tui::state::RecipientSurfaceAccess;
+        use crate::adapters::tui::widgets::recipient_surface::RecipientSurfaceAction;
+        use crate::domain::models::{PeerRowControl, PeerRowStage, SemanticMessageType};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let workspace = tempfile::tempdir().unwrap();
         let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
             workspace.path(),
@@ -5462,164 +5643,78 @@ mod tests {
         .unwrap();
         let address = append_received_test_item(
             &journal,
-            "ri_story_assignment",
-            SemanticMessageType::StoryAssignment,
-            "A locally journaled story assignment.",
+            "ri_bug_discuss",
+            SemanticMessageType::BugReport,
+            "bug report",
         )
         .await;
-        let row_id = "story-assignment-row".to_owned();
-        let conversation = Conversation {
-            messages: vec![peer_row(&row_id, "pending story assignment")],
-            peer_row_controls: [(
-                row_id,
-                crate::domain::models::PeerRowControl {
-                    node_id: "story-assignment-node".to_owned(),
-                    item_address: Some(address.clone()),
-                    message_type: SemanticMessageType::StoryAssignment,
-                    sender_label: "test sender".to_owned(),
-                    stage: crate::domain::models::PeerRowStage::AwaitingOperator,
-                    node_resolvable: true,
-                },
-            )]
-            .into_iter()
-            .collect(),
-            ..Conversation::default()
-        };
-        let mut state = TuiState::new(80, 24);
-        let mut input = String::new();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
-            workspace.path(),
-            Some(&conversation),
-            address.item().as_str(),
-            &mut state,
-            RecipientSurfaceAccess::Writer,
-            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
-        )
-        .await
-        .unwrap();
-        let actions = recipient_surface_actions(&state, &conversation, false);
-        assert!(actions.contains(&Some(RecipientSurfaceAction::Acknowledge)));
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            workspace.path(),
-            &conversation,
-            &mut input,
-            &mut state,
-            Some(&tx),
-        )
-        .await;
-        assert!(
-            rx.try_recv().is_err(),
-            "opening/viewing a received story assignment does not acknowledge it"
-        );
-
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
-            workspace.path(),
-            &conversation,
-            &mut input,
-            &mut state,
-            Some(&tx),
-        )
-        .await;
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(ClientFrame::AcknowledgeRecipientItem { item_id })
-                if item_id == address.item().as_str()
-        ));
-        assert!(
-            recipient_surface_actions(&state, &conversation, false)
-                .contains(&Some(RecipientSurfaceAction::Context)),
-            "after acknowledgement, the open surface still offers [c] Use as context"
-        );
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
-            workspace.path(),
-            &conversation,
-            &mut input,
-            &mut state,
-            Some(&tx),
-        )
-        .await;
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(ClientFrame::SetRecipientContext {
-                item_id,
-                selected: true
-            }) if item_id == address.item().as_str()
-        ));
-        crate::adapters::tui::handlers::recipient_actions::apply_action_result(
-            &mut state,
-            &mut input,
-            crate::adapters::daemon::protocol::RecipientAction::ContextSelect,
-            crate::adapters::daemon::protocol::RecipientActionTarget::Item {
-                item_id: address.item().as_str().to_owned(),
-            },
-            crate::adapters::daemon::protocol::RecipientActionOutcome::ContextSelection {
-                selected: true,
-                changed: true,
-            },
-        );
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
-            workspace.path(),
-            &conversation,
-            &mut input,
-            &mut state,
-            Some(&tx),
-        )
-        .await;
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(ClientFrame::SetRecipientContext {
-                item_id,
-                selected: false
-            }) if item_id == address.item().as_str()
-        ));
-
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
-            workspace.path(),
-            Some(&conversation),
-            address.item().as_str(),
-            &mut state,
-            RecipientSurfaceAccess::ReadOnly,
-            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
-        )
-        .await
-        .unwrap();
-        assert!(
-            state
-                .recipient_surface
-                .as_ref()
-                .is_some_and(|surface| surface.can_toggle_target),
-            "read-only item surface retains its [Tab] View item control"
-        );
-        assert!(
-            !recipient_surface_actions(&state, &conversation, true)
-                .contains(&Some(RecipientSurfaceAction::Acknowledge)),
-            "read-only item surfaces do not offer acknowledgement"
-        );
-
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
-            workspace.path(),
-            Some(&conversation),
-            address.item().as_str(),
-            &mut state,
-            RecipientSurfaceAccess::Writer,
-            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
-        )
-        .await
-        .unwrap();
-        if let Some(surface) = state.recipient_surface.as_mut() {
-            surface.item_state = Some("removed");
+        for stage in [
+            None,
+            Some(PeerRowStage::Settled),
+            Some(PeerRowStage::Drafting),
+        ] {
+            let mut conversation = Conversation::default();
+            if let Some(stage) = stage {
+                let row = "peer-response-bug";
+                conversation.messages.push(peer_row(row, "response"));
+                conversation.peer_row_controls.insert(
+                    row.into(),
+                    PeerRowControl {
+                        node_id: "bug".into(),
+                        item_address: Some(address.clone()),
+                        message_type: SemanticMessageType::BugReport,
+                        sender_label: "sender".into(),
+                        stage,
+                        node_resolvable: stage == PeerRowStage::Drafting,
+                    },
+                );
+            }
+            for access in [
+                RecipientSurfaceAccess::Writer,
+                RecipientSurfaceAccess::ReadOnly,
+                RecipientSurfaceAccess::LocalOnly,
+            ] {
+                let mut state = TuiState::new(80, 24);
+                crate::infrastructure::runtime::recipient_surface::open_received_surface(
+                    workspace.path(),
+                    Some(&conversation),
+                    address.item().as_str(),
+                    &mut state,
+                    access,
+                    crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+                )
+                .await
+                .unwrap();
+                let actions = recipient_surface_actions(&state, &conversation, false);
+                if access != RecipientSurfaceAccess::Writer {
+                    assert!(actions.iter().all(Option::is_none));
+                    continue;
+                }
+                assert!(matches!(
+                    actions[1],
+                    Some(RecipientSurfaceAction::Acknowledge)
+                ));
+                if stage == Some(PeerRowStage::Drafting) {
+                    assert!(actions[0].is_none());
+                    continue;
+                }
+                assert!(matches!(actions[0], Some(RecipientSurfaceAction::Discuss)));
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let mut input = String::new();
+                recipient_surface_key(
+                    KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                    workspace.path(),
+                    &conversation,
+                    &mut input,
+                    &mut state,
+                    Some(&tx),
+                )
+                .await;
+                assert_eq!(input, "/team reply ri_bug_discuss ");
+                assert!(rx.try_recv().is_err(), "Discuss composes, it does not send");
+                assert!(state.recipient_surface.is_none());
+            }
         }
-        assert!(
-            !recipient_surface_actions(&state, &conversation, false)
-                .contains(&Some(RecipientSurfaceAction::Acknowledge)),
-            "removed items do not offer acknowledgement"
-        );
     }
 
     #[test]

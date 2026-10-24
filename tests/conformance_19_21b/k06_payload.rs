@@ -90,7 +90,7 @@ async fn k06_approved_proposal_preserves_boundary_payload_bytes() {
     for post in proposal_posts_lena.iter().chain(proposal_posts_jun.iter()) {
         let wire: Value = serde_json::from_slice(post.body()).expect("captured POST is JSON");
         assert_wire_payload(&wire, BODY);
-        assert_no_forbidden_wire_fields(&wire);
+        assert_wire_privacy(&wire, "agent-composed");
         assert_no_forbidden_headers(post.headers());
         assert!(
             post.headers().get("content-type").is_some(),
@@ -205,7 +205,7 @@ async fn k06_proposal_matches_typed_send_for_representable_body() {
         let wire: Value =
             serde_json::from_slice(posts[0].body()).expect("actual forwarded proposal POST");
         assert_wire_payload(&wire, PARITY_BODY);
-        assert_no_forbidden_wire_fields(&wire);
+        assert_wire_privacy(&wire, "agent-composed");
         assert_no_forbidden_headers(posts[0].headers());
         assert!(posts[0].headers().get("content-type").is_some());
     }
@@ -282,7 +282,7 @@ async fn k06_proposal_matches_typed_send_for_representable_body() {
         let wire: Value = serde_json::from_slice(post.body()).expect("actual forwarded typed POST");
         assert_eq!(wire["method"], "message/send");
         assert_wire_payload(&wire, PARITY_BODY);
-        assert_no_forbidden_wire_fields(&wire);
+        assert_wire_privacy(&wire, "human-written");
         assert_no_forbidden_headers(post.headers());
     }
     let typed_facts = stable_send_facts(&fixture).await;
@@ -308,12 +308,12 @@ async fn k06_proposal_matches_typed_send_for_representable_body() {
     assert_recipient_received(&typed_received_lena[1..], PARITY_BODY);
     assert_recipient_received(&typed_received_jun[1..], PARITY_BODY);
     assert_eq!(
-        normalize_recipient_facts(&proposal_received_lena),
-        normalize_recipient_facts(&typed_received_lena[1..])
+        normalize_recipient_facts(&proposal_received_lena, "agent-composed"),
+        normalize_recipient_facts(&typed_received_lena[1..], "human-written")
     );
     assert_eq!(
-        normalize_recipient_facts(&proposal_received_jun),
-        normalize_recipient_facts(&typed_received_jun[1..])
+        normalize_recipient_facts(&proposal_received_jun, "agent-composed"),
+        normalize_recipient_facts(&typed_received_jun[1..], "human-written")
     );
 
     fixture.typed("/team log").await;
@@ -582,6 +582,26 @@ fn assert_wire_payload(wire: &Value, body: &str) {
     );
 }
 
+fn assert_wire_privacy(wire: &Value, authorship: &str) {
+    // Story 19.20: allow exactly the recorded facts at their allocated carrier,
+    // preserving the recursive ban at every other object path and in headers.
+    let mut private_wire = wire.clone();
+    let metadata = private_wire
+        .pointer_mut("/params/message/metadata")
+        .expect("message metadata")
+        .as_object_mut()
+        .unwrap();
+    assert_eq!(
+        metadata.remove("x-rustain-authorship"),
+        Some(serde_json::json!(authorship))
+    );
+    assert_eq!(
+        metadata.remove("x-rustain-send-authorization"),
+        Some(serde_json::json!("human-decided"))
+    );
+    assert_no_forbidden_wire_fields(&private_wire);
+}
+
 fn assert_no_forbidden_wire_fields(value: &Value) {
     match value {
         Value::Object(object) => {
@@ -659,13 +679,21 @@ fn assert_recipient_received(received: &[Value], body: &str) {
         Some("architecture_update")
     );
 }
-fn normalize_recipient_facts(received: &[Value]) -> Value {
+fn normalize_recipient_facts(received: &[Value], authorship: &str) -> Value {
     let mut normalized = Value::Array(received.to_vec());
     for fact in normalized.as_array_mut().expect("recipient facts array") {
         let fact = fact.as_object_mut().unwrap();
         fact.remove("recorded_at_ms");
         let event = fact.get_mut("event").unwrap().as_object_mut().unwrap();
         event.remove("task");
+        assert_eq!(
+            event.remove("authorship"),
+            Some(serde_json::json!(authorship))
+        );
+        assert_eq!(
+            event.get("send_authorization"),
+            Some(&serde_json::json!("human-decided"))
+        );
         // The recipient persists only a hash of the x-rustain-item-capability,
         // itself derived from the generated outbound message id. Preserve every
         // other received-event field (including the address principal).

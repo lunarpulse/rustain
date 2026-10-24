@@ -1087,6 +1087,16 @@ pub enum RoomEvent {
         /// Verified semantic type carried at ingress, independent of body text.
         #[serde(default, skip_serializing_if = "SemanticMessageType::is_unknown")]
         message_type: SemanticMessageType,
+        #[serde(
+            default = "Authorship::unknown",
+            skip_serializing_if = "Authorship::is_unknown"
+        )]
+        authorship: Authorship,
+        #[serde(
+            default = "SendAuthorization::unknown",
+            skip_serializing_if = "SendAuthorization::is_unknown"
+        )]
+        send_authorization: SendAuthorization,
         content: String,
         /// Story 19.18 `A5` — the item or reply-turn id this follow-up
         /// answers, carried by `x-rustain-in-reply-to` and stored raw

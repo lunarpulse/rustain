@@ -507,6 +507,8 @@ async fn deliver_one(
             reply_to,
             item_key: item_key.as_deref(),
             reply_capability: reply_capability.as_ref(),
+            authorship,
+            send_authorization,
         },
     );
     let task_id = message["message"]["messageId"]
@@ -1522,7 +1524,17 @@ mod tests {
     #[test]
     fn outbound_message_preserves_exact_unicode_text_in_one_text_part() {
         let text = "  Καλημέρα 🌕\nsecond line  ";
-        let (message, _) = outbound_message(text, None, super::MessageCarriers::default());
+        let (message, _) = outbound_message(
+            text,
+            None,
+            super::MessageCarriers {
+                reply_to: None,
+                item_key: None,
+                reply_capability: None,
+                authorship: crate::domain::models::Authorship::HumanWritten,
+                send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
+            },
+        );
         let parts = message["message"]["parts"]
             .as_array()
             .expect("message parts");

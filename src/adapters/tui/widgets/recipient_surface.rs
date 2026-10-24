@@ -76,7 +76,9 @@ pub(crate) fn recipient_surface_actions(
     {
         if !live_drafting {
             actions[0] = match surface.message_type {
-                SemanticMessageType::ArchitectureUpdate => Some(RecipientSurfaceAction::Discuss),
+                SemanticMessageType::ArchitectureUpdate | SemanticMessageType::BugReport => {
+                    Some(RecipientSurfaceAction::Discuss)
+                }
                 SemanticMessageType::Consultation => Some(RecipientSurfaceAction::Respond),
                 _ if control.is_some_and(|c| c.stage != PeerRowStage::Settled) => {
                     Some(RecipientSurfaceAction::Respond)
@@ -92,7 +94,9 @@ pub(crate) fn recipient_surface_actions(
             // the same `/team ack` frame, the same correlated Applied/
             // Idempotent result, and the daemon's transition gate rechecks it.
             // A receipt, ⛔ not an acceptance and not a person acting.
-            SemanticMessageType::ArchitectureUpdate | SemanticMessageType::StoryAssignment
+            SemanticMessageType::ArchitectureUpdate
+            | SemanticMessageType::StoryAssignment
+            | SemanticMessageType::BugReport
                 if surface.item_state == Some("received") =>
             {
                 Some(RecipientSurfaceAction::Acknowledge)

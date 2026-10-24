@@ -1771,6 +1771,8 @@ async fn not_yours_is_byte_identical_to_never_existed() {
             in_reply_to: Some(ri_q.clone()),
             capability_hash: None,
             reply_capability_matched: false,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         })
         .await
         .expect("seed another principal's earlier ingress");

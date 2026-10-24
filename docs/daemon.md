@@ -611,6 +611,13 @@ card saved by an older build refuses resolution with
 notice. The sender still receives only the truthful accepted/refused verdict,
 never response text. Conversational replies use A2A.
 
+At daemon startup, a persisted `Drafting` response row without a live draft
+phase settles before attachments are accepted:
+`[draft interrupted] The daemon restarted while this reply was being drafted; nothing was sent.`
+RAP-rooted interrupted drafts use the one-way notice above instead. Live draft
+phases and other stages are unchanged. Settlement creates no reply, provider
+turn or journal event; a direct `/team reply <item-id> …` remains available.
+
 Legacy rows are never backfilled: without recorded send authorization, that
 fact is Unknown. A legacy approved draft loses its false `[auto-sent]` label.
 A legacy genuine auto-response shows `[agent-composed]` only and is no longer

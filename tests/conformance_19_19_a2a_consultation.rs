@@ -2183,7 +2183,7 @@ async fn k02_restart_orphan_drafting_row_retains_item_but_disables_stale_node_ac
     let service = SocketService::start(&mut host).await;
     let (mut observer, mode, snapshot) = service.attach(ConnectionTier::TrustedLocal, true).await;
     assert_eq!(mode, AttachMode::ReadOnly);
-    assert_eq!(snapshot.peer_row_revision, before_revision);
+    assert_eq!(snapshot.peer_row_revision, before_revision + 1);
     assert_eq!(
         snapshot
             .transcript
@@ -2194,11 +2194,21 @@ async fn k02_restart_orphan_drafting_row_retains_item_but_disables_stale_node_ac
         "K02: restart snapshot retains the persisted response row"
     );
     let orphan = &snapshot.peer_row_controls[&row_id];
-    assert_eq!(orphan.stage, PeerRowStage::Drafting);
+    assert_eq!(orphan.stage, PeerRowStage::Settled);
     assert_eq!(orphan.item_address.as_ref(), Some(&item_address));
     assert!(
         !orphan.node_resolvable,
         "K02: restarted orphan does not advertise an unresolvable node action"
+    );
+    assert_eq!(
+        snapshot
+            .transcript
+            .iter()
+            .find(|message| message.id == row_id)
+            .unwrap()
+            .content,
+        "[draft interrupted] The daemon restarted while this reply was being drafted; nothing was sent.",
+        "Story 19.20: the retained orphan settles visibly rather than remaining stranded",
     );
     let (post_attach_ops, history) = history_fence(&mut observer).await;
     assert!(
@@ -2213,14 +2223,23 @@ async fn k02_restart_orphan_drafting_row_retains_item_but_disables_stale_node_ac
         .await
         .expect("load post-restart conversation")
         .expect("conversation remains durable");
-    assert_eq!(after.peer_row_revision, before_revision);
+    assert_eq!(after.peer_row_revision, before_revision + 1);
     assert_eq!(
         after.peer_row_controls[&row_id].item_address.as_ref(),
         Some(&item_address)
     );
     assert_eq!(
         after.peer_row_controls[&row_id].stage,
-        PeerRowStage::Drafting
+        PeerRowStage::Settled
+    );
+    assert_eq!(
+        after
+            .messages
+            .iter()
+            .find(|message| message.id == row_id)
+            .unwrap()
+            .content,
+        "[draft interrupted] The daemon restarted while this reply was being drafted; nothing was sent.",
     );
     host.cancel.cancel();
     host.http.await.expect("host task").expect("HTTP shutdown");

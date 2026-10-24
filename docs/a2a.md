@@ -258,11 +258,20 @@ proposals record `agent-composed` + `human-decided`, so they never gain
 `[auto-sent]`; typed sends record `human-written` + `human-decided`.
 Unknown facts add no label, and unknown future tokens remain readable as Unknown.
 
-These recorded act facts are journal-local, not new peer-wire fields. Raw event
-projections omit both facts on dispatch and disclosure rows, and send
-authorization on reply rows; the existing reply authorship exposure is unchanged.
-Peer-tier attach transcripts never expose send authorization, while trusted-local
-writers and read-only mirrors retain it.
+Outbound `message/send` carries both recorded facts in message metadata as
+`x-rustain-authorship` and `x-rustain-send-authorization`; unknown facts omit
+their keys. Recipients retain them across consent deferral and journal replay.
+The trusted-local `/team log` received row and `/team view` item turns render
+the same marks. The marks are the **sending host's report**, not independent
+evidence about the person. An absent mark does not establish that a human
+wrote or sent the message. Received log rows append the stored arrival alias
+while keeping the peer column; View headers use that alias when present.
+
+This adds no task-answer metadata or thread-read send authorization; thread
+reads retain their existing reply-authorship field. Raw event projections omit
+both facts on dispatch, disclosure and received-item rows. Raw reply events keep
+authorship and omit send authorization. Peer-tier attach transcripts still omit
+send authorization; trusted-local writers and read-only mirrors retain it.
 
 For model delegation, `human-decided` means an operator-surface resolver
 authorized the exact fingerprint-bound invocation, with its full input available
@@ -480,8 +489,8 @@ Use the verb on the rail that holds its object:
 - `/team ack <item-id>` is rail 4 only. It records receipt, not an answer.
   Standalone sessions refuse it; viewing or responding does not imply Ack.
 - `/team thread <peer-id> <item-id>` and
-  `/team followup <peer-id> <turn-id> <text…>` are rail 3 only. Rail 4 refuses
-  them because they need that session's A2A egress.
+  `/team followup <peer-id> <turn-id> <text…>` work on rails 3 and 4 through
+  their session's A2A egress.
 - `/team board <peer-id>` is the asker's discovery step: its correlated item
   row supplies the root item id to paste into `/team thread`.
 

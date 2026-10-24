@@ -78,4 +78,89 @@ impl SendAuthorization {
     pub const fn is_automatic(&self) -> bool {
         matches!(self, Self::Automatic)
     }
+
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::HumanDecided => "human-decided",
+            Self::Automatic => "automatic",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub fn from_wire(token: &str) -> Self {
+        match token {
+            "human-decided" => Self::HumanDecided,
+            "automatic" => Self::Automatic,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Product-owned marks for independent, recorded provenance facts.
+#[must_use]
+pub const fn provenance_tags(
+    authorship: Authorship,
+    send_authorization: SendAuthorization,
+) -> &'static str {
+    match (authorship, send_authorization) {
+        (Authorship::AgentComposed, SendAuthorization::Automatic) => {
+            " [agent-composed] [auto-sent]"
+        }
+        (Authorship::AgentComposed, _) => " [agent-composed]",
+        (_, SendAuthorization::Automatic) => " [auto-sent]",
+        _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_authorization_wire_tokens_round_trip_and_unknown_is_tolerant() {
+        for value in [
+            SendAuthorization::HumanDecided,
+            SendAuthorization::Automatic,
+            SendAuthorization::Unknown,
+        ] {
+            assert_eq!(SendAuthorization::from_wire(value.wire_name()), value);
+        }
+        for token in ["", "future-token", "Automatic", " human-decided"] {
+            assert_eq!(
+                SendAuthorization::from_wire(token),
+                SendAuthorization::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn provenance_tags_cover_independent_facts_without_inference() {
+        for (authorship, authorization, expected) in [
+            (
+                Authorship::HumanWritten,
+                SendAuthorization::HumanDecided,
+                "",
+            ),
+            (Authorship::Unknown, SendAuthorization::Unknown, ""),
+            (
+                Authorship::AgentComposed,
+                SendAuthorization::Unknown,
+                " [agent-composed]",
+            ),
+            (
+                Authorship::Unknown,
+                SendAuthorization::Automatic,
+                " [auto-sent]",
+            ),
+            (
+                Authorship::AgentComposed,
+                SendAuthorization::Automatic,
+                " [agent-composed] [auto-sent]",
+            ),
+        ] {
+            assert_eq!(provenance_tags(authorship, authorization), expected);
+        }
+    }
 }

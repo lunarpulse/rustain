@@ -42,6 +42,7 @@
 
 use std::path::PathBuf;
 
+use crate::domain::models::provenance::provenance_tags;
 use crate::domain::models::{
     Direction, FrameRefusal, JournalEntry, JournalRecord, PeerAdmissionOutcome,
     PeerFrameAttemptOutcome, PeerId, RejectReason, RoomEvent, node_journal,
@@ -428,17 +429,8 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             task.clone(),
             match act {
                 crate::domain::models::DispatchAct::Task => format!(
-                    "task dispatched to peer ({bytes} bytes){}{}",
-                    if *authorship == crate::domain::models::Authorship::AgentComposed {
-                        " [agent-composed]"
-                    } else {
-                        ""
-                    },
-                    if *send_authorization == crate::domain::models::SendAuthorization::Automatic {
-                        " [auto-sent]"
-                    } else {
-                        ""
-                    }
+                    "task dispatched to peer ({bytes} bytes){}",
+                    provenance_tags(*authorship, *send_authorization)
                 ),
                 // Story 19.16f `AC5(b)`: a retract is one outbound write of
                 // its own, ⛔ never a second dispatch of the item's task.
@@ -505,17 +497,8 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
                 .unwrap_or_else(|| "unknown-peer".to_owned()),
             task.clone(),
             format!(
-                "disclosed result to peer ({disclosed_bytes} bytes){}{}",
-                if *authorship == crate::domain::models::Authorship::AgentComposed {
-                    " [agent-composed]"
-                } else {
-                    ""
-                },
-                if *send_authorization == crate::domain::models::SendAuthorization::Automatic {
-                    " [auto-sent]"
-                } else {
-                    ""
-                }
+                "disclosed result to peer ({disclosed_bytes} bytes){}",
+                provenance_tags(*authorship, *send_authorization)
             ),
         ),
         RoomEvent::PeerInteractionSurfaced {
@@ -674,14 +657,28 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         // nothing the operator can see — the same string is read by the CLI,
         // the `--json` envelope, the TUI panel, its detail pane and the
         // panel's search key. Cutting it here scrubs all of them at source.
-        // ⇒ After this arm, an inbound item's row contains zero bytes the
-        // peer chose.
-        RoomEvent::RecipientItemReceived { address, .. } => (
+        // The stored arrival alias is the only peer-chosen display text:
+        // sanitized and bounded, never identity. Provenance tags are fixed
+        // product strings selected from the recorded enums.
+        RoomEvent::RecipientItemReceived {
+            address,
+            alias,
+            authorship,
+            send_authorization,
+            ..
+        } => (
             TransparencyKind::RecipientItemReceived,
             Direction::Inbound,
             item_principal_label(address.principal()),
             Some(address.item().as_str().to_owned()),
-            "recipient item received".to_owned(),
+            format!(
+                "recipient item received{}{}",
+                alias
+                    .as_deref()
+                    .map(|value| format!(" from {}", sanitize_disclosable(value, 80)))
+                    .unwrap_or_default(),
+                provenance_tags(*authorship, *send_authorization)
+            ),
         ),
         RoomEvent::RecipientItemRemoved { address } => (
             TransparencyKind::RecipientItemRemoved,
@@ -702,10 +699,10 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             item_principal_label(address.principal()),
             Some(address.item().as_str().to_owned()),
             format!(
-                "recipient item acknowledged{}",
+                "recipient item{} acknowledged",
                 alias
                     .as_deref()
-                    .map(|value| format!(" by {}", sanitize_disclosable(value, 80)))
+                    .map(|value| format!(" from {}", sanitize_disclosable(value, 80)))
                     .unwrap_or_default()
             ),
         ),
@@ -747,19 +744,10 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             item_principal_label(address.principal()),
             Some(answers.as_str().to_owned()),
             format!(
-                "reply {} recorded for item {} — its sender sees it when they read the thread{}{}",
+                "reply {} recorded for item {} — its sender sees it when they read the thread{}",
                 address.turn().as_str(),
                 answers.as_str(),
-                if *authorship == crate::domain::models::Authorship::AgentComposed {
-                    " [agent-composed]"
-                } else {
-                    ""
-                },
-                if *send_authorization == crate::domain::models::SendAuthorization::Automatic {
-                    " [auto-sent]"
-                } else {
-                    ""
-                }
+                provenance_tags(*authorship, *send_authorization)
             ),
         ),
         // Story 19.18 `A13` — the asker's receipt of one peer reply turn.
@@ -1549,6 +1537,72 @@ mod tests {
                 "{}",
                 other.label()
             );
+        }
+    }
+
+    #[test]
+    fn story19_20_recipient_log_alias_and_provenance_matrix() {
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, SemanticMessageType, SendAuthorization,
+        };
+
+        let address = ItemAddress::from_a2a_ingress(peer(), ItemId::from_replay("ri_question"));
+        for (authorship, send_authorization, tags) in [
+            (
+                Authorship::HumanWritten,
+                SendAuthorization::HumanDecided,
+                "",
+            ),
+            (
+                Authorship::AgentComposed,
+                SendAuthorization::HumanDecided,
+                " [agent-composed]",
+            ),
+            (
+                Authorship::AgentComposed,
+                SendAuthorization::Automatic,
+                " [agent-composed] [auto-sent]",
+            ),
+            (Authorship::Unknown, SendAuthorization::Unknown, ""),
+        ] {
+            for (alias, attribution) in [
+                (None, ""),
+                (Some("Tom"), " from Tom"),
+                (Some("T\x1bo\rm\u{9b}\n"), " from Tom"),
+            ] {
+                let received = RoomEvent::RecipientItemReceived {
+                    address: address.clone(),
+                    task: "sender-task".to_owned(),
+                    alias: alias.map(str::to_owned),
+                    message_type: SemanticMessageType::Unknown,
+                    authorship,
+                    send_authorization,
+                    content: "private body must not enter the ledger".to_owned(),
+                    in_reply_to: None,
+                    capability_hash: None,
+                    reply_capability_matched: false,
+                };
+                let row = transparency_row(&room_entry(1, 1, received)).unwrap();
+                assert_eq!(
+                    row.summary,
+                    format!("recipient item received{attribution}{tags}")
+                );
+                assert_eq!(row.peer, item_principal_label(address.principal()));
+                assert_eq!(row.direction, Direction::Inbound);
+                assert_eq!(row.task.as_deref(), Some("ri_question"));
+
+                let acknowledged = RoomEvent::RecipientItemAcknowledged {
+                    address: address.clone(),
+                    alias: alias.map(str::to_owned),
+                };
+                let row = transparency_row(&room_entry(2, 2, acknowledged)).unwrap();
+                assert_eq!(
+                    row.summary,
+                    format!("recipient item{attribution} acknowledged")
+                );
+                assert_eq!(row.peer, item_principal_label(address.principal()));
+                assert_eq!(row.direction, Direction::Unknown);
+            }
         }
     }
 

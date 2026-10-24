@@ -165,6 +165,10 @@ struct TypeRecordingRuntime {
     modes: Mutex<Vec<rustain::domain::models::ResponseMode>>,
     policy: Option<EffectiveDeliveryPolicy>,
     senders: Mutex<Vec<tokio::sync::watch::Sender<NodeState>>>,
+    approval_enabled: bool,
+    approval: Mutex<
+        Option<tokio::sync::oneshot::Sender<rustain::domain::ports::InboundApprovalDecision>>,
+    >,
 }
 
 #[async_trait::async_trait]
@@ -198,6 +202,14 @@ impl InboundPeerRuntime for TypeRecordingRuntime {
         _principal: &rustain::domain::models::PolicyPrincipal,
         _summary: &str,
     ) -> Result<InboundApprovalTicket, InboundPeerError> {
+        if self.approval_enabled {
+            let (sender, decision) = tokio::sync::oneshot::channel();
+            *self.approval.lock().expect("approval lock") = Some(sender);
+            return Ok(InboundApprovalTicket {
+                pending: true,
+                decision,
+            });
+        }
         Err(InboundPeerError::unavailable("approval is not used"))
     }
 
@@ -877,6 +889,184 @@ async fn message_type_metadata_is_exact_match_and_vanilla_defaults_to_unknown() 
     http.await.expect("server task").expect("server shutdown");
 }
 
+#[tokio::test]
+async fn provenance_metadata_is_tolerant_and_defaults_to_unknown() {
+    use rustain::adapters::a2a::{AUTHORSHIP_METADATA_KEY, SEND_AUTHORIZATION_METADATA_KEY};
+    use rustain::domain::models::JournalRecord;
+    use rustain::domain::models::{Authorship, RoomEvent, SendAuthorization};
+    use rustain::domain::ports::InboundApprovalDecision;
+
+    for deferred in [false, true] {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let key_dir = tempfile::tempdir().expect("identity directory");
+        let journal = Arc::new(
+            NodeJournal::open_workspace(workspace.path())
+                .await
+                .expect("open journal"),
+        );
+        let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(journal.clone(), None));
+        let runtime = Arc::new(TypeRecordingRuntime {
+            approval_enabled: deferred,
+            ..Default::default()
+        });
+        let signer = IdentityKeyStore::new(key_dir.path())
+            .load_or_generate()
+            .expect("identity");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let endpoint = format!("http://{}/", listener.local_addr().expect("address"));
+        let cancel = CancellationToken::new();
+        let http = tokio::spawn(serve(
+            listener,
+            ServeConfig {
+                registry: Arc::new(CapabilityRegistry::new(None)),
+                signer,
+                security: A2aServerSecurity::default(),
+                runtime: Some(runtime.clone()),
+                transparency: Arc::new(TransparencySink::new(room)),
+                policy: if deferred {
+                    A2aAdmissionPolicy::Ask
+                } else {
+                    A2aAdmissionPolicy::Allow
+                },
+                workspace: workspace.path().to_path_buf(),
+                advertised_host: None,
+                cards: Arc::new(SignedCardCache::new()),
+            },
+            cancel.child_token(),
+        ));
+        let client = reqwest::Client::new();
+        for (fact_index, key) in [AUTHORSHIP_METADATA_KEY, SEND_AUTHORIZATION_METADATA_KEY]
+            .into_iter()
+            .enumerate()
+        {
+            let valid_tokens: &[&str] = if fact_index == 0 {
+                &["human-written", "agent-composed"]
+            } else {
+                &["human-decided", "automatic"]
+            };
+            let mut values = vec![
+                None,
+                Some(serde_json::Value::Null),
+                Some(serde_json::json!(42)),
+                Some(serde_json::json!("")),
+                Some(serde_json::json!("future-token")),
+            ];
+            values.extend(
+                valid_tokens
+                    .iter()
+                    .map(|token| Some(serde_json::json!(token))),
+            );
+            for (case, value) in values.into_iter().enumerate() {
+                let task_id = format!("provenance-{fact_index}-{case}");
+                let mut metadata = serde_json::Map::new();
+                if let Some(value) = value.as_ref() {
+                    metadata.insert(key.to_owned(), value.clone());
+                }
+                let response = rpc(
+                    &client,
+                    &endpoint,
+                    u64::try_from(fact_index * 10 + case + 1).expect("small id"),
+                    "message/send",
+                    serde_json::json!({
+                        "message": {
+                            "messageId": task_id,
+                            "role": "user",
+                            "parts": [{"kind": "text", "text": "provenance tolerance"}],
+                            "metadata": metadata
+                        }
+                    }),
+                )
+                .await;
+                assert!(
+                    response.get("error").is_none(),
+                    "request accepted: {response}"
+                );
+                if deferred {
+                    assert_eq!(response["result"]["status"]["state"], "auth-required");
+                    assert!(
+                        !journal.load().await.expect("journal").iter().any(|entry| {
+                            matches!(&entry.record, JournalRecord::Room(
+                                RoomEvent::RecipientItemReceived { task, .. })
+                                if task == &task_id)
+                        }),
+                        "consent must precede the received record"
+                    );
+                    runtime
+                        .approval
+                        .lock()
+                        .expect("approval lock")
+                        .take()
+                        .expect("pending approval")
+                        .send(InboundApprovalDecision::AllowOnce)
+                        .expect("approval receiver");
+                } else {
+                    assert!(
+                        matches!(
+                            response["result"]["status"]["state"].as_str(),
+                            Some("submitted" | "working")
+                        ),
+                        "request reaches runtime: {response}"
+                    );
+                }
+                let (authorship, send_authorization) =
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            let entries = journal.load().await.expect("journal");
+                            if let Some(facts) =
+                                entries.iter().find_map(|entry| match &entry.record {
+                                    JournalRecord::Room(RoomEvent::RecipientItemReceived {
+                                        task,
+                                        authorship,
+                                        send_authorization,
+                                        ..
+                                    }) if task == &task_id => {
+                                        Some((*authorship, *send_authorization))
+                                    }
+                                    _ => None,
+                                })
+                            {
+                                break facts;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("received record after acceptance");
+                let token = value
+                    .as_ref()
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                assert_eq!(
+                    authorship,
+                    if fact_index == 0 {
+                        Authorship::from_wire(token)
+                    } else {
+                        Authorship::Unknown
+                    },
+                    "authorship, deferred={deferred}, key={key}, case={case}"
+                );
+                assert_eq!(
+                    send_authorization,
+                    if fact_index == 1 {
+                        SendAuthorization::from_wire(token)
+                    } else {
+                        SendAuthorization::Unknown
+                    },
+                    "send authorization, deferred={deferred}, key={key}, case={case}"
+                );
+                let raw = std::fs::read_to_string(journal.path()).expect("journal bytes");
+                assert!(
+                    !raw.contains("future-token"),
+                    "unknown raw token is never stored"
+                );
+            }
+        }
+        stop_server(cancel, http).await;
+    }
+}
+
 /// **[K4] AC4 differential.** A real listener must distinguish a poll that
 /// merely asks about work from a response that actually hands result text back.
 /// The journal is real: the fold observes exactly the same durable records that
@@ -1339,6 +1529,8 @@ async fn seed_item(
     );
     room.record_event(RoomEvent::RecipientItemReceived {
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
+        authorship: rustain::domain::models::Authorship::Unknown,
+        send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         address: address.clone(),
         task: task.to_owned(),
         alias: None,
@@ -1461,6 +1653,8 @@ async fn ac1_the_read_verb_serves_only_the_callers_own_set_through_the_real_fron
         );
         room.record_event(RoomEvent::RecipientItemReceived {
             message_type: rustain::domain::models::SemanticMessageType::Unknown,
+            authorship: rustain::domain::models::Authorship::Unknown,
+            send_authorization: rustain::domain::models::SendAuthorization::Unknown,
             address: acked_gone.clone(),
             task: "task-acked-gone".to_owned(),
             alias: None,

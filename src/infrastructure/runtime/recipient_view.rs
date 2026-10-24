@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::adapters::policy::recipient_item::{JournalRecipientItemProjection, ThreadTurnRef};
+use crate::domain::models::provenance::provenance_tags;
 use crate::domain::models::{ItemScope, RecipientItemState, ReplyKind, SemanticMessageType};
 use crate::domain::ports::RoomJournalReader;
 use crate::domain::services::{
@@ -184,7 +185,15 @@ pub(crate) async fn load_received_thread(
         _ => unreachable!("first and last are both derived from the same set"),
     };
 
-    let label = item_principal_label(opened.address.principal());
+    let label = opened.alias.as_deref().map_or_else(
+        || item_principal_label(opened.address.principal()),
+        |alias| {
+            crate::domain::services::transparency::sanitize_disclosable(
+                alias,
+                crate::domain::services::transparency::MAX_PEER_ID_BYTES,
+            )
+        },
+    );
     let mut content = String::new();
     use std::fmt::Write as _;
     let canonical = semantic_type_token(opened.message_type);
@@ -282,6 +291,7 @@ fn turn_cost(turn: &ThreadTurnRef<'_>, opened: bool) -> TurnCost {
                         acknowledged_before: false,
                     } => "removed".len(),
                 }
+                + provenance_tags(item.authorship, item.send_authorization).len()
                 + if item.retracted_at_ms.is_some() {
                     " · retracted by sender".len()
                 } else {
@@ -299,9 +309,9 @@ fn turn_cost(turn: &ThreadTurnRef<'_>, opened: bool) -> TurnCost {
                     safe_display_len(content)
                 }
                 RecipientItemState::Received { .. } | RecipientItemState::Acknowledged { .. } => {
-                    "\n      content withheld · body exceeds 64 KiB read ceiling".len()
+                    "      content withheld · body exceeds 64 KiB read ceiling".len()
                 }
-                RecipientItemState::Removed { .. } => "\n      content unavailable · removed".len(),
+                RecipientItemState::Removed { .. } => "      content unavailable · removed".len(),
             };
             TurnCost {
                 full: 2 + base + 2 + body,
@@ -356,6 +366,7 @@ fn append_turn(output: &mut String, turn: &ThreadTurnRef<'_>, include_body: bool
                 } => "removed",
             };
             let _ = write!(output, "  {} · {mark}", item.address.item().as_str());
+            output.push_str(provenance_tags(item.authorship, item.send_authorization));
             if item.retracted_at_ms.is_some() {
                 output.push_str(" · retracted by sender");
             }
@@ -462,6 +473,174 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn story19_20_recipient_view_renders_sender_alias_and_independent_tags() {
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, PeerId, RoomEvent, SendAuthorization,
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let address = ItemAddress::from_a2a_ingress(
+            PeerId::from_public_key(&[74; 32]).unwrap(),
+            ItemId::from_replay("ri_marks"),
+        );
+        journal
+            .append_room(RoomEvent::RecipientItemReceived {
+                address,
+                task: "task-marks".into(),
+                alias: Some("arrival-alias".into()),
+                message_type: SemanticMessageType::BugReport,
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::Automatic,
+                content: "bug body".into(),
+                in_reply_to: None,
+                capability_hash: None,
+                reply_capability_matched: false,
+            })
+            .await
+            .unwrap();
+        let page = load_received_thread(workspace.path(), "ri_marks", ReceivedThreadWindow::Newest)
+            .await
+            .unwrap();
+        assert!(
+            page.content.contains("bug_report · arrival-alias"),
+            "{}",
+            page.content
+        );
+        assert!(
+            page.content
+                .contains("ri_marks · received [agent-composed] [auto-sent]"),
+            "{}",
+            page.content
+        );
+    }
+
+    #[tokio::test]
+    async fn story19_20_view_fact_matrix_alias_bounds_and_cost_parity() {
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, PeerId, RoomEvent, SendAuthorization,
+        };
+        use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+        let workspace = tempfile::tempdir().expect("workspace");
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .expect("journal");
+        let aliases = [
+            None,
+            Some("arrival-alias".to_string()),
+            Some("arrival\n\r\t\u{1b}alias".to_string()),
+            Some("界\n".repeat(MAX_PEER_ID_BYTES * 2)),
+            Some(String::new()),
+        ];
+        for authorship in [
+            Authorship::Unknown,
+            Authorship::HumanWritten,
+            Authorship::AgentComposed,
+        ] {
+            for authorization in [
+                SendAuthorization::Unknown,
+                SendAuthorization::HumanDecided,
+                SendAuthorization::Automatic,
+            ] {
+                for (index, alias) in aliases.iter().enumerate() {
+                    let id = format!(
+                        "marks-{}-{}-{index}",
+                        authorship.wire_name(),
+                        authorization.wire_name(),
+                    );
+                    let address = ItemAddress::from_a2a_ingress(
+                        PeerId::from_public_key(&[75; 32]).expect("peer"),
+                        ItemId::from_replay(&id),
+                    );
+                    let label = alias.as_deref().map_or_else(
+                        || item_principal_label(address.principal()),
+                        |alias| sanitize_disclosable(alias, MAX_PEER_ID_BYTES),
+                    );
+                    journal
+                        .append_room(RoomEvent::RecipientItemReceived {
+                            address,
+                            task: id.clone(),
+                            alias: alias.clone(),
+                            message_type: SemanticMessageType::BugReport,
+                            authorship,
+                            send_authorization: authorization,
+                            content: "body\nwith\tcontrols\u{1b}".into(),
+                            in_reply_to: None,
+                            capability_hash: None,
+                            reply_capability_matched: false,
+                        })
+                        .await
+                        .expect("append item");
+                    let page =
+                        load_received_thread(workspace.path(), &id, ReceivedThreadWindow::Newest)
+                            .await
+                            .expect("bounded view opens");
+                    assert!(page.content.starts_with(&format!(
+                        "  bug_report · {label}\n  received thread · {label} · {id}\n",
+                    )));
+                    assert!(
+                        label.len()
+                            <= MAX_PEER_ID_BYTES
+                                + crate::domain::services::transparency::TRUNCATION_MARKER.len()
+                    );
+                    assert!(!label.chars().any(char::is_control));
+                    assert!(page.content.len() <= bounds::MAX_THREAD_RESPONSE_BYTES);
+                    let tags = match (
+                        authorship == Authorship::AgentComposed,
+                        authorization == SendAuthorization::Automatic,
+                    ) {
+                        (false, false) => "",
+                        (true, false) => " [agent-composed]",
+                        (false, true) => " [auto-sent]",
+                        (true, true) => " [agent-composed] [auto-sent]",
+                    };
+                    assert!(page.content.contains(&format!("{id} · received{tags}\n")));
+                    let reader = crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(workspace.path());
+                    let entries = reader.load_entries().await.expect("entries");
+                    let projection = JournalRecipientItemProjection::from_entries(&entries);
+                    let snapshot = projection.snapshot();
+                    let mut item = snapshot.find_by_id(&id).expect("item").clone();
+                    item.in_reply_to = Some("parent".into());
+                    item.retracted_at_ms = Some(1);
+                    for state in [
+                        RecipientItemState::Received {
+                            content: "body\n\t\u{1b}".into(),
+                        },
+                        RecipientItemState::Acknowledged {
+                            content: "body\n\t\u{1b}".into(),
+                        },
+                        RecipientItemState::Removed {
+                            acknowledged_before: false,
+                        },
+                        RecipientItemState::Removed {
+                            acknowledged_before: true,
+                        },
+                    ] {
+                        item.state = state;
+                        let turn = ThreadTurnRef::Item(&item);
+                        let cost = turn_cost(&turn, false);
+                        let mut metadata = String::new();
+                        append_turn(&mut metadata, &turn, false);
+                        assert_eq!(metadata.len(), cost.metadata);
+                        assert!(metadata.contains(&format!(
+                            "{tags} · retracted by sender · follow-up to parent",
+                        )));
+                        let mut rendered = String::new();
+                        append_turn(&mut rendered, &turn, true);
+                        rendered.push('\n');
+                        assert_eq!(rendered.len(), cost.full);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn k07_earlier_page_respects_requested_boundary_instead_of_reopening_newest() {
         use crate::domain::models::{ItemAddress, ItemId, PeerId, RoomEvent, SemanticMessageType};
         let workspace = tempfile::tempdir().expect("workspace");
@@ -484,6 +663,8 @@ mod tests {
                     in_reply_to: previous.clone(),
                     capability_hash: None,
                     reply_capability_matched: false,
+                    authorship: crate::domain::models::Authorship::Unknown,
+                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
                 })
                 .await
                 .expect("append linked received item");
@@ -529,26 +710,31 @@ mod tests {
             pinned_cost + middle_cost > bounds::MAX_THREAD_RESPONSE_BYTES,
             "pin reserve should leave less room than the ordinary middle turn needs"
         );
-        let append = |id: &str, content: String, parent: Option<String>| {
-            let journal = &journal;
-            let peer = peer.clone();
-            let id = id.to_string();
-            async move {
-                journal
-                    .append_room(RoomEvent::RecipientItemReceived {
-                        address: ItemAddress::from_a2a_ingress(peer, ItemId::from_replay(&id)),
-                        task: id.clone(),
-                        alias: None,
-                        message_type: SemanticMessageType::Unknown,
-                        content,
-                        in_reply_to: parent,
-                        capability_hash: None,
-                        reply_capability_matched: false,
-                    })
-                    .await
-                    .expect("append received item");
-            }
-        };
+        let append =
+            |id: &str, content: String, parent: Option<String>| {
+                let journal = &journal;
+                let peer = peer.clone();
+                let id = id.to_string();
+                async move {
+                    journal
+                        .append_room(RoomEvent::RecipientItemReceived {
+                            address: ItemAddress::from_a2a_ingress(peer, ItemId::from_replay(&id)),
+                            task: id.clone(),
+                            alias: Some("界\n".repeat(
+                                crate::domain::services::transparency::MAX_PEER_ID_BYTES * 2,
+                            )),
+                            message_type: SemanticMessageType::Unknown,
+                            content,
+                            in_reply_to: parent,
+                            capability_hash: None,
+                            reply_capability_matched: false,
+                            authorship: crate::domain::models::Authorship::AgentComposed,
+                            send_authorization: crate::domain::models::SendAuthorization::Automatic,
+                        })
+                        .await
+                        .expect("append received item");
+                }
+            };
         append("review-root", root_body.clone(), None).await;
         append(
             "review-middle",
@@ -563,6 +749,25 @@ mod tests {
             previous = id;
         }
         append("review-opened", opened_body.clone(), Some(previous)).await;
+        let reader =
+            crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                workspace.path(),
+            );
+        let entries = reader.load_entries().await.expect("entries");
+        let projection = JournalRecipientItemProjection::from_entries(&entries);
+        let snapshot = projection.snapshot();
+        let opened = snapshot.find_by_id("review-opened").expect("opened");
+        let scope = ItemScope::exact(opened.address.principal().clone());
+        let (_, turns) =
+            JournalRecipientItemProjection::thread_in_snapshot(&snapshot, &scope, "review-opened")
+                .expect("thread");
+        for turn in turns {
+            let mut rendered = String::new();
+            append_turn(&mut rendered, &turn, true);
+            rendered.push('\n');
+            assert_eq!(rendered.len(), turn_cost(&turn, false).full);
+            assert!(rendered.contains(" [agent-composed] [auto-sent]"));
+        }
 
         let initial = load_received_thread(
             workspace.path(),
