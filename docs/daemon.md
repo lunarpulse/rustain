@@ -597,13 +597,15 @@ journal-derived disclosure sequence greater than zero, and must not already
 be retracted. Settled controls remain excluded. This is not a reply-turn or
 cross-host retract command.
 
-RAP NotifyAndAuto rows record `agent-composed` + `unknown`: they show
-`[agent-composed]` only, with no `[auto-sent]` or Retract control. Approved or
-edited RAP drafts record `agent-composed` + `human-decided`, also without a
-delivery claim. These response modes send nothing over RAP; correcting the
-labels does not fix delivery. RAP response delivery is tracked separately as
-`DF-19-20A-RAP-RESPONSE-NOT-DELIVERED`, owned by
-`19-20b-rap-response-delivery`.
+RAP application messages are one-way, regardless of the configured response
+mode. Each accepted message is shown with a host-generated notice:
+`[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your <mode> response setting does not apply here.`
+Here `<mode>` is `notify-and-wait`, `notify-and-draft` or `notify-and-auto`.
+No template, draft, agent turn or pending response is created. A pending RAP
+card saved by an older build refuses resolution with
+`RAP carries messages one way; no reply was sent.` and settles as the same
+notice. The sender still receives only the truthful accepted/refused verdict,
+never response text. Conversational replies use A2A.
 
 Legacy rows are never backfilled: without recorded send authorization, that
 fact is Unknown. A legacy approved draft loses its false `[auto-sent]` label.

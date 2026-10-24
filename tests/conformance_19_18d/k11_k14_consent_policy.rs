@@ -287,14 +287,14 @@ async fn start_seeded(spec: HostSpec, grants: &[(PeerId, Option<PrincipalKind>)]
 
 /// A RAP peer with a real Ed25519 identity. Its public key is the roster pin
 /// of `p1`, so bound keys and this sender share one `PeerId`.
-struct RapSender {
+pub(super) struct RapSender {
     signer: AgentSigner,
     _keys: tempfile::TempDir,
     next: u64,
 }
 
 impl RapSender {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let keys = tempfile::tempdir().expect("rap keys");
         let signer = IdentityKeyStore::new(keys.path())
             .load_or_generate()
@@ -306,7 +306,7 @@ impl RapSender {
         }
     }
 
-    fn pin(&self) -> PeerId {
+    pub(super) fn pin(&self) -> PeerId {
         self.signer.identity().peer_id.clone()
     }
 
@@ -320,7 +320,7 @@ impl RapSender {
     }
 
     /// The standard roster with `p1` and `p1-alt` pinned to THIS sender's key.
-    fn roster(&self) -> Roster {
+    pub(super) fn roster(&self) -> Roster {
         Roster::standard()
             .pinned("p1", self.x())
             .pinned("p1-alt", self.x())
@@ -355,7 +355,7 @@ type RapDelivery = tokio::task::JoinHandle<Result<(), PeerDeliveryError>>;
 /// does (`daemon/mod.rs:610-616`: the transparency sink as the recorder,
 /// `configure_peer_recorder`) and hand back the handler the RAP transports
 /// call (`verified_peer_handler`).
-async fn open_rap_front_door(host: &BoundHost) -> Arc<VerifiedPeerFrameHandler> {
+pub(super) async fn open_rap_front_door(host: &BoundHost) -> Arc<VerifiedPeerFrameHandler> {
     let recorder = Arc::new(
         rustain::adapters::a2a::transparency::TransparencySink::new(host.journal.room.clone())
             .with_reader(host.journal.node.clone()),
@@ -374,7 +374,7 @@ async fn open_rap_front_door(host: &BoundHost) -> Arc<VerifiedPeerFrameHandler> 
 
 /// Hand one RAP frame to the front door; it settles when the sender-consent
 /// card is answered and the frame is ingested.
-fn deliver(
+pub(super) fn deliver(
     handler: &Arc<VerifiedPeerFrameHandler>,
     rap: &mut RapSender,
     recipient: &str,
@@ -386,7 +386,7 @@ fn deliver(
     tokio::spawn(async move { handler.handle_verified_peer_frame(frame, peer).await })
 }
 
-async fn delivered(delivery: RapDelivery) {
+pub(super) async fn delivered(delivery: RapDelivery) {
     tokio::time::timeout(SETTLE, delivery)
         .await
         .expect("the RAP frame settles before the deadline")

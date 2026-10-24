@@ -181,7 +181,7 @@ next frame, with no restart.
 
 ### `rustain peer ping <alias> [--count N] [--interval <duration>]`
 
-Sends one signed frame to a pinned peer and reports what they said. The
+Sends one signed frame to a pinned peer and reports its verdict. The
 frame carries a fixed body, `ping` — no operator-supplied content — with a
 unique nonce per frame and a 60-second validity window.
 
@@ -193,6 +193,10 @@ produced the verdict travelled: carried directly, carried through a relay
 (which therefore saw the exchange), or over a transport this build does not
 name. Because iroh holepunches after connecting, a multi-frame run can
 honestly migrate relay→direct mid-run.
+
+RAP application messages are one-way. The receiver returns only an
+accepted/refused verdict, never response text; its response-mode setting does
+not run a reply. Conversational replies use A2A.
 
 - `--count` — frames sent on one connection; default 1; `0` is refused at
   parse. More than one exists to watch a revocation take effect between

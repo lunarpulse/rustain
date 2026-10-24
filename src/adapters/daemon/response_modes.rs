@@ -107,6 +107,38 @@ pub(crate) const AWAITING_RESPONSE_PLACEHOLDER: &str = "[awaiting your response]
 pub(crate) const DRAFT_APPROVAL_PREFIX: &str =
     "[y] Approve  [e] Edit  [n] Reject  [write] My own\n";
 
+pub(crate) const RAP_ONE_WAY_REFUSAL: &str = "RAP carries messages one way; no reply was sent.";
+
+pub(crate) fn rap_one_way_notice(mode: crate::domain::models::ResponseMode) -> String {
+    format!(
+        "[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
+        mode.as_str()
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn rap_one_way_copy_pins_every_mode() {
+    use crate::domain::models::ResponseMode;
+    for mode in [
+        ResponseMode::NotifyAndWait,
+        ResponseMode::NotifyAndDraft,
+        ResponseMode::NotifyAndAuto,
+    ] {
+        assert_eq!(
+            rap_one_way_notice(mode),
+            format!(
+                "[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
+                mode.as_str()
+            )
+        );
+    }
+    assert_eq!(
+        RAP_ONE_WAY_REFUSAL,
+        "RAP carries messages one way; no reply was sent."
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DraftState {
     Drafting {

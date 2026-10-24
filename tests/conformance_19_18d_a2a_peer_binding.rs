@@ -42,3 +42,6 @@ mod k05_adoption_orphans;
 
 #[path = "conformance_19_18d/k11_k14_consent_policy.rs"]
 mod k11_k14_consent_policy;
+
+#[path = "conformance_19_18d/k19_20b_rap_one_way.rs"]
+mod k19_20b_rap_one_way;

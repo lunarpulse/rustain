@@ -53,6 +53,9 @@ use crate::domain::ports::StoragePort;
 use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntimeEvent};
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
+mod rap_inbound;
+use rap_inbound::DaemonPeerConsumer;
+
 /// Per-connection bounded writer queue depth. A connection that cannot keep up is
 /// dropped (its queue fills) — the turn is never blocked (AC3).
 const CONN_QUEUE_DEPTH: usize = 1024;
@@ -1229,12 +1232,17 @@ async fn snapshot_peer_row_controls(
     controls
 }
 
+fn rap_rooted_peer(node: &AgentId) -> Option<PeerId> {
+    PeerId::parse(node.as_str().split('/').next()?).ok()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PeerDraftResolutionOutcome {
     Applied {
         reply: Option<RecipientReplyReceipt>,
     },
     Idempotent,
+    RefusedOneWay,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1450,83 +1458,6 @@ pub struct AttachServer {
 struct PreparedPeerNode {
     command_rx: mpsc::Receiver<crate::domain::models::Op>,
     mailbox_budget: crate::infrastructure::subagent::MailboxBudget,
-}
-
-struct DaemonPeerConsumer {
-    server: std::sync::Weak<AttachServer>,
-}
-
-#[async_trait::async_trait]
-impl crate::adapters::rap::VerifiedPeerConsumer for DaemonPeerConsumer {
-    async fn consent(
-        &self,
-        _recipient: &AgentId,
-        content: &AgentMessage,
-        peer_id: &PeerId,
-    ) -> Result<crate::adapters::rap::VerifiedPeerConsent, String> {
-        let server = self
-            .server
-            .upgrade()
-            .ok_or_else(|| "daemon peer consumer is shutting down".to_string())?;
-        if !crate::domain::ports::InboundPeerRuntime::enforces_sender_consent(server.as_ref()) {
-            return Ok(crate::adapters::rap::VerifiedPeerConsent::Accept);
-        }
-        let ticket = crate::domain::ports::InboundPeerRuntime::request_admission_approval(
-            server.as_ref(),
-            &PolicyPrincipal::rap(peer_id.clone()),
-            &content.content,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        match ticket.decision.await {
-            Ok(crate::domain::ports::InboundApprovalDecision::AllowOnce)
-            | Ok(crate::domain::ports::InboundApprovalDecision::AllowAlways) => {
-                Ok(crate::adapters::rap::VerifiedPeerConsent::Accept)
-            }
-            Ok(crate::domain::ports::InboundApprovalDecision::Decline) | Err(_) => {
-                Ok(crate::adapters::rap::VerifiedPeerConsent::Decline)
-            }
-            Ok(crate::domain::ports::InboundApprovalDecision::RuntimeShutdown) => {
-                Err("daemon peer consumer is shutting down".to_owned())
-            }
-        }
-    }
-
-    async fn ingest(
-        &self,
-        recipient: &AgentId,
-        content: AgentMessage,
-        peer_id: &PeerId,
-    ) -> Result<(), String> {
-        self.ingest_with_policy(
-            recipient,
-            content,
-            peer_id,
-            crate::domain::ports::PeerResponsePolicy::default(),
-        )
-        .await
-    }
-
-    async fn ingest_with_policy(
-        &self,
-        recipient: &AgentId,
-        content: AgentMessage,
-        peer_id: &PeerId,
-        response_policy: crate::domain::ports::PeerResponsePolicy,
-    ) -> Result<(), String> {
-        let server = self
-            .server
-            .upgrade()
-            .ok_or_else(|| "daemon peer consumer is shutting down".to_string())?;
-        server
-            .enqueue_verified_peer_turn(
-                recipient.clone(),
-                content.content,
-                peer_id.clone(),
-                response_policy,
-            )
-            .await
-    }
 }
 
 /// Story 19.20c: every gate and its runtime are daemon-owned, including gates
@@ -2126,9 +2057,7 @@ impl AttachServer {
                 self.node_tree.clone(),
                 self.peer_bus.clone(),
                 self.domain_tx.clone(),
-                Arc::new(DaemonPeerConsumer {
-                    server: Arc::downgrade(self),
-                }),
+                Arc::new(DaemonPeerConsumer::new(Arc::downgrade(self))),
                 recorder,
             )
             // Story 18.4a — the **same** `Arc` the `"composite"` context adapter
@@ -3223,6 +3152,52 @@ impl AttachServer {
         preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
     ) -> Result<PeerDraftResolutionOutcome, String> {
         let _row_guard = self.peer_row_serial.lock().await;
+        if rap_rooted_peer(node_id).is_some()
+            && matches!(
+                self.pending_drafts.phase(node_id.as_str()).await,
+                None | Some(super::response_modes::DraftPhase::Ready)
+            )
+        {
+            let legacy = {
+                let conversation = self.conversation.lock().await;
+                let row_id = format!("peer-response-{node_id}");
+                conversation
+                    .messages
+                    .iter()
+                    .find(|row| row.id == row_id)
+                    .zip(conversation.peer_row_controls.get(&row_id))
+                    .filter(|(_, control)| {
+                        control.node_id == node_id.as_str()
+                            && matches!(
+                                control.stage,
+                                PeerRowStage::AwaitingOperator | PeerRowStage::Ready
+                            )
+                    })
+                    .map(|(row, control)| (row.clone(), control.clone()))
+            };
+            if let Some((mut row, mut control)) = legacy {
+                let mode = if control.stage == PeerRowStage::AwaitingOperator {
+                    crate::domain::models::ResponseMode::NotifyAndWait
+                } else {
+                    crate::domain::models::ResponseMode::NotifyAndDraft
+                };
+                row.content = super::response_modes::rap_one_way_notice(mode);
+                control.stage = PeerRowStage::Settled;
+                control.node_resolvable = false;
+                commit_peer_rows_serialized(
+                    &self.conversation,
+                    &self.registry,
+                    self.core.storage.as_ref(),
+                    vec![PeerRowMutation::Upsert {
+                        message: row,
+                        control: Some(control),
+                    }],
+                )
+                .await?;
+                self.pending_drafts.abandon(node_id.as_str()).await;
+                return Ok(PeerDraftResolutionOutcome::RefusedOneWay);
+            }
+        }
         match self.pending_drafts.phase(node_id.as_str()).await {
             Some(super::response_modes::DraftPhase::Settled) => {
                 return Ok(PeerDraftResolutionOutcome::Idempotent);
@@ -4057,6 +4032,11 @@ impl AttachServer {
                     }
                     Ok(PeerDraftResolutionOutcome::Idempotent) => {
                         RecipientActionOutcome::Idempotent
+                    }
+                    Ok(PeerDraftResolutionOutcome::RefusedOneWay) => {
+                        refuse(ProtocolError::PeerVerification(
+                            super::response_modes::RAP_ONE_WAY_REFUSAL.to_owned(),
+                        ))
                     }
                     Err(error) => refuse(ProtocolError::Internal(error)),
                 };
@@ -5423,6 +5403,13 @@ impl AttachServer {
                                 Ok(PeerDraftResolutionOutcome::Idempotent) => {
                                     RecipientActionOutcome::Idempotent
                                 }
+                                Ok(PeerDraftResolutionOutcome::RefusedOneWay) => {
+                                    RecipientActionOutcome::Refused {
+                                        error: ProtocolError::PeerVerification(
+                                            super::response_modes::RAP_ONE_WAY_REFUSAL.to_owned(),
+                                        ),
+                                    }
+                                }
                                 Err(error) => RecipientActionOutcome::Refused {
                                     error: ProtocolError::Internal(error),
                                 },
@@ -5824,440 +5811,6 @@ impl AttachServer {
             }
         }
         false
-    }
-
-    async fn enqueue_verified_peer_turn(
-        self: Arc<Self>,
-        recipient: AgentId,
-        text: String,
-        peer_id: PeerId,
-        response_policy: crate::domain::ports::PeerResponsePolicy,
-    ) -> Result<(), String> {
-        let response_row_id = format!("peer-response-{}", recipient.as_str());
-        match response_policy.mode {
-            crate::domain::models::ResponseMode::NotifyAndWait => {
-                // Same contract as the A2A front door's wait arm: a durable
-                // pending card (controller entry + `peer-response-<node>` row)
-                // the operator can resolve after a detach/restart. Unlike the
-                // A2A door, a RAP recipient names a NODE, not a task — many
-                // envelopes share it, so an existing card is appended to,
-                // never an error and never a duplicate row id.
-                let row_guard = self.peer_row_serial.lock().await;
-                let fresh = self.pending_drafts.begin(recipient.as_str()).await;
-                if fresh
-                    && !self
-                        .pending_drafts
-                        .complete(recipient.as_str(), String::new())
-                        .await
-                {
-                    self.pending_drafts.abandon(recipient.as_str()).await;
-                    return Err("pending peer response could not be initialised".to_owned());
-                }
-                let mut mutations = vec![PeerRowMutation::Upsert {
-                    message: peer_transcript_message(&text, &peer_id, &response_policy.provenance),
-                    control: None,
-                }];
-                if fresh {
-                    mutations.push(PeerRowMutation::Upsert {
-                        message: ChatMessage {
-                            id: response_row_id.clone(),
-                            role: MessageRole::Assistant,
-                            content: super::response_modes::AWAITING_RESPONSE_PLACEHOLDER
-                                .to_owned(),
-                            created_at: crate::domain::models::session_meta::now_unix(),
-                            synthetic: true,
-                            ..Default::default()
-                        },
-                        control: Some(peer_row_control(
-                            &recipient,
-                            None,
-                            &response_policy.provenance,
-                            peer_id.as_str(),
-                            PeerRowStage::AwaitingOperator,
-                            true,
-                        )),
-                    });
-                }
-                if let Err(error) = commit_peer_rows_serialized(
-                    &self.conversation,
-                    &self.registry,
-                    self.core.storage.as_ref(),
-                    mutations,
-                )
-                .await
-                {
-                    if fresh {
-                        self.pending_drafts.abandon(recipient.as_str()).await;
-                    }
-                    return Err(error);
-                }
-                self.node_tree
-                    .set_state(&recipient, NodeState::Running)
-                    .await;
-                self.node_tree
-                    .set_state(&recipient, NodeState::Waiting)
-                    .await;
-                if let Err(error) = self
-                    .node_tree
-                    .stamp_wait_reason(
-                        &recipient,
-                        Some(crate::domain::models::WaitReason::AwaitingPeerResponse),
-                    )
-                    .await
-                {
-                    if fresh {
-                        self.pending_drafts.abandon(recipient.as_str()).await;
-                        if let Err(remove_error) = remove_pending_peer_row_serialized(
-                            &self.conversation,
-                            &self.registry,
-                            self.core.storage.as_ref(),
-                            &recipient,
-                        )
-                        .await
-                        {
-                            tracing::warn!(%remove_error, node = %recipient, "removing failed peer response placeholder failed");
-                        }
-                    }
-                    return Err(error.to_string());
-                }
-                drop(row_guard);
-                Ok(())
-            }
-            crate::domain::models::ResponseMode::NotifyAndAuto => {
-                // AC4 — a conservative template, never inference. The row is
-                // persisted (and thereby visible) BEFORE the deadline is read.
-                // Its id is generated, not the card convention: a RAP node
-                // receives many template dispatches, and each exchange is a
-                // distinct row (`ChatMessage.id` stays unique).
-                let response_started_at_ms = self.clock.wall_now_ms();
-                let response = super::response_modes::auto_response_template(
-                    response_policy.auto_response.as_ref(),
-                );
-                let response_row_id = generate_message_id();
-                commit_peer_rows(
-                    &self.peer_row_serial,
-                    &self.conversation,
-                    &self.registry,
-                    self.core.storage.as_ref(),
-                    vec![
-                        PeerRowMutation::Upsert {
-                            message: peer_transcript_message(
-                                &text,
-                                &peer_id,
-                                &response_policy.provenance,
-                            ),
-                            control: None,
-                        },
-                        PeerRowMutation::Upsert {
-                            message: ChatMessage {
-                                id: response_row_id,
-                                role: MessageRole::Assistant,
-                                content: response.clone(),
-                                created_at: crate::domain::models::session_meta::now_unix(),
-                                authorship: crate::domain::models::Authorship::AgentComposed,
-                                send_authorization:
-                                    crate::domain::models::SendAuthorization::Unknown,
-                                ..Default::default()
-                            },
-                            control: Some(peer_row_control(
-                                &recipient,
-                                None,
-                                &response_policy.provenance,
-                                peer_id.as_str(),
-                                PeerRowStage::Settled,
-                                false,
-                            )),
-                        },
-                    ],
-                )
-                .await?;
-                super::response_modes::auto_response_surface(
-                    self.clock.as_ref(),
-                    response_started_at_ms,
-                    true,
-                    false,
-                )
-                .map_err(|miss| {
-                    format!(
-                        "auto response surface missed deadline by {}ms",
-                        miss.elapsed_ms
-                    )
-                })?;
-                self.inbound_results.lock().await.insert(
-                    recipient.clone(),
-                    crate::domain::ports::StagedPeerResult {
-                        text: response,
-                        authorship: crate::domain::models::Authorship::AgentComposed,
-                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
-                    },
-                );
-                self.node_tree
-                    .set_state(&recipient, NodeState::Running)
-                    .await;
-                self.node_tree
-                    .set_state(&recipient, NodeState::Completed)
-                    .await;
-                Ok(())
-            }
-            _ => {
-                // NotifyAndDraft — and any future variant, failing closed:
-                // buffer daemon-side, disclose nothing until the operator
-                // resolves the draft (AC3). A second envelope to the same node
-                // while a draft is pending appends to the conversation and
-                // rides the existing card — no duplicate inference, no
-                // duplicate row id.
-                let reply_guard = self.peer_reply_serial.lock().await;
-                let row_guard = self.peer_row_serial.lock().await;
-                if !self.pending_drafts.begin(recipient.as_str()).await {
-                    commit_peer_rows_serialized(
-                        &self.conversation,
-                        &self.registry,
-                        self.core.storage.as_ref(),
-                        vec![PeerRowMutation::Upsert {
-                            message: peer_transcript_message(
-                                &text,
-                                &peer_id,
-                                &response_policy.provenance,
-                            ),
-                            control: None,
-                        }],
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                let control = peer_row_control(
-                    &recipient,
-                    None,
-                    &response_policy.provenance,
-                    peer_id.as_str(),
-                    PeerRowStage::Drafting,
-                    true,
-                );
-                if let Err(error) = commit_peer_rows_serialized(
-                    &self.conversation,
-                    &self.registry,
-                    self.core.storage.as_ref(),
-                    vec![
-                        PeerRowMutation::Upsert {
-                            message: peer_transcript_message(
-                                &text,
-                                &peer_id,
-                                &response_policy.provenance,
-                            ),
-                            control: None,
-                        },
-                        PeerRowMutation::Upsert {
-                            message: ChatMessage {
-                                id: response_row_id.clone(),
-                                role: MessageRole::Assistant,
-                                content: super::response_modes::DRAFTING_PLACEHOLDER.to_owned(),
-                                created_at: crate::domain::models::session_meta::now_unix(),
-                                synthetic: true,
-                                ..Default::default()
-                            },
-                            control: Some(control),
-                        },
-                    ],
-                )
-                .await
-                {
-                    self.pending_drafts.abandon(recipient.as_str()).await;
-                    return Err(error);
-                }
-                drop(row_guard);
-                drop(reply_guard);
-                let (ingested_tx, ingested_rx) = tokio::sync::oneshot::channel();
-                let server = self.clone();
-                tokio::spawn(async move {
-                    let _turn_guard = server.turn_serial.lock().await;
-                    *server.active_channel_origin.lock().await = ChannelKind::Terminal;
-                    let rt = match server.core.ensure_runtime().await {
-                        Ok(runtime) => runtime,
-                        Err(error) => {
-                            server.pending_drafts.abandon(recipient.as_str()).await;
-                            if let Err(remove_error) = remove_pending_peer_row(
-                                &server.peer_row_serial,
-                                &server.conversation,
-                                &server.registry,
-                                server.core.storage.as_ref(),
-                                &recipient,
-                            )
-                            .await
-                            {
-                                tracing::warn!(%remove_error, node = %recipient, "removing failed peer response placeholder failed");
-                            }
-                            server
-                                .node_tree
-                                .set_state(&recipient, NodeState::Running)
-                                .await;
-                            server
-                                .node_tree
-                                .set_state(&recipient, NodeState::Failed)
-                                .await;
-                            server.node_tree.deregister(&recipient).await;
-                            let _ = ingested_tx.send(Err(error.to_string()));
-                            return;
-                        }
-                    };
-                    server.ensure_approval_gate(rt.approval.clone()).await;
-
-                    let conversation_id = server.conversation.lock().await.id.clone();
-                    let peer_turn_closed = server.peer_turn_closed.notified();
-                    tokio::pin!(peer_turn_closed);
-                    peer_turn_closed.as_mut().enable();
-                    let (tap_tx, tap_rx) = mpsc::unbounded_channel::<AppEvent>();
-                    let collector = spawn_turn_collector(
-                        tap_rx,
-                        server.domain_tx.clone(),
-                        true,
-                        Arc::new(recipient.clone()),
-                        conversation_id,
-                    );
-                    let handle = {
-                        let mut conversation = server.conversation.lock().await;
-                        rt.drive_preloaded_turn(
-                            &mut conversation,
-                            &tap_tx,
-                            TurnOrigin::RemotePeer {
-                                principal: PolicyPrincipal::rap(peer_id),
-                            },
-                            CancellationToken::new(),
-                        )
-                    };
-                    drop(tap_tx);
-                    let _ = ingested_tx.send(Ok(()));
-
-                    let join_failed = handle.await.is_err();
-                    let (answer, errored, completed) = collector.await.unwrap_or_default();
-                    peer_turn_closed.await;
-                    let _reply_guard = server.peer_reply_serial.lock().await;
-                    let _row_guard = server.peer_row_serial.lock().await;
-                    let terminal = if join_failed
-                        || errored
-                        || !completed
-                        || answer.trim().is_empty()
-                    {
-                        NodeState::Failed
-                    } else if !server
-                        .pending_drafts
-                        .complete(recipient.as_str(), answer.clone())
-                        .await
-                    {
-                        let settled = {
-                            let conversation = server.conversation.lock().await;
-                            conversation
-                                .peer_row_controls
-                                .get(&response_row_id)
-                                .is_some_and(|control| control.stage == PeerRowStage::Settled)
-                        };
-                        if settled {
-                            return;
-                        }
-                        NodeState::Failed
-                    } else {
-                        let (row, control) = {
-                            let conversation = server.conversation.lock().await;
-                            (
-                                conversation
-                                    .messages
-                                    .iter()
-                                    .find(|message| message.id == response_row_id)
-                                    .cloned(),
-                                conversation
-                                    .peer_row_controls
-                                    .get(&response_row_id)
-                                    .cloned(),
-                            )
-                        };
-                        match (row, control) {
-                            (Some(mut row), Some(mut control))
-                                if control.stage == PeerRowStage::Drafting =>
-                            {
-                                row.content = format!(
-                                    "{}{}",
-                                    super::response_modes::DRAFT_APPROVAL_PREFIX,
-                                    answer
-                                );
-                                control.stage = PeerRowStage::Ready;
-                                control.node_resolvable = true;
-                                match commit_peer_rows_serialized(
-                                    &server.conversation,
-                                    &server.registry,
-                                    server.core.storage.as_ref(),
-                                    vec![PeerRowMutation::Upsert {
-                                        message: row,
-                                        control: Some(control),
-                                    }],
-                                )
-                                .await
-                                {
-                                    Ok(()) => NodeState::Waiting,
-                                    Err(error) => {
-                                        tracing::warn!(%error, "persisting completed peer draft failed");
-                                        server.pending_drafts.abandon(recipient.as_str()).await;
-                                        NodeState::Failed
-                                    }
-                                }
-                            }
-                            (_, Some(control)) if control.stage == PeerRowStage::Settled => return,
-                            _ => {
-                                server.pending_drafts.abandon(recipient.as_str()).await;
-                                NodeState::Failed
-                            }
-                        }
-                    };
-                    if terminal != NodeState::Waiting {
-                        server.pending_drafts.abandon(recipient.as_str()).await;
-                        if let Err(error) = remove_pending_peer_row_serialized(
-                            &server.conversation,
-                            &server.registry,
-                            server.core.storage.as_ref(),
-                            &recipient,
-                        )
-                        .await
-                        {
-                            tracing::warn!(%error, "removing failed peer response placeholder failed");
-                        }
-                    }
-                    server
-                        .node_tree
-                        .set_state(&recipient, NodeState::Running)
-                        .await;
-                    server.node_tree.set_state(&recipient, terminal).await;
-                    if terminal == NodeState::Waiting
-                        && let Err(error) = server
-                            .node_tree
-                            .stamp_wait_reason(
-                                &recipient,
-                                Some(crate::domain::models::WaitReason::AwaitingPeerResponse),
-                            )
-                            .await
-                    {
-                        tracing::error!(%error, node = %recipient, "stamping peer draft wait failed");
-                        server
-                            .node_tree
-                            .set_state(&recipient, NodeState::Failed)
-                            .await;
-                        server.pending_drafts.abandon(recipient.as_str()).await;
-                        if let Err(remove_error) = remove_pending_peer_row_serialized(
-                            &server.conversation,
-                            &server.registry,
-                            server.core.storage.as_ref(),
-                            &recipient,
-                        )
-                        .await
-                        {
-                            tracing::warn!(%remove_error, node = %recipient, "removing failed peer response placeholder failed");
-                        }
-                        server.node_tree.deregister(&recipient).await;
-                    }
-                    *server.active_channel_origin.lock().await = ChannelKind::Terminal;
-                });
-                ingested_rx
-                    .await
-                    .map_err(|_| "verified-peer ingest task closed".to_string())?
-            }
-        }
     }
 
     /// Build the runtime (first activity), spawn the approval gate once, drive
@@ -10550,120 +10103,405 @@ mod tests {
         );
     }
 
+    /// Supersedes 19.20a K01r: RAP has no reply rail, so no response is composed.
     #[tokio::test]
-    async fn rap_auto_response_records_no_send() {
-        use crate::adapters::daemon::response_modes::{
-            RetractionError, plan_auto_response_retraction,
-        };
+    async fn rap_ingest_is_notify_only_in_every_response_mode() {
         use crate::adapters::rap::VerifiedPeerConsumer as _;
         use crate::adapters::tui::{state::TabRenderState, theme::Theme, widgets::chat_pane};
-        use crate::domain::models::{Authorship, SendAuthorization, StreamingState};
+        use crate::domain::models::ResponseMode;
+        use crate::domain::models::StreamingState;
+        use crate::domain::ports::TaskNodes as _;
         use ratatui::{Terminal, backend::TestBackend};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let (core, storage) = mock_core(tmp.path(), vec![]);
-        let conversation = Arc::new(Mutex::new(Conversation {
-            id: "rap-provenance".into(),
-            ..Default::default()
-        }));
-        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
-        let server = Arc::new(AttachServer::new(core, conversation, domain_tx));
-        let node = AgentId::new();
-        // Nearest test-visible seam on the production RAP consumer path (Rule 2),
-        // not the A2A start path or an inner response helper. No delivery claim.
-        DaemonPeerConsumer {
-            server: Arc::downgrade(&server),
-        }
-        .ingest_with_policy(
-            &node,
-            AgentMessage::new("RAP question"),
-            &test_signer(92).identity().peer_id,
-            crate::domain::ports::PeerResponsePolicy {
-                mode: crate::domain::models::ResponseMode::NotifyAndAuto,
+        for mode in [
+            ResponseMode::NotifyAndWait,
+            ResponseMode::NotifyAndAuto,
+            ResponseMode::NotifyAndDraft,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let provider = Arc::new(ToolThenTextProvider {
+                calls: AtomicUsize::new(0),
+            });
+            let (core, storage) = mock_core_with_provider(tmp.path(), provider.clone());
+            let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+            let conversation = Arc::new(Mutex::new(Conversation {
+                id: "rap-one-way".into(),
+                ..Default::default()
+            }));
+            let server = Arc::new(AttachServer::new(core, conversation, domain_tx));
+            let peer = test_signer(92).identity().peer_id.clone();
+            let node = AgentId::from_peer_path(&format!("{peer}/inbox")).unwrap();
+            let _handle = server
+                .node_tree
+                .register_task_node(&node, "remote-peer")
+                .await
+                .unwrap();
+            let before = server.node_tree.delivery_target(&node).await.unwrap().state;
+            let policy = crate::domain::ports::PeerResponsePolicy {
+                mode,
                 auto_response: Some("RAP_UNSENT_BODY_END".into()),
                 ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        let reloaded = storage
-            .load_conversation("rap-provenance")
+            };
+            DaemonPeerConsumer::new(Arc::downgrade(&server))
+                .ingest_with_policy(
+                    &node,
+                    AgentMessage::new("RAP question"),
+                    &peer,
+                    policy.clone(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                !server.core.is_runtime_initialized(),
+                "RAP must not initialize a runtime"
+            );
+            let reloaded = storage
+                .load_conversation("rap-one-way")
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = format!(
+                "[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
+                mode.as_str()
+            );
+            assert_eq!(reloaded.messages.len(), 2);
+            assert_eq!(reloaded.messages[1].content, expected);
+            let row = &reloaded.messages[1];
+            assert!(!row.id.is_empty() && !row.id.starts_with("peer-response-"));
+            assert_eq!(row.role, MessageRole::Assistant);
+            assert!(row.synthetic);
+            assert_eq!(row.authorship, ChatMessage::default().authorship);
+            assert_eq!(
+                row.send_authorization,
+                ChatMessage::default().send_authorization
+            );
+            assert_eq!(
+                reloaded.peer_row_controls[&row.id],
+                peer_row_control(
+                    &node,
+                    None,
+                    &policy.provenance,
+                    peer.as_str(),
+                    PeerRowStage::Settled,
+                    false
+                )
+            );
+            let transcript = &reloaded.messages[0];
+            assert_eq!(transcript.role, MessageRole::User);
+            assert!(!transcript.synthetic);
+            assert!(transcript.content.contains("RAP question"));
+            assert!(
+                transcript
+                    .content
+                    .contains(&policy.provenance.response_clause())
+            );
+            assert!(
+                transcript
+                    .content
+                    .contains(&policy.provenance.notification_clause())
+            );
+            assert_eq!(reloaded.peer_row_revision, 2);
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let mut cache = TabRenderState::default();
+            terminal
+                .draw(|frame| {
+                    chat_pane::render_with_search(
+                        frame,
+                        frame.area(),
+                        &reloaded,
+                        None,
+                        &StreamingState::default(),
+                        &Default::default(),
+                        &crate::domain::clock::MockClock::at_wall_ms(1_700_000_005_000),
+                        0,
+                        false,
+                        &Theme::dark(),
+                        &mut cache,
+                        &Default::default(),
+                        &Default::default(),
+                        None,
+                        None,
+                        &[],
+                        &[],
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                })
+                .unwrap();
+            let painted = terminal
+                .backend()
+                .buffer()
+                .content
+                .chunks(80)
+                .map(|line| line.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(painted.contains("[no reply over RAP]"));
+            let visible = painted
+                .lines()
+                .flat_map(|line| line.trim_start_matches('│').split_whitespace())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(visible.contains(&expected), "{painted}");
+            for absent in [
+                "[agent-composed]",
+                "[auto-sent]",
+                "RAP_UNSENT_BODY_END",
+                "[awaiting your response]",
+                "[drafting...]",
+            ] {
+                assert!(!painted.contains(absent), "{painted}");
+            }
+            assert!(server.inbound_results.lock().await.is_empty());
+            assert!(server.pending_drafts.phase(node.as_str()).await.is_none());
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            let after = server.node_tree.delivery_target(&node).await.unwrap().state;
+            assert_eq!(before, after);
+            assert_ne!(
+                crate::domain::models::agent_message::delivery_decision(after),
+                crate::domain::models::agent_message::DeliveryMode::Refuse
+            );
+            assert!(
+                server
+                    .node_tree
+                    .list()
+                    .await
+                    .iter()
+                    .find(|entry| entry.agent_id == node)
+                    .unwrap()
+                    .wait_reason
+                    .is_none()
+            );
+            let runtime = server.core.ensure_runtime().await.unwrap();
+            let mut approvals = runtime.approval.subscribe();
+            let turn_guard = server.turn_serial.lock().await;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                DaemonPeerConsumer::new(Arc::downgrade(&server)).ingest_with_policy(
+                    &node,
+                    AgentMessage::new("second RAP question"),
+                    &peer,
+                    policy,
+                ),
+            )
             .await
             .unwrap()
             .unwrap();
-        let row = reloaded
-            .messages
-            .iter()
-            .find(|row| row.content == "RAP_UNSENT_BODY_END")
-            .expect("RAP consumer persists the generated response");
-        assert!(!row.id.is_empty());
-        assert!(
-            !row.id.starts_with("peer-response-"),
-            "RAP row keeps its generated id"
-        );
-        assert_eq!(row.authorship, Authorship::AgentComposed);
-        assert_eq!(
-            row.send_authorization,
-            SendAuthorization::Unknown,
-            "M39: RAP template records no send authorization"
-        );
-        assert!(
-            matches!(
-                plan_auto_response_retraction(row, 1, true, 1_700_000_005_000),
-                Err(RetractionError::NotAutomatic)
-            ),
-            "unsent RAP response must be refused as NotAutomatic"
-        );
-        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
-        let mut cache = TabRenderState::default();
-        terminal
-            .draw(|frame| {
-                chat_pane::render_with_search(
-                    frame,
-                    frame.area(),
-                    &reloaded,
-                    None,
-                    &StreamingState::default(),
-                    &Default::default(),
-                    &crate::domain::clock::MockClock::at_wall_ms(1_700_000_005_000),
-                    0,
-                    false,
-                    &Theme::dark(),
-                    &mut cache,
-                    &Default::default(),
-                    &Default::default(),
-                    None,
-                    None,
-                    &[],
-                    &[],
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+            drop(turn_guard);
+            let second = storage
+                .load_conversation("rap-one-way")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(second.messages.len(), 4);
+            assert_eq!(second.messages[3].content, expected);
+            assert_eq!(
+                server.node_tree.delivery_target(&node).await.unwrap().state,
+                before
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                approvals.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ));
+            assert!(server.inbound_results.lock().await.is_empty());
+            assert!(server.pending_drafts.phase(node.as_str()).await.is_none());
+            let mut task = inbound_task(peer, "A2A control");
+            task.response_policy = crate::domain::ports::PeerResponsePolicy {
+                mode: ResponseMode::NotifyAndAuto,
+                auto_response: Some("A2A template".into()),
+                ..Default::default()
+            };
+            let task_node = task.node_id.clone();
+            server.start(task, CancellationToken::new()).await.unwrap();
+            assert_eq!(
+                server.take_result(&task_node).await.unwrap().text,
+                "A2A template"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_rap_card_refuses_resolution_and_settles() {
+        use super::super::protocol::PeerDraftAction;
+        use super::super::response_modes::{AWAITING_RESPONSE_PLACEHOLDER, DRAFT_APPROVAL_PREFIX};
+        for live_controller in [false, true] {
+            for (stage, action) in [
+                (
+                    PeerRowStage::AwaitingOperator,
+                    PeerDraftAction::WriteOwn {
+                        content: "mine".into(),
+                    },
+                ),
+                (PeerRowStage::AwaitingOperator, PeerDraftAction::Reject),
+                (PeerRowStage::Ready, PeerDraftAction::Approve),
+                (
+                    PeerRowStage::Ready,
+                    PeerDraftAction::Edit {
+                        content: "edited".into(),
+                    },
+                ),
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let peer = test_signer(92).identity().peer_id.clone();
+                let node = AgentId::from_peer_path(&format!("{peer}/inbox")).unwrap();
+                let row_id = format!("peer-response-{node}");
+                let mode = if stage == PeerRowStage::Ready {
+                    crate::domain::models::ResponseMode::NotifyAndDraft
+                } else {
+                    crate::domain::models::ResponseMode::NotifyAndWait
+                };
+                let (core, storage) = mock_core(tmp.path(), vec![]);
+                let mut conversation = Conversation {
+                    id: "legacy-rap".into(),
+                    ..Default::default()
+                };
+                conversation.messages.push(ChatMessage {
+                    id: row_id.clone(),
+                    role: MessageRole::Assistant,
+                    synthetic: true,
+                    content: if stage == PeerRowStage::Ready {
+                        format!("{DRAFT_APPROVAL_PREFIX}draft")
+                    } else {
+                        AWAITING_RESPONSE_PLACEHOLDER.into()
+                    },
+                    ..Default::default()
+                });
+                conversation.peer_row_controls.insert(
+                    row_id.clone(),
+                    peer_row_control(&node, None, &Default::default(), peer.as_str(), stage, true),
                 );
-            })
-            .unwrap();
-        let painted = terminal
-            .backend()
-            .buffer()
-            .content
-            .chunks(160)
-            .map(|line| line.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>();
-        assert!(
-            painted
-                .iter()
-                .any(|line| line.contains("RAP_UNSENT_BODY_END")),
-            "body must not be clipped"
-        );
-        assert!(painted.iter().any(|line| line.contains("[agent-composed]")));
-        assert!(
-            !painted
-                .iter()
-                .any(|line| line.contains("[auto-sent]") || line.contains("[✗] Retract")),
-            "RAP unsent response has no marker line"
-        );
+                storage.save_conversation(&conversation).await.unwrap();
+                let conversation = Arc::new(Mutex::new(
+                    storage
+                        .load_conversation("legacy-rap")
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                ));
+                let (domain_tx, domain_rx) = mpsc::unbounded_channel();
+                let journal = Arc::new(RecordingJournal::default());
+                let server =
+                    journaled_server(core, conversation.clone(), domain_tx, journal.clone());
+                if live_controller {
+                    assert!(server.pending_drafts.begin(node.as_str()).await);
+                    assert!(
+                        server
+                            .pending_drafts
+                            .complete(node.as_str(), "legacy draft")
+                            .await
+                    );
+                }
+                let socket = tmp.path().join("legacy.sock");
+                let listener = UnixListener::bind(&socket).unwrap();
+                let shutdown = CancellationToken::new();
+                let service = {
+                    let server = server.clone();
+                    let shutdown = shutdown.clone();
+                    tokio::spawn(async move {
+                        server.run(listener, domain_rx, None, None, shutdown).await;
+                    })
+                };
+                let mut client = UnixStream::connect(&socket).await.unwrap();
+                let ack = attach_with_proof(
+                    &mut client,
+                    false,
+                    ConnectionTier::TrustedLocal,
+                    &test_signer(94),
+                )
+                .await;
+                assert!(matches!(
+                    ack,
+                    Some(DaemonFrame::AttachAck {
+                        granted_mode: AttachMode::ReadWrite,
+                        ..
+                    })
+                ));
+                for attempt in 0..2 {
+                    write_frame(
+                        &mut client,
+                        &ClientFrame::ResolvePeerDraft {
+                            node: node.to_string(),
+                            action: action.clone(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        loop {
+                            if let Some(DaemonFrame::RecipientActionResult { outcome, .. }) =
+                                read_frame::<_, DaemonFrame>(&mut client).await.unwrap()
+                            {
+                                break outcome;
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let expected = if attempt == 0 {
+                        RecipientActionOutcome::Refused {
+                            error: ProtocolError::PeerVerification(
+                                "RAP carries messages one way; no reply was sent.".into(),
+                            ),
+                        }
+                    } else {
+                        RecipientActionOutcome::Idempotent
+                    };
+                    assert_eq!(outcome, expected);
+                }
+                let persisted = storage
+                    .load_conversation("legacy-rap")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    persisted.messages[0].content,
+                    format!(
+                        "[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
+                        mode.as_str()
+                    )
+                );
+                let controls = snapshot_peer_row_controls(&persisted, &server.pending_drafts).await;
+                assert_eq!(controls[&row_id].stage, PeerRowStage::Settled);
+                assert!(!controls[&row_id].node_resolvable);
+                assert_eq!(persisted.peer_row_controls[&row_id], controls[&row_id]);
+                assert!(server.inbound_results.lock().await.is_empty());
+                assert!(server.pending_drafts.phase(node.as_str()).await.is_none());
+                assert!(journal.events.lock().await.is_empty());
+                shutdown.cancel();
+                drop(client);
+                service.await.unwrap();
+            }
+        }
+        #[cfg(feature = "a2a")]
+        {
+            use super::super::response_modes::DraftResolution;
+            let tmp = tempfile::tempdir().unwrap();
+            let (server, journal, node) =
+                reply_card_fixture(tmp.path(), &format!("{DRAFT_APPROVAL_PREFIX}A2A draft")).await;
+            assert!(rap_rooted_peer(&node).is_none());
+            assert!(server.pending_drafts.begin(node.as_str()).await);
+            assert!(
+                server
+                    .pending_drafts
+                    .complete(node.as_str(), "A2A draft")
+                    .await
+            );
+            assert!(matches!(
+                server
+                    .resolve_peer_draft(&node, DraftResolution::Approve)
+                    .await
+                    .unwrap(),
+                PeerDraftResolutionOutcome::Applied { .. }
+            ));
+            assert_eq!(server.take_result(&node).await.unwrap().text, "A2A draft");
+            assert!(journal.events.lock().await.iter().any(|event| matches!(
+                event,
+                crate::domain::models::RoomEvent::PeerDraftResolved { .. }
+            )));
+        }
     }
 
     #[tokio::test]
@@ -12035,9 +11873,7 @@ mod tests {
             .unwrap();
         assert!(first.pending && second.pending);
         let (pseudo_request, pseudo_preview) = next_consent_card(&mut writer_rx).await;
-        let consumer = DaemonPeerConsumer {
-            server: Arc::downgrade(&server),
-        };
+        let consumer = DaemonPeerConsumer::new(Arc::downgrade(&server));
         let rap_peer = peer.clone();
         let mut rap = tokio::spawn(async move {
             consumer
@@ -12184,9 +12020,7 @@ mod tests {
                 InboundApprovalDecision::AllowAlways
             );
         }
-        let consumer = DaemonPeerConsumer {
-            server: Arc::downgrade(&server),
-        };
+        let consumer = DaemonPeerConsumer::new(Arc::downgrade(&server));
         assert!(matches!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
@@ -12248,13 +12082,11 @@ mod tests {
 
     #[tokio::test]
     async fn k06b_real_turns_retain_ingress_principal_in_tool_approval() {
-        use crate::adapters::rap::VerifiedPeerConsumer as _;
         use crate::domain::models::{ApprovalOutcome, ResponseMode};
         let peer = test_signer(231).identity().peer_id.clone();
-        for (principal, rap_ingest) in [
-            (PolicyPrincipal::rap(peer.clone()), false),
-            (PolicyPrincipal::Pseudonymous(peer.clone()), false),
-            (PolicyPrincipal::rap(peer.clone()), true),
+        for principal in [
+            PolicyPrincipal::rap(peer.clone()),
+            PolicyPrincipal::Pseudonymous(peer.clone()),
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let provider = Arc::new(ToolThenTextProvider {
@@ -12287,28 +12119,10 @@ mod tests {
                 tier: ConnectionTier::TrustedLocal,
                 approval_ready: true,
             });
-            if rap_ingest {
-                let consumer = DaemonPeerConsumer {
-                    server: Arc::downgrade(&server),
-                };
-                consumer
-                    .ingest_with_policy(
-                        &AgentId::root(),
-                        AgentMessage::new("request a tool"),
-                        &peer,
-                        crate::domain::ports::PeerResponsePolicy {
-                            mode: ResponseMode::NotifyAndDraft,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap();
-            } else {
-                let mut task = inbound_task(peer.clone(), "request a tool");
-                task.principal = principal.clone();
-                task.response_policy.mode = ResponseMode::NotifyAndDraft;
-                server.start(task, CancellationToken::new()).await.unwrap();
-            }
+            let mut task = inbound_task(peer.clone(), "request a tool");
+            task.principal = principal.clone();
+            task.response_policy.mode = ResponseMode::NotifyAndDraft;
+            server.start(task, CancellationToken::new()).await.unwrap();
             let id = match tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 approval_events.recv(),
@@ -16097,8 +15911,7 @@ mod tests {
         .await
         .expect("real reset/turn socket scenario completed");
     }
-    async fn review_managed_clear_waits_for_tool_display(rap_ingest: bool) {
-        use crate::adapters::rap::VerifiedPeerConsumer as _;
+    async fn review_managed_clear_waits_for_tool_display() {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let workspace = tempfile::tempdir().unwrap();
             let provider = Arc::new(ToolThenTextProvider { calls: AtomicUsize::new(0) });
@@ -16142,17 +15955,9 @@ mod tests {
             // Gate the actual forwarder before any tool evidence can be folded.
             let display_gate = server.peer_assistant_buffers.lock().await;
             let peer = test_signer(95).identity().peer_id.clone();
-            if rap_ingest {
-                DaemonPeerConsumer { server: Arc::downgrade(&server) }.ingest_with_policy(
-                    &AgentId::new(), AgentMessage::new("request a tool"), &peer,
-                    crate::domain::ports::PeerResponsePolicy {
-                        mode: crate::domain::models::ResponseMode::NotifyAndDraft, ..Default::default()
-                    }).await.unwrap();
-            } else {
-                let mut task = inbound_task(peer, "request a tool");
-                task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
-                server.start(task, CancellationToken::new()).await.unwrap();
-            }
+            let mut task = inbound_task(peer, "request a tool");
+            task.response_policy.mode = crate::domain::models::ResponseMode::NotifyAndDraft;
+            server.start(task, CancellationToken::new()).await.unwrap();
             loop {
                 if let Some(DaemonFrame::ApprovalRequest { request_id, .. }) =
                     read_frame::<_, DaemonFrame>(&mut client).await.unwrap() {
@@ -16196,13 +16001,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn story19_19_review_a2a_clear_waits_for_managed_tool_display() {
-        review_managed_clear_waits_for_tool_display(false).await;
+        review_managed_clear_waits_for_tool_display().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn story19_19_review_rap_clear_waits_for_managed_tool_display() {
-        review_managed_clear_waits_for_tool_display(true).await;
-    }
     #[tokio::test]
     async fn clearing_conversation_removes_uncontrolled_peer_display_rows() {
         let tmp = tempfile::tempdir().unwrap();
