@@ -508,14 +508,13 @@ def test_act1_attached_distribution(columns, rows, monkeypatch):
         assert re.search(r"Peer item inventory · \d+ rows", _compact(inventory)), inventory
         assert "Distribution board · story_assignment" not in inventory, inventory
 
-        thread_refusal = "'/team thread' unavailable in this session.\n    Run it in a non-attached session."
         before_thread_requests = _provider_requests(stub, "lena-po")
         before_thread_turns = _turns(stub, "lena-po")
         _command(lena, f"/team thread jun-dev {jun_item}")
-        thread_render = _chat_pages(lena, "lena-thread-refusal", snapshots)
+        _wait_for_marker(lena, f"thread · jun-dev · {jun_item}", lena.get_screen_text)
+        thread_render = _chat_pages(lena, "lena-thread", snapshots)
         thread_compact = _compact(thread_render)
-        assert _compact(thread_refusal) in thread_compact, thread_render
-        assert "ℹ '/team thread' unavailable in this session." in thread_compact, thread_render
+        assert f"thread · jun-dev · {jun_item}" in thread_compact, thread_render
         assert _provider_requests(stub, "lena-po") == before_thread_requests, stub.rows()
         assert _turns(stub, "lena-po") == before_thread_turns, stub.rows()
 
@@ -532,7 +531,6 @@ def test_act1_attached_distribution(columns, rows, monkeypatch):
             assert "Peers:" in status_compact, status_render
             for alias in ("jun-dev", "tom-dev", "yuki-dev", "nina-ux"):
                 assert f"- {alias} (" in status_compact, status_render
-            assert _compact(thread_refusal) in status_compact, "S7 Info refusal must persist after the status read\n" + status_render
             assert _provider_requests(stub, "lena-po") == before_requests, stub.rows()
             assert _turns(stub, "lena-po") == before_turns, stub.rows()
 

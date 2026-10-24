@@ -8,6 +8,14 @@ mod attached_harness;
 #[path = "conformance_19_21/harness.rs"]
 mod inherited;
 use inherited as harness;
+#[path = "conformance_19_21c/c_k01_thread.rs"]
+mod c_k01_thread;
+#[path = "conformance_19_21c/c_k02_followup.rs"]
+mod c_k02_followup;
+#[path = "conformance_19_21c/c_k03_retract.rs"]
+mod c_k03_retract;
+#[path = "conformance_19_21c/c_k04_retract_gating.rs"]
+mod c_k04_retract_gating;
 #[cfg(all(unix, feature = "test-instrumentation"))]
 #[path = "conformance_19_21b/g_entrypoints.rs"]
 mod g_entrypoints;

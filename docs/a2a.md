@@ -325,7 +325,7 @@ ratified remedies 512) are disclosure bounds, not a width rule, and keep their
 
 ## Live daemon recipient rows
 
-Daemon attachments use protocol **v9**. Continuously attached trusted-local
+Daemon attachments use protocol **v10**. Continuously attached trusted-local
 writers and read-only observers receive revisioned peer-row upserts and removals
 only after successful persistence. Snapshot and live updates use the same row
 identity; duplicate or older updates cannot restore a settled/deleted card.
@@ -342,19 +342,24 @@ ordering revisions survive conversation persistence and trusted-local reattach.
 The new operations and snapshot control targets are omitted for authenticated
 Peer-tier attachments. The raw event projection also omits sender-local
 `TeamSendActionRecorded`/`TeamSendRecipientSettled` events and strips the
-additive action reference from legacy `RemoteEnvelopeDispatched`; unrelated
-legacy raw-stream behavior is unchanged. This is not a blanket confidentiality
-guarantee for that legacy stream.
+additive action reference from legacy `RemoteEnvelopeDispatched`. Peer-reply
+bodies (`PeerReplyObserved.content`) remain in the journal but are stripped from
+raw-event fanout to every attachment; explicit thread views are origin-only.
+This is not a blanket confidentiality guarantee for the legacy stream.
 This local synchronization is not A2A reply push. The plain attach reader emits
 addressed row-operation JSON, rather than presenting replacements as new replies.
 
-### Attached operator commands (Story 19.21)
+### Attached operator commands (Stories 19.21 and 19.21c)
 
-The attached client composes no A2A egress. It sends `/team send` to the daemon's already-composed runtime, preserving the parsed multiline body, type and sender-local subject; sends and `/team untrust` require a trusted-local read/write attachment. `/team board` and `/team status` are explicit daemon-side reads and are available to trusted-local read-only attachments. Peer-tier attachments are refused for all four command families. Board text arrives in bounded request-correlated chunks and is painted only after an in-order sequence and explicit completion boundary. Send rows use the same feature-independent typed renderer and remain in their own stable `team-send-N` Info block.
+The attached client composes no A2A egress. It sends `/team send` to the daemon's already-composed runtime, preserving the parsed multiline body, type and sender-local subject; sends and `/team untrust` require a trusted-local read/write attachment. `/team board`, `/team status` and `/team thread <peer> <item-id>` are explicit daemon-side reads available to trusted-local read-only attachments. Peer-tier attachments are refused for all team commands. Board and thread text arrive in bounded request-correlated chunks and are painted only after an in-order sequence and explicit completion boundary. Send rows use the same feature-independent typed renderer and remain in their own stable `team-send-N` Info block.
 
 An unresolved `sending…` row remains visible when a recorded action's settlement cannot be published, including a `NotSent` outcome whose dispatch append and typed-settlement append both failed. The distinct action-record-failure branch has no action or settlement and may show visible `NotSent`. This matches standalone send-board behavior: the client does not invent a terminal outcome or add a timeout.
 
-`/team thread`, `/team followup` and `/team retract` remain unavailable in attached sessions. They render the two-line S7 Info response naming the unavailable verb and directing the operator to a non-attached session. No team board is pushed or refreshed by a timer.
+`/team followup <peer> <turn-id> <text…>` requires a trusted-local writer. It sends to exactly one peer with the reply link, human-written authorship and human-decided authorization; it creates no new send action, and its pending row settles without a `TeamSendStarted` frame. It shares the writer FIFO and the eight-send in-flight limit.
+
+`/team retract <peer> <item-id>` also requires a trusted-local writer. Its FIFO-admitted preview raises the same armed/disarmed confirmation card as standalone. Only an armed `y` confirms; `n` or `Esc` declines without detaching, and the card consumes all other keys. The daemon retains the target and task privately: decisions name only the preview request and take that connection's current slot once. Stale, replaced, disarmed or saturated decisions never POST. Confirmation requires the current writer and one send permit. An accepted dispatch survives detach — including a confirmation still queued in the writer's FIFO when it detaches; the target is dropped once that queue drains, or at once when another writer attaches. It journals before the single retract POST, re-renders any remembered board without another list, then returns the standalone sentence to the origin connection only.
+
+Thread reads and retract previews consume no send permit; threads remain readable while all eight sends are held. Thread views, retract cards and answers are never broadcast and never invoke a provider/model turn. All spawned work is daemon-owned and joined at shutdown. No board or thread is pushed or refreshed by a timer. Builds without an A2A runtime return a request-keyed refusal after the tier/write gates, before any retract target lookup.
 
 ## Reading a received item locally
 

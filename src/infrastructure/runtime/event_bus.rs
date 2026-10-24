@@ -368,6 +368,11 @@ impl RawEvent {
                     ) => {
                         *send_authorization = crate::domain::models::SendAuthorization::Unknown;
                     }
+                    // Story 19.21c: journaled peer reply bodies are private to
+                    // the explicit origin-only thread view, never raw fanout.
+                    crate::domain::events::DomainEventPayload::Room(
+                        crate::domain::models::RoomEvent::PeerReplyObserved { content, .. },
+                    ) => *content = None,
                     _ => {}
                 }
                 RawEvent {
@@ -899,5 +904,35 @@ mod tests {
             "A6 stored transcript is unchanged"
         );
         assert_eq!(projected.tool_calls.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod attached_thread_privacy_tests {
+    use super::*;
+    #[test]
+    fn peer_reply_raw_projection_keeps_metadata_not_body_or_journal_mutation() {
+        use crate::domain::{
+            events::DomainEventPayload,
+            models::{PeerId, RoomEvent},
+        };
+        let event = AppEvent::DomainEvent(DomainEventPayload::Room(RoomEvent::PeerReplyObserved {
+            peer: PeerId::from_public_key(&[42; 32]).unwrap(),
+            endpoint: Some("origin".into()),
+            turn: "turn-private".into(),
+            answers: Some("root".into()),
+            content: Some("distinctive private reply".into()),
+            content_hash: None,
+        }));
+        let projected = RawEvent::from_app_event(&event).unwrap();
+        assert!(matches!(projected.kind,
+            RawEventKind::DomainEvent(DomainEventPayload::Room(RoomEvent::PeerReplyObserved {
+                content: None, turn, answers: Some(root), ..
+            })) if turn == "turn-private" && root == "root"));
+        assert!(
+            matches!(event, AppEvent::DomainEvent(DomainEventPayload::Room(RoomEvent::PeerReplyObserved {
+            content: Some(body), ..
+        })) if body == "distinctive private reply")
+        );
     }
 }

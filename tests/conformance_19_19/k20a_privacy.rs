@@ -242,7 +242,7 @@ async fn k08_peer_tier_never_sees_send_authorization_and_old_protocol_is_refused
         matches!(
             socket_frame(&mut old).await,
             DaemonFrame::Error(ProtocolError::VersionMismatch {
-                daemon: 9,
+                daemon: 10,
                 client: 8
             })
         ),

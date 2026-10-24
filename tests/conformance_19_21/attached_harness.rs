@@ -1098,6 +1098,12 @@ pub struct RecipientHost {
     pub journal: Journal,
     pub endpoint: String,
     pub registry: Arc<CapabilityRegistry>,
+    /// Story 19.21c: method-level HTTP attempts, separate from journal marks.
+    observation: Arc<super::observed_host::Counters>,
+    observer_task: JoinHandle<Result<(), std::io::Error>>,
+    operator_server: Arc<AttachServer>,
+    operator_events: Option<mpsc::UnboundedReceiver<rustain::domain::events::AppEvent>>,
+    operator_task: Option<JoinHandle<()>>,
     cancel: CancellationToken,
     task: JoinHandle<anyhow::Result<()>>,
     _keys: tempfile::TempDir,
@@ -1142,7 +1148,7 @@ impl RecipientHost {
         let signer = IdentityKeyStore::new(keys.path())
             .load_or_generate()
             .expect("recipient identity");
-        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
+        let (domain_tx, domain_rx) = mpsc::unbounded_channel();
         let tree = NodeTree::with_event_tx(
             domain_tx.clone(),
             Arc::new(|| chrono::Utc::now().timestamp_millis()),
@@ -1196,6 +1202,10 @@ impl RecipientHost {
             journal.node.clone(),
             None,
         );
+        let observer = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("recipient observer");
+        let observed_authority = observer.local_addr().expect("observer address").to_string();
         let endpoint = format!(
             "http://{}/",
             listener.local_addr().expect("recipient address")
@@ -1208,21 +1218,40 @@ impl RecipientHost {
                 registry: registry.clone(),
                 signer,
                 security: A2aServerSecurity::default(),
-                runtime: Some(attach as Arc<dyn rustain::domain::ports::InboundPeerRuntime>),
+                runtime: Some(attach.clone() as Arc<dyn rustain::domain::ports::InboundPeerRuntime>),
                 transparency: Arc::new(
                     TransparencySink::new(sink).with_reader(journal.node.clone()),
                 ),
                 policy: admission,
                 workspace,
-                advertised_host: None,
+                advertised_host: Some(observed_authority.clone()),
                 cards: Arc::new(SignedCardCache::new()),
             },
             cancel.child_token(),
         ));
+        let observation = Arc::new(super::observed_host::Counters::default());
+        let app = axum::Router::new()
+            .fallback(super::observed_host::forward)
+            .with_state(super::observed_host::Proxy {
+                upstream: endpoint.trim_end_matches('/').to_owned(),
+                client: reqwest::Client::new(),
+                counters: observation.clone(),
+            });
+        let observer_cancel = cancel.child_token();
+        let observer_task = tokio::spawn(async move {
+            axum::serve(observer, app)
+                .with_graceful_shutdown(observer_cancel.cancelled_owned())
+                .await
+        });
         Self {
             journal,
-            endpoint,
+            endpoint: format!("http://{observed_authority}/"),
             registry,
+            observation,
+            observer_task,
+            operator_server: attach,
+            operator_events: Some(domain_rx),
+            operator_task: None,
             cancel,
             task,
             _keys: keys,
@@ -1235,8 +1264,67 @@ impl RecipientHost {
             rustain::domain::models::A2aPeerSource::Workspace,
         )
     }
+    /// Count actual JSON-RPC POST attempts, including refused or duplicate ones.
+    pub fn method_count(&self, method: &str) -> usize {
+        self.observation
+            .posts
+            .lock()
+            .expect("observed POSTs")
+            .iter()
+            .filter(|post| {
+                serde_json::from_slice::<serde_json::Value>(post.body())
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("method")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_owned)
+                    })
+                    .as_deref()
+                    == Some(method)
+            })
+            .count()
+    }
+    pub fn observe_retract_dispatches(
+        &self,
+        reader: Arc<dyn rustain::domain::ports::RoomJournalReader>,
+    ) {
+        *self
+            .observation
+            .dispatch_journal
+            .lock()
+            .expect("dispatch observer") = Some(reader);
+    }
+    pub fn dispatches_at_post(&self) -> Vec<usize> {
+        self.observation
+            .retract_dispatches_at_post
+            .lock()
+            .expect("POST observations")
+            .clone()
+    }
+    /// Opt into the production recipient socket/forwarder only for reply tests.
+    pub async fn enable_operator(&mut self) -> PathBuf {
+        let path = self.journal.workspace.path().join("recipient-daemon.sock");
+        let listener = UnixListener::bind(&path).expect("recipient attach socket");
+        let events = self.operator_events.take().expect("operator starts once");
+        self.operator_task = Some(tokio::spawn(self.operator_server.clone().run(
+            listener,
+            events,
+            None,
+            None,
+            self.cancel.child_token(),
+        )));
+        path
+    }
     pub async fn stop(self) {
         self.cancel.cancel();
+        if let Some(task) = self.operator_task {
+            task.await.expect("recipient operator task");
+        }
+        self.observer_task
+            .await
+            .expect("observer task")
+            .expect("observer shutdown");
         self.task
             .await
             .expect("recipient task")
@@ -1439,8 +1527,10 @@ impl AttachedClient {
             .filter(|frame| match frame {
                 DaemonFrame::TeamSendStarted { request: key, .. }
                 | DaemonFrame::TeamSendSettled { request: key, .. }
-                | DaemonFrame::TeamBoardChunk { request: key, .. }
-                | DaemonFrame::TeamBoardDone { request: key, .. }
+                | DaemonFrame::TeamViewChunk { request: key, .. }
+                | DaemonFrame::TeamViewDone { request: key, .. }
+                | DaemonFrame::TeamRetractPreviewed { request: key, .. }
+                | DaemonFrame::TeamRetractAnswered { request: key, .. }
                 | DaemonFrame::TeamStatusResult { request: key, .. }
                 | DaemonFrame::SenderConsentRevoked { request: key, .. } => key == request,
                 DaemonFrame::RecipientActionResult {
@@ -1475,14 +1565,14 @@ impl AttachedClient {
                 .wait_for(|f| {
                     matches!(
                         f,
-                        DaemonFrame::TeamBoardChunk { request, .. }
-                            | DaemonFrame::TeamBoardDone { request, .. }
+                        DaemonFrame::TeamViewChunk { request, .. }
+                            | DaemonFrame::TeamViewDone { request, .. }
                             if request == key
                     ) || is_request_refusal(f, key)
                 })
                 .await;
             match frame {
-                DaemonFrame::TeamBoardChunk {
+                DaemonFrame::TeamViewChunk {
                     sequence,
                     view: chunk,
                     ..
@@ -1497,7 +1587,7 @@ impl AttachedClient {
                     };
                     next_sequence = next;
                 }
-                DaemonFrame::TeamBoardDone { chunks, .. } if chunks == next_sequence => {
+                DaemonFrame::TeamViewDone { chunks, .. } if chunks == next_sequence => {
                     return Ok(view);
                 }
                 refusal @ DaemonFrame::RecipientActionResult { .. } => {
@@ -1633,8 +1723,14 @@ pub fn correlated_frames(
         let (key, kind) = match frame {
             DaemonFrame::TeamSendStarted { request, .. } => (request.as_str(), "started"),
             DaemonFrame::TeamSendSettled { request, .. } => (request.as_str(), "settled"),
-            DaemonFrame::TeamBoardChunk { request, .. } => (request.as_str(), "board-chunk"),
-            DaemonFrame::TeamBoardDone { request, .. } => (request.as_str(), "board"),
+            DaemonFrame::TeamViewChunk { request, .. } => (request.as_str(), "board-chunk"),
+            DaemonFrame::TeamViewDone { request, .. } => (request.as_str(), "board"),
+            DaemonFrame::TeamRetractPreviewed { request, .. } => {
+                (request.as_str(), "retract-preview")
+            }
+            DaemonFrame::TeamRetractAnswered { request, .. } => {
+                (request.as_str(), "retract-answer")
+            }
             DaemonFrame::TeamStatusResult { request, .. } => (request.as_str(), "status"),
             DaemonFrame::SenderConsentRevoked { request, .. } => (request.as_str(), "revoked"),
             DaemonFrame::RecipientActionResult {

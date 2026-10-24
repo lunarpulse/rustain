@@ -1570,7 +1570,6 @@ pub fn apply_client_event(
 enum AttachedTeamLine {
     Frame(ClientFrame),
     Refused(String),
-    Unavailable(&'static str),
     PassThrough,
     LocalLog(crate::adapters::tui::handlers::team_command::TeamLogArgs),
     LocalView(String),
@@ -1586,6 +1585,16 @@ enum AttachedTeamRequest {
         next_sequence: u32,
         view: String,
     },
+    Thread {
+        next_sequence: u32,
+        view: String,
+    },
+    RetractPreview,
+    Retract {
+        next_sequence: u32,
+        view: String,
+        view_done: bool,
+    },
     Status,
     Untrust,
 }
@@ -1596,6 +1605,8 @@ struct AttachedTeamRequests {
     next_send_id: u64,
     pending: std::collections::BTreeMap<String, AttachedTeamRequest>,
     latest_board: Option<String>,
+    latest_thread: Option<String>,
+    open_retract: Option<String>,
 }
 
 impl AttachedTeamRequests {
@@ -1603,6 +1614,59 @@ impl AttachedTeamRequests {
         self.next_id += 1;
         format!("attached-team-{}", self.next_id)
     }
+}
+
+/// Story 19.21c: own every card key before detach, Ctrl+X or the composer.
+fn attached_team_retract_key(
+    state: &mut TuiState,
+    requests: &mut AttachedTeamRequests,
+    key: crossterm::event::KeyEvent,
+    frame_tx: &mpsc::UnboundedSender<ClientFrame>,
+) -> bool {
+    use crate::adapters::tui::handlers::team_command as handler;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let Some(pending) = &state.pending_team_retract else {
+        return false;
+    };
+    let decision = if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('y') if pending.armed => Some(true),
+            KeyCode::Char('n') | KeyCode::Esc => Some(false),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(confirm) = decision {
+        handler::resolve_team_retract_card(state, confirm);
+        if let Some(request) = requests.open_retract.take() {
+            if confirm {
+                requests.pending.insert(
+                    request.clone(),
+                    AttachedTeamRequest::Retract {
+                        next_sequence: 0,
+                        view: String::new(),
+                        view_done: false,
+                    },
+                );
+                handler::show_team_retract(state, handler::TEAM_RETRACT_SENDING.to_owned());
+            } else {
+                requests.pending.remove(&request);
+            }
+            if frame_tx
+                .send(ClientFrame::TeamRetractDecision {
+                    request: request.clone(),
+                    confirm,
+                })
+                .is_err()
+            {
+                if let Some(pending) = requests.pending.remove(&request) {
+                    paint_team_request_failure(state, pending, "could not enqueue command");
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Story 19.16g — what one composer key did on the attached client.
@@ -1622,8 +1686,8 @@ enum ComposerOutcome {
 /// Story 19.16g — composer routing for `Char`, `Backspace` and `Enter`,
 /// extracted from `run_attached` (its production caller) so the read-only
 /// exception is reachable by a test. Read-only clients may edit their composer,
-/// run daemon-served team board/status reads, and see the explicit S7 Info
-/// refusal; model turns and writer-only team commands remain guarded.
+/// run daemon-served team board/status/thread reads; model turns and
+/// writer-only team commands remain guarded.
 fn attached_composer_key(
     code: crossterm::event::KeyCode,
     read_only: bool,
@@ -1687,18 +1751,6 @@ fn attached_composer_key_with_team_requests(
                     state.pinned_peer_compose = None;
                     return ComposerOutcome::LocalView(item_id);
                 }
-                AttachedTeamLine::Unavailable(verb) => {
-                    input.clear();
-                    state.pinned_peer_compose = None;
-                    let id = format!("team-{verb}");
-                    crate::adapters::tui::handlers::team_command::show_team_send(
-                        state,
-                        &id,
-                        format!(
-                            "'/team {verb}' unavailable in this session.\n    Run it in a non-attached session."
-                        ),
-                    );
-                }
                 AttachedTeamLine::Frame(ClientFrame::InspectRecipientContext) => {
                     state.pinned_peer_compose = None;
                     if queue_recipient_action(
@@ -1712,6 +1764,7 @@ fn attached_composer_key_with_team_requests(
                     }
                 }
                 AttachedTeamLine::Frame(frame @ ClientFrame::TeamBoard { .. })
+                | AttachedTeamLine::Frame(frame @ ClientFrame::TeamThread { .. })
                 | AttachedTeamLine::Frame(frame @ ClientFrame::TeamStatus { .. }) => {
                     state.pinned_peer_compose = None;
                     if enqueue_attached_team_frame(state, team_requests, frame, frame_tx) {
@@ -1720,9 +1773,16 @@ fn attached_composer_key_with_team_requests(
                     }
                 }
                 AttachedTeamLine::Frame(frame @ ClientFrame::TeamSend { .. })
+                | AttachedTeamLine::Frame(frame @ ClientFrame::TeamFollowup { .. })
+                | AttachedTeamLine::Frame(frame @ ClientFrame::TeamRetractPreview { .. })
                 | AttachedTeamLine::Frame(frame @ ClientFrame::RevokeSenderConsent { .. }) => {
                     if read_only {
-                        flash(state, "read-only — can't send here".into());
+                        let message = if matches!(frame, ClientFrame::TeamRetractPreview { .. }) {
+                            "read-only — can't retract here"
+                        } else {
+                            "read-only — can't send here"
+                        };
+                        flash(state, message.into());
                     } else {
                         state.pinned_peer_compose = None;
                         if enqueue_attached_team_frame(state, team_requests, frame, frame_tx) {
@@ -1842,6 +1902,7 @@ fn attached_proposal_higher_confirmation(
     consent
         || consolidation
         || retract
+        || state.pending_team_retract.is_some()
         || crate::adapters::tui::app::proposal_higher_confirmation_active(state)
 }
 
@@ -2141,6 +2202,45 @@ fn enqueue_attached_team_frame(
             recipients,
             ..
         } => (request.clone(), begin_attached_team_send(state, recipients)),
+        ClientFrame::TeamFollowup { request, peer, .. } => (
+            request.clone(),
+            begin_attached_team_send(state, std::slice::from_ref(peer)),
+        ),
+        ClientFrame::TeamThread { request, .. } => {
+            requests
+                .pending
+                .retain(|_, pending| !matches!(pending, AttachedTeamRequest::Thread { .. }));
+            requests.latest_thread = Some(request.clone());
+            crate::adapters::tui::handlers::team_command::show_team_thread(
+                state,
+                crate::adapters::tui::handlers::team_command::TEAM_THREAD_READING.to_owned(),
+            );
+            (
+                request.clone(),
+                AttachedTeamRequest::Thread {
+                    next_sequence: 0,
+                    view: String::new(),
+                },
+            )
+        }
+        ClientFrame::TeamRetractPreview { request, .. } => {
+            if requests.open_retract.is_some()
+                || requests.pending.values().any(|pending| {
+                    matches!(
+                        pending,
+                        AttachedTeamRequest::RetractPreview | AttachedTeamRequest::Retract { .. }
+                    )
+                })
+            {
+                crate::adapters::tui::handlers::team_command::show_team_retract(
+                    state,
+                    "A retract is already awaiting your answer. Nothing was sent for this one."
+                        .into(),
+                );
+                return false;
+            }
+            (request.clone(), AttachedTeamRequest::RetractPreview)
+        }
         ClientFrame::TeamProposalDecision {
             proposal,
             decision: TeamProposalDecision::Send,
@@ -2197,6 +2297,12 @@ fn paint_team_request_failure(state: &mut TuiState, pending: AttachedTeamRequest
             show_team_send(state, &block_id, text);
         }
         AttachedTeamRequest::Board { .. } => show_team_board(state, text),
+        AttachedTeamRequest::Thread { .. } => {
+            crate::adapters::tui::handlers::team_command::show_team_thread(state, text)
+        }
+        AttachedTeamRequest::RetractPreview | AttachedTeamRequest::Retract { .. } => {
+            crate::adapters::tui::handlers::team_command::show_team_retract(state, text)
+        }
         AttachedTeamRequest::Status | AttachedTeamRequest::Untrust => show_team_status(state, text),
     }
 }
@@ -2205,6 +2311,8 @@ fn apply_attached_team_frame(
     state: &mut TuiState,
     requests: &mut AttachedTeamRequests,
     frame: DaemonFrame,
+    confirmation_busy: bool,
+    frame_tx: &mpsc::UnboundedSender<ClientFrame>,
 ) -> bool {
     use crate::adapters::tui::handlers::team_command::{
         render_team_send_rows, show_team_board, show_team_send, show_team_status,
@@ -2261,53 +2369,179 @@ fn apply_attached_team_frame(
             }
             true
         }
-        DaemonFrame::TeamBoardChunk {
+        DaemonFrame::TeamViewChunk {
             request,
             sequence,
             view,
         } => {
-            let valid = matches!(
-                requests.pending.get(&request),
-                Some(AttachedTeamRequest::Board { next_sequence, .. })
-                    if *next_sequence == sequence
-            );
-            if requests.latest_board.as_deref() != Some(request.as_str()) || !valid {
-                requests.pending.remove(&request);
-                tracing::warn!(%request, sequence, "attach: stale or out-of-order team board chunk discarded");
-                return true;
-            }
-            let Some(next) = sequence.checked_add(1) else {
-                requests.pending.remove(&request);
-                tracing::warn!(%request, "attach: team board sequence overflow");
+            let current = match requests.pending.get(&request) {
+                Some(AttachedTeamRequest::Board { .. }) => {
+                    requests.latest_board.as_deref() == Some(request.as_str())
+                }
+                Some(AttachedTeamRequest::Thread { .. }) => {
+                    requests.latest_thread.as_deref() == Some(request.as_str())
+                }
+                Some(AttachedTeamRequest::Retract { view_done, .. }) => !view_done,
+                _ => {
+                    tracing::warn!(%request, "attach: unmatched view chunk");
+                    return true;
+                }
+            };
+            let Some(pending) = requests.pending.get_mut(&request) else {
                 return true;
             };
-            if let Some(AttachedTeamRequest::Board {
-                next_sequence,
-                view: assembled,
-            }) = requests.pending.get_mut(&request)
-            {
-                assembled.push_str(&view);
-                *next_sequence = next;
+            let (next_sequence, assembled) = match pending {
+                AttachedTeamRequest::Board {
+                    next_sequence,
+                    view,
+                }
+                | AttachedTeamRequest::Thread {
+                    next_sequence,
+                    view,
+                }
+                | AttachedTeamRequest::Retract {
+                    next_sequence,
+                    view,
+                    ..
+                } => (next_sequence, view),
+                _ => return true,
+            };
+            if !current || *next_sequence != sequence || sequence == u32::MAX {
+                if let AttachedTeamRequest::Retract {
+                    view_done, view, ..
+                } = pending
+                {
+                    *view_done = true;
+                    view.clear();
+                } else {
+                    requests.pending.remove(&request);
+                }
+                tracing::warn!(%request, "attach: stale or out-of-order view discarded");
+                return true;
+            }
+            assembled.push_str(&view);
+            *next_sequence += 1;
+            true
+        }
+        DaemonFrame::TeamViewDone { request, chunks } => {
+            let Some(pending) = requests.pending.remove(&request) else {
+                tracing::warn!(%request, "attach: unmatched view completion");
+                return true;
+            };
+            match pending {
+                AttachedTeamRequest::Board {
+                    next_sequence,
+                    view,
+                } if chunks == next_sequence
+                    && requests.latest_board.as_deref() == Some(request.as_str()) =>
+                {
+                    show_team_board(state, view)
+                }
+                AttachedTeamRequest::Thread {
+                    next_sequence,
+                    view,
+                } if chunks == next_sequence
+                    && requests.latest_thread.as_deref() == Some(request.as_str()) =>
+                {
+                    crate::adapters::tui::handlers::team_command::show_team_thread(state, view)
+                }
+                AttachedTeamRequest::Retract {
+                    next_sequence,
+                    view,
+                    view_done,
+                } => {
+                    if !view_done && chunks == next_sequence {
+                        show_team_board(state, view);
+                    }
+                    requests.pending.insert(
+                        request,
+                        AttachedTeamRequest::Retract {
+                            next_sequence,
+                            view: String::new(),
+                            view_done: true,
+                        },
+                    );
+                }
+                other @ (AttachedTeamRequest::Send { .. }
+                | AttachedTeamRequest::Status
+                | AttachedTeamRequest::Untrust
+                | AttachedTeamRequest::RetractPreview) => {
+                    requests.pending.insert(request, other);
+                }
+                _ => tracing::warn!(%request, "attach: incomplete or stale view discarded"),
             }
             true
         }
-        DaemonFrame::TeamBoardDone { request, chunks } => {
-            let Some(AttachedTeamRequest::Board {
-                next_sequence,
-                view,
-            }) = requests.pending.remove(&request)
-            else {
-                tracing::warn!(%request, "attach: unmatched team board completion");
-                return true;
-            };
-            if chunks != next_sequence {
-                tracing::warn!(%request, chunks, received = next_sequence, "attach: incomplete team board discarded");
+        DaemonFrame::TeamRetractPreviewed { request, preview } => {
+            use crate::adapters::daemon::protocol::TeamRetractPreviewView;
+            use crate::adapters::tui::handlers::team_command as handler;
+            if !matches!(
+                requests.pending.get(&request),
+                Some(AttachedTeamRequest::RetractPreview)
+            ) {
+                tracing::warn!(%request, "attach: unmatched retract preview");
                 return true;
             }
-            if requests.latest_board.as_deref() == Some(request.as_str()) {
-                show_team_board(state, view);
+            match preview {
+                TeamRetractPreviewView::Answer { message } => {
+                    requests.pending.remove(&request);
+                    requests.open_retract = None;
+                    handler::show_team_retract(state, message);
+                }
+                TeamRetractPreviewView::Card {
+                    peer,
+                    item_id,
+                    body,
+                    armed,
+                } => {
+                    let overlay = matches!(
+                        state.focus,
+                        FocusState::Overlay(
+                            crate::domain::models::visual::OverlayType::Confirmation(_)
+                        )
+                    );
+                    if confirmation_busy
+                        || overlay
+                        || state.pending_team_retract.is_some()
+                        || requests.open_retract.is_some()
+                    {
+                        requests.pending.remove(&request);
+                        let _ = frame_tx.send(ClientFrame::TeamRetractDecision {
+                            request,
+                            confirm: false,
+                        });
+                        handler::show_team_retract(state,
+                            "Another confirmation is already awaiting your answer. Nothing was sent for this one.".into());
+                    } else {
+                        handler::open_team_retract_card(
+                            state,
+                            "daemon-attachment",
+                            crate::domain::events::TeamRetractPreview::Card(
+                                crate::domain::events::TeamRetractCard {
+                                    peer,
+                                    item_id,
+                                    task: None,
+                                    body,
+                                    armed,
+                                },
+                            ),
+                        );
+                        requests.open_retract = Some(request);
+                    }
+                }
+            }
+            true
+        }
+        DaemonFrame::TeamRetractAnswered { request, message } => {
+            if matches!(
+                requests.pending.get(&request),
+                Some(AttachedTeamRequest::Retract { .. })
+            ) {
+                requests.pending.remove(&request);
+                requests.open_retract = None;
+                crate::adapters::tui::handlers::team_command::show_team_retract(state, message);
             } else {
-                tracing::debug!(%request, "attach: stale team board discarded");
+                tracing::warn!(%request, "attach: unmatched retract answer");
             }
             true
         }
@@ -2352,6 +2586,10 @@ fn apply_attached_team_refusal(
     let expected = match requests.pending.get(&request) {
         Some(AttachedTeamRequest::Send { .. }) => RecipientAction::TeamSend,
         Some(AttachedTeamRequest::Board { .. }) => RecipientAction::TeamBoard,
+        Some(AttachedTeamRequest::Thread { .. }) => RecipientAction::TeamThread,
+        Some(AttachedTeamRequest::RetractPreview | AttachedTeamRequest::Retract { .. }) => {
+            RecipientAction::TeamRetract
+        }
         Some(AttachedTeamRequest::Status) => RecipientAction::TeamStatus,
         Some(AttachedTeamRequest::Untrust) => RecipientAction::RevokeSenderConsent,
         None => {
@@ -2386,6 +2624,20 @@ fn apply_attached_team_refusal(
             if requests.latest_board.as_deref() == Some(request.as_str()) {
                 crate::adapters::tui::handlers::team_command::show_team_board(state, message);
             }
+        }
+        AttachedTeamRequest::Thread { .. } => {
+            if requests.latest_thread.as_deref() == Some(request.as_str()) {
+                crate::adapters::tui::handlers::team_command::show_team_thread(state, message);
+            }
+        }
+        AttachedTeamRequest::RetractPreview | AttachedTeamRequest::Retract { .. } => {
+            if requests.open_retract.as_deref() == Some(request.as_str()) {
+                requests.open_retract = None;
+                crate::adapters::tui::handlers::team_command::resolve_team_retract_card(
+                    state, false,
+                );
+            }
+            crate::adapters::tui::handlers::team_command::show_team_retract(state, message);
         }
         AttachedTeamRequest::Status | AttachedTeamRequest::Untrust => {
             crate::adapters::tui::handlers::team_command::show_team_status(state, message)
@@ -2443,7 +2695,13 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
         Ok(TeamCommandArgs::Remove { item_id }) => {
             AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { item_id })
         }
-        Ok(TeamCommandArgs::Retract { .. }) => AttachedTeamLine::Unavailable("retract"),
+        Ok(TeamCommandArgs::Retract { peer, item_id }) => {
+            AttachedTeamLine::Frame(ClientFrame::TeamRetractPreview {
+                request,
+                peer,
+                item_id,
+            })
+        }
         Ok(TeamCommandArgs::Reply { item_id, text }) => {
             AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem { item_id, text })
         }
@@ -2461,8 +2719,23 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
             item_id,
             selected: !off,
         }),
-        Ok(TeamCommandArgs::Thread { .. }) => AttachedTeamLine::Unavailable("thread"),
-        Ok(TeamCommandArgs::Followup { .. }) => AttachedTeamLine::Unavailable("followup"),
+        Ok(TeamCommandArgs::Thread { peer, item_id }) => {
+            AttachedTeamLine::Frame(ClientFrame::TeamThread {
+                request,
+                peer,
+                item_id,
+            })
+        }
+        Ok(TeamCommandArgs::Followup {
+            peer,
+            turn_id,
+            text,
+        }) => AttachedTeamLine::Frame(ClientFrame::TeamFollowup {
+            request,
+            peer,
+            reply_to: turn_id,
+            text,
+        }),
         Ok(TeamCommandArgs::Status) => AttachedTeamLine::Frame(ClientFrame::TeamStatus { request }),
         Ok(TeamCommandArgs::Untrust(alias)) => {
             AttachedTeamLine::Frame(ClientFrame::RevokeSenderConsent { request, alias })
@@ -2741,6 +3014,13 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     layout.chat_pane,
                 );
             }
+            // Story 19.21c: the retract card owns every key while open, so it paints last.
+            if let Some(pending) = &state.pending_team_retract {
+                render_bottom_anchored_decision_card(f.buffer_mut(),
+                    crate::adapters::tui::widgets::team_retract_prompt::render_team_retract_lines(
+                        pending, &state.theme, layout.chat_pane.width),
+                    state.theme.colors.accent, layout.chat_pane);
+            }
             state.team_proposal_scroll_max = proposal_card.as_ref().map_or(0, |card| card.scroll_max());
             state.team_proposal_scroll = state.team_proposal_scroll.min(state.team_proposal_scroll_max);
             state.team_proposal_viewport_rows = proposal_card.as_ref().map_or(0, |card| card.viewport_rows());
@@ -2769,6 +3049,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             maybe_ev = events.next() => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                        if attached_team_retract_key(&mut state, &mut attached_team_requests, key, &frame_tx) {
+                            continue;
+                        }
                         let approval_higher = attached_proposal_higher_confirmation(
                             &state, !pending_consent_approvals.is_empty(),
                             pending_consolidation_card.is_some(), retract_confirm.is_some(),
@@ -3075,6 +3358,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             && approvals.pending.is_empty()
                             && pending_consolidation_card.is_none()
                             && retract_confirm.is_none()
+                            && state.pending_team_retract.is_none()
                         {
                             append_attached_paste(&mut input, &text);
                             state.needs_redraw = true;
@@ -3223,12 +3507,17 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     Ok(Some(DaemonFrame::Detached)) => break Ok(()),
                     Ok(Some(frame @ DaemonFrame::TeamSendStarted { .. }))
                     | Ok(Some(frame @ DaemonFrame::TeamSendSettled { .. }))
-                    | Ok(Some(frame @ DaemonFrame::TeamBoardChunk { .. }))
-                    | Ok(Some(frame @ DaemonFrame::TeamBoardDone { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamViewChunk { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamViewDone { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamRetractPreviewed { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamRetractAnswered { .. }))
                     | Ok(Some(frame @ DaemonFrame::TeamStatusResult { .. }))
                     | Ok(Some(frame @ DaemonFrame::SenderConsentRevoked { .. })) => {
+                        let confirmation_busy = !pending_consent_approvals.is_empty()
+                            || pending_consolidation_token.is_some() || retract_confirm.is_some()
+                            || attached_proposal_pending(&state).is_some() || !approvals.pending.is_empty();
                         let _ = apply_attached_team_frame(
-                            &mut state, &mut attached_team_requests, frame,
+                            &mut state, &mut attached_team_requests, frame, confirmation_busy, &frame_tx,
                         );
                     }
                     Ok(Some(DaemonFrame::RecipientActionResult { action, target, outcome })) => {
@@ -4508,7 +4797,9 @@ mod tests {
                     DaemonFrame::TeamSendStarted {
                         request: request.into(),
                         action: crate::domain::models::SendActionId::mint(),
-                    }
+                    },
+                    false,
+                    &mpsc::unbounded_channel().0
                 ));
                 for index in 0..2 {
                     assert!(apply_attached_team_frame(
@@ -4518,7 +4809,9 @@ mod tests {
                             request: request.into(),
                             index,
                             outcome: TeamSendOutcome::Delivered,
-                        }
+                        },
+                        false,
+                        &mpsc::unbounded_channel().0
                     ));
                 }
             }
@@ -6722,7 +7015,7 @@ mod tests {
                 AttachedTeamLine::Frame(ClientFrame::TeamSend { .. }) => "send",
                 AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { .. }) => "ack",
                 AttachedTeamLine::Frame(ClientFrame::RemoveRecipientItem { .. }) => "remove",
-                AttachedTeamLine::Unavailable("retract") => "retract",
+                AttachedTeamLine::Frame(ClientFrame::TeamRetractPreview { .. }) => "retract",
                 AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem { .. }) => "reply",
                 AttachedTeamLine::Frame(ClientFrame::DeferRecipientItem { .. }) => "defer",
                 AttachedTeamLine::LocalView(_) => "view",
@@ -6735,8 +7028,8 @@ mod tests {
                     selected: false,
                     ..
                 }) => "context-off",
-                AttachedTeamLine::Unavailable("thread") => "thread",
-                AttachedTeamLine::Unavailable("followup") => "followup",
+                AttachedTeamLine::Frame(ClientFrame::TeamThread { .. }) => "thread",
+                AttachedTeamLine::Frame(ClientFrame::TeamFollowup { .. }) => "followup",
                 AttachedTeamLine::Frame(ClientFrame::TeamStatus { .. }) => "status",
                 AttachedTeamLine::Frame(ClientFrame::RevokeSenderConsent { .. }) => "untrust",
                 other => panic!("{line}: unexpected classification {other:?}"),
@@ -6751,44 +7044,6 @@ mod tests {
             attached_team_line("plain text"),
             AttachedTeamLine::PassThrough
         ));
-    }
-
-    #[test]
-    fn attached_deferred_commands_render_the_exact_s7_info_block() {
-        use crate::domain::models::FeedbackLevel;
-        use crossterm::event::KeyCode;
-
-        for verb in ["thread", "followup", "retract"] {
-            let command = match verb {
-                "thread" => "/team thread a ri-a",
-                "followup" => "/team followup a turn-1 hello",
-                _ => "/team retract a ri-a",
-            };
-            let mut state = TuiState::new(80, 24);
-            let mut input = command.to_owned();
-            let (tx, _rx) = mpsc::unbounded_channel();
-            let mut requests = AttachedTeamRequests::default();
-            assert!(matches!(
-                attached_composer_key_with_team_requests(
-                    KeyCode::Enter,
-                    true,
-                    &mut input,
-                    &mut state,
-                    &tx,
-                    &mut requests
-                ),
-                ComposerOutcome::Handled
-            ));
-            let block = &state.feedback_blocks[&format!("team-{verb}")];
-            assert_eq!(block.level, FeedbackLevel::Info);
-            assert_eq!(
-                block.message,
-                format!(
-                    "'/team {verb}' unavailable in this session.\n    Run it in a non-attached session."
-                )
-            );
-            assert_eq!(input, "");
-        }
     }
 
     #[test]
@@ -6985,6 +7240,8 @@ mod tests {
                     request: request.into(),
                     action: crate::domain::models::SendActionId::mint(),
                 },
+                false,
+                &mpsc::unbounded_channel().0,
             );
         }
         apply_attached_team_frame(
@@ -6995,6 +7252,8 @@ mod tests {
                 index: 0,
                 outcome: crate::adapters::daemon::protocol::TeamSendOutcome::Delivered,
             },
+            false,
+            &mpsc::unbounded_channel().0,
         );
         apply_attached_team_refusal(
             &mut state,
@@ -7036,21 +7295,25 @@ mod tests {
         apply_attached_team_frame(
             &mut state,
             &mut requests,
-            DaemonFrame::TeamBoardChunk {
+            DaemonFrame::TeamViewChunk {
                 request: "board-old".into(),
                 sequence: 0,
                 view: "old view".into(),
             },
+            false,
+            &mpsc::unbounded_channel().0,
         );
         assert!(!state.feedback_blocks.contains_key("team-board"));
         apply_attached_team_frame(
             &mut state,
             &mut requests,
-            DaemonFrame::TeamBoardChunk {
+            DaemonFrame::TeamViewChunk {
                 request: "board-new".into(),
                 sequence: 0,
                 view: "new view".into(),
             },
+            false,
+            &mpsc::unbounded_channel().0,
         );
         assert!(
             !state.feedback_blocks.contains_key("team-board"),
@@ -7059,10 +7322,12 @@ mod tests {
         apply_attached_team_frame(
             &mut state,
             &mut requests,
-            DaemonFrame::TeamBoardDone {
+            DaemonFrame::TeamViewDone {
                 request: "board-new".into(),
                 chunks: 1,
             },
+            false,
+            &mpsc::unbounded_channel().0,
         );
         assert_eq!(state.feedback_blocks["team-board"].message, "new view");
         assert_eq!(
@@ -7080,19 +7345,23 @@ mod tests {
         apply_attached_team_frame(
             &mut state,
             &mut requests,
-            DaemonFrame::TeamBoardChunk {
+            DaemonFrame::TeamViewChunk {
                 request: "board-invalid".into(),
                 sequence: 1,
                 view: "invalid partial".into(),
             },
+            false,
+            &mpsc::unbounded_channel().0,
         );
         apply_attached_team_frame(
             &mut state,
             &mut requests,
-            DaemonFrame::TeamBoardDone {
+            DaemonFrame::TeamViewDone {
                 request: "board-invalid".into(),
                 chunks: 1,
             },
+            false,
+            &mpsc::unbounded_channel().0,
         );
         assert_eq!(
             state.feedback_blocks["team-board"].message, "new view",
@@ -7466,14 +7735,15 @@ mod tests {
             }
             other => panic!("expected the reply frame, got {other:?}"),
         }
-        for (line, verb) in [
-            ("/team thread b ri_x", "thread"),
-            ("/team followup b rr_y hi", "followup"),
-            ("/team retract b ri_x", "retract"),
+        for line in [
+            "/team thread b ri_x",
+            "/team followup b rr_y hi",
+            "/team retract b ri_x",
         ] {
-            assert!(
-                matches!(attached_team_line(line), AttachedTeamLine::Unavailable(found) if found == verb)
-            );
+            assert!(matches!(
+                attached_team_line(line),
+                AttachedTeamLine::Frame(_)
+            ));
         }
         assert!(matches!(
             attached_team_line("/teamwork"),
@@ -7547,5 +7817,346 @@ mod tests {
         assert_eq!(input, "preserved local input");
         assert!(state.recipient_surface.is_some());
         assert!(rx.try_recv().is_err(), "detach chords are not peer actions");
+    }
+}
+
+#[cfg(test)]
+mod attached_parity_tests {
+    use super::*;
+    use crate::adapters::daemon::protocol::{TeamRetractPreviewView, TeamSendOutcome};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn submit(
+        state: &mut TuiState,
+        requests: &mut AttachedTeamRequests,
+        line: &str,
+        reader: bool,
+        tx: &mpsc::UnboundedSender<ClientFrame>,
+    ) -> ComposerOutcome {
+        attached_composer_key_with_team_requests(
+            KeyCode::Enter,
+            reader,
+            &mut line.to_owned(),
+            state,
+            tx,
+            requests,
+        )
+    }
+    fn preview(
+        state: &mut TuiState,
+        requests: &mut AttachedTeamRequests,
+        armed: bool,
+        busy: bool,
+        tx: &mpsc::UnboundedSender<ClientFrame>,
+    ) {
+        requests
+            .pending
+            .insert("retract".into(), AttachedTeamRequest::RetractPreview);
+        apply_attached_team_frame(
+            state,
+            requests,
+            DaemonFrame::TeamRetractPreviewed {
+                request: "retract".into(),
+                preview: TeamRetractPreviewView::Card {
+                    peer: "B".into(),
+                    item_id: "ri_a".into(),
+                    body: "Exact card body".into(),
+                    armed,
+                },
+            },
+            busy,
+            tx,
+        );
+    }
+
+    #[test]
+    fn reader_thread_allowed_followup_and_retract_guarded() {
+        for (line, allowed, flash) in [
+            ("/team thread B ri_a", true, ""),
+            (
+                "/team followup B ri_a more",
+                false,
+                "read-only — can't send here",
+            ),
+            (
+                "/team retract B ri_a",
+                false,
+                "read-only — can't retract here",
+            ),
+        ] {
+            let mut state = TuiState::new(80, 24);
+            let mut requests = AttachedTeamRequests::default();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let outcome = submit(&mut state, &mut requests, line, true, &tx);
+            assert_eq!(
+                matches!(outcome, ComposerOutcome::FrameSent),
+                allowed,
+                "{line}"
+            );
+            if allowed {
+                assert!(matches!(
+                    rx.try_recv().unwrap(),
+                    ClientFrame::TeamThread { .. }
+                ));
+                assert_eq!(
+                    state.feedback_blocks["team-thread"].message,
+                    crate::adapters::tui::handlers::team_command::TEAM_THREAD_READING
+                );
+            } else {
+                assert!(rx.try_recv().is_err());
+                assert!(
+                    matches!(state.status, StatusState::Flash { message, .. } if message == flash)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn followup_row_settles_without_team_send_started() {
+        let mut state = TuiState::new(80, 24);
+        let mut requests = AttachedTeamRequests::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        submit(
+            &mut state,
+            &mut requests,
+            "/team followup B turn-1 more",
+            false,
+            &tx,
+        );
+        let ClientFrame::TeamFollowup {
+            request,
+            peer,
+            reply_to,
+            text,
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("linked frame")
+        };
+        assert_eq!(
+            (peer.as_str(), reply_to.as_str(), text.as_str()),
+            ("B", "turn-1", "more")
+        );
+        assert!(
+            state.feedback_blocks["team-send-1"]
+                .message
+                .contains("sending…")
+        );
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamSendSettled {
+                request,
+                index: 0,
+                outcome: TeamSendOutcome::Delivered,
+            },
+            false,
+            &tx,
+        );
+        assert_eq!(
+            state.feedback_blocks["team-send-1"].message,
+            "  ● B  delivered"
+        );
+        assert!(requests.pending.is_empty());
+    }
+
+    #[test]
+    fn retract_card_key_matrix_owns_focus_and_double_y_sends_once() {
+        for armed in [false, true] {
+            for key in [
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            ] {
+                let mut state = TuiState::new(80, 24);
+                let mut requests = AttachedTeamRequests::default();
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                preview(&mut state, &mut requests, armed, false, &tx);
+                assert_eq!(
+                    state.pending_team_retract.as_ref().unwrap().card,
+                    "Exact card body"
+                );
+                assert!(attached_team_retract_key(
+                    &mut state,
+                    &mut requests,
+                    key,
+                    &tx
+                ));
+                let expected = match key.code {
+                    KeyCode::Char('y') if armed => Some(true),
+                    KeyCode::Char('n') | KeyCode::Esc => Some(false),
+                    _ => None,
+                };
+                if let Some(confirm) = expected {
+                    assert!(
+                        matches!(rx.try_recv().unwrap(), ClientFrame::TeamRetractDecision {
+                        request, confirm: found } if request == "retract" && found == confirm)
+                    );
+                    assert!(state.pending_team_retract.is_none());
+                    assert!(requests.open_retract.is_none());
+                    if confirm {
+                        assert!(matches!(
+                            requests.pending["retract"],
+                            AttachedTeamRequest::Retract { .. }
+                        ));
+                        assert!(!attached_team_retract_key(
+                            &mut state,
+                            &mut requests,
+                            key,
+                            &tx
+                        ));
+                    } else {
+                        assert!(requests.pending.is_empty());
+                    }
+                } else {
+                    assert!(state.pending_team_retract.is_some());
+                    assert_eq!(requests.open_retract.as_deref(), Some("retract"));
+                }
+                assert!(rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn preview_busy_declines_and_second_retract_never_replaces_pending_card() {
+        for busy in [false, true] {
+            let mut state = TuiState::new(80, 24);
+            let mut requests = AttachedTeamRequests::default();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            preview(&mut state, &mut requests, true, busy, &tx);
+            if busy {
+                assert!(state.pending_team_retract.is_none());
+                assert!(matches!(
+                    rx.try_recv().unwrap(),
+                    ClientFrame::TeamRetractDecision { confirm: false, .. }
+                ));
+                assert!(
+                    state.feedback_blocks["team-retract"]
+                        .message
+                        .starts_with("Another confirmation")
+                );
+            } else {
+                submit(
+                    &mut state,
+                    &mut requests,
+                    "/team retract B ri_other",
+                    false,
+                    &tx,
+                );
+                assert!(rx.try_recv().is_err());
+                assert_eq!(state.pending_team_retract.as_ref().unwrap().item_id, "ri_a");
+            }
+        }
+        let mut state = TuiState::new(80, 24);
+        let mut requests = AttachedTeamRequests::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        submit(
+            &mut state,
+            &mut requests,
+            "/team retract B ri_a",
+            false,
+            &tx,
+        );
+        rx.try_recv().unwrap();
+        submit(
+            &mut state,
+            &mut requests,
+            "/team retract B ri_other",
+            false,
+            &tx,
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(
+            state.feedback_blocks["team-retract"]
+                .message
+                .starts_with("A retract is already")
+        );
+    }
+
+    #[test]
+    fn thread_latest_only_and_retract_done_keeps_answer_pending() {
+        let mut state = TuiState::new(80, 24);
+        let mut requests = AttachedTeamRequests::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut keys = Vec::new();
+        for _ in 0..2 {
+            submit(&mut state, &mut requests, "/team thread B ri_a", false, &tx);
+            let ClientFrame::TeamThread { request, .. } = rx.try_recv().unwrap() else {
+                panic!("thread")
+            };
+            keys.push(request);
+        }
+        for (key, view) in [(keys[0].clone(), "stale"), (keys[1].clone(), "latest")] {
+            apply_attached_team_frame(
+                &mut state,
+                &mut requests,
+                DaemonFrame::TeamViewChunk {
+                    request: key.clone(),
+                    sequence: 0,
+                    view: view.into(),
+                },
+                false,
+                &tx,
+            );
+            apply_attached_team_frame(
+                &mut state,
+                &mut requests,
+                DaemonFrame::TeamViewDone {
+                    request: key,
+                    chunks: 1,
+                },
+                false,
+                &tx,
+            );
+        }
+        assert_eq!(state.feedback_blocks["team-thread"].message, "latest");
+        requests.pending.insert(
+            "retract".into(),
+            AttachedTeamRequest::Retract {
+                next_sequence: 0,
+                view: String::new(),
+                view_done: false,
+            },
+        );
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamViewChunk {
+                request: "retract".into(),
+                sequence: 0,
+                view: "remembered board".into(),
+            },
+            false,
+            &tx,
+        );
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamViewDone {
+                request: "retract".into(),
+                chunks: 1,
+            },
+            false,
+            &tx,
+        );
+        assert_eq!(
+            state.feedback_blocks["team-board"].message,
+            "remembered board"
+        );
+        assert!(requests.pending.contains_key("retract"));
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamRetractAnswered {
+                request: "retract".into(),
+                message: "Landed".into(),
+            },
+            false,
+            &tx,
+        );
+        assert_eq!(state.feedback_blocks["team-retract"].message, "Landed");
+        assert!(requests.pending.is_empty());
     }
 }

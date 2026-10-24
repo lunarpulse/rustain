@@ -310,9 +310,14 @@ async fn press_y(sender: &Sender, state: &mut TuiState) -> Option<String> {
     }
     let pending = resolve_team_retract_card(state, true)?;
     Some(
-        team_retract_dispatch(sender.runtime(), &pending)
-            .await
-            .message,
+        team_retract_dispatch(
+            sender.runtime(),
+            &pending.peer,
+            &pending.item_id,
+            pending.task,
+        )
+        .await
+        .message,
     )
 }
 
@@ -580,7 +585,13 @@ async fn a_landed_retract_re_renders_the_remembered_board_with_its_mark() {
         InputAction::TeamRetractConfirm
     );
     let pending = resolve_team_retract_card(&mut state, true).expect("accepted");
-    let answer = team_retract_dispatch(sender.runtime(), &pending).await;
+    let answer = team_retract_dispatch(
+        sender.runtime(),
+        &pending.peer,
+        &pending.item_id,
+        pending.task,
+    )
+    .await;
     let board = answer.board.expect("the remembered board re-renders");
     assert!(
         board.contains("    item ri_mark · arrival 1 · task task-mark · received · [retracted "),
@@ -996,7 +1007,9 @@ async fn the_dispatch_row_is_durable_before_the_post_is_answered() {
     );
     let pending = resolve_team_retract_card(&mut state, true).expect("accepted");
     let runtime = sender.runtime().clone();
-    let dispatch = tokio::spawn(async move { team_retract_dispatch(&runtime, &pending).await });
+    let dispatch = tokio::spawn(async move {
+        team_retract_dispatch(&runtime, &pending.peer, &pending.item_id, pending.task).await
+    });
 
     tokio::time::timeout(SETTLE, append_started.notified())
         .await

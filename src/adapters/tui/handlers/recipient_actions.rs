@@ -293,6 +293,8 @@ fn action_notice<'a>(
                 RecipientAction::ContextRemove => "context removal",
                 RecipientAction::TeamSend => "team send",
                 RecipientAction::TeamBoard => "team board",
+                RecipientAction::TeamThread => "team thread",
+                RecipientAction::TeamRetract => "team retract",
                 RecipientAction::TeamStatus => "team status",
                 RecipientAction::RevokeSenderConsent => "sender consent revocation",
             };

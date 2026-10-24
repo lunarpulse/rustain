@@ -288,12 +288,12 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "/team thread <peer-id> <item-id>",
-                    description: "Read one thread on a peer's host; unavailable in an attached session (S7)",
+                    description: "Read one thread on a peer's host; trusted-local read-only attachments are allowed",
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {
                     key: "/team followup <peer-id> <turn-id> <text…>",
-                    description: "Answer a turn in a peer thread; unavailable in an attached session (S7)",
+                    description: "Answer a turn in a peer thread; trusted-local writer attachment only",
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {

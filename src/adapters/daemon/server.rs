@@ -55,6 +55,8 @@ use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
 mod rap_inbound;
 use rap_inbound::DaemonPeerConsumer;
+mod team;
+use team::TeamSendPayload;
 
 /// Per-connection bounded writer queue depth. A connection that cannot keep up is
 /// dropped (its queue fills) — the turn is never blocked (AC3).
@@ -63,8 +65,6 @@ const CONN_QUEUE_DEPTH: usize = 1024;
 const OPERATOR_QUEUE_DEPTH: usize = 64;
 /// Maximum daemon-owned `/team send` actions admitted concurrently.
 pub const MAX_IN_FLIGHT_TEAM_SENDS: usize = 8;
-/// Leave a small, bounded request key so even a refusal frame is serializable.
-const MAX_TEAM_BOARD_REQUEST_BYTES: usize = 128;
 
 const CHANNEL_TURN_FAILED_REPLY: &str =
     "Sorry, processing failed before the agent produced a response. Please try again.";
@@ -200,6 +200,26 @@ pub struct TeamSendCompletion {
     pub kind: TeamSendCompletionKind,
 }
 
+/// Story 19.21c: deterministic preview completion ordering, without sleeps.
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub struct TeamRetractPreviewGate {
+    entered: Semaphore,
+    release: Semaphore,
+}
+#[cfg(any(test, feature = "test-instrumentation"))]
+impl TeamRetractPreviewGate {
+    pub async fn wait_entered(&self) {
+        self.entered
+            .acquire()
+            .await
+            .expect("preview entered")
+            .forget();
+    }
+    pub fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
 #[cfg(any(test, feature = "test-instrumentation"))]
 struct TeamSendTestHooksInner {
     fifo_tx: mpsc::UnboundedSender<TeamSendFifoEvent>,
@@ -227,6 +247,7 @@ struct TeamSendTestHooksInner {
     send_action_release: Semaphore,
     outbound_queue_capacity: AtomicUsize,
     board_now: Option<Arc<dyn Fn() -> std::time::Instant + Send + Sync>>,
+    retract_previews: Mutex<std::collections::HashMap<String, Arc<TeamRetractPreviewGate>>>,
 }
 
 /// Immutable-before-construction test controls for attached team-send lifecycle
@@ -287,6 +308,7 @@ impl TeamSendTestHooks {
                 send_action_release: Semaphore::new(0),
                 outbound_queue_capacity: AtomicUsize::new(outbound_queue_capacity.unwrap_or(0)),
                 board_now: None,
+                retract_previews: Mutex::new(std::collections::HashMap::new()),
             }),
         }
     }
@@ -409,6 +431,30 @@ impl TeamSendTestHooks {
         }
     }
 
+    pub async fn hold_retract_preview(&self, request: &str) -> Arc<TeamRetractPreviewGate> {
+        let gate = Arc::new(TeamRetractPreviewGate {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        self.inner
+            .retract_previews
+            .lock()
+            .await
+            .insert(request.to_owned(), gate.clone());
+        gate
+    }
+    async fn before_retract_preview(&self, request: &str) {
+        let gate = self.inner.retract_previews.lock().await.remove(request);
+        if let Some(gate) = gate {
+            gate.entered.add_permits(1);
+            gate.release
+                .acquire()
+                .await
+                .expect("preview release")
+                .forget();
+        }
+    }
+
     /// Number of send tasks that reached the optional pre-coordinator gate.
     pub fn send_action_count(&self) -> usize {
         self.inner.send_action_count.load(Ordering::Acquire)
@@ -500,7 +546,7 @@ impl TeamSendTestHooks {
                 request,
                 TeamSendPublicationKind::Refused { action: *action },
             ),
-            DaemonFrame::TeamBoardDone { request, .. } => {
+            DaemonFrame::TeamViewDone { request, .. } => {
                 (request, TeamSendPublicationKind::BoardResult)
             }
             DaemonFrame::TeamStatusResult { request, .. } => {
@@ -509,7 +555,9 @@ impl TeamSendTestHooks {
             DaemonFrame::SenderConsentRevoked { request, .. } => {
                 (request, TeamSendPublicationKind::ConsentRevoked)
             }
-            DaemonFrame::TeamBoardChunk { .. }
+            DaemonFrame::TeamViewChunk { .. }
+            | DaemonFrame::TeamRetractPreviewed { .. }
+            | DaemonFrame::TeamRetractAnswered { .. }
             | DaemonFrame::AttachChallenge { .. }
             | DaemonFrame::AttachAck { .. }
             | DaemonFrame::Event(_)
@@ -542,7 +590,10 @@ impl TeamSendTestHooks {
 
 fn team_send_request_key(frame: &ClientFrame) -> Option<&str> {
     match frame {
-        ClientFrame::TeamSend { request, .. } => Some(request),
+        ClientFrame::TeamSend { request, .. }
+        | ClientFrame::TeamFollowup { request, .. }
+        | ClientFrame::TeamRetractPreview { request, .. }
+        | ClientFrame::TeamRetractDecision { request, .. } => Some(request),
         ClientFrame::TeamProposalDecision { proposal, .. } => Some(proposal),
         _ => None,
     }
@@ -748,8 +799,10 @@ fn frame_variant_name(frame: &DaemonFrame) -> &'static str {
         DaemonFrame::TeamProposalClosed { .. } => "TeamProposalClosed",
         DaemonFrame::TeamSendStarted { .. } => "TeamSendStarted",
         DaemonFrame::TeamSendSettled { .. } => "TeamSendSettled",
-        DaemonFrame::TeamBoardChunk { .. } => "TeamBoardChunk",
-        DaemonFrame::TeamBoardDone { .. } => "TeamBoardDone",
+        DaemonFrame::TeamViewChunk { .. } => "TeamViewChunk",
+        DaemonFrame::TeamViewDone { .. } => "TeamViewDone",
+        DaemonFrame::TeamRetractPreviewed { .. } => "TeamRetractPreviewed",
+        DaemonFrame::TeamRetractAnswered { .. } => "TeamRetractAnswered",
         DaemonFrame::TeamStatusResult { .. } => "TeamStatusResult",
         DaemonFrame::SenderConsentRevoked { .. } => "SenderConsentRevoked",
         DaemonFrame::Detached => "Detached",
@@ -1306,48 +1359,6 @@ const RECIPIENT_ITEM_REMOVED: &str = "recipient item already removed";
 #[cfg(feature = "a2a")]
 const PEER_RESPONSE_ROW_PREFIX: &str = "peer-response-";
 
-enum TeamSendPayload {
-    Human {
-        recipients: Vec<String>,
-        text: String,
-        message_type: Option<crate::domain::models::SemanticMessageType>,
-        subject: Option<String>,
-    },
-    #[cfg(feature = "a2a")]
-    Agent(Arc<crate::domain::models::TeamProposal>),
-}
-
-#[cfg(feature = "a2a")]
-impl TeamSendPayload {
-    fn request(&self) -> crate::adapters::a2a::send::SendRequest<'_> {
-        match self {
-            Self::Human {
-                recipients,
-                text,
-                message_type,
-                subject,
-            } => crate::adapters::a2a::send::SendRequest {
-                recipients,
-                text,
-                message_type: *message_type,
-                reply_to: None,
-                subject: subject.as_deref(),
-                authorship: crate::domain::models::Authorship::HumanWritten,
-                send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
-            },
-            Self::Agent(proposal) => crate::adapters::a2a::send::SendRequest {
-                recipients: &proposal.recipients,
-                text: &proposal.body,
-                message_type: Some(proposal.message_type),
-                reply_to: None,
-                subject: None,
-                authorship: crate::domain::models::Authorship::AgentComposed,
-                send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
-            },
-        }
-    }
-}
-
 pub struct AttachServer {
     core: Arc<DaemonCore>,
     conversation: Arc<Mutex<Conversation>>,
@@ -1438,6 +1449,9 @@ pub struct AttachServer {
     team_send_shutdown: CancellationToken,
     team_send_accepting: AtomicBool,
     team_send_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Story 19.21c: connection-owned previews shared with joined workers.
+    #[cfg(feature = "a2a")]
+    team_retracts: Arc<Mutex<std::collections::HashMap<u64, team::RetractSlot>>>,
     team_send_started_count: Arc<AtomicUsize>,
     team_send_settled_count: Arc<AtomicUsize>,
     team_send_saturation_refusals: Arc<AtomicUsize>,
@@ -2002,6 +2016,8 @@ impl AttachServer {
             team_send_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_TEAM_SENDS)),
             team_send_shutdown: CancellationToken::new(),
             team_send_tasks: Mutex::new(Vec::new()),
+            #[cfg(feature = "a2a")]
+            team_retracts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             team_send_accepting: AtomicBool::new(true),
             team_send_started_count: Arc::new(AtomicUsize::new(0)),
             team_send_settled_count: Arc::new(AtomicUsize::new(0)),
@@ -2622,6 +2638,8 @@ impl AttachServer {
             for id in dead {
                 tracing::info!(conn = id, "daemon: dropping slow/closed attach connection");
                 reg.remove(id);
+                #[cfg(feature = "a2a")]
+                self.team_retracts.lock().await.remove(&id);
             }
         }
     }
@@ -2749,6 +2767,8 @@ impl AttachServer {
             };
             if granted == AttachMode::ReadWrite {
                 self.last_writer_conn_id.store(conn_id, Ordering::SeqCst);
+                #[cfg(feature = "a2a")]
+                self.team_retracts.lock().await.clear();
             }
             reg.conns.push(Conn {
                 id: conn_id,
@@ -2994,6 +3014,30 @@ impl AttachServer {
                                             text,
                                             message_type,
                                             subject,
+                                            reply_to: None,
+                                        }),
+                                        Some(send_connection.clone()),
+                                    )
+                                    .await;
+                            }
+                            ClientFrame::TeamFollowup {
+                                request,
+                                peer,
+                                reply_to,
+                                text,
+                            } => {
+                                server
+                                    .handle_team_send(
+                                        conn_id,
+                                        tier,
+                                        granted_mode,
+                                        request,
+                                        Some(TeamSendPayload::Human {
+                                            recipients: vec![peer],
+                                            text,
+                                            message_type: None,
+                                            subject: None,
+                                            reply_to: Some(reply_to),
                                         }),
                                         Some(send_connection.clone()),
                                     )
@@ -3028,6 +3072,10 @@ impl AttachServer {
                             hooks.record_fifo(request, conn_id, TeamSendFifoEventKind::Handled);
                         }
                     }
+                    // Story 19.21c D3/OR-2: deregistration invalidates the retract
+                    // target only after the answers this writer already queued ran.
+                    #[cfg(feature = "a2a")]
+                    server.team_retracts.lock().await.remove(&conn_id);
                 });
                 Some((tx, worker))
             } else {
@@ -3056,6 +3104,9 @@ impl AttachServer {
                                 | ClientFrame::InspectRecipientContext
                                 | ClientFrame::SetRecipientContext { .. }
                                 | ClientFrame::TeamSend { .. }
+                                | ClientFrame::TeamFollowup { .. }
+                                | ClientFrame::TeamRetractPreview { .. }
+                                | ClientFrame::TeamRetractDecision { .. }
                                 | ClientFrame::EnableTeamProposals
                                 | ClientFrame::TeamProposalDecision { .. }
                                 | ClientFrame::RevokeSenderConsent { .. }
@@ -4343,749 +4394,6 @@ impl AttachServer {
         }
     }
 
-    async fn team_connection(
-        &self,
-        conn_id: u64,
-    ) -> Option<(
-        mpsc::Sender<DaemonFrame>,
-        watch::Sender<Option<ProtocolError>>,
-    )> {
-        self.registry
-            .lock()
-            .await
-            .conns
-            .iter()
-            .find(|conn| conn.id == conn_id)
-            .map(|conn| (conn.tx.clone(), conn.terminal_tx.clone()))
-    }
-
-    async fn send_team_frame(&self, conn_id: u64, frame: DaemonFrame) -> bool {
-        let Some((tx, terminal_tx)) = self.team_connection(conn_id).await else {
-            return false;
-        };
-        publish_team_frame_to_connection(
-            &tx,
-            &terminal_tx,
-            frame,
-            conn_id,
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            self.team_send_test_hooks.as_ref(),
-        )
-    }
-    /// Send a complete board as bounded fragments. `send().await` applies
-    /// backpressure to this request only; it never fills the shared queue with
-    /// an uncapped list or blocks send/approval workers.
-    async fn send_team_board_view(
-        tx: mpsc::Sender<DaemonFrame>,
-        terminal_tx: watch::Sender<Option<ProtocolError>>,
-        _conn_id: u64,
-        request: String,
-        view: String,
-        #[cfg(any(test, feature = "test-instrumentation"))] hooks: Option<TeamSendTestHooks>,
-    ) -> bool {
-        let mut terminal_rx = terminal_tx.subscribe();
-        let frame_base = DaemonFrame::TeamBoardChunk {
-            request: request.clone(),
-            sequence: u32::MAX,
-            view: String::new(),
-        };
-        // A JSON string can expand a control byte to six ASCII bytes. Account
-        // for that worst case plus the exact escaped request/envelope overhead.
-        let base_len = match serde_json::to_vec(&frame_base) {
-            Ok(encoded) => encoded.len(),
-            Err(error) => {
-                tracing::warn!(%error, "daemon: could not encode board chunk envelope");
-                return false;
-            }
-        };
-        let Some(available) = (MAX_FRAME_BYTES as usize)
-            .checked_sub(base_len)
-            .map(|bytes| (bytes / 6).min(1024 * 1024))
-        else {
-            Self::refuse_team_board_stream(
-                &tx,
-                &mut terminal_rx,
-                request,
-                ProtocolError::Malformed(
-                    "team board request leaves no room for a response frame".into(),
-                ),
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                _conn_id,
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                hooks.as_ref(),
-            )
-            .await;
-            return false;
-        };
-        if available < 4 {
-            Self::refuse_team_board_stream(
-                &tx,
-                &mut terminal_rx,
-                request,
-                ProtocolError::Malformed(
-                    "team board request leaves no room for a response frame".into(),
-                ),
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                _conn_id,
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                hooks.as_ref(),
-            )
-            .await;
-            return false;
-        }
-
-        let mut chunk_count = 0u32;
-        let mut offset = 0;
-        while offset < view.len() {
-            offset = Self::next_board_chunk_end(&view, offset, available);
-            let Some(next) = chunk_count.checked_add(1) else {
-                Self::refuse_team_board_stream(
-                    &tx,
-                    &mut terminal_rx,
-                    request,
-                    ProtocolError::Malformed("team board requires too many frames".into()),
-                    #[cfg(any(test, feature = "test-instrumentation"))]
-                    _conn_id,
-                    #[cfg(any(test, feature = "test-instrumentation"))]
-                    hooks.as_ref(),
-                )
-                .await;
-                return false;
-            };
-            chunk_count = next;
-        }
-        let done = DaemonFrame::TeamBoardDone {
-            request: request.clone(),
-            chunks: chunk_count,
-        };
-        match serde_json::to_vec(&done) {
-            Ok(encoded) if encoded.len() <= MAX_FRAME_BYTES as usize => {}
-            _ => {
-                Self::refuse_team_board_stream(
-                    &tx,
-                    &mut terminal_rx,
-                    request,
-                    ProtocolError::Malformed(
-                        "team board completion frame exceeds the protocol limit".into(),
-                    ),
-                    #[cfg(any(test, feature = "test-instrumentation"))]
-                    _conn_id,
-                    #[cfg(any(test, feature = "test-instrumentation"))]
-                    hooks.as_ref(),
-                )
-                .await;
-                return false;
-            }
-        }
-
-        let mut offset = 0;
-        for sequence in 0..chunk_count {
-            let end = Self::next_board_chunk_end(&view, offset, available);
-            let chunk = DaemonFrame::TeamBoardChunk {
-                request: request.clone(),
-                sequence,
-                view: view[offset..end].to_owned(),
-            };
-            if !Self::send_team_frame_wait(
-                &tx,
-                &mut terminal_rx,
-                chunk,
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                _conn_id,
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                hooks.as_ref(),
-            )
-            .await
-            {
-                return false;
-            }
-            if sequence + 1 < chunk_count
-                && !Self::wait_for_team_output_drain(&tx, &mut terminal_rx).await
-            {
-                return false;
-            }
-            offset = end;
-        }
-        Self::send_team_frame_wait(
-            &tx,
-            &mut terminal_rx,
-            done,
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            _conn_id,
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            hooks.as_ref(),
-        )
-        .await
-    }
-
-    fn next_board_chunk_end(view: &str, start: usize, max_source_bytes: usize) -> usize {
-        let mut end = start.saturating_add(max_source_bytes).min(view.len());
-        while end > start && !view.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == start {
-            view[start..]
-                .char_indices()
-                .nth(1)
-                .map_or(view.len(), |(offset, _)| start + offset)
-        } else {
-            end
-        }
-    }
-    async fn wait_for_team_output_drain(
-        tx: &mpsc::Sender<DaemonFrame>,
-        terminal_rx: &mut watch::Receiver<Option<ProtocolError>>,
-    ) -> bool {
-        let capacity = tx.max_capacity();
-        tokio::select! {
-            biased;
-            _ = terminal_rx.changed() => false,
-            permits = tx.reserve_many(capacity) => match permits {
-                Ok(permits) => {
-                    drop(permits);
-                    true
-                }
-                Err(_) => false,
-            },
-        }
-    }
-
-    async fn send_team_frame_wait(
-        tx: &mpsc::Sender<DaemonFrame>,
-        terminal_rx: &mut watch::Receiver<Option<ProtocolError>>,
-        frame: DaemonFrame,
-        #[cfg(any(test, feature = "test-instrumentation"))] connection_id: u64,
-        #[cfg(any(test, feature = "test-instrumentation"))] hooks: Option<&TeamSendTestHooks>,
-    ) -> bool {
-        if terminal_rx.borrow().is_some() {
-            return false;
-        }
-        #[cfg(any(test, feature = "test-instrumentation"))]
-        let publication_frame = hooks.map(|_| frame.clone());
-        let sent = tokio::select! {
-            biased;
-            _ = terminal_rx.changed() => false,
-            result = tx.send(frame) => result.is_ok(),
-        };
-        #[cfg(any(test, feature = "test-instrumentation"))]
-        if sent && let (Some(hooks), Some(frame)) = (hooks, publication_frame.as_ref()) {
-            hooks.record_publication(connection_id, frame);
-        }
-        sent
-    }
-    async fn refuse_team_board_stream(
-        tx: &mpsc::Sender<DaemonFrame>,
-        terminal_rx: &mut watch::Receiver<Option<ProtocolError>>,
-        request: String,
-        error: ProtocolError,
-        #[cfg(any(test, feature = "test-instrumentation"))] conn_id: u64,
-        #[cfg(any(test, feature = "test-instrumentation"))] hooks: Option<&TeamSendTestHooks>,
-    ) {
-        let _ = Self::send_team_frame_wait(
-            tx,
-            terminal_rx,
-            DaemonFrame::RecipientActionResult {
-                action: RecipientAction::TeamBoard,
-                target: RecipientActionTarget::Request { request },
-                outcome: RecipientActionOutcome::Refused { error },
-            },
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            conn_id,
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            hooks,
-        )
-        .await;
-    }
-
-    async fn refuse_team_request(
-        &self,
-        conn_id: u64,
-        action: RecipientAction,
-        request: String,
-        error: ProtocolError,
-    ) {
-        let _ = self
-            .send_team_frame(
-                conn_id,
-                DaemonFrame::RecipientActionResult {
-                    action,
-                    target: RecipientActionTarget::Request { request },
-                    outcome: RecipientActionOutcome::Refused { error },
-                },
-            )
-            .await;
-    }
-
-    fn team_request_error(
-        tier: ConnectionTier,
-        mode: AttachMode,
-        write_required: bool,
-    ) -> Option<ProtocolError> {
-        if tier != ConnectionTier::TrustedLocal {
-            Some(ProtocolError::PeerVerification(
-                "team commands are trusted-local only".to_owned(),
-            ))
-        } else if write_required && mode != AttachMode::ReadWrite {
-            Some(ProtocolError::ReadOnly)
-        } else {
-            None
-        }
-    }
-
-    async fn handle_team_board(
-        &self,
-        conn_id: u64,
-        tier: ConnectionTier,
-        mode: AttachMode,
-        request: String,
-        selector: super::protocol::TeamBoardRequest,
-    ) {
-        let action = RecipientAction::TeamBoard;
-        if let Some(error) = Self::team_request_error(tier, mode, false) {
-            self.refuse_team_request(conn_id, action, request, error)
-                .await;
-            return;
-        }
-        if request.len() > MAX_TEAM_BOARD_REQUEST_BYTES {
-            self.refuse_team_request(
-                conn_id,
-                action,
-                request,
-                ProtocolError::Malformed(format!(
-                    "team board request key exceeds {MAX_TEAM_BOARD_REQUEST_BYTES} bytes"
-                )),
-            )
-            .await;
-            return;
-        }
-        #[cfg(feature = "a2a")]
-        if let Some(runtime) = &self.a2a_runtime {
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            let now = self
-                .team_send_test_hooks
-                .as_ref()
-                .and_then(TeamSendTestHooks::board_now)
-                .unwrap_or_else(std::time::Instant::now);
-            #[cfg(not(any(test, feature = "test-instrumentation")))]
-            let now = std::time::Instant::now();
-            let view =
-                crate::infrastructure::runtime::transparency_bridge::team_board_message_for_request_at(
-                    runtime, selector, now,
-                )
-                .await;
-            let Some((tx, terminal_tx)) = self.team_connection(conn_id).await else {
-                return;
-            };
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            let hooks = self.team_send_test_hooks.clone();
-            tokio::spawn(async move {
-                let _ = Self::send_team_board_view(
-                    tx,
-                    terminal_tx,
-                    conn_id,
-                    request,
-                    view,
-                    #[cfg(any(test, feature = "test-instrumentation"))]
-                    hooks,
-                )
-                .await;
-            });
-            return;
-        }
-        #[cfg(not(feature = "a2a"))]
-        let _ = selector;
-        self.refuse_team_request(
-            conn_id,
-            action,
-            request,
-            ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
-        )
-        .await;
-    }
-
-    async fn handle_team_status(
-        &self,
-        conn_id: u64,
-        tier: ConnectionTier,
-        mode: AttachMode,
-        request: String,
-    ) {
-        let action = RecipientAction::TeamStatus;
-        if let Some(error) = Self::team_request_error(tier, mode, false) {
-            self.refuse_team_request(conn_id, action, request, error)
-                .await;
-            return;
-        }
-        #[cfg(not(feature = "a2a"))]
-        {
-            self.refuse_team_request(
-                conn_id,
-                action,
-                request,
-                ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
-            )
-            .await;
-        }
-        #[cfg(feature = "a2a")]
-        {
-            let Some(manager) = &self.pending_consent else {
-                self.refuse_team_request(
-                    conn_id,
-                    action,
-                    request,
-                    ProtocolError::Internal("daemon consent projection is unavailable".to_owned()),
-                )
-                .await;
-                return;
-            };
-            match manager.render_team_status(&self.team_peers).await {
-                Ok(message) => {
-                    let _ = self
-                        .send_team_frame(
-                            conn_id,
-                            DaemonFrame::TeamStatusResult { request, message },
-                        )
-                        .await;
-                }
-                Err(error) => {
-                    self.refuse_team_request(
-                        conn_id,
-                        action,
-                        request,
-                        ProtocolError::Internal(error),
-                    )
-                    .await;
-                }
-            }
-        }
-    }
-    async fn handle_team_revoke(
-        &self,
-        conn_id: u64,
-        tier: ConnectionTier,
-        mode: AttachMode,
-        request: String,
-        alias: String,
-    ) {
-        let action = RecipientAction::RevokeSenderConsent;
-        if let Some(error) = Self::team_request_error(tier, mode, true) {
-            self.refuse_team_request(conn_id, action, request, error)
-                .await;
-            return;
-        }
-        #[cfg(not(feature = "a2a"))]
-        {
-            let _ = alias;
-            self.refuse_team_request(
-                conn_id,
-                action,
-                request,
-                ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
-            )
-            .await;
-        }
-        #[cfg(feature = "a2a")]
-        {
-            let Some(manager) = &self.pending_consent else {
-                self.refuse_team_request(
-                    conn_id,
-                    action,
-                    request,
-                    ProtocolError::Internal("daemon consent projection is unavailable".to_owned()),
-                )
-                .await;
-                return;
-            };
-            match manager
-                .revoke_sender_consent(&alias, &self.team_peers)
-                .await
-            {
-                Ok(message) => {
-                    let _ = self
-                        .send_team_frame(
-                            conn_id,
-                            DaemonFrame::SenderConsentRevoked {
-                                request,
-                                alias,
-                                message,
-                            },
-                        )
-                        .await;
-                }
-                Err(error) => {
-                    self.refuse_team_request(
-                        conn_id,
-                        action,
-                        request,
-                        ProtocolError::Internal(error),
-                    )
-                    .await;
-                }
-            }
-        }
-    }
-
-    async fn close_team_proposal(
-        &self,
-        conn_id: u64,
-        proposal: String,
-        outcome: super::protocol::TeamProposalCloseOutcome,
-    ) {
-        if let Some((tx, terminal)) = self.team_connection(conn_id).await {
-            publish_team_frame(
-                &tx,
-                &terminal,
-                DaemonFrame::TeamProposalClosed { proposal, outcome },
-            );
-        }
-    }
-
-    async fn refuse_team_send(
-        &self,
-        conn_id: u64,
-        request: String,
-        error: ProtocolError,
-        proposed: bool,
-    ) {
-        if proposed {
-            self.close_team_proposal(
-                conn_id,
-                request,
-                super::protocol::TeamProposalCloseOutcome::Refused {
-                    reason: error.to_string(),
-                },
-            )
-            .await;
-        } else {
-            self.refuse_team_request(conn_id, RecipientAction::TeamSend, request, error)
-                .await;
-        }
-    }
-
-    async fn handle_team_send(
-        &self,
-        conn_id: u64,
-        tier: ConnectionTier,
-        mode: AttachMode,
-        request: String,
-        payload: Option<TeamSendPayload>,
-        connection: Option<(
-            mpsc::Sender<DaemonFrame>,
-            watch::Sender<Option<ProtocolError>>,
-        )>,
-    ) {
-        let proposed = payload.is_none();
-        if let Some(error) = Self::team_request_error(tier, mode, true) {
-            self.refuse_team_send(conn_id, request, error, proposed)
-                .await;
-            return;
-        }
-        #[cfg(feature = "a2a")]
-        {
-            let Some(runtime) = self.a2a_runtime.clone() else {
-                self.refuse_team_send(
-                    conn_id,
-                    request,
-                    ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
-                    proposed,
-                )
-                .await;
-                return;
-            };
-            let (tx, terminal_tx) = if let Some(connection) = connection {
-                connection
-            } else if let Some(connection) = self.team_connection(conn_id).await {
-                connection
-            } else {
-                return;
-            };
-            use super::team_proposal::ProposalTakeError;
-            let admitted = match payload {
-                Some(payload) => self
-                    .team_send_slots
-                    .clone()
-                    .try_acquire_owned()
-                    .map(|permit| (payload, permit))
-                    .map_err(|_| ProposalTakeError::Busy),
-                None => self
-                    .team_proposals
-                    .take_for_send(&request, self.team_send_slots.clone())
-                    .await
-                    .map(|(proposal, permit)| (TeamSendPayload::Agent(proposal), permit)),
-            };
-            let (payload, permit) = match admitted {
-                Ok(admitted) => admitted,
-                Err(ProposalTakeError::Unknown) => {
-                    self.close_team_proposal(
-                        conn_id,
-                        request,
-                        super::protocol::TeamProposalCloseOutcome::Refused {
-                            reason: "That proposal is no longer waiting. Nothing was sent."
-                                .to_owned(),
-                        },
-                    )
-                    .await;
-                    return;
-                }
-                Err(ProposalTakeError::Busy) => {
-                    self.team_send_saturation_refusals
-                        .fetch_add(1, Ordering::AcqRel);
-                    if proposed {
-                        self.close_team_proposal(conn_id, request.clone(),
-                            super::protocol::TeamProposalCloseOutcome::Refused {
-                                reason: "Not sent yet — this daemon is busy sending. The proposal is still waiting.".to_owned(),
-                            }).await;
-                        self.team_proposals.reemit(&request, conn_id).await;
-                    } else {
-                        self.refuse_team_send(
-                            conn_id,
-                            request,
-                            ProtocolError::Internal(
-                                "daemon team-send limit reached; try again later".to_owned(),
-                            ),
-                            false,
-                        )
-                        .await;
-                    }
-                    return;
-                }
-            };
-            let send_request = payload.request();
-            if let Err(error) =
-                crate::adapters::a2a::send::validate_send_request(&runtime, &send_request)
-            {
-                drop(permit);
-                self.refuse_team_send(
-                    conn_id,
-                    request,
-                    ProtocolError::Malformed(error.to_string()),
-                    proposed,
-                )
-                .await;
-                return;
-            }
-            let mut tasks = self.team_send_tasks.lock().await;
-            if !self.team_send_accepting.load(Ordering::Acquire) {
-                drop(tasks);
-                drop(permit);
-                self.refuse_team_send(
-                    conn_id,
-                    request,
-                    ProtocolError::Internal("daemon is shutting down".to_owned()),
-                    proposed,
-                )
-                .await;
-                return;
-            }
-            let cancel = self.team_send_shutdown.child_token();
-            let started_tx = tx.clone();
-            let started_terminal = terminal_tx.clone();
-            let settled_tx = tx;
-            let settled_terminal = terminal_tx;
-            let started_request = request.clone();
-            let settled_request = request;
-            let started_count = self.team_send_started_count.clone();
-            let settled_count = self.team_send_settled_count.clone();
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            let hooks = self.team_send_test_hooks.clone();
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            let started_hooks = hooks.clone();
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            let send_action_hooks = hooks.clone();
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            let settled_hooks = hooks.clone();
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            let completion_hooks = hooks;
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            let completion_request = settled_request.clone();
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            let cancel_for_completion = cancel.clone();
-            let started_conn_id = conn_id;
-            let settled_conn_id = conn_id;
-            let task = tokio::spawn(async move {
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                let send_permit = permit;
-                #[cfg(not(any(test, feature = "test-instrumentation")))]
-                let _send_permit = permit;
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                if let Some(hooks) = send_action_hooks {
-                    hooks.before_send_action().await;
-                }
-                let _ = crate::adapters::a2a::send::coordinate_send(
-                    &runtime,
-                    payload.request(),
-                    cancel,
-                    |action| {
-                        started_count.fetch_add(1, Ordering::AcqRel);
-                        let _ = publish_team_frame_to_connection(
-                            &started_tx,
-                            &started_terminal,
-                            DaemonFrame::TeamSendStarted {
-                                request: started_request.clone(),
-                                action: action.clone(),
-                            },
-                            started_conn_id,
-                            #[cfg(any(test, feature = "test-instrumentation"))]
-                            started_hooks.as_ref(),
-                        );
-                    },
-                    |index, outcome| {
-                        settled_count.fetch_add(1, Ordering::AcqRel);
-                        let _ = publish_team_frame_to_connection(
-                            &settled_tx,
-                            &settled_terminal,
-                            DaemonFrame::TeamSendSettled {
-                                request: settled_request.clone(),
-                                index,
-                                outcome: super::protocol::TeamSendOutcome::from(&outcome),
-                            },
-                            settled_conn_id,
-                            #[cfg(any(test, feature = "test-instrumentation"))]
-                            settled_hooks.as_ref(),
-                        );
-                    },
-                )
-                .await;
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                {
-                    drop(send_permit);
-                    if let Some(hooks) = completion_hooks {
-                        let kind = if cancel_for_completion.is_cancelled() {
-                            TeamSendCompletionKind::Cancelled
-                        } else {
-                            TeamSendCompletionKind::Finished
-                        };
-                        hooks.record_completion(completion_request, kind);
-                    }
-                }
-                #[cfg(not(any(test, feature = "test-instrumentation")))]
-                drop(_send_permit);
-            });
-            tasks.retain(|task| !task.is_finished());
-            tasks.push(task);
-        }
-        #[cfg(not(feature = "a2a"))]
-        {
-            let _ = connection;
-            self.refuse_team_send(
-                conn_id,
-                request,
-                ProtocolError::Internal("A2A is not enabled in this build".to_owned()),
-                proposed,
-            )
-            .await;
-            if let Some(TeamSendPayload::Human {
-                recipients,
-                text,
-                message_type,
-                subject,
-            }) = payload
-            {
-                let _ = (recipients, text, message_type, subject);
-            }
-        }
-    }
-
     /// Returns `true` if the connection should detach.
     async fn handle_client_frame(
         &self,
@@ -5763,6 +5071,29 @@ impl AttachServer {
                         text,
                         message_type,
                         subject,
+                        reply_to: None,
+                    }),
+                    None,
+                )
+                .await;
+            }
+            ClientFrame::TeamFollowup {
+                request,
+                peer,
+                reply_to,
+                text,
+            } => {
+                self.handle_team_send(
+                    conn_id,
+                    tier,
+                    mode,
+                    request,
+                    Some(TeamSendPayload::Human {
+                        recipients: vec![peer],
+                        text,
+                        message_type: None,
+                        subject: None,
+                        reply_to: Some(reply_to),
                     }),
                     None,
                 )
@@ -5800,6 +5131,26 @@ impl AttachServer {
             }
             ClientFrame::TeamBoard { request, selector } => {
                 self.handle_team_board(conn_id, tier, mode, request, selector)
+                    .await;
+            }
+            ClientFrame::TeamThread {
+                request,
+                peer,
+                item_id,
+            } => {
+                self.handle_team_thread(conn_id, tier, mode, request, peer, item_id)
+                    .await;
+            }
+            ClientFrame::TeamRetractPreview {
+                request,
+                peer,
+                item_id,
+            } => {
+                self.handle_team_retract_preview(conn_id, tier, mode, request, peer, item_id)
+                    .await;
+            }
+            ClientFrame::TeamRetractDecision { request, confirm } => {
+                self.handle_team_retract_decision(conn_id, tier, mode, request, confirm)
                     .await;
             }
             ClientFrame::TeamStatus { request } => {
@@ -9265,18 +8616,19 @@ mod tests {
         let conn_id = server.registry.lock().await.conns[0].id;
         let expected = "row\n\\\u{0001}🧪".repeat(1_000_000);
         assert!(expected.len() > MAX_FRAME_BYTES as usize);
-        let request_id = "\u{0001}".repeat(MAX_TEAM_BOARD_REQUEST_BYTES);
+        let request_id = "\u{0001}".repeat(team::MAX_TEAM_REQUEST_BYTES);
         let (tx, terminal_tx) = server.team_connection(conn_id).await.unwrap();
         let hooks = server.team_send_test_hooks.clone();
         let source = expected.clone();
         let response_request = request_id.clone();
         let send = tokio::spawn(async move {
-            AttachServer::send_team_board_view(
+            AttachServer::send_team_view(
                 tx,
                 terminal_tx,
                 conn_id,
                 response_request,
                 source,
+                RecipientAction::TeamBoard,
                 hooks,
             )
             .await
@@ -9291,7 +8643,7 @@ mod tests {
                 .expect("board stream remains connected through its done frame");
             assert!(serde_json::to_vec(&frame).unwrap().len() <= MAX_FRAME_BYTES as usize);
             match frame {
-                DaemonFrame::TeamBoardChunk {
+                DaemonFrame::TeamViewChunk {
                     request,
                     sequence,
                     view,
@@ -9301,7 +8653,7 @@ mod tests {
                     next_sequence += 1;
                     assembled.push_str(&view);
                 }
-                DaemonFrame::TeamBoardDone { request, chunks } => {
+                DaemonFrame::TeamViewDone { request, chunks } => {
                     assert_eq!(request, request_id);
                     assert_eq!(chunks, next_sequence);
                     break;
@@ -9360,7 +8712,7 @@ mod tests {
             })
         );
         let _ = rx.try_recv();
-        let first = DaemonFrame::TeamBoardDone {
+        let first = DaemonFrame::TeamViewDone {
             request: "board-1".into(),
             chunks: 0,
         };
@@ -9407,7 +8759,7 @@ mod tests {
         );
         assert!(matches!(
             rx.try_recv(),
-            Ok(DaemonFrame::TeamBoardDone { .. })
+            Ok(DaemonFrame::TeamViewDone { .. })
         ));
         assert!(rx.try_recv().is_err());
 
@@ -13622,14 +12974,14 @@ mod tests {
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         // Server issues a challenge first; the version check precedes proof work,
         // so a wrong declared version is rejected before the proof is examined.
-        // A v8 client accepts the new field but its old renderer would label
-        // human-approved drafts auto-sent; v9 must reject it before registration.
+        // Story 19.21c: a v9 client cannot decode the shared view/retract
+        // frames; v10 rejects it before proof work or registration.
         let signer = test_signer(1);
         let _ = read_attach_challenge(&mut stream).await;
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: 8,
+                protocol_version: 9,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -13642,8 +12994,8 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, 8);
-                assert_eq!(daemon, 9);
+                assert_eq!(client, 9);
+                assert_eq!(daemon, 10);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }
@@ -16238,5 +15590,114 @@ mod tests {
             let _ = task.await;
         }
         assert!(journal.events.lock().await.is_empty());
+    }
+    /// Story 19.21c: runtime absence refuses every new request before slot access,
+    /// in both feature-independent and a2a-enabled clients.
+    #[tokio::test]
+    async fn attached_parity_no_runtime_is_request_keyed_after_authority_gates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, _storage) = mock_core(tmp.path(), vec![]);
+        let (bus, domain_rx) = EventBus::new(32);
+        let server = AttachServer::new(
+            core,
+            Arc::new(Mutex::new(Conversation::default())),
+            bus.domain_tx.clone(),
+        );
+        let socket = tmp.path().join("parity.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let shutdown = CancellationToken::new();
+        let running = tokio::spawn(server.clone().run(
+            listener,
+            domain_rx,
+            None,
+            None,
+            shutdown.child_token(),
+        ));
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+        assert!(matches!(
+            attach_with_proof(
+                &mut client,
+                false,
+                ConnectionTier::TrustedLocal,
+                &test_signer(73)
+            )
+            .await,
+            Some(DaemonFrame::AttachAck {
+                granted_mode: AttachMode::ReadWrite,
+                ..
+            })
+        ));
+        #[cfg(feature = "a2a")]
+        {
+            let id = server.registry.lock().await.conns[0].id;
+            server.team_retracts.lock().await.insert(
+                id,
+                team::RetractSlot::Reading {
+                    request: "decision".into(),
+                    admission: 0,
+                },
+            );
+        }
+        for (request, action, frame) in [
+            (
+                "thread",
+                RecipientAction::TeamThread,
+                ClientFrame::TeamThread {
+                    request: "thread".into(),
+                    peer: "B".into(),
+                    item_id: "ri_a".into(),
+                },
+            ),
+            (
+                "followup",
+                RecipientAction::TeamSend,
+                ClientFrame::TeamFollowup {
+                    request: "followup".into(),
+                    peer: "B".into(),
+                    reply_to: "ri_a".into(),
+                    text: "more".into(),
+                },
+            ),
+            (
+                "preview",
+                RecipientAction::TeamRetract,
+                ClientFrame::TeamRetractPreview {
+                    request: "preview".into(),
+                    peer: "B".into(),
+                    item_id: "ri_a".into(),
+                },
+            ),
+            (
+                "decision",
+                RecipientAction::TeamRetract,
+                ClientFrame::TeamRetractDecision {
+                    request: "decision".into(),
+                    confirm: true,
+                },
+            ),
+        ] {
+            write_frame(&mut client, &frame).await.unwrap();
+            let answer = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                read_frame::<_, DaemonFrame>(&mut client),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            assert!(matches!(answer, DaemonFrame::RecipientActionResult {
+                action: found, target: RecipientActionTarget::Request { request: key },
+                outcome: RecipientActionOutcome::Refused { error: ProtocolError::Internal(message) },
+            } if found == action && key == request && message == "A2A is not enabled in this build"));
+        }
+        #[cfg(feature = "a2a")]
+        assert_eq!(
+            server.team_retracts.lock().await.len(),
+            1,
+            "runtime check precedes compare-and-take"
+        );
+        drop(client);
+        shutdown.cancel();
+        running.await.unwrap();
     }
 }

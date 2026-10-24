@@ -488,7 +488,7 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v9**; a client speaking another version
+attach handshake negotiates **protocol v10**; a client speaking another version
 receives `VersionMismatch` before proof verification, registration or other
 attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
@@ -533,21 +533,25 @@ variant and serialized byte count; later frames continue on the same connection.
 
 The client speaks `ClientFrame`, including `Attach`, `UserMessage`,
 `HistoryRequest`, `ApprovalResponse`, `Detach`, and the request-keyed team
-commands `TeamSend`, `TeamBoard`, `TeamStatus`, and `RevokeSenderConsent`.
+commands `TeamSend`, `TeamFollowup`, `TeamBoard`, `TeamThread`, `TeamStatus`,
+`TeamRetractPreview`, `TeamRetractDecision`, and `RevokeSenderConsent`.
 `EnableTeamProposals` is an additive v7 opt-in sent by a capable rich client after
 its authenticated writer acknowledgement. It enters the same operator FIFO and
 stale-writer fence as decisions; read-only and Peer connections cannot enable it.
-The daemon answers team boards with request-correlated `TeamBoardChunk` frames
-(sequence numbers start at zero) and a `TeamBoardDone` frame naming the complete
-chunk count; clients reassemble only the matching request and publish the board
-after a valid done boundary. The stream applies backpressure through only the
+The daemon answers boards, threads and the board re-rendered after a landed
+retract with request-correlated `TeamViewChunk` frames (sequence numbers start
+at zero) and a `TeamViewDone` frame naming the complete chunk count; clients
+reassemble only the matching request and publish the view after a valid done
+boundary. The stream applies backpressure through only the
 originating connection's writer; it stops if that connection closes and does
-not hold the command reader while chunks drain. Board request keys are limited
+not hold the command reader while chunks drain. Team request keys are limited
 to 128 bytes. Each JSON frame, including escaped text and request overhead,
 fits the 8 MiB `MAX_FRAME_BYTES` limit. Team status uses
 `TeamStatusResult`; revocation uses `SenderConsentRevoked`; sends use
-`TeamSendStarted` plus typed, per-recipient `TeamSendSettled` frames. Refusals use a
-`RecipientActionResult` targeted at the originating request key.
+`TeamSendStarted` plus typed, per-recipient `TeamSendSettled` frames. A retract
+preview answers with `TeamRetractPreviewed` (a card without any task, or an
+answer); a landed decision streams the view and then `TeamRetractAnswered`.
+Refusals use a `RecipientActionResult` targeted at the originating request key.
 
 `TeamProposal` carries the sender-local proposal id, ordered aliases, semantic type
 and body only to the trusted writer. `TeamProposalDecision` carries Send or Dismiss;
@@ -621,9 +625,10 @@ Migrated tool blocks retain a consistent selection identity, so copying a select
 block returns that tool's result before and after the message mirror is rebuilt.
 Fold navigation counts the same provenance and metadata rows that are painted.
 
-Protocol v9 replaces v8 because a v8 client would mislabel approved drafts as
-`[auto-sent]`. Such clients receive `VersionMismatch` before proof verification
-or registration; the historical v7 introductions above remain unchanged.
+Protocol v10 replaces v9 (Story 19.21c): shared request-keyed view streams and
+attached thread/followup/retract frames cannot be decoded by older clients.
+They receive `VersionMismatch` before proof verification or registration; the
+historical v7 introductions and v9 authorship/authorization change remain valid.
 
 Only host act producers write send authorization. It is never imported from an
 attached client's frame or an A2A/RAP peer payload. Session and journal files

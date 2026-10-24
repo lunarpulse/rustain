@@ -301,7 +301,7 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
     // This line client has no TeamProposalDecision input surface. Keep ordinary
     // writer turns usable, but never opt in with EnableTeamProposals.
 
-    let mut board_chunks = std::collections::HashMap::<String, (u32, String)>::new();
+    let mut team_views = PlainTeamViews::default();
     let approvals = Arc::new(Mutex::new(PlainApprovals::new(writer)));
     let reader_approvals = Arc::clone(&approvals);
     let mut reader = tokio::spawn(async move {
@@ -338,29 +338,13 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
                                 peer_row_revision = operation.revision();
                             }
                         }
-                        DaemonFrame::TeamBoardChunk {
+                        DaemonFrame::TeamViewChunk {
                             request,
                             sequence,
                             view,
-                        } => {
-                            let current = board_chunks.get(&request).map(|entry| entry.0);
-                            if current != Some(sequence) {
-                                board_chunks.remove(&request);
-                            } else if let Some(next) = sequence.checked_add(1) {
-                                if let Some(entry) = board_chunks.get_mut(&request) {
-                                    entry.1.push_str(&view);
-                                    entry.0 = next;
-                                }
-                            } else {
-                                board_chunks.remove(&request);
-                            }
-                        }
-                        DaemonFrame::TeamBoardDone { request, chunks } => {
-                            if let Some((received, view)) = board_chunks.remove(&request)
-                                && received == chunks
-                            {
-                                println!("{view}");
-                            }
+                        } => team_views.chunk(request, sequence, &view),
+                        DaemonFrame::TeamViewDone { request, chunks } => {
+                            team_views.done(&request, chunks, &mut std::io::stdout().lock())?
                         }
                         result @ DaemonFrame::TeamProposal { .. }
                         | result @ DaemonFrame::TeamProposalClosed { .. } => {
@@ -371,6 +355,8 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
                         result @ DaemonFrame::TeamSendStarted { .. }
                         | result @ DaemonFrame::TeamSendSettled { .. }
                         | result @ DaemonFrame::TeamStatusResult { .. }
+                        | result @ DaemonFrame::TeamRetractPreviewed { .. }
+                        | result @ DaemonFrame::TeamRetractAnswered { .. }
                         | result @ DaemonFrame::SenderConsentRevoked { .. } => {
                             print_frame_json(&result)?;
                         }
@@ -863,5 +849,71 @@ mod exact_approval_tests {
             ),
             "History too large to show here (4.0 KiB)\n"
         );
+    }
+}
+
+/// Story 19.21c: the line client prints only complete ordered rendered views.
+/// A broken stream stays poisoned (`None`) until its done boundary, so a
+/// repeated `sequence == 0` can never restart it.
+#[derive(Default)]
+struct PlainTeamViews(std::collections::HashMap<String, Option<(u32, String)>>);
+impl PlainTeamViews {
+    fn chunk(&mut self, request: String, sequence: u32, view: &str) {
+        let slot = self
+            .0
+            .entry(request)
+            .or_insert_with(|| (sequence == 0).then_some((0, String::new())));
+        match slot {
+            Some((next, assembled)) if *next == sequence && sequence < u32::MAX => {
+                assembled.push_str(view);
+                *next += 1;
+            }
+            _ => *slot = None,
+        }
+    }
+    fn done(
+        &mut self,
+        request: &str,
+        chunks: u32,
+        output: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        if let Some(Some((received, view))) = self.0.remove(request)
+            && received == chunks
+        {
+            writeln!(output, "{view}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod team_view_tests {
+    use super::*;
+    #[test]
+    fn plain_prints_complete_views_but_not_incomplete_or_out_of_order_streams() {
+        let mut views = PlainTeamViews::default();
+        let mut output = Vec::new();
+        views.chunk("complete".into(), 0, "thread · 界\n");
+        views.chunk("complete".into(), 1, "reply");
+        views.done("complete", 2, &mut output).unwrap();
+        assert_eq!(
+            String::from_utf8(output.clone()).unwrap(),
+            "thread · 界\nreply\n"
+        );
+        views.chunk("short".into(), 0, "never print");
+        views.done("short", 2, &mut output).unwrap();
+        views.chunk("unordered".into(), 1, "never print");
+        views.done("unordered", 1, &mut output).unwrap();
+        views.chunk("gap".into(), 0, "never print");
+        views.chunk("gap".into(), 2, "gap");
+        views.done("gap", 3, &mut output).unwrap();
+        views.chunk("restart".into(), 0, "never print");
+        views.chunk("restart".into(), 0, "replacement");
+        views.done("restart", 1, &mut output).unwrap();
+        views.chunk("revived".into(), 0, "never print");
+        views.chunk("revived".into(), 2, "gap");
+        views.chunk("revived".into(), 0, "replacement");
+        views.done("revived", 1, &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "thread · 界\nreply\n");
     }
 }

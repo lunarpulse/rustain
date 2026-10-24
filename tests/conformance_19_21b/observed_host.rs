@@ -27,17 +27,19 @@ pub(crate) struct HttpCounts {
 }
 
 #[derive(Default)]
-struct Counters {
-    get: AtomicUsize,
-    post: AtomicUsize,
-    posts: Mutex<Vec<CapturedPost>>,
+pub(super) struct Counters {
+    pub(super) get: AtomicUsize,
+    pub(super) post: AtomicUsize,
+    pub(super) posts: Mutex<Vec<CapturedPost>>,
+    pub(super) dispatch_journal: Mutex<Option<Arc<dyn rustain::domain::ports::RoomJournalReader>>>,
+    pub(super) retract_dispatches_at_post: Mutex<Vec<usize>>,
 }
 
 #[derive(Clone)]
-struct Proxy {
-    upstream: String,
-    client: reqwest::Client,
-    counters: Arc<Counters>,
+pub(super) struct Proxy {
+    pub(super) upstream: String,
+    pub(super) client: reqwest::Client,
+    pub(super) counters: Arc<Counters>,
 }
 
 /// Counts the actual HTTP boundary while forwarding unchanged requests to the
@@ -122,7 +124,7 @@ impl ObservedHost {
     }
 }
 
-async fn forward(
+pub(super) async fn forward(
     State(proxy): State<Proxy>,
     request: Request,
 ) -> Result<Response, (StatusCode, String)> {
@@ -136,6 +138,48 @@ async fn forward(
     let upstream = format!("{}{}", proxy.upstream, parts.uri);
     if parts.method == Method::POST {
         proxy.counters.post.fetch_add(1, Ordering::SeqCst);
+        let reader = proxy
+            .counters
+            .dispatch_journal
+            .lock()
+            .expect("dispatch observer")
+            .clone();
+        if let Some(reader) = reader
+            && serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|body| {
+                    body.get("method")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("x-rustain-items/retract")
+        {
+            let rows = reader
+                .load_entries()
+                .await
+                .expect("sender journal at POST boundary");
+            let count = rows
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.record,
+                        rustain::domain::models::JournalRecord::Room(
+                            rustain::domain::models::RoomEvent::RemoteEnvelopeDispatched {
+                                act: rustain::domain::models::DispatchAct::ItemRetract { .. },
+                                ..
+                            }
+                        )
+                    )
+                })
+                .count();
+            proxy
+                .counters
+                .retract_dispatches_at_post
+                .lock()
+                .expect("POST observations")
+                .push(count);
+        }
         let mut post = CapturedPost::new(bytes.to_vec());
         *post.method_mut() = Method::POST;
         *post.uri_mut() = parts.uri;

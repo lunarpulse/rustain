@@ -44,9 +44,9 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// older client/daemon is rejected with [`ProtocolError::VersionMismatch`]
 /// rather than mis-parsing (forward-compat for 12.3/12.4).
 ///
-/// v9 (Story 19.20a): separate authorship and send authorization; reject older
-/// renderers that would label human-approved drafts as automatic sends.
-pub const PROTOCOL_VERSION: u32 = 9;
+/// v10 (2026-10-24, Story 19.21c): attached thread/followup/retract parity and
+/// request-keyed shared view streams; reject older clients before proof.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -627,6 +627,27 @@ pub enum ClientFrame {
         request: String,
         selector: TeamBoardRequest,
     },
+    /// Story 19.21c: trusted-local thread read, including read-only attachments.
+    TeamThread {
+        request: String,
+        peer: String,
+        item_id: String,
+    },
+    /// Story 19.21c: a writer's single-recipient linked human followup.
+    TeamFollowup {
+        request: String,
+        peer: String,
+        reply_to: String,
+        text: String,
+    },
+    /// Story 19.21c: writer-only preview; the target stays daemon-owned.
+    TeamRetractPreview {
+        request: String,
+        peer: String,
+        item_id: String,
+    },
+    /// Story 19.21c: compare-and-take the origin connection's preview.
+    TeamRetractDecision { request: String, confirm: bool },
     /// Story 19.21 `AC4(b)` — `/team status`, computed
     /// daemon-side over the daemon's composed roster and consent projection.
     /// TrustedLocal; a read-only attachment may ask.
@@ -660,6 +681,21 @@ pub enum TeamBoardRequest {
     Last,
     Action(String),
     Actions,
+}
+
+/// Story 19.21c: feature-independent rendered preview; never carries a task.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamRetractPreviewView {
+    Card {
+        peer: String,
+        item_id: String,
+        body: String,
+        armed: bool,
+    },
+    Answer {
+        message: String,
+    },
 }
 
 /// Why a recipient's send did not complete, with its provenance (Story 19.21
@@ -775,6 +811,9 @@ pub enum RecipientAction {
     /// refusals travel on this envelope ([`RecipientActionTarget::Request`]).
     TeamSend,
     TeamBoard,
+    /// Story 19.21c: request-keyed thread and retract refusals.
+    TeamThread,
+    TeamRetract,
     TeamStatus,
     RevokeSenderConsent,
 }
@@ -957,14 +996,21 @@ pub enum DaemonFrame {
         index: usize,
         outcome: TeamSendOutcome,
     },
-    /// One bounded ordered fragment of the complete rendered board.
-    TeamBoardChunk {
+    /// Story 19.21c: bounded ordered fragment of a board, thread or retract view.
+    TeamViewChunk {
         request: String,
         sequence: u32,
         view: String,
     },
-    /// Explicit boundary for a complete request-correlated board response.
-    TeamBoardDone { request: String, chunks: u32 },
+    /// Explicit boundary for a complete request-correlated rendered view.
+    TeamViewDone { request: String, chunks: u32 },
+    /// Story 19.21c: private preview for the originating writer only.
+    TeamRetractPreviewed {
+        request: String,
+        preview: TeamRetractPreviewView,
+    },
+    /// Story 19.21c: terminal retract sentence, after any remembered board.
+    TeamRetractAnswered { request: String, message: String },
     /// The rendered `/team status` answer.
     TeamStatusResult { request: String, message: String },
     /// The durable answer to [`ClientFrame::RevokeSenderConsent`].
@@ -1327,6 +1373,30 @@ mod tests {
                 request: "board-actions".into(),
                 selector: TeamBoardRequest::Actions,
             },
+            ClientFrame::TeamThread {
+                request: "thread-1".into(),
+                peer: "alice".into(),
+                item_id: "ri_a".into(),
+            },
+            ClientFrame::TeamFollowup {
+                request: "followup-1".into(),
+                peer: "alice".into(),
+                reply_to: "turn-1".into(),
+                text: "more".into(),
+            },
+            ClientFrame::TeamRetractPreview {
+                request: "retract-1".into(),
+                peer: "alice".into(),
+                item_id: "ri_a".into(),
+            },
+            ClientFrame::TeamRetractDecision {
+                request: "retract-1".into(),
+                confirm: true,
+            },
+            ClientFrame::TeamRetractDecision {
+                request: "retract-2".into(),
+                confirm: false,
+            },
             ClientFrame::TeamStatus {
                 request: "status-1".into(),
             },
@@ -1585,19 +1655,38 @@ mod tests {
                     reason: "That proposal is no longer waiting. Nothing was sent.".into(),
                 },
             },
-            DaemonFrame::TeamBoardChunk {
+            DaemonFrame::TeamViewChunk {
                 request: "board-1".into(),
                 sequence: 0,
                 view: "Distribution ".into(),
             },
-            DaemonFrame::TeamBoardChunk {
+            DaemonFrame::TeamViewChunk {
                 request: "board-1".into(),
                 sequence: 1,
                 view: "board".into(),
             },
-            DaemonFrame::TeamBoardDone {
+            DaemonFrame::TeamViewDone {
                 request: "board-1".into(),
                 chunks: 2,
+            },
+            DaemonFrame::TeamRetractPreviewed {
+                request: "retract-1".into(),
+                preview: TeamRetractPreviewView::Card {
+                    peer: "alice".into(),
+                    item_id: "ri_a".into(),
+                    body: "Exact card".into(),
+                    armed: true,
+                },
+            },
+            DaemonFrame::TeamRetractPreviewed {
+                request: "retract-2".into(),
+                preview: TeamRetractPreviewView::Answer {
+                    message: "Nothing was marked.".into(),
+                },
+            },
+            DaemonFrame::TeamRetractAnswered {
+                request: "retract-1".into(),
+                message: "Retracted.".into(),
             },
             DaemonFrame::TeamStatusResult {
                 request: "status-1".into(),

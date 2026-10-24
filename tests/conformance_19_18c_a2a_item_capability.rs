@@ -1362,7 +1362,11 @@ async fn press_y(sender: &Sender, state: &mut TuiState) -> Option<String> {
     }
     let pending = resolve_team_retract_card(state, true)?;
     let runtime = sender.app_state.a2a_send.as_ref().expect("egress runtime");
-    Some(team_retract_dispatch(runtime, &pending).await.message)
+    Some(
+        team_retract_dispatch(runtime, &pending.peer, &pending.item_id, pending.task)
+            .await
+            .message,
+    )
 }
 
 fn retracted(rows: &[(u64, RoomEvent)], item: &str) -> bool {

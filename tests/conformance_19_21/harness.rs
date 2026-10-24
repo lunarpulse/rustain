@@ -528,9 +528,14 @@ impl Sender {
         }
         let pending = resolve_team_retract_card(state, true)?;
         Some(
-            team_retract_dispatch(self.runtime(), &pending)
-                .await
-                .message,
+            team_retract_dispatch(
+                self.runtime(),
+                &pending.peer,
+                &pending.item_id,
+                pending.task,
+            )
+            .await
+            .message,
         )
     }
     pub(crate) async fn confirm_retract_with_board(
@@ -542,7 +547,13 @@ impl Sender {
             return None;
         }
         let pending = resolve_team_retract_card(state, true)?;
-        let result = team_retract_dispatch(self.runtime(), &pending).await;
+        let result = team_retract_dispatch(
+            self.runtime(),
+            &pending.peer,
+            &pending.item_id,
+            pending.task,
+        )
+        .await;
         Some((result.message, result.board))
     }
 

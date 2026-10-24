@@ -1262,31 +1262,22 @@ pub struct TeamRetractAnswer {
 #[cfg(feature = "a2a")]
 pub async fn team_retract_dispatch(
     runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
-    pending: &crate::adapters::tui::state::PendingTeamRetract,
+    peer: &str,
+    item_id: &str,
+    task: Option<String>,
 ) -> TeamRetractAnswer {
     use crate::adapters::a2a::board::{mark_clock, render_board};
     use crate::adapters::a2a::send::{RetractOutcome, RetractRefusal, retract_item_on_peer};
     use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
 
-    let alias = retract_alias(&pending.peer);
-    let outcome = retract_item_on_peer(
-        runtime,
-        &pending.peer,
-        &pending.item_id,
-        pending.task.clone(),
-    )
-    .await;
+    let alias = retract_alias(peer);
+    let outcome = retract_item_on_peer(runtime, peer, item_id, task).await;
     let mut board = None;
     let message = match outcome {
         RetractOutcome::Landed { retracted_at_ms } => {
             if let Some(ms) = retracted_at_ms {
                 board = runtime
-                    .mark_board_item_retracted(
-                        &pending.peer,
-                        &pending.item_id,
-                        ms,
-                        runtime.wall_now_unix_secs(),
-                    )
+                    .mark_board_item_retracted(peer, item_id, ms, runtime.wall_now_unix_secs())
                     .await;
             }
             format!(
@@ -1298,9 +1289,7 @@ pub async fn team_retract_dispatch(
             Some(ms) => format!("already retracted {} — nothing changed", mark_clock(ms)),
             None => "already retracted — nothing changed".to_owned(),
         },
-        RetractOutcome::NotSent(not_sent) => {
-            retract_not_sent_sentence(&alias, &pending.peer, &not_sent)
-        }
+        RetractOutcome::NotSent(not_sent) => retract_not_sent_sentence(&alias, peer, &not_sent),
         RetractOutcome::Refused(refusal) => match refusal {
             RetractRefusal::Tombstone => format!(
                 "{alias}'s host already removed that item — its content is no longer shown \
@@ -1311,7 +1300,7 @@ pub async fn team_retract_dispatch(
             }
             RetractRefusal::NotFound => format!(
                 "{alias}'s host has no item {} this host can address. Nothing was marked.",
-                sanitize_disclosable(&pending.item_id, MAX_PEER_ID_BYTES)
+                sanitize_disclosable(item_id, MAX_PEER_ID_BYTES)
             ),
             RetractRefusal::OldBuild => {
                 format!("{alias} runs a build without the retract verb. Nothing was marked.")
@@ -1359,7 +1348,7 @@ pub(crate) async fn resolve_team_retract(state: &mut TuiState, accept: bool, app
             let answer = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return,
-                answer = team_retract_dispatch(&runtime, &pending) => answer,
+                answer = team_retract_dispatch(&runtime, &pending.peer, &pending.item_id, pending.task) => answer,
             };
             let _ = event_bus.emit_domain(crate::domain::events::AppEvent::TeamRetractAnswered {
                 conversation_id: pending.conversation_id,
@@ -3308,9 +3297,13 @@ mod credential_tests {
         let fixture = PeerFixture::plaintext().await;
         fixture.answer_with(answer).await;
         let harness = Harness::compose(vec![peer("scripted", &fixture.origin)]).await;
-        let answer =
-            super::team_retract_dispatch(harness.egress.runtime(), &retract_card("scripted", true))
-                .await;
+        let answer = super::team_retract_dispatch(
+            harness.egress.runtime(),
+            "scripted",
+            "ri_x",
+            retract_card("scripted", true).task,
+        )
+        .await;
         (
             answer,
             harness.rejected_rows().await,
