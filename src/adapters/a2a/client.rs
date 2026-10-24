@@ -350,12 +350,14 @@ impl A2aClientAdapter {
     /// response against the request id. This is the transport seam Story 17.4b's
     /// task lifecycle drives through.
     ///
-    /// Hard rules (Task 0b spike): **no `A2A-Version` header** (sending one is the
-    /// one way to break an agent that would otherwise answer), and the caller MUST
-    /// pass the resolved `url` — never the origin, which returns a plain 404. The
-    /// https-or-loopback safety policy is enforced here via `parse_and_validate_url`,
-    /// so a plain-HTTP non-loopback endpoint (6/141 in the corpus) is refused at
-    /// POST time even though endpoint resolution accepted it.
+    /// Hard rules (Task 0b spike): **no `A2A-Version` header**. Omission means
+    /// A2A 0.3 (spec §3.6.1), matching [`super::jsonrpc::A2A_PROTOCOL_VERSION`].
+    /// Never send `1.0`: rustain's own server refuses it with `-32009`, and the
+    /// measured v1.0 SDK returns `-32603`. The caller MUST pass the resolved
+    /// `url` — never the origin, which returns a plain 404. The https-or-loopback
+    /// safety policy is enforced here via `parse_and_validate_url`, so a
+    /// plain-HTTP non-loopback endpoint (6/141 in the corpus) is refused at POST
+    /// time even though endpoint resolution accepted it.
     ///
     /// # Refusal precedence, applied over *observed* causes (`AD-1823`)
     ///

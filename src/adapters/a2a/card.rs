@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::error::A2aError;
+use super::jsonrpc::A2A_PROTOCOL_VERSION;
 
 use crate::domain::models::capability_registry::CapabilityRegistry;
 
@@ -177,7 +178,7 @@ impl ServedAgentCard {
             supported_interfaces: vec![ServedInterface {
                 url: endpoint_url.to_owned(),
                 protocol_binding: "JSONRPC",
-                protocol_version: "1.0",
+                protocol_version: A2A_PROTOCOL_VERSION,
             }],
             security_schemes: BTreeMap::new(),
             security: Vec::new(),

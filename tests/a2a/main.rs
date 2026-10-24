@@ -88,6 +88,9 @@ mod conformance_19_16b_board;
 #[path = "../conformance_19_16d_retract.rs"]
 mod conformance_19_16d_retract;
 
+#[path = "../conformance_19_16e_a2a_version_boundary.rs"]
+mod conformance_19_16e_a2a_version_boundary;
+
 #[path = "../conformance_19_16f_retract_surface.rs"]
 mod conformance_19_16f_retract_surface;
 

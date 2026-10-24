@@ -38,9 +38,15 @@
 //!   discouraged, and accepting it would make a notification and a null-id call
 //!   indistinguishable in every response we emit.
 //! * **Batch arrays** are rejected with a single `-32600` naming the profile.
+//! * **A2A-Version** (spec §3.6) selects this interface's A2A dialect:
+//!   the first header value when non-empty after trimming, else the first
+//!   matching query pair, else [`A2A_PROTOCOL_VERSION`]. Major.Minor must match;
+//!   header bytes outside visible ASCII are unsupported. A valid patch is
+//!   ignored. Unsupported or malformed versions answer `-32009` over HTTP 200
+//!   before dispatch, even for notifications (`id: null`).
 //!
-//! The same three statements appear in the ADR, and
-//! `the_declared_jsonrpc_profile_matches_the_adr` fails if they drift apart.
+//! These rules are pinned by the envelope unit tests and the real-listener
+//! `tests/conformance_19_16e_a2a_version_boundary.rs` behavioural tests.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -49,9 +55,9 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Extension, State};
+use axum::extract::{DefaultBodyLimit, Extension, RawQuery, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
@@ -86,9 +92,10 @@ use super::item_capability::{
     PresentedCapability, capability_matches, parse_presented_capability, presented_matches,
 };
 use super::jsonrpc::{
-    CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_ITEM_REMOVED,
-    CODE_METHOD_NOT_FOUND, CODE_PARSE_ERROR, CODE_REFUSED_BY_POLICY, CODE_TASK_NOT_FOUND,
-    JsonRpcErrorResponse, JsonRpcResponse,
+    A2A_PROTOCOL_VERSION, A2A_VERSION_HEADER, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS,
+    CODE_INVALID_REQUEST, CODE_ITEM_REMOVED, CODE_METHOD_NOT_FOUND, CODE_PARSE_ERROR,
+    CODE_REFUSED_BY_POLICY, CODE_TASK_NOT_FOUND, CODE_VERSION_NOT_SUPPORTED, JsonRpcErrorResponse,
+    JsonRpcResponse,
 };
 use super::projection::{RemotePeerViewer, RoomProjection};
 use super::transparency::{InboundOutcome, TransparencySink};
@@ -109,6 +116,56 @@ const TASK_NOT_FOUND: &str = "Task not found";
 /// `CODE_TASK_NOT_FOUND`, so the two are byte-identical by construction
 /// (`ADR-17-4a-01` R21). ⛔ `TASK_NOT_FOUND`'s noun is wrong for an item.
 const ITEM_NOT_FOUND: &str = "Item not found";
+
+/// Spec §3.6: header first, then the first form-decoded query match, else
+/// the interface's default. A header outside visible ASCII (RFC 9110 OWS is
+/// SP/HTAB only) is unsupported and never falls through.
+fn a2a_version_supported(header: Option<&HeaderValue>, query: Option<&str>) -> bool {
+    if let Some(header) = header {
+        let Ok(value) = header.to_str() else {
+            return false;
+        };
+        if !value.trim().is_empty() {
+            return a2a_version_pair(value.trim()) == a2a_version_pair(A2A_PROTOCOL_VERSION);
+        }
+    }
+    if let Some((_, value)) = query.and_then(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key.eq_ignore_ascii_case(A2A_VERSION_HEADER))
+    }) {
+        let value = value.trim();
+        if !value.is_empty() {
+            return a2a_version_pair(value) == a2a_version_pair(A2A_PROTOCOL_VERSION);
+        }
+    }
+    true
+}
+
+/// Major.Minor membership; patch is digit-checked, never parsed (spec §3.6).
+fn a2a_version_pair(value: &str) -> Option<(u32, u32)> {
+    fn digits(value: &str) -> bool {
+        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+    }
+
+    let mut parts = value.split('.');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    if !digits(major) || !digits(minor) {
+        return None;
+    }
+    if parts.next().is_some_and(|patch| !digits(patch)) || parts.next().is_some() {
+        return None;
+    }
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn version_not_supported(id: serde_json::Value) -> JsonRpcErrorResponse {
+    let message = format!(
+        "A2A protocol version not supported: this agent serves A2A {A2A_PROTOCOL_VERSION} on \
+         this interface; send `A2A-Version: {A2A_PROTOCOL_VERSION}` or omit it"
+    );
+    JsonRpcErrorResponse::new(id, CODE_VERSION_NOT_SUPPORTED, message)
+}
 
 /// Story 19.16d `Q3` — the caller's own item is a tombstone. ⛔ Not
 /// `ITEM_NOT_FOUND`: ownership is already proven, and a tombstone must be
@@ -774,10 +831,21 @@ async fn authenticate_request(
 async fn handle_jsonrpc(
     State(state): State<ServerState>,
     Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
     match parse_envelope(&body) {
         Err(response) => json_response(&response, StatusCode::OK),
+        Ok(envelope)
+            if !a2a_version_supported(headers.get(A2A_VERSION_HEADER), query.as_deref()) =>
+        {
+            let id = match envelope {
+                Envelope::Call { id, .. } => id,
+                Envelope::Notification { .. } => serde_json::Value::Null,
+            };
+            json_response(&version_not_supported(id), StatusCode::OK)
+        }
         Ok(Envelope::Notification { method, params }) => {
             // Story 19.16d `P3` — the one method that refuses the notification
             // form. A retract is a write whose collapse disclosure
@@ -2975,6 +3043,74 @@ async fn run_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a2a_version_resolution_obeys_source_order_and_numeric_components() {
+        use axum::http::HeaderValue;
+
+        let cases = [
+            (None, None, true),
+            (Some(""), None, true),
+            (Some("  "), None, true),
+            (Some("0.3"), None, true),
+            (Some("0.3.0"), None, true),
+            (Some("0.3.9"), None, true),
+            (Some(" 0.3 "), None, true),
+            (Some("00.3"), None, true),
+            (Some("0.03"), None, true),
+            (Some("0.3.999999999999999999999999"), None, true),
+            (Some("99999999999.3"), None, false),
+            (Some("0.99999999999"), None, false),
+            (Some("v0.3"), None, false),
+            (Some("0.3-rc1"), None, false),
+            (Some("0.3."), None, false),
+            (Some(".3"), None, false),
+            (Some("1"), None, false),
+            (Some("1.0"), None, false),
+            (Some("0.4"), None, false),
+            (Some("0.30"), None, false),
+            (Some("0.3.0.1"), None, false),
+            (Some("+0.3"), None, false),
+            (Some("0.3.+1"), None, false),
+            (Some("0.3.９"), None, false),
+            (None, Some("a2a-version=1.0"), false),
+            (None, Some("A2A-Version=0%2E3"), true),
+            (None, Some("A2A-Version=0.3&A2A-Version=1.0"), true),
+            (None, Some("A2A-Version=1.0&A2A-Version=0.3"), false),
+            (None, Some("A2A-Version=&A2A-Version=1.0"), true),
+            (None, Some("other=1.0&A2A-Version=+0.3+"), true),
+            (Some(""), Some("A2A-Version=1.0"), false),
+            (Some("  "), Some("A2A-Version=1.0"), false),
+            (Some("0.3"), Some("A2A-Version=1.0"), true),
+            (Some("1.0"), Some("A2A-Version=0.3"), false),
+        ];
+        for (header, query, expected) in cases {
+            let header = header.map(|value| HeaderValue::from_bytes(value.as_bytes()).unwrap());
+            assert_eq!(
+                a2a_version_supported(header.as_ref(), query),
+                expected,
+                "header={header:?}, query={query:?}"
+            );
+        }
+        let non_utf8 = HeaderValue::from_bytes(b"\xff").unwrap();
+        assert!(!a2a_version_supported(Some(&non_utf8), None));
+        assert!(!a2a_version_supported(
+            Some(&non_utf8),
+            Some("A2A-Version=0.3")
+        ));
+        // Valid UTF-8 is not enough: NBSP is not HTTP whitespace.
+        let nbsp_wrapped = HeaderValue::from_bytes("\u{a0}0.3\u{a0}".as_bytes()).unwrap();
+        assert!(!a2a_version_supported(Some(&nbsp_wrapped), None));
+        assert!(!a2a_version_supported(
+            Some(&nbsp_wrapped),
+            Some("A2A-Version=0.3")
+        ));
+
+        let mut headers = HeaderMap::new();
+        headers.append("a2a-version", HeaderValue::from_static("0.3"));
+        headers.append("a2a-version", HeaderValue::from_static("1.0"));
+        assert!(a2a_version_supported(headers.get("a2a-version"), None));
+    }
 
     fn body(raw: &str) -> Bytes {
         Bytes::from(raw.to_owned())

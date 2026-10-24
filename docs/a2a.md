@@ -915,6 +915,7 @@ is not implemented (`DF-18-1-HOSTRECONCILE`).
   Content`.
 - An explicit `"id": null` is rejected with `-32600`.
 - **Batch arrays are not supported**; send one request object per HTTP POST.
+- The interface speaks A2A 0.3, and the AgentCard advertises 0.3. An absent or empty `A2A-Version` (header, or query parameter when the header is absent or empty) means 0.3, and a valid patch component is ignored. Any other or malformed version returns JSON-RPC `-32009` over HTTP 200, and this is answered even for a notification.
 
 ### What a remote peer can see
 

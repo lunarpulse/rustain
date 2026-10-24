@@ -7,8 +7,10 @@
 //!
 //! Hard rules from the Task 0b spike (each a way to break an agent that would
 //! otherwise answer):
-//! - **Never send an `A2A-Version` header.** Omitting it works on every measured
-//!   agent; sending `1.0` gets `-32603` from the v1.0 agent.
+//! - **Never send an `A2A-Version` header.** Omission means A2A 0.3 (spec
+//!   §3.6.1), matching [`A2A_PROTOCOL_VERSION`]. Never send `1.0`: rustain's
+//!   own server refuses it with `-32009`, and the measured v1.0 SDK returns
+//!   `-32603`.
 //! - **POST only to the resolved `url`, never the origin.** The origin returns a
 //!   plain `{"detail":"Not Found"}` 404 a naive client mis-reads as transport
 //!   failure.
@@ -16,6 +18,14 @@
 use serde::{Deserialize, Serialize};
 
 use super::error::A2aError;
+
+/// The A2A interface dialect, resolved per A2A spec §3.6.
+pub const A2A_PROTOCOL_VERSION: &str = "0.3";
+/// The request version header (or query key), per A2A spec §3.6.
+pub const A2A_VERSION_HEADER: &str = "A2A-Version";
+/// A2A spec §3.6 VersionNotSupportedError; never `-32001`, which is
+/// reserved for the task-scoping collapse (ADR-17-4a-01 R21).
+pub const CODE_VERSION_NOT_SUPPORTED: i64 = -32009;
 
 /// Standard JSON-RPC parse error.
 pub const CODE_PARSE_ERROR: i64 = -32700;
