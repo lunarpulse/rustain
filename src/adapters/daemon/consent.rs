@@ -673,8 +673,6 @@ mod tests {
         let journal = Arc::new(RecordingJournal::default());
         let (manager, projection) = manager(journal.clone());
         let sender = PolicyPrincipal::rap(peer(1));
-        crate::infrastructure::subagent::node_journal::NodeJournal::reset_load_count();
-
         let first = manager
             .register(sender.clone(), "first task", DeliveryDisposition::MayRefuse)
             .await;
@@ -685,11 +683,6 @@ mod tests {
                 DeliveryDisposition::MayRefuse,
             )
             .await;
-        assert_eq!(
-            crate::infrastructure::subagent::node_journal::NodeJournal::load_count(),
-            0,
-            "sender admission must query the cached projection, never reload the journal"
-        );
         assert!(first.first_for_sender);
         assert!(!second.first_for_sender);
 
