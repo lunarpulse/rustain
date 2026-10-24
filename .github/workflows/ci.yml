@@ -338,7 +338,7 @@ jobs:
             receipt-checker-evidence/**/restored.json
 
       - name: Run non-API Python TUI tests
-        run: pytest tests_tui/ -m "not requires_api and not a2a_binary" -n auto --timeout=120 -v --junitxml=tui-results.xml
+        run: pytest tests_tui/ -m "not requires_api and not a2a_binary and not p2p_binary" -n auto --timeout=120 -v --junitxml=tui-results.xml
         env:
           RUST_LOG: debug
       - name: Annotate test failures
