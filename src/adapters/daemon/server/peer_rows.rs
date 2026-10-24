@@ -3,8 +3,40 @@ use crate::adapters::daemon::response_modes::{
     DRAFT_INTERRUPTED_NOTICE, DraftPhase, PendingDraftController, rap_one_way_notice,
 };
 use crate::domain::models::{
-    AgentId, Conversation, PeerId, PeerRowControl, PeerRowStage, ResponseMode,
+    AgentId, Conversation, InteractionPolicySnapshot, ItemAddress, PeerId, PeerRowControl,
+    PeerRowStage, ResponseMode, StorySummary,
 };
+#[cfg(feature = "a2a")]
+use crate::domain::models::{SemanticMessageType, story_summary};
+
+pub(super) fn peer_row_control(
+    node_id: &AgentId,
+    item_address: Option<ItemAddress>,
+    stories: Option<StorySummary>,
+    provenance: &InteractionPolicySnapshot,
+    fallback_label: &str,
+    stage: PeerRowStage,
+    node_resolvable: bool,
+) -> PeerRowControl {
+    PeerRowControl {
+        node_id: node_id.as_str().to_owned(),
+        item_address,
+        stories,
+        message_type: provenance.message_type,
+        sender_label: provenance
+            .sender_label
+            .clone()
+            .unwrap_or_else(|| fallback_label.to_owned()),
+        stage,
+        node_resolvable,
+    }
+}
+
+pub(super) struct PeerItemContext {
+    pub(super) address: ItemAddress,
+    pub(super) alias: Option<String>,
+    pub(super) stories: Option<StorySummary>,
+}
 
 pub(super) async fn snapshot_peer_row_controls(
     conversation: &Conversation,
@@ -38,6 +70,39 @@ pub(super) fn rap_rooted_peer(node: &AgentId) -> Option<PeerId> {
 }
 
 impl AttachServer {
+    pub(super) async fn item_context_for_node(&self, node_id: &AgentId) -> Option<PeerItemContext> {
+        #[cfg(feature = "a2a")]
+        {
+            let reader = self.room_journal_reader.as_ref()?;
+            let entries = match reader.load_entries().await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::warn!(%error, node = %node_id, "loading journal for peer-row target failed");
+                    return None;
+                }
+            };
+            let projection =
+                crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
+            crate::adapters::a2a::exec::recipient_item_for_node(&projection, node_id).map(|item| {
+                PeerItemContext {
+                    stories: (item.message_type == SemanticMessageType::StoryAssignment)
+                        .then(|| {
+                            item.stories
+                                .as_ref()
+                                .map(|list| StorySummary(story_summary(list)))
+                        })
+                        .flatten(),
+                    address: item.address,
+                    alias: item.alias,
+                }
+            })
+        }
+        #[cfg(not(feature = "a2a"))]
+        {
+            let _ = node_id;
+            None
+        }
+    }
     /// Story 19.20: process-owned drafts cannot resume after daemon restart.
     pub(super) async fn settle_interrupted_drafts(&self) -> Result<(), String> {
         let candidates = {
@@ -140,7 +205,7 @@ mod tests {
                     ..Default::default()
                 });
                 persisted.peer_row_controls.insert(row_id.clone(), peer_row_control(
-                    &node, linked.then(|| address.clone()), &Default::default(),
+                    &node, linked.then(|| address.clone()), None, &Default::default(),
                     "remote", stage, true,
                 ));
                 storage.save_conversation(&persisted).await.unwrap();
@@ -150,18 +215,16 @@ mod tests {
                 let (domain_tx, _) = mpsc::unbounded_channel();
                 let journal = Arc::new(RecordingJournal::default());
                 if linked {
-                    journal.record_event(RoomEvent::RecipientItemReceived {
-                        address: address.clone(),
-                        task: "restart-task".into(),
-                        alias: None,
-                        message_type: crate::domain::models::SemanticMessageType::BugReport,
-                        authorship: Authorship::Unknown,
-                        send_authorization: SendAuthorization::Unknown,
-                        content: "bug report".into(),
-                        in_reply_to: None,
-                        capability_hash: None,
-                        reply_capability_matched: false,
-                    }).await.unwrap();
+                    journal.record_event(RoomEvent::RecipientItemReceived { stories: None, address: address.clone(),
+                    task: "restart-task".into(),
+                    alias: None,
+                    message_type: crate::domain::models::SemanticMessageType::BugReport,
+                    authorship: Authorship::Unknown,
+                    send_authorization: SendAuthorization::Unknown,
+                    content: "bug report".into(),
+                    in_reply_to: None,
+                    capability_hash: None,
+                    reply_capability_matched: false, }).await.unwrap();
                 }
                 let base_events = journal.events.lock().await.len();
                 let server = journaled_server(core, conversation, domain_tx, journal.clone());
@@ -234,6 +297,11 @@ mod tests {
                                 if content == "Direct reply after restart"));
                         }
                     }
+                    // This fixture reuses the server across boots. Observe connection
+                    // cleanup before restarting, so its old writer slot cannot race
+                    // the next boot's ReadWrite attach.
+                    write_frame(&mut client, &ClientFrame::Detach).await.unwrap();
+                    while read_frame::<_, DaemonFrame>(&mut client).await.unwrap().is_some() {}
                     shutdown.cancel();
                     drop(client);
                     service.await.unwrap();
@@ -303,6 +371,7 @@ mod tests {
                 row_id.clone(),
                 peer_row_control(
                     &node,
+                    None,
                     None,
                     &Default::default(),
                     "remote",

@@ -1763,6 +1763,7 @@ async fn not_yours_is_byte_identical_to_never_existed() {
     b.journal
         .room
         .record_event(RoomEvent::RecipientItemReceived {
+            stories: None,
             message_type: rustain::domain::models::SemanticMessageType::Unknown,
             address: foreign,
             task: "their-task".to_owned(),

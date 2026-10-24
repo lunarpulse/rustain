@@ -356,16 +356,21 @@ impl RawEvent {
                             send_authorization,
                             ..
                         },
-                    )
-                    | crate::domain::events::DomainEventPayload::Room(
+                    ) => {
+                        *authorship = crate::domain::models::Authorship::Unknown;
+                        *send_authorization = crate::domain::models::SendAuthorization::Unknown;
+                    }
+                    crate::domain::events::DomainEventPayload::Room(
                         crate::domain::models::RoomEvent::RecipientItemReceived {
                             authorship,
                             send_authorization,
+                            stories,
                             ..
                         },
                     ) => {
                         *authorship = crate::domain::models::Authorship::Unknown;
                         *send_authorization = crate::domain::models::SendAuthorization::Unknown;
+                        *stories = None;
                     }
                     crate::domain::events::DomainEventPayload::Room(
                         crate::domain::models::RoomEvent::RecipientItemReplied {
@@ -736,11 +741,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn received_raw_projection_omits_provenance_and_retains_domain_facts() {
+    async fn received_raw_projection_omits_stories_and_provenance_and_retains_domain_facts() {
         use crate::domain::events::DomainEventPayload;
         use crate::domain::models::{
-            Authorship, ItemAddress, ItemId, PeerId, RoomEvent, SemanticMessageType,
-            SendAuthorization,
+            Authorship, ItemAddress, ItemId, PeerId, ReceivedStories, ReceivedStory, RoomEvent,
+            SemanticMessageType, SendAuthorization, StoryHolder, StoryKey,
         };
 
         let event = RoomEvent::RecipientItemReceived {
@@ -751,7 +756,13 @@ mod tests {
             task: "received-task".to_owned(),
             alias: Some("sender".to_owned()),
             content: "received body".to_owned(),
-            message_type: SemanticMessageType::Unknown,
+            message_type: SemanticMessageType::StoryAssignment,
+            stories: Some(ReceivedStories::Listed {
+                stories: vec![ReceivedStory {
+                    key: StoryKey::parse("S-private").unwrap(),
+                    holder: StoryHolder::You,
+                }],
+            }),
             in_reply_to: None,
             capability_hash: None,
             reply_capability_matched: false,
@@ -761,6 +772,7 @@ mod tests {
         let original = serde_json::to_value(&event).unwrap();
         assert_eq!(original["authorship"], "agent-composed");
         assert_eq!(original["send_authorization"], "automatic");
+        assert_eq!(original["stories"]["state"], "Listed");
         let (bus, mut domain) = EventBus::new(16);
         let mut raw = bus.subscribe_raw();
         bus.emit_domain(AppEvent::DomainEvent(DomainEventPayload::Room(
@@ -781,10 +793,13 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("send_authorization");
+        expected.as_object_mut().unwrap().remove("stories");
         assert_eq!(serde_json::to_value(projected).unwrap(), expected);
         let encoded = serde_json::to_string(&encoded).unwrap();
         assert!(!encoded.contains("authorship"));
         assert!(!encoded.contains("send_authorization"));
+        assert!(!encoded.contains("stories"));
+        assert!(!encoded.contains("S-private"));
         let AppEvent::DomainEvent(DomainEventPayload::Room(retained)) = domain
             .try_recv()
             .expect("source event reaches domain channel")

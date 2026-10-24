@@ -216,6 +216,7 @@ mod tests {
             subject: Some("sprint-7".to_owned()),
             body_hash: ContentHash::from_bytes([0; 32]),
             body_bytes: 4,
+            stories: Vec::new(),
         }
     }
 

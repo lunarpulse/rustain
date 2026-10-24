@@ -82,6 +82,7 @@ async fn seed_item(room: &dyn RoomJournal, item_id: &str, task: &str, state: Rec
         ItemId::from_replay(item_id),
     );
     room.record_event(RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address: address.clone(),
         task: task.to_owned(),

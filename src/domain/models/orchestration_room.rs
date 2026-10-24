@@ -1087,6 +1087,9 @@ pub enum RoomEvent {
         /// Verified semantic type carried at ingress, independent of body text.
         #[serde(default, skip_serializing_if = "SemanticMessageType::is_unknown")]
         message_type: SemanticMessageType,
+        /// Sender-stated story relationships, fixed when this item is created.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stories: Option<super::ReceivedStories>,
         #[serde(
             default = "Authorship::unknown",
             skip_serializing_if = "Authorship::is_unknown"
@@ -1262,6 +1265,8 @@ pub enum RoomEvent {
         subject: Option<String>,
         body_hash: ContentHash,
         body_bytes: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stories: Vec<crate::domain::models::RecordedStory>,
     },
     /// Story 19.21 `C1` — the typed outcome of one recipient of a send action,
     /// appended after every row that recipient's delivery path emitted and

@@ -318,6 +318,8 @@ pub struct RecipientItemView {
     pub task: String,
     pub alias: Option<String>,
     pub message_type: super::SemanticMessageType,
+    /// Sender-stated story relationships from the first received record.
+    pub stories: Option<super::ReceivedStories>,
     pub authorship: super::Authorship,
     pub send_authorization: super::SendAuthorization,
     /// The content lives **inside** [`RecipientItemState`]

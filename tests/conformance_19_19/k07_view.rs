@@ -611,6 +611,7 @@ async fn k07_view_keeps_distinct_principals_and_unrelated_threads_separate() {
         .journal
         .room
         .record_event(RoomEvent::RecipientItemReceived {
+            stories: None,
             address: rustain::domain::models::ItemAddress::from_a2a_ingress(
                 second_peer,
                 rustain::domain::models::ItemId::from_replay(cross_principal_child),

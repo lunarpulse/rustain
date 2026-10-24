@@ -550,6 +550,7 @@ async fn k11_a_typed_pinned_grant_from_a_rap_card_answer_is_reused_by_bound_a2a_
     host.journal
         .room
         .record_event(RoomEvent::RecipientItemReceived {
+            stories: None,
             message_type: rustain::domain::models::SemanticMessageType::Unknown,
             address: ItemAddress::from_rap_ingress(
                 pin.clone(),

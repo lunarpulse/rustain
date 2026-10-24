@@ -769,6 +769,7 @@ pub(crate) async fn seed_recipient_item(journal: &Journal, item: &str, task: &st
     journal
         .room
         .record_event(RoomEvent::RecipientItemReceived {
+            stories: None,
             message_type: SemanticMessageType::Unknown,
             address,
             task: task.to_owned(),

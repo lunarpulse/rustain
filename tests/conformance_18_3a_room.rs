@@ -110,6 +110,9 @@ fn room_role_never_reaches_the_capability_or_authority_seams() {
             "local_operator",
             "RoomEditKind",
             "PatchDisposition",
+            "StoryManifest",
+            "ReceivedStories",
+            "StoryHolder",
         ] {
             assert!(
                 !source.contains(needle),
@@ -117,7 +120,7 @@ fn room_role_never_reaches_the_capability_or_authority_seams() {
                  class and a merge-back disposition must never contribute to a CapabilityToken, \
                  an AuthorityProvider decision, or an approval fingerprint (epics.md contracted \
                  scope: roles govern room edits only; FR152: addressing a human is a \
-                 zero-authority attribution)"
+                 zero-authority attribution; a story assignment is a zero-authority statement)"
             );
         }
     }

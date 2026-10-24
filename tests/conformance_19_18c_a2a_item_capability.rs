@@ -2210,6 +2210,7 @@ async fn k08_legacy_items_keep_their_gate_and_a_broken_hash_fails_closed() {
             .journal
             .room
             .record_event(RoomEvent::RecipientItemReceived {
+                stories: None,
                 message_type: rustain::domain::models::SemanticMessageType::Unknown,
                 address: rustain::domain::models::ItemAddress::from_a2a_ingress(
                     principal.clone(),

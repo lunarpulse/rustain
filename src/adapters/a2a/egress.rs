@@ -725,6 +725,7 @@ mod item_capability_tests {
                 item_key: Some(&key),
                 reply_to: None,
                 reply_capability: None,
+                stories: None,
                 authorship: crate::domain::models::Authorship::Unknown,
                 send_authorization: crate::domain::models::SendAuthorization::Unknown,
             },

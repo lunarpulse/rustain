@@ -104,6 +104,7 @@ impl A2aProvider {
                 item_key: item_key.as_deref(),
                 reply_to: None,
                 reply_capability: None,
+                stories: None,
                 authorship,
                 send_authorization,
             },

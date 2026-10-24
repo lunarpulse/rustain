@@ -31,9 +31,9 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::events::{AppEvent, DomainEventPayload};
 use crate::domain::models::{
     A2aPeerSpec, AgentId, AgentMetrics, Authorship, CapabilityTokenId, ContentHash, CorrelationId,
-    Direction, MessageKind, NodeState, Op, PeerId, RapTaskState, RefuseReason, RejectReason,
-    RoomEvent, SemanticMessageType, SendActionId, SendActionRecipient, SendActionRef,
-    SendAuthorization, SendSettlement, SubagentEnvelope, SubagentEvent, TrustTier,
+    Direction, MessageKind, NodeState, Op, PeerId, RapTaskState, RecordedStory, RefuseReason,
+    RejectReason, RoomEvent, SemanticMessageType, SendActionId, SendActionRecipient, SendActionRef,
+    SendAuthorization, SendSettlement, StoryManifest, SubagentEnvelope, SubagentEvent, TrustTier,
     semantic_message_type_metadata,
 };
 use crate::domain::ports::{RoomJournal, RoomJournalError};
@@ -317,6 +317,7 @@ pub(crate) struct SendLiveness {
 pub(crate) struct SendActionHandle {
     id: SendActionId,
     tokens: Vec<Arc<()>>,
+    stories: Vec<Option<serde_json::Value>>,
 }
 
 impl SendActionHandle {
@@ -324,26 +325,94 @@ impl SendActionHandle {
         &self.id
     }
 
-    /// One `(reference, liveness)` pair per recipient, in operator order. The
-    /// reference is what the recipient's dispatch row and settlement carry; the
-    /// liveness token must be moved into that recipient's future **before** it
-    /// is first polled, so a future dropped unpolled still releases it.
-    pub(crate) fn into_recipients(self) -> Vec<(SendActionRef, SendLiveness)> {
-        let Self { id, tokens } = self;
+    /// One `(reference, liveness, stories)` tuple per recipient, in operator order.
+    /// The reference is what the recipient's dispatch row and settlement carry;
+    /// the liveness token must be moved into that recipient's future **before**
+    /// it is first polled, so a future dropped unpolled still releases it.
+    pub(crate) fn into_recipients(
+        self,
+    ) -> Vec<(SendActionRef, SendLiveness, Option<serde_json::Value>)> {
+        let Self {
+            id,
+            tokens,
+            stories,
+        } = self;
         tokens
             .into_iter()
+            .zip(stories)
             .enumerate()
-            .map(|(index, token)| {
+            .map(|(index, (token, stories))| {
                 (
                     SendActionRef {
                         action: id.clone(),
                         index: u32::try_from(index).unwrap_or(u32::MAX),
                     },
                     SendLiveness { _token: token },
+                    stories,
                 )
             })
             .collect()
     }
+}
+
+/// Freeze the validated manifest against the same roster slots as the action.
+/// Only actual pins cross hosts; a sender-local alias pseudonym never does.
+/// `you` marks every entry held by this recipient's host: the same alias (a
+/// repeated slot) or the same actual pin (two aliases for one host).
+fn freeze_stories(
+    manifest: Option<&StoryManifest>,
+    aliases: &[String],
+    pins: &[Option<PeerId>],
+) -> (Vec<RecordedStory>, Vec<Option<serde_json::Value>>) {
+    let Some(manifest) = manifest else {
+        return (Vec::new(), aliases.iter().map(|_| None).collect());
+    };
+    let recorded: Vec<RecordedStory> = manifest
+        .stories
+        .iter()
+        .map(|story| RecordedStory {
+            key: story.key.clone(),
+            to: story.to.as_ref().map(|alias| {
+                let index = aliases
+                    .iter()
+                    .position(|recipient| recipient == alias)
+                    .expect("validated story member is an addressed recipient");
+                u32::try_from(index).expect("recipient index fits u32")
+            }),
+        })
+        .collect();
+    let carriers = aliases
+        .iter()
+        .enumerate()
+        .map(|(recipient_index, _)| {
+            let stories: Vec<serde_json::Value> = recorded
+                .iter()
+                .map(|story| {
+                    let mut entry = serde_json::json!({ "key": story.key.as_str() });
+                    if let Some(index) = story.to {
+                        let index = usize::try_from(index).expect("recipient index fits usize");
+                        let same_host = aliases[index] == aliases[recipient_index]
+                            || pins[index]
+                                .as_ref()
+                                .is_some_and(|pin| pins[recipient_index].as_ref() == Some(pin));
+                        if same_host {
+                            entry["you"] = serde_json::Value::Bool(true);
+                        } else {
+                            entry["alias"] = serde_json::Value::String(aliases[index].clone());
+                            if let Some(peer) = &pins[index] {
+                                entry["peer"] = serde_json::Value::String(peer.as_str().to_owned());
+                            }
+                        }
+                    }
+                    entry
+                })
+                .collect();
+            let mut carrier = serde_json::Map::new();
+            carrier.insert("stories".to_owned(), serde_json::Value::Array(stories));
+            Some(serde_json::Value::Object(carrier))
+        })
+        .collect();
+    (recorded, carriers)
 }
 
 /// Drop every slot whose recipient future is gone, and every action left empty.
@@ -1054,8 +1123,14 @@ impl A2aDelegationRuntime {
         text: &str,
         message_type: Option<SemanticMessageType>,
         subject: Option<&str>,
+        stories: Option<&StoryManifest>,
     ) -> Result<SendActionHandle, DelegationError> {
         let mut frozen = Vec::with_capacity(recipients.len());
+        let mut pins = if stories.is_some() {
+            Vec::with_capacity(recipients.len())
+        } else {
+            Vec::new()
+        };
         for alias in recipients {
             let (spec, _) = self.peer_binding(alias).ok_or_else(|| {
                 DelegationError::Driver(format!("no roster binding for recipient `{alias}`"))
@@ -1065,7 +1140,11 @@ impl A2aDelegationRuntime {
                 peer: spec.resolved_identity(),
                 endpoint: self.dispatch_endpoint(&spec),
             });
+            if stories.is_some() {
+                pins.push(spec.pinned_identity());
+            }
         }
+        let (recorded_stories, story_carriers) = freeze_stories(stories, recipients, &pins);
         let action = self.mint_send_action_id().await?;
         self.emit_room(RoomEvent::TeamSendActionRecorded {
             action: action.clone(),
@@ -1074,6 +1153,7 @@ impl A2aDelegationRuntime {
             subject: subject.map(str::to_owned),
             body_hash: text_content_hash(text),
             body_bytes: text.len(),
+            stories: recorded_stories,
         })
         .await?;
         let tokens: Vec<Arc<()>> = recipients.iter().map(|_| Arc::new(())).collect();
@@ -1094,7 +1174,11 @@ impl A2aDelegationRuntime {
                     .collect(),
             );
         }
-        Ok(SendActionHandle { id: action, tokens })
+        Ok(SendActionHandle {
+            id: action,
+            tokens,
+            stories: story_carriers,
+        })
     }
 
     /// A fresh id, unique among every id this workspace journal records
@@ -2005,6 +2089,8 @@ pub struct MessageCarriers<'a> {
     /// Story 19.18c `A10` — the capability of the reference's nearest item
     /// ([`super::REPLY_CAPABILITY_METADATA_KEY`]).
     pub reply_capability: Option<&'a ItemCapability>,
+    /// Story 19.21d `AC3` — the frozen per-recipient story list; never a follow-up.
+    pub stories: Option<&'a serde_json::Value>,
     pub authorship: Authorship,
     pub send_authorization: SendAuthorization,
 }
@@ -2070,6 +2156,11 @@ pub fn build_message(
             super::REPLY_TO_METADATA_KEY.to_owned(),
             serde_json::Value::String(reply_to.to_owned()),
         );
+    }
+    if carriers.reply_to.is_none()
+        && let Some(stories) = carriers.stories
+    {
+        metadata.insert(super::STORIES_METADATA_KEY.to_owned(), stories.clone());
     }
     if let Some(reply_capability) = carriers.reply_capability {
         metadata.insert(
@@ -2165,6 +2256,7 @@ mod tests {
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
+                stories: None,
                 authorship: Authorship::Unknown,
                 send_authorization: SendAuthorization::Unknown,
             },
@@ -2180,6 +2272,7 @@ mod tests {
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
+                stories: None,
                 authorship: Authorship::Unknown,
                 send_authorization: SendAuthorization::Unknown,
             },
@@ -2206,6 +2299,7 @@ mod tests {
                     reply_to: None,
                     item_key: None,
                     reply_capability: None,
+                    stories: None,
                     authorship,
                     send_authorization,
                 },
@@ -2240,6 +2334,7 @@ mod tests {
             "inReplyTo": "rr_forged",
             "x-rustain-item-capability": "forged",
             "x-rustain-reply-capability": "forged",
+            "x-rustain-stories": { "stories": [{ "key": "FORGED", "you": true }] },
             "x-rustain-authorship": "agent-composed",
             "x-rustain-send-authorization": "automatic",
             "authorship": "agent-composed",
@@ -2251,6 +2346,7 @@ mod tests {
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
+                stories: None,
                 authorship: Authorship::Unknown,
                 send_authorization: SendAuthorization::Unknown,
             },
@@ -2266,6 +2362,7 @@ mod tests {
                 item_key: Some(&key),
                 reply_to: None,
                 reply_capability: None,
+                stories: None,
                 authorship: Authorship::Unknown,
                 send_authorization: SendAuthorization::Unknown,
             },
@@ -2286,6 +2383,7 @@ mod tests {
                 reply_to: Some("rr_1"),
                 reply_capability: Some(&reply),
                 item_key: None,
+                stories: None,
                 authorship: Authorship::Unknown,
                 send_authorization: SendAuthorization::Unknown,
             },
@@ -2312,6 +2410,7 @@ mod tests {
                 item_key: Some(&key),
                 reply_to: None,
                 reply_capability: None,
+                stories: None,
                 authorship: Authorship::Unknown,
                 send_authorization: SendAuthorization::Unknown,
             },
@@ -2344,6 +2443,7 @@ mod tests {
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
+                stories: None,
                 authorship: Authorship::Unknown,
                 send_authorization: SendAuthorization::Unknown,
             },
@@ -2367,6 +2467,7 @@ mod tests {
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
+                stories: None,
                 authorship: Authorship::Unknown,
                 send_authorization: SendAuthorization::Unknown,
             },
@@ -3778,5 +3879,118 @@ mod tests {
             restarted.settle_thread(&other, &turns[..1]).await,
             vec![false]
         );
+    }
+}
+
+#[cfg(test)]
+mod story_contract_tests {
+    use super::*;
+    use crate::domain::models::{PeerId, StoryManifest};
+
+    #[test]
+    fn story_carriers_match_frozen_recipient_slots() {
+        let aliases = vec!["b".to_owned(), "c".to_owned()];
+        let pin = PeerId::from_public_key(&[3; 32]).unwrap();
+        let manifest = StoryManifest::parse("S1,S2=b,S3=c").unwrap();
+        let (recorded, carriers) =
+            freeze_stories(Some(&manifest), &aliases, &[None, Some(pin.clone())]);
+        assert_eq!(
+            serde_json::to_value(recorded).unwrap(),
+            serde_json::json!([
+                {"key":"S1","to":null},{"key":"S2","to":0},{"key":"S3","to":1}
+            ])
+        );
+        assert_eq!(
+            carriers,
+            vec![
+                Some(
+                    serde_json::json!({"stories":[{"key":"S1"},{"key":"S2","you":true},{"key":"S3","alias":"c","peer":pin}]})
+                ),
+                Some(
+                    serde_json::json!({"stories":[{"key":"S1"},{"key":"S2","alias":"b"},{"key":"S3","you":true}]})
+                )
+            ]
+        );
+        let (recorded, carriers) = freeze_stories(None, &aliases, &[None, None]);
+        assert!(recorded.is_empty());
+        assert_eq!(carriers, vec![None, None]);
+    }
+
+    #[test]
+    fn story_carriers_mark_you_for_every_slot_of_the_holder_host() {
+        let pin = PeerId::from_public_key(&[4; 32]).unwrap();
+        let other = PeerId::from_public_key(&[5; 32]).unwrap();
+        let manifest = StoryManifest::parse("S1=b").unwrap();
+        let you = Some(serde_json::json!({"stories":[{"key":"S1","you":true}]}));
+        // A repeated alias is one host, whatever its pin.
+        let (recorded, carriers) =
+            freeze_stories(Some(&manifest), &["b".into(), "b".into()], &[None, None]);
+        assert_eq!(
+            serde_json::to_value(recorded).unwrap(),
+            serde_json::json!([{"key":"S1","to":0}])
+        );
+        assert_eq!(carriers, vec![you.clone(), you.clone()]);
+        // Two aliases pinned to one host both receive `you`.
+        let (_, carriers) = freeze_stories(
+            Some(&manifest),
+            &["b".into(), "c".into()],
+            &[Some(pin.clone()), Some(pin.clone())],
+        );
+        assert_eq!(carriers, vec![you.clone(), you.clone()]);
+        // Control: a different pin, or no pin at all, stays a named member.
+        for c_pin in [Some(other), None] {
+            let (_, carriers) = freeze_stories(
+                Some(&manifest),
+                &["b".into(), "c".into()],
+                &[Some(pin.clone()), c_pin],
+            );
+            assert_eq!(
+                carriers,
+                vec![
+                    you.clone(),
+                    Some(
+                        serde_json::json!({"stories":[{"key":"S1","alias":"b","peer":pin.clone()}]})
+                    )
+                ]
+            );
+        }
+        // An unpinned holder never matches an unpinned recipient by absence.
+        let (_, carriers) =
+            freeze_stories(Some(&manifest), &["b".into(), "c".into()], &[None, None]);
+        assert_eq!(
+            carriers[1],
+            Some(serde_json::json!({"stories":[{"key":"S1","alias":"b"}]}))
+        );
+    }
+
+    #[test]
+    fn story_metadata_is_explicit_and_omitted_for_followups() {
+        let stories = serde_json::json!({ "stories": [{ "key": "S1", "you": true }] });
+        for (reply_to, carrier, expected) in [
+            (None, Some(&stories), Some(&stories)),
+            (None, None, None),
+            (Some("rr_1"), Some(&stories), None),
+            (Some("rr_1"), None, None),
+        ] {
+            let (message, _) = build_message(
+                &serde_json::json!({
+                    "message": "story details",
+                    "message_type": "story_assignment",
+                    "x-rustain-stories": { "stories": [{ "key": "FORGED" }] },
+                }),
+                MessageCarriers {
+                    reply_to,
+                    item_key: None,
+                    reply_capability: None,
+                    stories: carrier,
+                    authorship: Authorship::Unknown,
+                    send_authorization: SendAuthorization::Unknown,
+                },
+            );
+            assert_eq!(
+                message["message"]["metadata"].get(super::super::STORIES_METADATA_KEY),
+                expected,
+            );
+        }
     }
 }

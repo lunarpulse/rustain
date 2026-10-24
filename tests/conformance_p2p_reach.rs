@@ -790,8 +790,14 @@ fn exactly_one_production_caller_reaches_send_to() {
         }
     }
     // `AttachServer::send_to` is the daemon's own unrelated frame writer on the
-    // local Unix socket; it is not this port.
+    // local Unix socket, not this port. Its decode helper makes exactly one
+    // such call; only that call is excused, so a second caller there still counts.
     callers.retain(|name| !name.ends_with("adapters/daemon/server.rs"));
+    let decode_helper = callers
+        .iter()
+        .position(|name| name.ends_with("adapters/daemon/server/frame_decode.rs"))
+        .expect("the decode helper answers through `AttachServer::send_to`");
+    callers.remove(decode_helper);
     assert_eq!(
         callers,
         vec!["src/infrastructure/runtime/peer_bridge.rs".to_owned()],

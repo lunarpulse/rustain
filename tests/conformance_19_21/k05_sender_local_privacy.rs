@@ -22,6 +22,7 @@ async fn peer_raw_events_omit_sender_action_facts_but_keep_sanitized_legacy_disp
             "sender body is not a wire projection",
             None,
             Some("sender-only-subject-7f2d".into()),
+            None,
         )
         .await;
     assert!(matches!(

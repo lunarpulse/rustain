@@ -80,6 +80,7 @@ pub mod session_queue;
 mod skill;
 pub mod skill_catalog_delta;
 pub mod skill_metadata;
+pub mod story_manifest;
 mod stream;
 pub mod subagent_envelope;
 pub mod subagent_error;
@@ -268,6 +269,10 @@ pub use skill::{
 };
 pub use skill_catalog_delta::SkillCatalogDelta;
 pub use skill_metadata::SkillMetadata;
+pub use story_manifest::{
+    ReceivedStories, ReceivedStory, RecordedStory, StoryEntry, StoryHolder, StoryKey,
+    StoryManifest, StoryRefusal, StorySummary, story_summary,
+};
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use subagent_error::{SpawnLimitKind, SubagentError};

@@ -1571,6 +1571,7 @@ mod tests {
                 (Some("T\x1bo\rm\u{9b}\n"), " from Tom"),
             ] {
                 let received = RoomEvent::RecipientItemReceived {
+                    stories: None,
                     address: address.clone(),
                     task: "sender-task".to_owned(),
                     alias: alias.map(str::to_owned),

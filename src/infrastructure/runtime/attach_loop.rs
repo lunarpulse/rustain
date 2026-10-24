@@ -334,6 +334,7 @@ struct PendingPeerResponse<'a> {
     canonical_type: &'static str,
     sender_label: &'a str,
     item_address: Option<&'a crate::domain::models::ItemAddress>,
+    stories: Option<&'a crate::domain::models::StorySummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,6 +373,7 @@ fn pending_peer_response(conversation: &Conversation) -> Option<PendingPeerRespo
         canonical_type: semantic_message_type_metadata(control.message_type).operator_noun,
         sender_label: &control.sender_label,
         item_address: control.item_address.as_ref(),
+        stories: control.stories.as_ref(),
     })
 }
 
@@ -425,12 +427,15 @@ fn peer_response_card_lines<'a>(
     } else {
         String::new()
     };
-    let mut lines = Vec::with_capacity(3);
+    let mut lines = Vec::with_capacity(3 + usize::from(pending.stories.is_some()));
     lines.push(Line::from(vec![
         Span::raw(pending.canonical_type),
         Span::raw(" · "),
         Span::raw(pending.sender_label),
     ]));
+    if let Some(summary) = pending.stories {
+        lines.push(Line::from(summary.0.as_str()));
+    }
     if pending.node_resolvable {
         match &pending.stage {
             PeerResponseStage::AwaitingOperator => {
@@ -586,6 +591,11 @@ fn legacy_response_content(
         crate::domain::models::semantic_message_type_metadata(control.message_type).operator_noun,
         sanitize_disclosable(&control.sender_label, control.sender_label.len()),
     );
+    if let Some(summary) = &control.stories {
+        content.push_str("  ");
+        content.push_str(&summary.0);
+        content.push('\n');
+    }
     if super::recipient_view::safe_display_len(body)
         > crate::domain::services::recipient_thread_bounds::MAX_THREAD_TURN_BYTES
             .saturating_sub(content.len())
@@ -2682,12 +2692,14 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
             text,
             message_type,
             subject,
+            stories,
         }) => AttachedTeamLine::Frame(ClientFrame::TeamSend {
             request,
             recipients,
             text,
             message_type,
             subject,
+            stories,
         }),
         Ok(TeamCommandArgs::Acknowledge { item_id }) => {
             AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { item_id })
@@ -4766,6 +4778,7 @@ mod tests {
                     text: snapshot.body.clone(),
                     message_type: Some(snapshot.message_type),
                     subject: None,
+                    stories: None,
                 },
                 &tx,
             ));
@@ -5171,10 +5184,61 @@ mod tests {
         crate::domain::models::PeerRowControl {
             node_id: node.to_owned(),
             item_address: None,
+            stories: None,
             message_type: crate::domain::models::SemanticMessageType::Consultation,
             sender_label: "sender".to_owned(),
             stage,
             node_resolvable: true,
+        }
+    }
+
+    #[test]
+    fn story_card_summary_uses_control_only_at_floor_width() {
+        use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card;
+        use crate::domain::models::{PeerRowStage, StorySummary};
+        let summary = "8 stories, 2 assigned to you";
+        for expected in [
+            Some(summary),
+            None,
+            Some("story list not readable by this build"),
+        ] {
+            let mut control = peer_control("story", PeerRowStage::AwaitingOperator);
+            control.message_type = crate::domain::models::SemanticMessageType::StoryAssignment;
+            control.stories = expected.map(|text| StorySummary(text.to_owned()));
+            let conversation = Conversation {
+                messages: vec![peer_row("story", summary)],
+                peer_row_controls: [("story".to_owned(), control)].into_iter().collect(),
+                ..Default::default()
+            };
+            let pending = pending_peer_response(&conversation).unwrap();
+            let lines = peer_response_card_lines(&pending, false);
+            let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+            if let Some(expected) = expected {
+                assert_eq!(text[1], expected);
+            } else {
+                assert!(!text.iter().any(|line| line.contains(summary)));
+            }
+            let pane = ratatui::layout::Rect::new(0, 0, 60, 12);
+            let mut buffer = ratatui::buffer::Buffer::empty(pane);
+            render_bottom_anchored_decision_card(
+                &mut buffer,
+                lines,
+                ratatui::style::Color::Reset,
+                pane,
+            );
+            let rendered = (0..pane.height)
+                .map(|y| {
+                    (0..pane.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(expected) = expected {
+                assert!(rendered.contains(expected));
+            } else {
+                assert!(!rendered.contains(summary));
+            }
         }
     }
 
@@ -5194,6 +5258,7 @@ mod tests {
         );
         journal
             .append_room(RoomEvent::RecipientItemReceived {
+                stories: None,
                 address: address.clone(),
                 task: format!("task-{item_id}"),
                 alias: Some("test sender".to_owned()),
@@ -5352,6 +5417,7 @@ mod tests {
                 crate::domain::models::PeerRowControl {
                     node_id: format!("node-{index}"),
                     item_address: Some(address.clone()),
+                    stories: None,
                     message_type,
                     sender_label: "test sender".to_owned(),
                     stage: PeerRowStage::AwaitingOperator,
@@ -5481,6 +5547,7 @@ mod tests {
                     crate::domain::models::PeerRowControl {
                         node_id: "story-assignment-node".to_owned(),
                         item_address: Some(address.clone()),
+                        stories: None,
                         message_type,
                         sender_label: "test sender".to_owned(),
                         stage: crate::domain::models::PeerRowStage::AwaitingOperator,
@@ -5662,6 +5729,7 @@ mod tests {
                     PeerRowControl {
                         node_id: "bug".into(),
                         item_address: Some(address.clone()),
+                        stories: None,
                         message_type: SemanticMessageType::BugReport,
                         sender_label: "sender".into(),
                         stage,
@@ -7245,6 +7313,7 @@ mod tests {
             text,
             message_type,
             subject,
+            stories: None,
         }) = attached_team_line_for_request(&input, "paste-1".into())
         else {
             panic!("pasted send command must stay a typed daemon frame");
@@ -7278,6 +7347,7 @@ mod tests {
                 text: "body".into(),
                 message_type: None,
                 subject: None,
+                stories: None,
             },
             &tx,
         ));
@@ -7310,6 +7380,7 @@ mod tests {
                     text: "body".into(),
                     message_type: None,
                     subject: None,
+                    stories: None,
                 },
                 &tx,
             ));

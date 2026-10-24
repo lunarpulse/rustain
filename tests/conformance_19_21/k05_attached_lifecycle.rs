@@ -55,6 +55,7 @@ fn send_frame(request: &str, recipient: &str, text: &str) -> ClientFrame {
         text: text.to_owned(),
         message_type: Some(SemanticMessageType::StoryAssignment),
         subject: Some("lifecycle-check".to_owned()),
+        stories: None,
     }
 }
 

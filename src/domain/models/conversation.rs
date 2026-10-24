@@ -188,6 +188,8 @@ pub enum PeerRowStage {
 pub struct PeerRowControl {
     pub node_id: String,
     pub item_address: Option<super::ItemAddress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stories: Option<super::StorySummary>,
     pub message_type: super::SemanticMessageType,
     pub sender_label: String,
     pub stage: PeerRowStage,

@@ -2652,6 +2652,7 @@ async fn a_task_lost_to_a_restart_resolves_failed_with_a_distinct_reason() {
     rustain::domain::ports::RoomJournal::record_event(
         &NodeRoomJournal::new(journal.clone(), Some(domain_tx.clone())),
         rustain::domain::models::RoomEvent::RecipientItemReceived {
+            stories: None,
             message_type: rustain::domain::models::SemanticMessageType::Unknown,
             address: durable_address,
             task: task_id.to_owned(),
@@ -3522,6 +3523,7 @@ async fn ac4_a_restart_never_rebinds_an_orphaned_task_to_a_removed_item() {
     rustain::domain::ports::RoomJournal::record_event(
         &room,
         rustain::domain::models::RoomEvent::RecipientItemReceived {
+            stories: None,
             message_type: rustain::domain::models::SemanticMessageType::Unknown,
             address: removed_address.clone(),
             task: task_id.to_owned(),

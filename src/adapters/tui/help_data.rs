@@ -257,8 +257,8 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {
-                    key: "/team send [--type <type>] [--subject <label>] <peer-id>[,<peer-id>…] <text…>",
-                    description: "Daemon-served typed send over the composed egress; requires trusted-local writer attachment; --subject is sender-local (a2a feature)",
+                    key: "/team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…>",
+                    description: "Daemon-served typed send; trusted-local writer; --subject is local, --stories states story holders (a2a feature)",
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {

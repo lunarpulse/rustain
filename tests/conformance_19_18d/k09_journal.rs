@@ -121,6 +121,7 @@ fn principal_of(event: &RoomEvent) -> &ItemPrincipal {
 
 fn received(address: ItemAddress) -> RoomEvent {
     RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address,
         task: "sender-message-1".to_owned(),

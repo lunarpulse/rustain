@@ -302,6 +302,7 @@ async fn accepted_proposal_send_survives_eof_without_replacement() {
             BODY,
             Some(SemanticMessageType::ArchitectureUpdate),
             None,
+            None,
         )
         .await;
     daemon.team_send_hooks.wait_for_send_action_count(1).await;
@@ -619,6 +620,7 @@ async fn opt_in_waits_for_operator_fifo_and_cannot_outlive_its_writer() {
             BODY,
             Some(SemanticMessageType::ArchitectureUpdate),
             None,
+            None,
         )
         .await;
     daemon.team_send_hooks.wait_for_worker_gate_count(1).await;
@@ -629,6 +631,7 @@ async fn opt_in_waits_for_operator_fifo_and_cannot_outlive_its_writer() {
             vec!["lena-po".into()],
             BODY,
             Some(SemanticMessageType::ArchitectureUpdate),
+            None,
             None,
         )
         .await;
@@ -716,6 +719,7 @@ async fn saturated_send_preserves_proposal_for_retry() {
                 vec!["lena-po".into()],
                 "held",
                 Some(SemanticMessageType::ArchitectureUpdate),
+                None,
                 None,
             )
             .await;

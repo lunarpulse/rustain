@@ -32,6 +32,7 @@ fn address_for(key: &SubmitterKey, item: &str) -> ItemAddress {
 
 fn received(address: &ItemAddress) -> RoomEvent {
     RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address: address.clone(),
         task: "task-1".to_owned(),

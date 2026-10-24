@@ -29,6 +29,7 @@ fn entry(seq: u64, event: RoomEvent) -> JournalEntry {
 
 fn received(address: &ItemAddress, task: &str) -> RoomEvent {
     RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         address: address.clone(),
         task: task.to_owned(),

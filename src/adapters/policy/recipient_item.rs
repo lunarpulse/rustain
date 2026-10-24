@@ -707,6 +707,7 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
             task,
             alias,
             message_type,
+            stories,
             authorship,
             send_authorization,
             content,
@@ -721,6 +722,7 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
                     task: task.clone(),
                     alias: alias.clone(),
                     message_type: *message_type,
+                    stories: stories.clone(),
                     authorship: *authorship,
                     send_authorization: *send_authorization,
                     state: RecipientItemState::Received {
@@ -848,6 +850,7 @@ mod tests {
             task: "sender-task".to_owned(),
             alias: None,
             message_type: crate::domain::models::SemanticMessageType::Unknown,
+            stories: None,
             content: "content".to_owned(),
             in_reply_to: None,
             capability_hash: None,
@@ -867,6 +870,160 @@ mod tests {
         JournalEntry::new(seq, JournalRecord::Room(event), seq as i64)
     }
 
+    fn story_event(
+        address: &ItemAddress,
+        stories: Option<crate::domain::models::ReceivedStories>,
+    ) -> RoomEvent {
+        RoomEvent::RecipientItemReceived {
+            address: address.clone(),
+            task: "story-task".to_owned(),
+            alias: Some("sender".to_owned()),
+            message_type: crate::domain::models::SemanticMessageType::StoryAssignment,
+            stories,
+            authorship: crate::domain::models::Authorship::Unknown,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
+            content: "story content".to_owned(),
+            in_reply_to: None,
+            capability_hash: None,
+            reply_capability_matched: false,
+        }
+    }
+
+    #[test]
+    fn received_stories_are_fixed_through_duplicates_acknowledgement_and_removal() {
+        use crate::domain::models::{ReceivedStories, ReceivedStory, StoryHolder, StoryKey};
+
+        let peer = PeerId::from_public_key(&[26; 32]).unwrap();
+        let address =
+            ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay("ri_story_history"));
+        let list = ReceivedStories::Listed {
+            stories: vec![
+                ReceivedStory {
+                    key: StoryKey::parse("S1").unwrap(),
+                    holder: StoryHolder::You,
+                },
+                ReceivedStory {
+                    key: StoryKey::parse("S2").unwrap(),
+                    holder: StoryHolder::Member {
+                        alias: "other-member".to_owned(),
+                        peer: Some(peer),
+                    },
+                },
+            ],
+        };
+        for first in [None, Some(list)] {
+            let events = [
+                story_event(&address, first.clone()),
+                story_event(&address, Some(ReceivedStories::Unreadable)),
+                RoomEvent::RecipientItemAcknowledged {
+                    address: address.clone(),
+                    alias: Some("renamed-sender".to_owned()),
+                },
+                story_event(&address, None),
+                RoomEvent::RecipientItemRemoved {
+                    address: address.clone(),
+                },
+            ];
+            let projection = JournalRecipientItemProjection::default();
+            for (index, event) in events.iter().enumerate() {
+                projection.apply(event);
+                let item = projection.get(&address).unwrap();
+                assert_eq!(item.stories, first, "creation wins at event {index}");
+                if index == 2 || index == 3 {
+                    assert!(matches!(
+                        item.state,
+                        RecipientItemState::Acknowledged { .. }
+                    ));
+                    assert_eq!(item.alias.as_deref(), Some("renamed-sender"));
+                }
+            }
+            let entries: Vec<_> = events
+                .into_iter()
+                .enumerate()
+                .map(|(index, event)| entry(index as u64 + 1, event))
+                .collect();
+            let replayed = JournalRecipientItemProjection::from_entries(&entries)
+                .get(&address)
+                .unwrap();
+            assert_eq!(replayed.stories, first);
+            assert!(matches!(replayed.state, RecipientItemState::Removed { .. }));
+        }
+    }
+
+    #[test]
+    fn future_story_list_and_holder_tags_remain_readable_journal_records() {
+        use crate::domain::models::{ReceivedStories, ReceivedStory, StoryHolder, StoryKey};
+        use serde_json::json;
+
+        let address = ItemAddress::from_a2a_ingress(
+            PeerId::from_public_key(&[27; 32]).unwrap(),
+            ItemId::from_replay("ri_future_stories"),
+        );
+        for (raw, expected) in [
+            (
+                json!({"state": "FutureList", "future": {"private": "extension"}}),
+                ReceivedStories::Unrecognized,
+            ),
+            (
+                json!({
+                    "state": "Listed",
+                    "stories": [{"key": "S1", "holder": {"kind": "FutureHolder", "extra": 1}}]
+                }),
+                ReceivedStories::Listed {
+                    stories: vec![ReceivedStory {
+                        key: StoryKey::parse("S1").unwrap(),
+                        holder: StoryHolder::Unrecognized,
+                    }],
+                },
+            ),
+        ] {
+            let mut value = serde_json::to_value(entry(
+                1,
+                story_event(&address, Some(ReceivedStories::Unreadable)),
+            ))
+            .unwrap();
+            *value.pointer_mut("/record/payload/stories").unwrap() = raw;
+            let decoded: JournalEntry =
+                serde_json::from_value(value).expect("future story tags keep the journal readable");
+            assert!(matches!(
+                &decoded.record,
+                JournalRecord::Room(RoomEvent::RecipientItemReceived { .. })
+            ));
+            let entries = [
+                decoded,
+                entry(
+                    2,
+                    RoomEvent::RecipientItemAcknowledged {
+                        address: address.clone(),
+                        alias: None,
+                    },
+                ),
+            ];
+            let item = JournalRecipientItemProjection::from_entries(&entries)
+                .get(&address)
+                .expect("future tags do not discard the item");
+            assert_eq!(item.stories, Some(expected));
+            assert!(matches!(
+                item.state,
+                RecipientItemState::Acknowledged { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_received_event_omits_story_field_and_folds_without_a_list() {
+        let address = ItemAddress::from_a2a_ingress(
+            PeerId::from_public_key(&[28; 32]).unwrap(),
+            ItemId::from_replay("ri_legacy_stories"),
+        );
+        let value = serde_json::to_value(story_event(&address, None)).unwrap();
+        assert!(value.get("stories").is_none());
+        let event: RoomEvent = serde_json::from_value(value).unwrap();
+        let projection = JournalRecipientItemProjection::default();
+        projection.apply(&event);
+        assert_eq!(projection.get(&address).unwrap().stories, None);
+    }
+
     #[test]
     fn journal_reply_kind_future_and_malformed_events_do_not_poison_fold() {
         let address = ItemAddress::from_a2a_ingress(
@@ -878,6 +1035,7 @@ mod tests {
             task: "sender-task".to_owned(),
             alias: None,
             message_type: crate::domain::models::SemanticMessageType::Consultation,
+            stories: None,
             content: "question".to_owned(),
             in_reply_to: None,
             capability_hash: None,
@@ -1011,6 +1169,7 @@ mod tests {
                     address: address.clone(),
                     task: "sender-task".to_owned(),
                     message_type: crate::domain::models::SemanticMessageType::Unknown,
+                    stories: None,
                     authorship: crate::domain::models::Authorship::Unknown,
                     send_authorization: crate::domain::models::SendAuthorization::Unknown,
                     alias: Some("arrival-alias".to_owned()),
@@ -1076,6 +1235,7 @@ mod tests {
             address: address.clone(),
             task: "sender-task".to_owned(),
             message_type: crate::domain::models::SemanticMessageType::Unknown,
+            stories: None,
             alias: None,
             content: "peer content".to_owned(),
             in_reply_to: None,
@@ -1115,6 +1275,7 @@ mod tests {
             |peer: &PeerId, id: &str, reply_to: Option<&str>| RoomEvent::RecipientItemReceived {
                 address: ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay(id)),
                 message_type: crate::domain::models::SemanticMessageType::Unknown,
+                stories: None,
                 task: format!("task-{id}"),
                 alias: None,
                 content: format!("content {id}"),
@@ -1280,6 +1441,7 @@ mod tests {
             reply_capability_matched: false,
             authorship: crate::domain::models::Authorship::Unknown,
             send_authorization: crate::domain::models::SendAuthorization::Unknown,
+            stories: None,
         };
         let projection = JournalRecipientItemProjection::from_entries(&[
             entry(1, item("ri_a", "ri_b")),

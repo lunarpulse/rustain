@@ -69,7 +69,8 @@ use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::domain::models::provenance::{Authorship, SendAuthorization};
 use crate::domain::models::{
     A2aPeerSpec, AppConfig, CapabilityRegistry, ItemPrincipal, ItemScope, PeerId, PolicyPrincipal,
-    RapTaskState, RecipientItemAllocator, RetractOutcome, RoomEvent, SemanticMessageType,
+    RapTaskState, ReceivedStories, RecipientItemAllocator, RetractOutcome, RoomEvent,
+    SemanticMessageType,
 };
 use crate::domain::ports::{InboundApprovalTicket, InboundPeerRuntime, InboundPeerTask};
 
@@ -99,6 +100,7 @@ use super::jsonrpc::{
     JsonRpcResponse,
 };
 use super::projection::{RemotePeerViewer, RoomProjection};
+use super::story_carrier::parse_story_carrier;
 use super::transparency::{InboundOutcome, TransparencySink};
 use crate::adapters::policy::JournalRecipientItemProjection;
 
@@ -1091,6 +1093,7 @@ async fn message_send(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or(""),
         ),
+        stories: parse_story_carrier(message_type, carrier(super::STORIES_METADATA_KEY)),
         in_reply_to: reference.as_ref().map(|reference| reference.id.clone()),
         capability_hash: item_capability
             .as_ref()
@@ -1148,6 +1151,8 @@ struct IngressFacts {
     /// Story 19.20 — sender-reported facts retained across deferred approval.
     authorship: Authorship,
     send_authorization: SendAuthorization,
+    /// The bounded story statement, retained across deferred approval.
+    stories: Option<ReceivedStories>,
     /// Story 19.18 `AC5(c)` — the resolved follow-up reference, stored raw.
     in_reply_to: Option<String>,
     /// `sha256` hex of the presented item capability; `None` is legacy.
@@ -1700,6 +1705,7 @@ async fn launch(
         message_type,
         authorship: facts.authorship,
         send_authorization: facts.send_authorization,
+        stories: facts.stories,
         task: task.id.clone(),
         // Story 19.18d `P2`/`F11` — the matched bound slot's alias (display
         // attribution only); `None` for loopback and unbound keys.

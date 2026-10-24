@@ -13,6 +13,7 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
     let address = ItemAddress::from_a2a_ingress(peer(7), ItemId::from_replay("item-1"));
     let events = [
         RoomEvent::RecipientItemReceived {
+            stories: None,
             message_type: rustain::domain::models::SemanticMessageType::Unknown,
             authorship: Authorship::Unknown,
             send_authorization: rustain::domain::models::SendAuthorization::Unknown,
@@ -128,6 +129,7 @@ async fn received_provenance_journal_preserves_legacy_bytes_and_tolerates_future
 
     let valid_address = ItemAddress::from_a2a_ingress(peer(23), ItemId::from_replay("ri_valid"));
     let valid = RoomEvent::RecipientItemReceived {
+        stories: None,
         address: valid_address.clone(),
         task: "valid-task".to_owned(),
         alias: Some("sender".to_owned()),
@@ -178,6 +180,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
     let content_hash = ContentHash::from_bytes([0x18; 32]);
 
     let received = RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         authorship: Authorship::Unknown,
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,
@@ -344,6 +347,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
     let address = ItemAddress::from_a2a_ingress(peer(21), ItemId::from_replay("ri_capable"));
     let hash = "ab".repeat(32);
     let received = RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         authorship: Authorship::Unknown,
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,
@@ -364,6 +368,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
     );
 
     let legacy = RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         authorship: Authorship::Unknown,
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,
@@ -499,6 +504,7 @@ fn recipient_item_fold_replays_acknowledgement_and_is_idempotent() {
 
     let address = ItemAddress::from_a2a_ingress(peer(10), ItemId::from_replay("ri_replay"));
     let received = RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         authorship: Authorship::Unknown,
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,
@@ -555,6 +561,7 @@ fn replacing_from_the_journal_discards_an_in_memory_divergence() {
 
     let address = ItemAddress::from_a2a_ingress(peer(11), ItemId::from_replay("ri_refold"));
     let received = RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         authorship: Authorship::Unknown,
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,
@@ -598,6 +605,7 @@ fn find_by_task_binds_the_newest_item_when_a_message_id_is_resent() {
     let second =
         ItemAddress::from_a2a_ingress(principal_peer.clone(), ItemId::from_replay("ri_second"));
     let received = |address: ItemAddress| RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         authorship: Authorship::Unknown,
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,
@@ -686,6 +694,7 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
     let principal = peer(41);
     let address = ItemAddress::from_a2a_ingress(principal.clone(), ItemId::from_replay("ri_root"));
     let root = RoomEvent::RecipientItemReceived {
+        stories: None,
         message_type: rustain::domain::models::SemanticMessageType::Unknown,
         authorship: Authorship::Unknown,
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,

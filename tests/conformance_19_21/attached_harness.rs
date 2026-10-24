@@ -799,7 +799,7 @@ impl AttachedDaemon {
             }
         })
         .await
-        .expect("inbound received-task deadline");
+        .unwrap_or_else(|error| panic!("inbound received-task {task} deadline: {error}"));
     }
     /// Start production inbound A2A HTTP on this same daemon/server and consent
     /// manager, resolving each caller through a written config, both production
@@ -1028,6 +1028,15 @@ impl InboundHttpSender {
         }
     }
     pub async fn message_send(&self, task: &str, text: &str) -> InboundSendResult {
+        self.message_send_with_metadata(task, text, serde_json::json!({}))
+            .await
+    }
+    pub async fn message_send_with_metadata(
+        &self,
+        task: &str,
+        text: &str,
+        metadata: serde_json::Value,
+    ) -> InboundSendResult {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1037,7 +1046,7 @@ impl InboundHttpSender {
                 "messageId": task,
                 "role": "user",
                 "parts": [{ "kind": "text", "text": text }],
-                "metadata": {},
+                "metadata": metadata,
             }},
         });
         let response = tokio::time::timeout(
@@ -1098,6 +1107,7 @@ pub struct RecipientHost {
     pub journal: Journal,
     pub endpoint: String,
     pub registry: Arc<CapabilityRegistry>,
+    identity: PeerIdentity,
     /// Story 19.21c: method-level HTTP attempts, separate from journal marks.
     observation: Arc<super::observed_host::Counters>,
     observer_task: JoinHandle<Result<(), std::io::Error>>,
@@ -1148,6 +1158,7 @@ impl RecipientHost {
         let signer = IdentityKeyStore::new(keys.path())
             .load_or_generate()
             .expect("recipient identity");
+        let identity = signer.identity().clone();
         let (domain_tx, domain_rx) = mpsc::unbounded_channel();
         let tree = NodeTree::with_event_tx(
             domain_tx.clone(),
@@ -1247,6 +1258,7 @@ impl RecipientHost {
             journal,
             endpoint: format!("http://{observed_authority}/"),
             registry,
+            identity,
             observation,
             observer_task,
             operator_server: attach,
@@ -1263,6 +1275,26 @@ impl RecipientHost {
             rustain::domain::models::RedactedUrl::from(self.endpoint.clone()),
             rustain::domain::models::A2aPeerSource::Workspace,
         )
+    }
+    /// Pin the actual identity used by this host's production card signer.
+    pub fn pinned_peer(&self, alias: &str) -> rustain::domain::models::A2aPeerSpec {
+        self.peer(alias)
+            .with_pinned_key(Some(rustain::domain::models::PinnedKey::new(
+                rustain::domain::models::PinnedKeyAlgorithm::EdDsa,
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&self.identity.public_key),
+                None,
+            )))
+    }
+    /// Inspect the actual forwarded JSON-RPC requests, not reconstructed carriers.
+    pub fn message_send_posts(&self) -> Vec<serde_json::Value> {
+        self.observation
+            .posts
+            .lock()
+            .expect("observed POSTs")
+            .iter()
+            .filter_map(|post| serde_json::from_slice::<serde_json::Value>(post.body()).ok())
+            .filter(|post| post["method"] == "message/send")
+            .collect()
     }
     /// Count actual JSON-RPC POST attempts, including refused or duplicate ones.
     pub fn method_count(&self, method: &str) -> usize {
@@ -1462,6 +1494,7 @@ impl AttachedClient {
         text: impl Into<String>,
         message_type: Option<rustain::domain::models::SemanticMessageType>,
         subject: Option<String>,
+        stories: Option<rustain::domain::models::StoryManifest>,
     ) {
         self.send_frame(ClientFrame::TeamSend {
             request: request.into(),
@@ -1469,6 +1502,7 @@ impl AttachedClient {
             text: text.into(),
             message_type,
             subject,
+            stories,
         })
         .await;
     }
@@ -1846,6 +1880,7 @@ pub async fn standalone_attached_parity(
             text,
             Some(rustain::domain::models::SemanticMessageType::StoryAssignment),
             Some(subject.to_owned()),
+            None,
         )
         .await;
     let started = client.wait_send_started(&request).await;
@@ -1936,6 +1971,7 @@ async fn attached_harness_smoke_typed_send_reaches_two_real_http_hosts() {
             "typed attached fixture",
             Some(rustain::domain::models::SemanticMessageType::StoryAssignment),
             Some("smoke".into()),
+            None,
         )
         .await;
     assert!(matches!(
@@ -2020,6 +2056,7 @@ async fn attached_harness_smoke_boot_down_peer_keeps_card_not_cached_refusal() {
             "boot-down",
             vec!["down".into()],
             "must retain boot slot",
+            None,
             None,
             None,
         )

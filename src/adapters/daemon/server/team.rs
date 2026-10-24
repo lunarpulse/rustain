@@ -10,6 +10,7 @@ pub(super) enum TeamSendPayload {
         text: String,
         message_type: Option<crate::domain::models::SemanticMessageType>,
         subject: Option<String>,
+        stories: Option<crate::domain::models::StoryManifest>,
         reply_to: Option<String>,
     },
     #[cfg(feature = "a2a")]
@@ -25,6 +26,7 @@ impl TeamSendPayload {
                 text,
                 message_type,
                 subject,
+                stories,
                 reply_to,
             } => crate::adapters::a2a::send::SendRequest {
                 recipients,
@@ -32,6 +34,7 @@ impl TeamSendPayload {
                 message_type: *message_type,
                 reply_to: reply_to.as_deref(),
                 subject: subject.as_deref(),
+                stories: stories.as_ref(),
                 authorship: crate::domain::models::Authorship::HumanWritten,
                 send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             },
@@ -41,6 +44,7 @@ impl TeamSendPayload {
                 message_type: Some(proposal.message_type),
                 reply_to: None,
                 subject: None,
+                stories: None,
                 authorship: crate::domain::models::Authorship::AgentComposed,
                 send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             },
@@ -805,10 +809,11 @@ impl AttachServer {
                 text,
                 message_type,
                 subject,
+                stories,
                 reply_to,
             }) = payload
             {
-                let _ = (recipients, text, message_type, subject, reply_to);
+                let _ = (recipients, text, message_type, subject, stories, reply_to);
             }
         }
     }

@@ -488,7 +488,7 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v10**; a client speaking another version
+attach handshake negotiates **protocol v11**; a client speaking another version
 receives `VersionMismatch` before proof verification, registration or other
 attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
@@ -636,6 +636,19 @@ Protocol v10 replaces v9 (Story 19.21c): shared request-keyed view streams and
 attached thread/followup/retract frames cannot be decoded by older clients.
 They receive `VersionMismatch` before proof verification or registration; the
 historical v7 introductions and v9 authorship/authorization change remain valid.
+
+Protocol v11 (Story 19.21d) adds the optional `TeamSend.stories` list and
+`PeerRowControl.stories` summary. After attach, an undecodable but completely
+length-framed client body receives `Malformed` on that connection only:
+`this daemon could not decode a frame from this client; the frame was ignored`.
+The daemon skips it and continues reading; it never echoes serde diagnostics,
+frame bytes, or an unknown variant name. I/O, oversized, malformed-length and
+truncated frames still close the session because their stream cannot be resynchronised.
+An undecodable first frame receives
+`the first frame could not be decoded; attach with a client of the same version`
+and closes; the client shows its existing `daemon rejected attach: …` message.
+A request-keyed frame that cannot be decoded cannot echo its key, so that
+request gets no settle. Between same-version builds this is unreachable.
 
 Only host act producers write send authorization. It is never imported from an
 attached client's frame or an A2A/RAP peer payload. Session and journal files

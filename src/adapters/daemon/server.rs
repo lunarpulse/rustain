@@ -53,8 +53,9 @@ use crate::domain::ports::StoragePort;
 use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntimeEvent};
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
+mod frame_decode;
 mod peer_rows;
-use peer_rows::{rap_rooted_peer, snapshot_peer_row_controls};
+use peer_rows::{peer_row_control, rap_rooted_peer, snapshot_peer_row_controls};
 mod rap_inbound;
 use rap_inbound::DaemonPeerConsumer;
 mod team;
@@ -1236,27 +1237,6 @@ async fn clear_conversation_rows(
     Ok(())
 }
 
-fn peer_row_control(
-    node_id: &AgentId,
-    item_address: Option<ItemAddress>,
-    provenance: &InteractionPolicySnapshot,
-    fallback_label: &str,
-    stage: PeerRowStage,
-    node_resolvable: bool,
-) -> PeerRowControl {
-    PeerRowControl {
-        node_id: node_id.as_str().to_owned(),
-        item_address,
-        message_type: provenance.message_type,
-        sender_label: provenance
-            .sender_label
-            .clone()
-            .unwrap_or_else(|| fallback_label.to_owned()),
-        stage,
-        node_resolvable,
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PeerDraftResolutionOutcome {
     Applied {
@@ -2066,31 +2046,6 @@ impl AttachServer {
         self.registry.try_lock().map(|r| r.conns.len()).unwrap_or(0)
     }
 
-    async fn item_context_for_node(
-        &self,
-        node_id: &AgentId,
-    ) -> Option<(ItemAddress, Option<String>)> {
-        #[cfg(feature = "a2a")]
-        {
-            let reader = self.room_journal_reader.as_ref()?;
-            let entries = match reader.load_entries().await {
-                Ok(entries) => entries,
-                Err(error) => {
-                    tracing::warn!(%error, node = %node_id, "loading journal for peer-row target failed");
-                    return None;
-                }
-            };
-            let projection =
-                crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
-            crate::adapters::a2a::exec::recipient_item_for_node(&projection, node_id)
-                .map(|item| (item.address, item.alias))
-        }
-        #[cfg(not(feature = "a2a"))]
-        {
-            let _ = node_id;
-            None
-        }
-    }
     pub async fn run(
         self: Arc<Self>,
         listener: UnixListener,
@@ -2714,6 +2669,16 @@ impl AttachServer {
                 return;
             }
             Ok(None) => return, // clean disconnect before handshake
+            Err(FrameError::Json(_)) => {
+                let _ = write_frame(
+                    &mut write_half,
+                    &DaemonFrame::Error(ProtocolError::Malformed(
+                        frame_decode::UNDECODABLE_FIRST_FRAME.into(),
+                    )),
+                )
+                .await;
+                return;
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: attach handshake read failed");
                 return;
@@ -2979,6 +2944,7 @@ impl AttachServer {
                                 text,
                                 message_type,
                                 subject,
+                                stories,
                             } => {
                                 server
                                     .handle_team_send(
@@ -2991,6 +2957,7 @@ impl AttachServer {
                                             text,
                                             message_type,
                                             subject,
+                                            stories,
                                             reply_to: None,
                                         }),
                                         Some(send_connection.clone()),
@@ -3014,6 +2981,7 @@ impl AttachServer {
                                             text,
                                             message_type: None,
                                             subject: None,
+                                            stories: None,
                                             reply_to: Some(reply_to),
                                         }),
                                         Some(send_connection.clone()),
@@ -3130,6 +3098,10 @@ impl AttachServer {
                     }
                 }
                 Ok(None) => break, // peer closed
+                Err(FrameError::Json(_)) => {
+                    self.answer_undecodable_frame(conn_id).await;
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, conn = conn_id, "daemon: attach read error");
                     break;
@@ -5037,6 +5009,7 @@ impl AttachServer {
                 text,
                 message_type,
                 subject,
+                stories,
             } => {
                 self.handle_team_send(
                     conn_id,
@@ -5048,6 +5021,7 @@ impl AttachServer {
                         text,
                         message_type,
                         subject,
+                        stories,
                         reply_to: None,
                     }),
                     None,
@@ -5070,6 +5044,7 @@ impl AttachServer {
                         text,
                         message_type: None,
                         subject: None,
+                        stories: None,
                         reply_to: Some(reply_to),
                     }),
                     None,
@@ -6810,10 +6785,12 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 } else {
                     true
                 };
-            let (item_address, item_alias) = self
+            let (item_address, item_alias, stories) = self
                 .item_context_for_node(&task.node_id)
                 .await
-                .map_or((None, None), |(address, alias)| (Some(address), alias));
+                .map_or((None, None, None), |context| {
+                    (Some(context.address), context.alias, context.stories)
+                });
             // The durable ingress alias is display-only; policy authority stays on the principal.
             let sender_label = item_alias
                 .as_deref()
@@ -6860,6 +6837,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                         control: Some(peer_row_control(
                             &task.node_id,
                             item_address.clone(),
+                            stories.clone(),
                             &task.response_policy.provenance,
                             sender_label,
                             PeerRowStage::AwaitingOperator,
@@ -6945,6 +6923,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                         control: Some(peer_row_control(
                             &task.node_id,
                             item_address.clone(),
+                            stories.clone(),
                             &task.response_policy.provenance,
                             sender_label,
                             PeerRowStage::Settled,
@@ -7022,6 +7001,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                         control: Some(peer_row_control(
                             &task.node_id,
                             item_address,
+                            stories,
                             &task.response_policy.provenance,
                             sender_label,
                             PeerRowStage::Drafting,
@@ -8296,6 +8276,7 @@ mod tests {
                     text: "held before dispatch".to_owned(),
                     message_type: None,
                     subject: None,
+                    stories: None,
                 },
             )
             .await
@@ -8362,6 +8343,7 @@ mod tests {
                 text: "handled by current writer".to_owned(),
                 message_type: None,
                 subject: None,
+                stories: None,
             },
         )
         .await
@@ -8536,6 +8518,7 @@ mod tests {
                     text: "body".into(),
                     message_type: None,
                     subject: None,
+                    stories: None,
                 },
             )
             .await
@@ -9508,6 +9491,7 @@ mod tests {
                 peer_row_control(
                     &node,
                     None,
+                    None,
                     &policy.provenance,
                     peer.as_str(),
                     PeerRowStage::Settled,
@@ -9700,7 +9684,15 @@ mod tests {
                 });
                 conversation.peer_row_controls.insert(
                     row_id.clone(),
-                    peer_row_control(&node, None, &Default::default(), peer.as_str(), stage, true),
+                    peer_row_control(
+                        &node,
+                        None,
+                        None,
+                        &Default::default(),
+                        peer.as_str(),
+                        stage,
+                        true,
+                    ),
                 );
                 storage.save_conversation(&conversation).await.unwrap();
                 let conversation = Arc::new(Mutex::new(
@@ -10072,6 +10064,7 @@ mod tests {
         );
         journal
             .record_event(crate::domain::models::RoomEvent::RecipientItemReceived {
+                stories: None,
                 address: address.clone(),
                 task: "sender-task".to_owned(),
                 alias: None,
@@ -10177,6 +10170,7 @@ mod tests {
             );
             journal
                 .record_event(crate::domain::models::RoomEvent::RecipientItemReceived {
+                    stories: None,
                     address: address.clone(),
                     task: format!("{item_id}-sender-task"),
                     message_type: crate::domain::models::SemanticMessageType::Unknown,
@@ -11994,6 +11988,7 @@ mod tests {
         let journal = Arc::new(RecordingJournal::default());
         journal
             .record_event(RoomEvent::RecipientItemReceived {
+                stories: None,
                 address: ItemAddress::from_a2a_ingress(
                     submitter.pseudonymous_peer_id(),
                     ItemId::from_replay("ri_reply-test"),
@@ -12327,6 +12322,7 @@ mod tests {
             PeerRowControl {
                 node_id: wait_node.as_str().to_owned(),
                 item_address: None,
+                stories: None,
                 message_type: crate::domain::models::SemanticMessageType::Unknown,
                 sender_label: "peer".to_owned(),
                 stage: PeerRowStage::AwaitingOperator,
@@ -12935,7 +12931,7 @@ mod tests {
         shutdown.cancel();
         handle.abort();
     }
-    /// Story 19.20c: v7 is rejected before proof validation or registration at v8.
+    /// A previous protocol is rejected before proof validation or registration.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn previous_protocol_version_is_rejected_before_proof() {
         let tmp = tempfile::tempdir().unwrap();
@@ -12957,14 +12953,13 @@ mod tests {
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         // Server issues a challenge first; the version check precedes proof work,
         // so a wrong declared version is rejected before the proof is examined.
-        // Story 19.21c: a v9 client cannot decode the shared view/retract
-        // frames; v10 rejects it before proof work or registration.
+        // Story 19.21d: a v10 client cannot decode the new story fields.
         let signer = test_signer(1);
         let _ = read_attach_challenge(&mut stream).await;
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: 9,
+                protocol_version: 10,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -12977,8 +12972,8 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, 9);
-                assert_eq!(daemon, 10);
+                assert_eq!(client, 10);
+                assert_eq!(daemon, 11);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }

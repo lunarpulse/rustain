@@ -212,7 +212,14 @@ async fn k05_thread_served_at_eight_sends_retract_consumed_on_saturation() {
     let mut writer =
         AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
     writer
-        .send_team("seed-saturation", vec!["B".into()], "hello", None, None)
+        .send_team(
+            "seed-saturation",
+            vec!["B".into()],
+            "hello",
+            None,
+            None,
+            None,
+        )
         .await;
     hooks.wait_for_send_action_count(1).await;
     hooks.release_send_actions(1);
@@ -240,6 +247,7 @@ async fn k05_thread_served_at_eight_sends_retract_consumed_on_saturation() {
                 format!("held-{index}"),
                 vec!["B".into()],
                 "held",
+                None,
                 None,
                 None,
             )

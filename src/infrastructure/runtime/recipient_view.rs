@@ -4,7 +4,10 @@ use std::path::Path;
 
 use crate::adapters::policy::recipient_item::{JournalRecipientItemProjection, ThreadTurnRef};
 use crate::domain::models::provenance::provenance_tags;
-use crate::domain::models::{ItemScope, RecipientItemState, ReplyKind, SemanticMessageType};
+use crate::domain::models::{
+    ItemScope, ReceivedStories, RecipientItemState, RecipientItemView, ReplyKind,
+    SemanticMessageType, StoryHolder, story_summary,
+};
 use crate::domain::ports::RoomJournalReader;
 use crate::domain::services::{
     recipient_thread_bounds as bounds, transparency::item_principal_label,
@@ -43,14 +46,62 @@ pub struct ReceivedThreadPage {
     pub omitted_after: usize,
 }
 
-pub(crate) fn recipient_context_available(item: &crate::domain::models::RecipientItemView) -> bool {
+pub(crate) fn recipient_context_available(item: &RecipientItemView) -> bool {
+    let reserve = 4096 + item_story_block(item).len();
+    context_available_with_cost(
+        item,
+        turn_cost(&ThreadTurnRef::Item(item), true)
+            .full
+            .saturating_add(reserve),
+    )
+}
+
+fn context_available_with_cost(item: &RecipientItemView, cost: usize) -> bool {
     matches!(
         &item.state,
         RecipientItemState::Received { content } | RecipientItemState::Acknowledged { content }
-            if content.len() <= BODY_LIMIT
-                && turn_cost(&ThreadTurnRef::Item(item), true).full.saturating_add(4096)
-                    <= bounds::MAX_THREAD_TURN_BYTES
+            if content.len() <= BODY_LIMIT && cost <= bounds::MAX_THREAD_TURN_BYTES
     )
+}
+
+fn item_story_block(item: &RecipientItemView) -> String {
+    if item.message_type != SemanticMessageType::StoryAssignment
+        || matches!(item.state, RecipientItemState::Removed { .. })
+    {
+        return String::new();
+    }
+    item.stories
+        .as_ref()
+        .map_or_else(String::new, render_story_list)
+}
+
+fn render_story_list(list: &ReceivedStories) -> String {
+    use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+    use std::fmt::Write as _;
+
+    let mut block = format!("  {}\n", story_summary(list));
+    let ReceivedStories::Listed { stories } = list else {
+        return block;
+    };
+    let mut has_member = false;
+    for story in stories {
+        let _ = write!(block, "    {}", story.key);
+        match &story.holder {
+            StoryHolder::NoHolder => {}
+            StoryHolder::You => block.push_str("  assigned to you"),
+            StoryHolder::Member { alias, .. } => {
+                let alias = sanitize_disclosable(alias, MAX_PEER_ID_BYTES);
+                let _ = write!(block, "  assigned to {alias}");
+                has_member = true;
+            }
+            StoryHolder::Unrecognized => block.push_str("  holder not readable by this build"),
+        }
+        block.push('\n');
+    }
+    if has_member {
+        block.push_str("    other names are the sender's roster aliases\n");
+    }
+    block
 }
 
 /// Read one exact-principal thread from the workspace journal. This path is
@@ -91,7 +142,11 @@ pub(crate) async fn load_received_thread(
     drop(entries);
     let pinned = |index: usize| Some(index) == root_index || index == opened_index;
 
+    let story_block = item_story_block(opened);
+    let opened_reserve = 4096 + story_block.len();
     let opened_turn_cost = turn_cost(&turns[opened_index], true);
+    let context_available =
+        context_available_with_cost(opened, opened_turn_cost.full.saturating_add(opened_reserve));
     let pins = [opened_index, root_index.unwrap_or(turns.len())];
     let next_candidate = match page {
         ReceivedThreadWindow::Newest => (0..turns.len()).rev().find(|index| !pinned(*index)),
@@ -113,7 +168,7 @@ pub(crate) async fn load_received_thread(
             turn.full + reserve
         }
     };
-    let opened_cost = bounded_cost(opened_turn_cost, 4096);
+    let opened_cost = bounded_cost(opened_turn_cost, opened_reserve);
     let withhold_root_body = root_cost.zip(candidate_cost).is_some_and(|(root, next)| {
         opened_cost
             .saturating_add(bounded_cost(root, 0))
@@ -149,7 +204,14 @@ pub(crate) async fn load_received_thread(
         if page_withheld(index, turn) && turn.full <= bounds::MAX_THREAD_TURN_BYTES {
             turn.metadata + 1 + WITHHELD_PAGE.len()
         } else {
-            bounded_cost(turn, if index == opened_index { 4096 } else { 0 })
+            bounded_cost(
+                turn,
+                if index == opened_index {
+                    opened_reserve
+                } else {
+                    0
+                },
+            )
         }
     };
     let selected = match page {
@@ -206,6 +268,7 @@ pub(crate) async fn load_received_thread(
     if root_id != item_id {
         let _ = writeln!(content, "  thread root · {root_id}");
     }
+    content.push_str(&story_block);
     match &opened.state {
         RecipientItemState::Received { content: body }
         | RecipientItemState::Acknowledged { content: body } => {
@@ -214,9 +277,7 @@ pub(crate) async fn load_received_thread(
                 "  Context received: 1 text body · {} bytes",
                 body.len()
             );
-            if body.len() <= BODY_LIMIT
-                && opened_turn_cost.full.saturating_add(4096) <= bounds::MAX_THREAD_TURN_BYTES
-            {
+            if context_available {
                 append_safe_body(&mut content, body);
                 content.push('\n');
             } else {
@@ -239,7 +300,11 @@ pub(crate) async fn load_received_thread(
     }
     for &index in &selected {
         let cost = cached_turn_cost(index);
-        let reserve = if index == opened_index { 4096 } else { 0 };
+        let reserve = if index == opened_index {
+            opened_reserve
+        } else {
+            0
+        };
         if cost.full + reserve > bounds::MAX_THREAD_TURN_BYTES || page_withheld(index, cost) {
             append_turn(&mut content, &turns[index], false);
             content.push('\n');
@@ -263,7 +328,7 @@ pub(crate) async fn load_received_thread(
         root_id,
         message_type: opened.message_type,
         item_state: opened.state.wire_name(),
-        context_available: recipient_context_available(opened),
+        context_available,
         content,
         first_non_pinned_ordinal: first,
         last_non_pinned_ordinal: last,
@@ -489,6 +554,7 @@ mod tests {
         );
         journal
             .append_room(RoomEvent::RecipientItemReceived {
+                stories: None,
                 address,
                 task: "task-marks".into(),
                 alias: Some("arrival-alias".into()),
@@ -563,6 +629,7 @@ mod tests {
                     );
                     journal
                         .append_room(RoomEvent::RecipientItemReceived {
+                            stories: None,
                             address,
                             task: id.clone(),
                             alias: alias.clone(),
@@ -655,6 +722,7 @@ mod tests {
             let id = format!("k07-page-{index}");
             journal
                 .append_room(RoomEvent::RecipientItemReceived {
+                    stories: None,
                     address: ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay(&id)),
                     task: format!("task-{index}"),
                     alias: None,
@@ -718,6 +786,7 @@ mod tests {
                 async move {
                     journal
                         .append_room(RoomEvent::RecipientItemReceived {
+                            stories: None,
                             address: ItemAddress::from_a2a_ingress(peer, ItemId::from_replay(&id)),
                             task: id.clone(),
                             alias: Some("界\n".repeat(
@@ -845,5 +914,399 @@ mod tests {
                 && earlier.content.matches(&rendered_opened).count() == 1
         );
         assert_eq!(state.focus, FocusState::Chat);
+    }
+}
+
+#[cfg(test)]
+mod story_view_tests {
+    use super::*;
+    use crate::domain::models::{ReceivedStories, ReceivedStory, StoryHolder, StoryKey};
+
+    #[test]
+    fn story_view_block_names_holders_and_future_values_without_body_inference() {
+        let list = ReceivedStories::Listed {
+            stories: vec![
+                ReceivedStory {
+                    key: StoryKey::parse("S1").unwrap(),
+                    holder: StoryHolder::NoHolder,
+                },
+                ReceivedStory {
+                    key: StoryKey::parse("S2").unwrap(),
+                    holder: StoryHolder::You,
+                },
+                ReceivedStory {
+                    key: StoryKey::parse("S3").unwrap(),
+                    holder: StoryHolder::Member {
+                        alias: "b\nunsafe".into(),
+                        peer: None,
+                    },
+                },
+                ReceivedStory {
+                    key: StoryKey::parse("S4").unwrap(),
+                    holder: StoryHolder::Unrecognized,
+                },
+            ],
+        };
+        let block = render_story_list(&list);
+        assert!(block.starts_with("  4 stories, 1 assigned to you\n"));
+        assert!(block.contains("    S1\n"));
+        assert!(block.contains("    S2  assigned to you\n"));
+        assert!(block.contains("    S3  assigned to "));
+        assert!(!block.contains("b\nunsafe"));
+        assert!(block.contains("    S4  holder not readable by this build\n"));
+        assert!(block.ends_with("    other names are the sender's roster aliases\n"));
+        assert_eq!(
+            render_story_list(&ReceivedStories::Unreadable),
+            "  story list not readable by this build\n"
+        );
+        assert_eq!(
+            render_story_list(&ReceivedStories::Unrecognized),
+            "  story list not readable by this build\n"
+        );
+    }
+
+    fn maximal_story_list() -> ReceivedStories {
+        ReceivedStories::Listed {
+            stories: (0..64)
+                .map(|index| ReceivedStory {
+                    key: StoryKey::parse(&format!("S{index:02}{}", "x".repeat(29))).unwrap(),
+                    holder: StoryHolder::Member {
+                        alias: "a".repeat(256),
+                        peer: None,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    fn received_event(
+        id: &str,
+        parent: Option<String>,
+        content: String,
+        stories: Option<ReceivedStories>,
+        message_type: SemanticMessageType,
+    ) -> crate::domain::models::RoomEvent {
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, PeerId, RoomEvent, SendAuthorization,
+        };
+        RoomEvent::RecipientItemReceived {
+            address: ItemAddress::from_a2a_ingress(
+                PeerId::from_public_key(&[92; 32]).unwrap(),
+                ItemId::from_replay(id),
+            ),
+            task: id.into(),
+            alias: Some("sender".into()),
+            message_type,
+            authorship: Authorship::HumanWritten,
+            send_authorization: SendAuthorization::HumanDecided,
+            content,
+            in_reply_to: parent,
+            capability_hash: None,
+            reply_capability_matched: false,
+            stories,
+        }
+    }
+
+    #[test]
+    fn story_block_preserves_order_and_sanitizes_member_aliases() {
+        use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+        let alias = format!("{}\n\r\t\u{1b}", "界".repeat(84));
+        assert_eq!(alias.len(), MAX_PEER_ID_BYTES);
+        let list = ReceivedStories::Listed {
+            stories: vec![
+                ReceivedStory {
+                    key: StoryKey::parse("Z-last").unwrap(),
+                    holder: StoryHolder::You,
+                },
+                ReceivedStory {
+                    key: StoryKey::parse("A-first").unwrap(),
+                    holder: StoryHolder::Member {
+                        alias: alias.clone(),
+                        peer: None,
+                    },
+                },
+                ReceivedStory {
+                    key: StoryKey::parse("N").unwrap(),
+                    holder: StoryHolder::NoHolder,
+                },
+                ReceivedStory {
+                    key: StoryKey::parse("F").unwrap(),
+                    holder: StoryHolder::Unrecognized,
+                },
+            ],
+        };
+        assert_eq!(
+            render_story_list(&list),
+            format!(
+                "  4 stories, 1 assigned to you\n\
+                 \x20   Z-last  assigned to you\n\
+                 \x20   A-first  assigned to {}\n\
+                 \x20   N\n\
+                 \x20   F  holder not readable by this build\n\
+                 \x20   other names are the sender's roster aliases\n",
+                sanitize_disclosable(&alias, MAX_PEER_ID_BYTES),
+            ),
+        );
+        assert_eq!(
+            render_story_list(&ReceivedStories::Listed {
+                stories: vec![ReceivedStory {
+                    key: StoryKey::parse("Only").unwrap(),
+                    holder: StoryHolder::NoHolder,
+                }],
+            }),
+            "  1 story, none assigned to you\n    Only\n",
+        );
+    }
+
+    #[tokio::test]
+    async fn story_block_maximal_list_keeps_all_byte_saturated_paging_directions_bounded() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        journal
+            .append_room(received_event(
+                "list-root",
+                None,
+                "\n".repeat(64_500),
+                None,
+                SemanticMessageType::StoryAssignment,
+            ))
+            .await
+            .unwrap();
+        let mut previous = "list-root".to_string();
+        for index in 0..20 {
+            let id = format!("list-turn-{index:02}");
+            journal
+                .append_room(received_event(
+                    &id,
+                    Some(previous),
+                    format!("{index:02}{}", "m".repeat(8190)),
+                    None,
+                    SemanticMessageType::StoryAssignment,
+                ))
+                .await
+                .unwrap();
+            previous = id;
+        }
+        let list = maximal_story_list();
+        let block = render_story_list(&list);
+        assert!(block.len() > 19_000);
+        assert_eq!(block.lines().count(), 66);
+        assert!(!block.contains(crate::domain::services::transparency::TRUNCATION_MARKER));
+        journal
+            .append_room(received_event(
+                "list-opened",
+                Some(previous),
+                "\n".repeat(57_000),
+                Some(list),
+                SemanticMessageType::StoryAssignment,
+            ))
+            .await
+            .unwrap();
+
+        for window in [
+            ReceivedThreadWindow::Newest,
+            ReceivedThreadWindow::Earlier { before: 14 },
+            ReceivedThreadWindow::Newer { after: 2 },
+        ] {
+            let page = load_received_thread(workspace.path(), "list-opened", window)
+                .await
+                .expect("maximal list fits a byte-saturated page");
+            assert!(page.content.len() <= bounds::MAX_THREAD_RESPONSE_BYTES);
+            assert!(page.content.len() > bounds::MAX_THREAD_RESPONSE_BYTES - block.len());
+            assert_eq!(page.content.matches(&block).count(), 1);
+            assert!(page.content.contains(&format!(
+                "  thread root · list-root\n{block}  Context received:"
+            )));
+            assert!(!page.content.contains(WITHHELD_TURN));
+            assert!(!page.content.contains(WITHHELD_PAGE));
+            assert!(page.context_available);
+            let first = page.first_non_pinned_ordinal.unwrap();
+            let last = page.last_non_pinned_ordinal.unwrap();
+            assert_eq!(last - first + 1, 5, "reserve includes every story byte");
+            match window {
+                ReceivedThreadWindow::Newest => {
+                    assert_eq!(last, 20);
+                    assert_eq!(page.omitted_after, 0);
+                    assert!(page.omitted_before > 0);
+                }
+                ReceivedThreadWindow::Earlier { before } => {
+                    assert_eq!(last, before - 1);
+                    assert!(page.omitted_before > 0 && page.omitted_after > 0);
+                }
+                ReceivedThreadWindow::Newer { after } => {
+                    assert_eq!(first, after + 1);
+                    assert!(page.omitted_before > 0 && page.omitted_after > 0);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn story_block_reserve_controls_opened_body_and_context_eligibility() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let list = maximal_story_list();
+        let block = render_story_list(&list);
+        journal
+            .append_room(received_event(
+                "list-boundary",
+                None,
+                "\n".repeat(64_000),
+                Some(list),
+                SemanticMessageType::StoryAssignment,
+            ))
+            .await
+            .unwrap();
+        let reader =
+            crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                workspace.path(),
+            );
+        let entries = reader.load_entries().await.unwrap();
+        let projection = JournalRecipientItemProjection::from_entries(&entries);
+        let snapshot = projection.snapshot();
+        let item = snapshot.find_by_id("list-boundary").unwrap();
+        let cost = turn_cost(&ThreadTurnRef::Item(item), true).full;
+        assert!(cost + 4096 <= bounds::MAX_THREAD_TURN_BYTES);
+        assert!(cost + 4096 + block.len() > bounds::MAX_THREAD_TURN_BYTES);
+        assert!(!recipient_context_available(item));
+        let mut without_list = item.clone();
+        without_list.stories = None;
+        assert!(recipient_context_available(&without_list));
+        let mut acknowledged = item.clone();
+        acknowledged.state = RecipientItemState::Acknowledged {
+            content: "\n".repeat(64_000),
+        };
+        assert!(!recipient_context_available(&acknowledged));
+        for window in [
+            ReceivedThreadWindow::Newest,
+            ReceivedThreadWindow::Earlier { before: 1 },
+            ReceivedThreadWindow::Newer { after: 0 },
+        ] {
+            let page = load_received_thread(workspace.path(), "list-boundary", window)
+                .await
+                .unwrap();
+            assert!(!page.context_available);
+            assert!(page.content.len() <= bounds::MAX_THREAD_RESPONSE_BYTES);
+            assert_eq!(page.content.matches(&block).count(), 1);
+            assert!(page.content.contains(WITHHELD_TURN));
+            assert!(!page.content.contains(&"\n      ".repeat(64_000)));
+        }
+        for state in [
+            RecipientItemState::Removed {
+                acknowledged_before: false,
+            },
+            RecipientItemState::Removed {
+                acknowledged_before: true,
+            },
+        ] {
+            let mut removed = item.clone();
+            removed.state = state;
+            assert_eq!(item_story_block(&removed), "");
+            assert!(!recipient_context_available(&removed));
+        }
+        let mut other_type = item.clone();
+        other_type.message_type = SemanticMessageType::BugReport;
+        assert_eq!(item_story_block(&other_type), "");
+        assert!(recipient_context_available(&other_type));
+    }
+
+    #[tokio::test]
+    async fn story_block_requires_typed_list_and_disappears_after_removal() {
+        use crate::domain::models::RoomEvent;
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        for (id, kind, list) in [
+            ("no-list", SemanticMessageType::StoryAssignment, None),
+            ("body-spoof", SemanticMessageType::StoryAssignment, None),
+            (
+                "other-type",
+                SemanticMessageType::BugReport,
+                Some(maximal_story_list()),
+            ),
+            (
+                "unreadable",
+                SemanticMessageType::StoryAssignment,
+                Some(ReceivedStories::Unreadable),
+            ),
+            (
+                "future-list",
+                SemanticMessageType::StoryAssignment,
+                Some(ReceivedStories::Unrecognized),
+            ),
+            (
+                "removed-list",
+                SemanticMessageType::StoryAssignment,
+                Some(maximal_story_list()),
+            ),
+        ] {
+            let body = if id == "body-spoof" {
+                "8 stories, 2 assigned to you"
+            } else {
+                "plain body"
+            };
+            let event = received_event(id, None, body.into(), list, kind);
+            let address = match &event {
+                RoomEvent::RecipientItemReceived { address, .. } => address.clone(),
+                _ => unreachable!(),
+            };
+            journal.append_room(event).await.unwrap();
+            if id == "removed-list" {
+                journal
+                    .append_room(RoomEvent::RecipientItemRemoved { address })
+                    .await
+                    .unwrap();
+            }
+            let page = load_received_thread(workspace.path(), id, ReceivedThreadWindow::Newest)
+                .await
+                .unwrap();
+            if matches!(id, "unreadable" | "future-list") {
+                assert!(page.content.contains(&format!(
+                    "  received thread · sender · {id}\n  story list not readable by this build\n  Context received:"
+                )));
+                assert!(
+                    !page
+                        .content
+                        .contains("other names are the sender's roster aliases")
+                );
+            } else {
+                assert!(page.content.contains(&format!(
+                    "  received thread · sender · {id}\n  Context received:"
+                )));
+                assert!(!page.content.contains("\n  8 stories, 2 assigned to you\n"));
+                assert!(
+                    !page
+                        .content
+                        .contains("\n  64 stories, none assigned to you\n")
+                );
+                assert!(
+                    !page
+                        .content
+                        .contains("other names are the sender's roster aliases")
+                );
+                if id == "body-spoof" {
+                    assert!(
+                        page.content
+                            .contains("\n      8 stories, 2 assigned to you\n")
+                    );
+                }
+                if id == "removed-list" {
+                    assert!(!page.context_available);
+                    assert!(page.content.contains("content unavailable · removed"));
+                    assert!(!page.content.contains("plain body"));
+                }
+            }
+        }
     }
 }

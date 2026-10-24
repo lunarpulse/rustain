@@ -33,6 +33,7 @@ pub enum SendError {
     /// grammar. Decided with the unknown-peer check, before any journal write
     /// or I/O.
     InvalidSubject(crate::domain::services::send_action_ledger::SubjectRefusal),
+    InvalidStories(crate::domain::models::StoryRefusal),
 }
 
 impl std::fmt::Display for SendError {
@@ -62,6 +63,7 @@ impl std::fmt::Display for SendError {
                 write!(f, "peer `{peer}` has no usable A2A endpoint: {source}")
             }
             Self::InvalidSubject(refusal) => write!(f, "{refusal}"),
+            Self::InvalidStories(refusal) => write!(f, "{refusal}"),
         }
     }
 }
@@ -172,6 +174,11 @@ pub fn validate_send_request(
         crate::domain::services::send_action_ledger::validate_subject(subject)
             .map_err(SendError::InvalidSubject)?;
     }
+    if let Some(stories) = request.stories {
+        stories
+            .check(request.message_type, request.recipients)
+            .map_err(SendError::InvalidStories)?;
+    }
     Ok(())
 }
 
@@ -190,6 +197,7 @@ pub struct SendRequest<'a> {
     /// (Story 19.21 `AC1(i)`).
     pub reply_to: Option<&'a str>,
     pub subject: Option<&'a str>,
+    pub stories: Option<&'a crate::domain::models::StoryManifest>,
     /// Provenance for this outbound dispatch; never sent to the peer.
     pub authorship: crate::domain::models::Authorship,
     pub send_authorization: crate::domain::models::SendAuthorization,
@@ -250,42 +258,48 @@ where
 
     validate_send_request(runtime, &request)?;
 
-    let slots: Vec<Option<(crate::domain::models::SendActionRef, SendLiveness)>> =
-        if request.reply_to.is_none() {
-            match runtime
-                .record_send_action(
-                    request.recipients,
-                    request.text,
-                    request.message_type,
-                    request.subject,
-                )
-                .await
-            {
-                Ok(handle) => {
-                    on_started(handle.id());
-                    handle.into_recipients().into_iter().map(Some).collect()
-                }
-                Err(_) => {
-                    // The journal could not record the attempt: nothing was sent
-                    // and nothing will be (`AC1(f)`).
-                    for index in 0..request.recipients.len() {
-                        on_settle(index, RecipientOutcome::NotSent);
-                    }
-                    return Ok(());
-                }
+    let slots: Vec<
+        Option<(
+            crate::domain::models::SendActionRef,
+            SendLiveness,
+            Option<serde_json::Value>,
+        )>,
+    > = if request.reply_to.is_none() {
+        match runtime
+            .record_send_action(
+                request.recipients,
+                request.text,
+                request.message_type,
+                request.subject,
+                request.stories,
+            )
+            .await
+        {
+            Ok(handle) => {
+                on_started(handle.id());
+                handle.into_recipients().into_iter().map(Some).collect()
             }
-        } else {
-            request.recipients.iter().map(|_| None).collect()
-        };
+            Err(_) => {
+                // The journal could not record the attempt: nothing was sent
+                // and nothing will be (`AC1(f)`).
+                for index in 0..request.recipients.len() {
+                    on_settle(index, RecipientOutcome::NotSent);
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        request.recipients.iter().map(|_| None).collect()
+    };
 
     let pending = FuturesUnordered::new();
     for (index, (peer, slot)) in request.recipients.iter().zip(slots).enumerate() {
         // `slot` is captured by the future when it is CREATED, so a future
         // dropped before its first poll still drops its liveness token.
         pending.push(async move {
-            let (reference, liveness) = match slot {
-                Some((reference, liveness)) => (Some(reference), Some(liveness)),
-                None => (None, None),
+            let (reference, liveness, stories) = match slot {
+                Some((reference, liveness, stories)) => (Some(reference), Some(liveness), stories),
+                None => (None, None, None),
             };
             let mut item = None;
             let outcome = deliver_one(
@@ -295,6 +309,7 @@ where
                 request.message_type,
                 request.reply_to,
                 reference.as_ref(),
+                stories.as_ref(),
                 request.authorship,
                 request.send_authorization,
                 &mut item,
@@ -410,6 +425,7 @@ pub async fn deliver_text(
         message_type,
         reply_to,
         None,
+        None,
         crate::domain::models::Authorship::HumanWritten,
         crate::domain::models::SendAuthorization::HumanDecided,
         &mut None,
@@ -429,6 +445,7 @@ async fn deliver_one(
     message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<&str>,
     action: Option<&crate::domain::models::SendActionRef>,
+    stories: Option<&serde_json::Value>,
     authorship: crate::domain::models::Authorship,
     send_authorization: crate::domain::models::SendAuthorization,
     item_out: &mut Option<String>,
@@ -507,6 +524,7 @@ async fn deliver_one(
             reply_to,
             item_key: item_key.as_deref(),
             reply_capability: reply_capability.as_ref(),
+            stories,
             authorship,
             send_authorization,
         },
@@ -1403,7 +1421,7 @@ mod tests {
 
         // Action 1: two recipient slots, each with its own owner.
         let first = rt
-            .record_send_action(&two, "one", None, None)
+            .record_send_action(&two, "one", None, None, None)
             .await
             .expect("the action is recorded");
         let first_id = first.id().clone();
@@ -1431,7 +1449,7 @@ mod tests {
         // remove the dead slots.
         drop(owners);
         let second = rt
-            .record_send_action(&two, "two", None, None)
+            .record_send_action(&two, "two", None, None, None)
             .await
             .expect("the next action is recorded");
         assert_eq!(
@@ -1531,6 +1549,7 @@ mod tests {
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
+                stories: None,
                 authorship: crate::domain::models::Authorship::HumanWritten,
                 send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             },

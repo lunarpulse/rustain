@@ -195,6 +195,7 @@ fn parse_input(
         message_type: Some(message_type),
         reply_to: None,
         subject: None,
+        stories: None,
         authorship: crate::domain::models::Authorship::AgentComposed,
         send_authorization: crate::domain::models::SendAuthorization::Unknown,
     };

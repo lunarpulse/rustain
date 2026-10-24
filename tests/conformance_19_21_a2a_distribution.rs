@@ -20,6 +20,18 @@ mod c_k02_followup;
 mod c_k03_retract;
 #[path = "conformance_19_21c/c_k04_retract_gating.rs"]
 mod c_k04_retract_gating;
+#[path = "conformance_19_21d/d_k01_record_wire.rs"]
+mod d_k01_record_wire;
+#[path = "conformance_19_21d/d_k02_refusals.rs"]
+mod d_k02_refusals;
+#[path = "conformance_19_21d/d_k03_ingest.rs"]
+mod d_k03_ingest;
+#[path = "conformance_19_21d/d_k04_render.rs"]
+mod d_k04_render;
+#[path = "conformance_19_21d/d_k05_no_authority.rs"]
+mod d_k05_no_authority;
+#[path = "conformance_19_21d/d_k06_decode.rs"]
+mod d_k06_decode;
 #[cfg(all(unix, feature = "test-instrumentation"))]
 #[path = "conformance_19_21b/g_entrypoints.rs"]
 mod g_entrypoints;

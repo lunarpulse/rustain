@@ -117,6 +117,7 @@ impl AttachServer {
                     control: Some(peer_row_control(
                         &recipient,
                         None,
+                        None,
                         &response_policy.provenance,
                         peer_id.as_str(),
                         PeerRowStage::Settled,

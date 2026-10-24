@@ -386,6 +386,7 @@ async fn approved_snapshot_matches_attached_typed_send_exactly() {
             BODY,
             Some(SemanticMessageType::ArchitectureUpdate),
             None,
+            None,
         )
         .await;
     let typed_started = writer.wait_send_started("typed-control").await;

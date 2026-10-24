@@ -10,7 +10,7 @@ use rustain::domain::models::RoomEvent;
 
 pub(super) async fn seed(writer: &mut AttachedClient, host: &RecipientHost, key: &str) -> String {
     writer
-        .send_team(key, vec!["B".into()], "hello", None, None)
+        .send_team(key, vec!["B".into()], "hello", None, None, None)
         .await;
     assert!(matches!(
         writer.wait_send_settled(key, 0).await,

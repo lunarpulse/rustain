@@ -46,7 +46,8 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 ///
 /// v10 (2026-10-24, Story 19.21c): attached thread/followup/retract parity and
 /// request-keyed shared view streams; reject older clients before proof.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// v11 (Story 19.21d): TeamSend carries stories; PeerRowControl carries the story summary; an undecodable client frame is answered and skipped
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -620,6 +621,8 @@ pub enum ClientFrame {
         message_type: Option<SemanticMessageType>,
         #[serde(default)]
         subject: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stories: Option<crate::domain::models::StoryManifest>,
     },
     /// Story 19.21 `AC4(b)` — one `/team board` read. TrustedLocal; a
     /// read-only attachment may ask. ⛔ Never pushed: it is an explicit read.
@@ -1352,6 +1355,7 @@ mod tests {
                 text: "hello from daemon".into(),
                 message_type: Some(SemanticMessageType::StoryAssignment),
                 subject: Some("sprint-7".into()),
+                stories: None,
             },
             ClientFrame::TeamBoard {
                 request: "board-inventory".into(),
@@ -1461,6 +1465,7 @@ mod tests {
                         node_id: "node-1".into(),
                         item_address: None,
                         message_type: crate::domain::models::SemanticMessageType::Consultation,
+                        stories: None,
                         sender_label: "peer-1".into(),
                         stage: crate::domain::models::PeerRowStage::AwaitingOperator,
                         node_resolvable: true,

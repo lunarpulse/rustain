@@ -567,6 +567,7 @@ pub async fn team_command(
             text,
             message_type,
             subject,
+            stories,
         } => {
             start_team_send(
                 state,
@@ -576,6 +577,7 @@ pub async fn team_command(
                 message_type,
                 None,
                 subject,
+                stories,
                 crate::domain::models::Authorship::HumanWritten,
             );
         }
@@ -597,6 +599,7 @@ pub async fn team_command(
                 },
                 None,
                 Some(turn_id),
+                None,
                 None,
                 crate::domain::models::Authorship::HumanWritten,
             );
@@ -769,6 +772,7 @@ pub(crate) fn start_proposed_team_send(
         message_type,
         None,
         None,
+        None,
         crate::domain::models::Authorship::AgentComposed,
     );
 }
@@ -788,6 +792,7 @@ fn start_team_send(
     message_type: Option<crate::domain::models::SemanticMessageType>,
     reply_to: Option<String>,
     subject: Option<String>,
+    stories: Option<crate::domain::models::StoryManifest>,
     authorship: crate::domain::models::Authorship,
 ) {
     #[cfg(not(feature = "a2a"))]
@@ -819,6 +824,7 @@ fn start_team_send(
                 message_type,
                 reply_to: reply_to.as_deref(),
                 subject: subject.as_deref(),
+                stories: stories.as_ref(),
                 authorship,
                 send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             },
@@ -849,6 +855,7 @@ fn start_team_send(
                     message_type,
                     reply_to: reply_to.as_deref(),
                     subject: subject.as_deref(),
+                    stories: stories.as_ref(),
                     authorship,
                     send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
                 },
@@ -877,6 +884,7 @@ fn start_team_send(
             message_type,
             reply_to,
             subject,
+            stories,
             authorship,
             conversation_id,
             app_state,
