@@ -1063,6 +1063,19 @@ pub enum RoomEvent {
         #[serde(default)]
         advertised: String,
     },
+    /// This host admitted handles from a peer's topic feed. An observation of
+    /// their arrival, never a claim about the artifacts' contents or truth.
+    PeerTopicHandlesReceived {
+        #[serde(default)]
+        peer: Option<PeerId>,
+        #[serde(default)]
+        topic: String,
+        #[serde(default)]
+        sequence: u64,
+        /// Lowercase artifact ids in frame order; no peer-chosen prose.
+        #[serde(default)]
+        artifacts: Vec<String>,
+    },
     /// A recipient-owned durable work item was accepted from an inbound peer.
     RecipientItemReceived {
         address: ItemAddress,
@@ -1659,6 +1672,8 @@ impl OrchestrationRoom {
             // transparency projection, which is where a peer-interaction fact
             // belongs.
             | RoomEvent::PeerEquivocated { .. }
+            // A handle arrival is a fact about a peer's feed; no node to attach to.
+            | RoomEvent::PeerTopicHandlesReceived { .. }
             // Recipient items have their own projection; they are deliberately
             // not folded into the orchestration node read model.
             | RoomEvent::RecipientItemReceived { .. }
@@ -1703,6 +1718,21 @@ mod tests {
 
     fn sample_artifact_id() -> ArtifactId {
         ArtifactId::from(ContentHash::from_bytes([0x11; 32]))
+    }
+
+    #[test]
+    fn topic_receipt_defaults_and_is_a_room_no_op() {
+        let event: RoomEvent =
+            serde_json::from_str(r#"{"event":"peer_topic_handles_received"}"#).expect("defaults");
+        assert!(matches!(
+            &event,
+            RoomEvent::PeerTopicHandlesReceived {
+                peer: None, topic, sequence: 0, artifacts
+            } if topic.is_empty() && artifacts.is_empty()
+        ));
+        let room =
+            OrchestrationRoom::project(OrchestrationRoomId::new(), vec![event.clone(), event]);
+        assert!(room.nodes().is_empty());
     }
 
     #[test]

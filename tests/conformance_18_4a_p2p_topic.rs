@@ -1552,7 +1552,7 @@ async fn review_journal_failure_leaves_topic_admission_uncommitted() {
     assert!(
         host.handler
             .bind_topic_effects(rustain::adapters::rap::TopicEffects {
-                workspace: bad_workspace,
+                workspace: bad_workspace.clone(),
                 transport: transport as Arc<dyn PeerTransport>,
                 signer: signer_of(40),
             },)
@@ -1583,6 +1583,8 @@ async fn review_journal_failure_leaves_topic_admission_uncommitted() {
     // The replay reservation rolled back; a valid B frame at the same feed
     // position can land exactly once, proving the failed attempt did not leave
     // a hidden local feed step behind.
+    std::fs::remove_file(&bad_workspace).expect("remove the unusable journal root");
+    std::fs::create_dir_all(&bad_workspace).expect("repair the journal root");
     let retry = sign_gossip(
         &signer_of(12),
         "t-journal",
@@ -1593,6 +1595,26 @@ async fn review_journal_failure_leaves_topic_admission_uncommitted() {
     );
     assert!(accepted(&host, retry, &peer_b).await);
     assert_eq!(host.store.live_handles(1_000).await.len(), 2);
+    let entries = rustain::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+        &bad_workspace,
+    )
+    .await
+    .expect("open repaired journal")
+    .load()
+    .await
+    .expect("read repaired journal");
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry.record,
+                rustain::domain::models::JournalRecord::Room(
+                    RoomEvent::PeerTopicHandlesReceived { .. }
+                )
+            ))
+            .count(),
+        1
+    );
 }
 
 /// Code-review P9: TopicGossip branches before message translation, so its

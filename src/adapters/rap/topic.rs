@@ -197,7 +197,8 @@ const MAX_OBSERVED_PER_FEED: usize = 8;
 /// A validated admission, computed against pre-state and not yet applied.
 ///
 /// ⚑ Code-review P6: the production front door calls [`PeerTopicStore::prepare`],
-/// journals every divergence, and only then calls [`PeerTopicStore::commit`].
+/// journals every divergence and the handle-arrival record, and only then calls
+/// [`PeerTopicStore::commit`], all under [`PeerTopicStore::admission_gate`].
 /// A journal failure leaves the store untouched, so the retried frame the
 /// rolled-back replay reservation allows cannot advance a feed twice.
 #[derive(Debug)]
@@ -211,6 +212,36 @@ pub struct PreparedAdmission {
     pub divergences: Vec<TopicDivergence>,
     first_sightings: Vec<((CorrelationId, PeerId, u64), ObservedHead)>,
     now_unix: i64,
+}
+
+impl PreparedAdmission {
+    /// One observation per handle-bearing frame, before commit orders the handles.
+    #[must_use]
+    pub fn received_record(&self) -> Option<RoomEvent> {
+        let (sequence, _) = self.chained.as_ref()?;
+        if self.refs.is_empty() {
+            return None;
+        }
+        Some(RoomEvent::PeerTopicHandlesReceived {
+            peer: Some(self.sender.clone()),
+            topic: self.topic.0.clone(),
+            sequence: *sequence,
+            artifacts: self
+                .refs
+                .iter()
+                .map(|handle| handle.artifact.to_string())
+                .collect(),
+        })
+    }
+
+    pub(crate) fn journal_records(&self) -> Vec<crate::domain::models::JournalRecord> {
+        self.divergences
+            .iter()
+            .map(TopicDivergence::to_room_event)
+            .chain(self.received_record())
+            .map(crate::domain::models::JournalRecord::Room)
+            .collect()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -233,6 +264,12 @@ struct TopicState {
 #[derive(Debug, Default)]
 pub struct PeerTopicStore {
     state: Mutex<TopicState>,
+    /// Serializes every writer against a remote admission's prepare → journal
+    /// → commit. `commit` applies the membership and observation decisions
+    /// `prepare` took against pre-state without re-checking them, so a write
+    /// landing between the two (another peer's worker, a local share) would be
+    /// overwritten or bypassed by a stale decision.
+    admission: Mutex<()>,
 }
 
 impl PeerTopicStore {
@@ -250,6 +287,7 @@ impl PeerTopicStore {
     /// names why a third admission model is refused: `ADR-18-4-01` D4 exists
     /// precisely because that hazard already occurred once.
     pub async fn grant_membership(&self, topic: &CorrelationId, peer: &PeerId) {
+        let _admission = self.admission.lock().await;
         self.state
             .lock()
             .await
@@ -257,6 +295,14 @@ impl PeerTopicStore {
             .entry(topic.clone())
             .or_default()
             .insert(peer.clone());
+    }
+
+    /// Hold this across one remote admission's [`Self::prepare`], the journal
+    /// append of its records, and [`Self::commit`]. Every other store writer
+    /// waits on the same gate, so the pre-state `prepare` read is still the
+    /// state `commit` applies to. Release it before any network send.
+    pub async fn admission_gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.admission.lock().await
     }
 
     /// Whether `peer` may be advertised this Topic's hashes.
@@ -341,6 +387,7 @@ impl PeerTopicStore {
         gossip: TopicGossip,
         now_unix: i64,
     ) -> Result<TopicAdmission, TopicError> {
+        let _admission = self.admission.lock().await;
         let prepared = self.prepare(header, sender, gossip, now_unix).await?;
         Ok(self.commit(prepared).await)
     }
@@ -622,6 +669,7 @@ impl PeerTopicStore {
         handles: Vec<ContextRef>,
     ) -> Result<TopicHead, TopicError> {
         let topic = header.correlation_id.clone();
+        let _admission = self.admission.lock().await;
         let mut state = self.state.lock().await;
         state
             .members
@@ -803,6 +851,48 @@ mod tests {
         assert!(matches!(
             divergence.to_room_event(),
             RoomEvent::PeerEquivocated { sequence: 4, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn received_record_uses_the_chained_sequence_and_ignores_heads_only() {
+        let store = PeerTopicStore::new();
+        let sender = peer(1);
+        let heads = store
+            .prepare(
+                &header("t", 1, Vec::new()),
+                &sender,
+                TopicGossip {
+                    refs: vec![],
+                    heads: vec![TopicHead {
+                        topic: CorrelationId::new("t"),
+                        issuer: peer(2),
+                        sequence: 4,
+                        head: vec![7; 32],
+                    }],
+                },
+                0,
+            )
+            .await
+            .expect("heads-only admission");
+        assert!(heads.received_record().is_none());
+        let prepared = store
+            .prepare(
+                &header("t", 99, Vec::new()),
+                &sender,
+                TopicGossip {
+                    refs: vec![handle(2, &sender)],
+                    heads: vec![],
+                },
+                0,
+            )
+            .await
+            .expect("handle admission");
+        assert!(matches!(
+            prepared.received_record(),
+            Some(RoomEvent::PeerTopicHandlesReceived {
+                peer: Some(peer), topic, sequence: 1, artifacts,
+            }) if peer == sender && topic == "t" && artifacts.len() == 1
         ));
     }
 

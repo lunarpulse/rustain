@@ -12,6 +12,9 @@
 #[path = "../conformance_18_4a_p2p_topic.rs"]
 mod conformance_18_4a_p2p_topic;
 
+#[path = "../conformance_18_10_p2p_topic_received.rs"]
+mod conformance_18_10_p2p_topic_received;
+
 #[path = "../conformance_p2p_architecture.rs"]
 mod conformance_p2p_architecture;
 

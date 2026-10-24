@@ -76,6 +76,7 @@ markers = [
     "story_19_19: Story 19-19 — executing consultation and ADR fan-out capture",
     "story_19_21: Story 19.21 — attached Act 1 distribution capture",
     "a2a_binary: test requires an explicitly built binary with the a2a feature",
+    "p2p_binary: test requires an explicitly built binary with the p2p feature",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest

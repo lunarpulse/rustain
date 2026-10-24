@@ -1376,6 +1376,122 @@ mod p2p_listener_composition_tests {
             .expect("cancellation stops the composed listener")
             .expect("listener task does not panic");
     }
+
+    /// Story 18.10 K05: the actual listener binds receipt effects before ingress.
+    /// The returned verdict follows the durable append, so no observation wait is allowed.
+    #[tokio::test]
+    async fn the_composed_listener_journals_a_received_topic_handle() {
+        use crate::adapters::rap::TopicEffects;
+        use crate::domain::models::{
+            ArtifactId, ArtifactKind, CapabilityTokenId, ContentHash, ContextSummary,
+            EvidenceArtifact, HostBinding, JournalRecord, RoomEvent,
+        };
+        use crate::infrastructure::subagent::node_journal::NodeJournal;
+
+        let workspace = tempfile::tempdir().expect("receiver workspace");
+        let sender_workspace = tempfile::tempdir().expect("sender workspace");
+        let server_key = ed25519_dalek::SigningKey::from_bytes(&[71; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[72; 32]);
+        let pinned = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(client_key.verifying_key().to_bytes());
+        let config = workspace.path().join(".rustain");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("p2p.json"), format!(
+            r#"{{"listen":true,"agents":{{"client":{{"pinnedKey":{{"alg":"EdDSA","x":"{pinned}"}}}}}}}}"#
+        )).unwrap();
+        std::fs::write(config.join("relay.json"), r#"{"mode":"disabled"}"#).unwrap();
+        let mut events = Vec::new();
+        let make_handler = |events: &mut Vec<_>| {
+            let (ingested_tx, ingested_rx) = mpsc::unbounded_channel();
+            let (domain_tx, domain_rx) = mpsc::unbounded_channel();
+            events.push((ingested_rx, domain_rx));
+            let tree = NodeTree::new();
+            let bus = Arc::new(LocalMessageBus::new(
+                tree.clone(),
+                Arc::new(RelationshipDeliveryPolicy),
+            )) as Arc<dyn AgentMessageBus>;
+            Arc::new(VerifiedPeerFrameHandler::new(
+                tree,
+                Arc::new(ArcSwap::from_pointee(bus)),
+                domain_tx,
+                Arc::new(ForwardingConsumer(ingested_tx)),
+                Arc::new(AcceptingRecorder),
+            ))
+        };
+        let receiver = make_handler(&mut events);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let listener = super::compose_p2p_listener(
+            workspace.path(),
+            receiver,
+            server_key.to_bytes(),
+            shutdown.child_token(),
+        )
+        .await
+        .expect("production composition");
+        let identity =
+            derive_peer_endpoint_identity(&server_key.verifying_key().to_bytes()).unwrap();
+        let client = Arc::new(
+            IrohPeerTransport::bind(
+                client_key.to_bytes(),
+                HashMap::from([(
+                    identity.peer_id.clone(),
+                    crate::domain::ports::PeerAddress::from_bytes(listener.address.into_bytes())
+                        .unwrap(),
+                )]),
+                &crate::domain::models::RelayMode::Disabled,
+            )
+            .await
+            .unwrap(),
+        );
+        let sender = make_handler(&mut events);
+        let signer = AgentSigner::from_signing_key(client_key);
+        let sender_peer = signer.identity().peer_id.clone();
+        assert!(sender.bind_topic_effects(TopicEffects {
+            workspace: sender_workspace.path().to_path_buf(),
+            transport: client.clone(),
+            signer,
+        }));
+        let hash = ContentHash::from_bytes([0x73; 32]);
+        let artifact = EvidenceArtifact {
+            id: ArtifactId::from(hash),
+            content_hash: hash,
+            kind: ArtifactKind::Decision,
+            producer: AgentId::parse("worker").unwrap(),
+            authority: CapabilityTokenId::nil(),
+            provenance: vec![],
+            depends_on: vec![],
+            review: None,
+            host: HostBinding::new("sender", "workspace"),
+        };
+        let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        assert!(journal.load().await.unwrap().is_empty());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            sender.share_handle(
+                &identity.peer_id,
+                &artifact,
+                &CorrelationId::new("arch-review"),
+                ContextSummary::new("event bus decision").unwrap(),
+            ),
+        )
+        .await
+        .expect("a 20-second verdict timeout must fail this test")
+        .expect("share");
+        // No polling: the receiver's verdict cannot precede the journal append.
+        let entries = journal.load().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].record,
+            JournalRecord::Room(RoomEvent::PeerTopicHandlesReceived {
+                peer: Some(peer), topic, sequence: 1, artifacts,
+            }) if peer == &sender_peer && topic == "arch-review"
+                && artifacts == &vec![artifact.id.to_string()]));
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), listener.task)
+            .await
+            .expect("listener stops")
+            .unwrap();
+        client.shutdown().await.unwrap();
+    }
 }
 
 /// Real-process crash arming seam used by the Story 17.2a L2 harness. The

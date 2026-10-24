@@ -8018,6 +8018,18 @@ mod tests {
                          sequence={sequence} held={held:?} advertised={advertised:?}"
                     ));
                 }
+                RoomEvent::PeerTopicHandlesReceived {
+                    peer,
+                    topic,
+                    sequence,
+                    artifacts,
+                } => {
+                    let p = peer.as_ref().map(|peer| it.sym(peer.as_str()));
+                    lines.push(format!(
+                        "journal PeerTopicHandlesReceived peer={p:?} topic={topic:?} \
+                         sequence={sequence} artifacts={artifacts:?}"
+                    ));
+                }
                 RoomEvent::RecipientItemReceived {
                     address,
                     task,

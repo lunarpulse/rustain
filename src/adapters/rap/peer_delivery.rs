@@ -140,7 +140,7 @@ pub struct VerifiedPeerFrameHandler {
     /// than the one its transport writes, so the composition root passes one
     /// `Arc` to both.
     topics: Arc<crate::adapters::rap::topic::PeerTopicStore>,
-    /// Where a divergent head is journaled and where re-gossip is sent from.
+    /// Where topic observations and handle arrivals are journaled, and re-gossip is sent from.
     ///
     /// ⚑ Filled **after** construction, and that is forced by the composition
     /// order rather than chosen: the handler is built by
@@ -149,9 +149,9 @@ pub struct VerifiedPeerFrameHandler {
     /// this handler. A `OnceLock` makes the late binding explicit and
     /// single-shot — ⛔ never a slot a second composition can silently replace.
     ///
-    /// Empty in the composition paths that own no transport; a topic frame is
-    /// then admitted and compared but nothing is written or re-advertised,
-    /// which is refused honestly rather than passed off as success.
+    /// Empty in composition paths that own no transport: clean admissions
+    /// commit without a record or re-advertisement; divergences refuse because
+    /// they cannot be recorded. The production listener always binds effects.
     topic_effects: Arc<std::sync::OnceLock<TopicEffects>>,
     /// This sender's outbound gossip position per peer, for the life of one
     /// process. ⛔ Never durable: 18.4d's D9 rejected a durable sender cursor
@@ -169,7 +169,7 @@ pub struct VerifiedPeerFrameHandler {
 /// The two effects a topic frame can have beyond the in-memory store.
 #[derive(Clone)]
 pub struct TopicEffects {
-    /// Journal root for `RoomEvent::PeerEquivocated`.
+    /// Journal root for topic divergence and handle-arrival records.
     pub workspace: std::path::PathBuf,
     /// The transport the re-gossip fan-out goes out on.
     pub transport: Arc<dyn crate::domain::ports::PeerTransport>,
@@ -364,13 +364,13 @@ impl VerifiedPeerFrameHandler {
         }
     }
 
-    /// Admit one verified topic-gossip frame, journal any divergence, and
-    /// re-advertise what this host holds (Story 18.4a — FR150, FR150-a).
+    /// Admit one topic-gossip frame, journal its observations and handle arrival,
+    /// and re-advertise what this host holds (FR150, FR150-a).
     ///
     /// # Ordering is the contract
     ///
     /// 1. prepare the admission against pre-state (nothing mutates),
-    /// 2. append the durable record for every divergence,
+    /// 2. append one batch: every divergence, then the handle-arrival record,
     /// 3. commit the admission,
     /// 4. **then** re-gossip — and only when the admission changed what this
     ///    host would advertise.
@@ -378,7 +378,9 @@ impl VerifiedPeerFrameHandler {
     /// ⚑ Code-review P6: journaling happens **before** the commit, so a journal
     /// failure leaves the store untouched — a retried frame (the ingress rolls
     /// back the replay reservation on an error) cannot advance a feed twice or
-    /// journal the same observation twice.
+    /// journal the same observation twice. Steps 1–3 hold the store's admission
+    /// gate: each peer has its own ingress worker, and a second admission landing
+    /// across this one's journal append would leave its pre-state decisions stale.
     ///
     /// ⚑ Code-review D4 (team ruling): re-gossip fires only when the admission
     /// admitted handles — the one event that changes this host's advertised
@@ -398,50 +400,42 @@ impl VerifiedPeerFrameHandler {
             serde_json::from_value(envelope.body.clone())
                 .map_err(|error| PeerDeliveryError::TopicRefused(error.to_string()))?;
         let now_ms = (self.now)();
+        let gate = self.topics.admission_gate().await;
         let prepared = self
             .topics
             .prepare(&envelope.header, &peer_id, gossip, now_ms)
             .await
             .map_err(|error| PeerDeliveryError::TopicRefused(error.to_string()))?;
 
-        if !prepared.divergences.is_empty() {
-            let Some(effects) = self.topic_effects.get() else {
-                // ⛔ Not silently `Ok`: a build with no journal and no transport
-                // cannot honour the record-and-advertise half, and saying so is
-                // the difference between "nothing happened" and "we did not
-                // notice".
+        let records = prepared.journal_records();
+        if !records.is_empty() {
+            if let Some(effects) = self.topic_effects.get() {
+                let journal =
+                    crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+                        &effects.workspace,
+                    )
+                    .await
+                    .map_err(|error| {
+                        PeerDeliveryError::TopicRefused(format!(
+                            "a topic frame was received but could not be recorded ({error})"
+                        ))
+                    })?;
+                journal.append_batch(records).await.map_err(|error| {
+                    PeerDeliveryError::TopicRefused(format!(
+                        "a topic frame was received but could not be recorded ({error})"
+                    ))
+                })?;
+            } else if !prepared.divergences.is_empty() {
                 return Err(PeerDeliveryError::TopicRefused(
                     "a divergent topic head was observed but this host has no journal bound to \
                      record it"
                         .to_owned(),
                 ));
-            };
-            for divergence in &prepared.divergences {
-                let event = divergence.to_room_event();
-                match crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
-                    &effects.workspace,
-                )
-                .await
-                {
-                    Ok(journal) => {
-                        if let Err(error) = journal.append_room(event).await {
-                            return Err(PeerDeliveryError::TopicRefused(format!(
-                                "two different topic heads were seen but the observation could \
-                                 not be recorded ({error})"
-                            )));
-                        }
-                    }
-                    Err(error) => {
-                        return Err(PeerDeliveryError::TopicRefused(format!(
-                            "two different topic heads were seen but the journal could not be \
-                             opened ({error})"
-                        )));
-                    }
-                }
             }
         }
 
         let admission = self.topics.commit(prepared).await;
+        drop(gate);
 
         if admission.head.is_some()
             && let Some(effects) = self.topic_effects.get()

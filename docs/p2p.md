@@ -235,6 +235,14 @@ addressed peer **membership of this Topic** — that, and nothing beyond it.
 The receiving agent reads the summary as tainted context: the signature
 establishes attribution, never truth.
 
+On the receiving host, each admitted frame carrying handles leaves one durable
+`⇣ topic-received` row naming the sender, topic, artifact ids and topic-feed
+sequence. Find it with `rustain team log --filter kind=topic-received`, `/team log`,
+or the `Ctrl+X, L` panel, including after a restart. It records a handle arriving,
+not an artifact body arriving or being read; the artifacts stay on the sender.
+Heads-only re-advertisements write no receipt row (a divergent head still gets
+its own row), and the handle's summary text is never logged.
+
 Refusals name what was not shared: unknown alias, no pinned key, no address
 on file, a relay-only address you have not configured, feature disabled, no
 daemon, no such artifact in this workspace's room (see `rustain team log`

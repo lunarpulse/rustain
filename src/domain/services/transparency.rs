@@ -144,6 +144,8 @@ pub enum TransparencyKind {
     /// The six touch points are paid: variant, glyph, wire label, the fold arm,
     /// the filter parse arm, and this story's own coverage.
     PeerEquivocated,
+    /// This host admitted handles from a peer's topic feed; no artifact body arrived.
+    PeerTopicReceived,
     /// Recipient-owned durable item accepted from an inbound principal.
     RecipientItemReceived,
     /// Local human acknowledgement of a recipient-owned durable item.
@@ -224,6 +226,7 @@ impl TransparencyKind {
             Self::PeerFrameAttempted => "↗",
             // ≠ is unused by every other kind: two heads that do not reconcile.
             Self::PeerEquivocated => "≠",
+            Self::PeerTopicReceived => "⇣",
             Self::RecipientItemReceived => "↓",
             Self::RecipientItemAcknowledged => "✓",
             // ⊘ is the sanctioned mark for a disposed thing (UX-DR-TM-01's
@@ -272,6 +275,7 @@ impl TransparencyKind {
             Self::TransportAdmission => "transport-admission",
             Self::PeerFrameAttempted => "peer-frame",
             Self::PeerEquivocated => "peer-equivocated",
+            Self::PeerTopicReceived => "topic-received",
             Self::RecipientItemReceived => "item-received",
             Self::RecipientItemAcknowledged => "item-acknowledged",
             Self::RecipientItemRemoved => "item-removed",
@@ -648,6 +652,20 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             Some(topic.clone()),
             peer_equivocation_summary(issuer.as_ref(), *sequence),
         ),
+        RoomEvent::PeerTopicHandlesReceived {
+            peer,
+            topic,
+            sequence,
+            artifacts,
+        } => (
+            TransparencyKind::PeerTopicReceived,
+            Direction::Inbound,
+            peer.as_ref()
+                .map(|peer| peer.as_str().to_owned())
+                .unwrap_or_else(|| "—".to_owned()),
+            Some(topic.clone()),
+            peer_topic_received_summary(artifacts, *sequence),
+        ),
         // ⛔ The summary does NOT quote `content`. A transparency LEDGER
         // records that an interaction happened, not its payload: the row
         // already carries the host-minted item id, the host-derived peer
@@ -889,6 +907,24 @@ fn peer_equivocation_summary(issuer: Option<&PeerId>, sequence: u64) -> String {
     }
 }
 
+fn peer_topic_received_summary(artifacts: &[String], sequence: u64) -> String {
+    match artifacts {
+        [] => format!(
+            "topic handles received at feed sequence {sequence}; no artifact ids were recorded"
+        ),
+        [id] => format!(
+            "topic handle received for artifact {id} at feed sequence {sequence}; \
+             the artifact itself stays on the sender"
+        ),
+        ids => format!(
+            "{} topic handles received at feed sequence {sequence}: {}; \
+             the artifacts themselves stay on the sender",
+            ids.len(),
+            ids.join(", ")
+        ),
+    }
+}
+
 /// Copy for an outbound frame-attempt row.
 ///
 /// ⛔ Says only what the verdict said. A written frame with no answer reports an
@@ -1050,6 +1086,7 @@ impl TransparencyFilter {
                         "transport-admission" => TransparencyKind::TransportAdmission,
                         "peer-frame" => TransparencyKind::PeerFrameAttempted,
                         "peer-equivocated" => TransparencyKind::PeerEquivocated,
+                        "topic-received" => TransparencyKind::PeerTopicReceived,
                         "item-received" => TransparencyKind::RecipientItemReceived,
                         "item-acknowledged" => TransparencyKind::RecipientItemAcknowledged,
                         "item-removed" => TransparencyKind::RecipientItemRemoved,
@@ -1072,7 +1109,7 @@ impl TransparencyFilter {
                                 "unknown kind `{value}` — valid: accepted, refused, dispatched, \
                                  awaiting-approval, status-query, disclosed, consent-granted, \
                                  consent-revoked, room-role-granted, room-role-revoked, \
-                                 transport-admission, peer-frame, peer-equivocated, \
+                                 transport-admission, peer-frame, peer-equivocated, topic-received, \
                                  item-received, item-acknowledged, item-removed, \
                                  item-retracted, item-replied, reply-observed, surfaced, \
                                  digest-flushed, unknown"
@@ -1380,6 +1417,139 @@ mod tests {
 
     fn room_entry(seq: u64, recorded_at_ms: i64, event: RoomEvent) -> JournalEntry {
         JournalEntry::new(seq, JournalRecord::Room(event), recorded_at_ms)
+    }
+
+    #[test]
+    fn topic_received_rows_render_all_summary_forms_and_defaults() {
+        let id = "ab".repeat(32);
+        let second = "cd".repeat(32);
+        for (artifacts, expected) in [
+            (
+                vec![id.clone()],
+                format!(
+                    "topic handle received for artifact {id} at feed sequence 7; the artifact itself stays on the sender"
+                ),
+            ),
+            (
+                vec![id.clone(), second.clone()],
+                format!(
+                    "2 topic handles received at feed sequence 7: {id}, {second}; the artifacts themselves stay on the sender"
+                ),
+            ),
+            (
+                vec![],
+                "topic handles received at feed sequence 7; no artifact ids were recorded"
+                    .to_owned(),
+            ),
+        ] {
+            let row = transparency_row(&room_entry(
+                1,
+                1,
+                RoomEvent::PeerTopicHandlesReceived {
+                    peer: Some(peer()),
+                    topic: "arch-review".to_owned(),
+                    sequence: 7,
+                    artifacts,
+                },
+            ))
+            .expect("receipt renders");
+            assert_eq!(row.summary, expected);
+            assert_eq!(row.kind, TransparencyKind::PeerTopicReceived);
+            assert_eq!(row.kind.glyph(), "⇣");
+            assert_eq!(row.kind.label(), "topic-received");
+            assert_eq!(row.direction, Direction::Inbound);
+            assert_eq!(row.peer, peer().as_str());
+            assert_eq!(row.task.as_deref(), Some("arch-review"));
+            assert!(
+                TransparencyFilter::parse("kind=topic-received")
+                    .unwrap()
+                    .matches(&row)
+            );
+            assert!(
+                !TransparencyFilter::parse("kind=peer-equivocated")
+                    .unwrap()
+                    .matches(&row)
+            );
+            for banned in [
+                "authenticated",
+                "tamper",
+                "signed",
+                "audit",
+                "evidence",
+                "proof",
+                "verified",
+                "replicat",
+                "cannot read",
+                "ciphertext",
+                "event bus decision",
+            ] {
+                assert!(
+                    !row.one_line().to_ascii_lowercase().contains(banned),
+                    "{banned}"
+                );
+            }
+        }
+        let event = serde_json::from_str(r#"{"event":"peer_topic_handles_received"}"#).unwrap();
+        let row = transparency_row(&room_entry(1, 1, event)).expect("legacy defaults render");
+        assert_eq!(row.peer, "—");
+        assert_eq!(row.task.as_deref(), Some(""));
+        assert_eq!(
+            row.summary,
+            "topic handles received at feed sequence 0; no artifact ids were recorded"
+        );
+        assert!(
+            TransparencyFilter::parse("kind=not-a-kind")
+                .unwrap_err()
+                .contains("topic-received")
+        );
+        let event = RoomEvent::PeerTopicHandlesReceived {
+            peer: None,
+            topic: String::new(),
+            sequence: 1,
+            artifacts: vec![id; 12],
+        };
+        let row = transparency_row(&room_entry(1, 1, event)).unwrap();
+        assert!(row.summary.ends_with(TRUNCATION_MARKER));
+        assert_eq!(
+            row.summary.len(),
+            MAX_SUMMARY_BYTES + TRUNCATION_MARKER.len()
+        );
+    }
+
+    #[test]
+    fn topic_received_glyph_differs_from_every_other_kind() {
+        use TransparencyKind::*;
+        for other in [
+            Accepted,
+            Rejected,
+            Dispatched,
+            AwaitingApproval,
+            StatusQueried,
+            Disclosed,
+            ConsentGranted,
+            ConsentRevoked,
+            RoomRoleGranted,
+            RoomRoleRevoked,
+            TransportAdmission,
+            PeerFrameAttempted,
+            PeerEquivocated,
+            RecipientItemReceived,
+            RecipientItemAcknowledged,
+            RecipientItemRemoved,
+            RecipientItemRetracted,
+            RecipientItemReplied,
+            PeerReplyObserved,
+            InteractionSurfaced,
+            DigestFlushed,
+            Unknown,
+        ] {
+            assert_ne!(
+                PeerTopicReceived.glyph(),
+                other.glyph(),
+                "{}",
+                other.label()
+            );
+        }
     }
 
     #[test]
