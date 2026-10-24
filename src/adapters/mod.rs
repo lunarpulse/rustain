@@ -60,6 +60,7 @@ pub mod skill_provider;
 pub mod skill_registry;
 pub mod subagent;
 pub mod template;
+pub mod tls_provider;
 pub mod tool_exposure;
 pub mod toolset_adapter;
 pub mod tui;

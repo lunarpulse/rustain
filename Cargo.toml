@@ -210,13 +210,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
 # ── HTTP client (provider adapters) ─────────────────────────────
-reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], optional = true }
+# One TLS stack: rustls + ring; native roots preserve the OS trust store.
+# Keep charset/system-proxy explicitly, but not http2 (streaming stays HTTP/1.1).
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls-native-roots", "charset", "system-proxy"], optional = true }
 axum = { version = "0.8", optional = true }
-# Story 18.1b — server-side TLS for the non-loopback A2A listener. Direct (not
-# via reqwest's `rustls-tls`, which is a *client* config) and `a2a`-gated.
-# Pinned to the versions reqwest already resolves so one rustls links.
-rustls = { version = "0.23", optional = true }
-tokio-rustls = { version = "0.26", optional = true }
+# Shared server TLS and explicit process provider for MCP, A2A and relay.
+# Disable defaults so aws-lc cannot become a second crypto provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
 # Story 19.14 (`A1`) — named SOLELY to downcast `rustls::CertificateError::Other`
 # to `webpki::Error::CaUsedAsEndEntity`, the one anchor sub-cause rustls does not
@@ -337,25 +338,16 @@ croner = { version = "3.0.1", optional = true }
 # llm-provider = { path = "../rustycode/llm-provider", features = ["config"] }
 
 # ── MCP SDK (Epic 9) ─────────────────────────────────────────────
-# Story 9.9 (ruling A3 → Option A, resolved at the 2026-08-31 preflight):
-# `transport-streamable-http-client-reqwest` brings the Streamable HTTP client
-# transport; `reqwest` is the TLS backend and is ⛔ NOT optional. The transport
-# feature alone expands to `["transport-streamable-http-client", "__reqwest"]`
-# and `__reqwest = ["dep:reqwest"]` — which selects NO TLS provider, so every
-# `https://` MCP URL would fail to build a client. TLS lives in rmcp's separate
-# `reqwest = ["__reqwest", "reqwest?/rustls"]` key. BOTH STRINGS OR NEITHER.
-#
-# ⚠ rmcp resolves its own reqwest 0.13 (semver-incompatible with rustain's 0.12
-# at :77 — no feature unification, both are in the lock). Measured against the
-# SHIPPED feature set (`release.yml:70` = self-update,relay-server,a2a,p2p +
-# defaults) this adds exactly ONE crate, `sse-stream`: `reqwest 0.13`,
-# `aws-lc-rs`, `rustls-platform-verifier` and `rustls-native-certs` are already
-# at release baseline via `iroh → hickory-resolver → hickory-net → rustls`.
+# Streamable HTTP needs both the transport and its TLS feature. rmcp uses
+# reqwest 0.13 (separate from our 0.12), retaining its platform verifier.
+# `reqwest-tls-no-provider` avoids reqwest's aws-lc fallback; tls_provider
+# installs ring before GuardedHttpClient constructs the HTTPS client.
+# MCP HTTPS therefore trusts the OS store, as do unanchored provider clients.
 rmcp = { version = "1.0", default-features = false, features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
-    "reqwest",
+    "reqwest-tls-no-provider",
 ], optional = true }
 
 # Story 9.9 (AC6) — rmcp's Streamable HTTP transport is generic over its HTTP
@@ -431,7 +423,7 @@ models-dev = ["dep:reqwest"]
 # Story 9.9: `reqwest13` is rmcp's own reqwest 0.13 under a second name, needed
 # to name `StreamableHttpError<reqwest::Error>` when classifying HTTP failures
 # (AC6). Adds zero crates — see the dependency comment.
-mcp = ["dep:rmcp", "dep:reqwest13", "dep:sse-stream"]
+mcp = ["dep:rmcp", "dep:reqwest13", "dep:sse-stream", "dep:rustls"]
 test-fake-mcp = ["mcp", "rmcp/server"]
 # DF-17-4a-6: composite_toolset_adapter remains MCP-gated across its lifecycle surface.
 a2a = [
@@ -516,11 +508,62 @@ collapsible_if = "allow"
 collapsible_else_if = "allow"
 
 [profile.release]
-opt-level =  3 #"z"
+opt-level = 3
 lto = true
 strip = true
 codegen-units = 1
 panic = "abort"
+
+# Cold dependency code optimizes for size. Hot means non-generic work per
+# rendered frame, streamed chunk, TLS record/bulk byte, match or signed message.
+# Generic monomorphizations in rustain retain level 3; startup/CLI/control is cold.
+# Keep this reviewed list synchronized with K2 in conformance_release_workflow.
+[profile.release.package]
+"*" = { opt-level = "z" }
+# Runtime / IO
+tokio = { opt-level = 3 }
+tokio-util = { opt-level = 3 }
+tokio-stream = { opt-level = 3 }
+mio = { opt-level = 3 }
+futures-util = { opt-level = 3 }
+futures-core = { opt-level = 3 }
+futures-channel = { opt-level = 3 }
+bytes = { opt-level = 3 }
+# TUI frames
+ratatui-core = { opt-level = 3 }
+ratatui-widgets = { opt-level = 3 }
+ratatui-crossterm = { opt-level = 3 }
+crossterm = { opt-level = 3 }
+kasuari = { opt-level = 3 }
+compact_str = { opt-level = 3 }
+unicode-width = { opt-level = 3 }
+unicode-segmentation = { opt-level = 3 }
+unicode-truncate = { opt-level = 3 }
+lru = { opt-level = 3 }
+pulldown-cmark = { opt-level = 3 }
+# Streaming, HTTP and TLS records
+serde_json = { opt-level = 3 }
+memchr = { opt-level = 3 }
+itoa = { opt-level = 3 }
+zmij = { opt-level = 3 }
+hyper = { opt-level = 3 }
+hyper-util = { opt-level = 3 }
+http = { opt-level = 3 }
+httparse = { opt-level = 3 }
+rustls = { opt-level = 3 }
+tokio-rustls = { opt-level = 3 }
+ring = { opt-level = 3 }
+# Matching
+regex = { opt-level = 3 }
+regex-automata = { opt-level = 3 }
+aho-corasick = { opt-level = 3 }
+globset = { opt-level = 3 }
+# Containers and cryptography
+hashbrown = { opt-level = 3 }
+sha2 = { opt-level = 3 }
+blake3 = { opt-level = 3 }
+curve25519-dalek = { opt-level = 3 }
+ed25519-dalek = { opt-level = 3 }
 
 # Grand Plan P0-2 (docs/rustain-grand-plan-2026-10-22.md §4, Rule C).
 # Full DWARF for 272 integration binaries was most of the link work and disk

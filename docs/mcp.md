@@ -38,12 +38,13 @@ A plaintext `http://` URL pointed at a **non-loopback** host warns once per
 server and then connects anyway (warn-and-allow): the traffic and any auth token
 are unencrypted. Loopback URLs and `https://` URLs are silent.
 
-⚠ **Trust anchors differ by subsystem, and this is worth knowing before you
-deploy behind a corporate CA.** MCP HTTPS validates against the **operating
-system trust store** (via `rustls-platform-verifier`, already in the shipped
-binary through `iroh`), while LLM-provider traffic validates against the pinned
-`webpki-roots` bundle. An OS-level intercepting proxy therefore sees MCP traffic
-and not provider traffic. Tracked as `DF-9-9-TRUST-ANCHOR-SPLIT`.
+**Unanchored outbound HTTPS trusts the operating system store.** MCP uses
+`rustls-platform-verifier`; LLM providers, self-update, models-dev, profile
+installation and unanchored A2A use reqwest 0.12 with native roots. Corporate
+CAs therefore apply to both paths. Both use rustls + ring, installed explicitly
+before MCP constructs its client. Operator-anchored A2A still disables built-in
+roots and trusts only the supplied anchor. The optional `telegram` feature also
+enables Mozilla roots through teloxide (native ∪ Mozilla); C-2 owns that choice.
 
 ⛔ **MCP tasks require stdio.** A server that answers `tools/call` with a
 task-shaped result over HTTP is refused with a named boundary rather than

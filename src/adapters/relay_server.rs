@@ -17,13 +17,11 @@
 //!
 //! # Two landmines that are not obvious from the API
 //!
-//! 1. **A rustls `CryptoProvider` must be installed or the TLS path panics at
-//!    runtime.** `iroh-relay`'s `server` feature enables `rustls/ring`, while
-//!    rustain's own `rustls` carries the default `aws-lc-rs`; with two providers
-//!    linked and none installed, `rustls::ServerConfig::builder()` panics. It is
-//!    not a compile error, and it only fires on the TLS path. `a2a` is not a
-//!    default feature, so a `relay-server`-only build has no other installer in
-//!    the process — [`crate::adapters::pem_tls`] does it for both.
+//! 1. **Install the rustls `CryptoProvider` explicitly.** The process uses
+//!    rustls + ring only; [`crate::adapters::pem_tls`] calls the shared installer
+//!    before building the server config, including for library callers that
+//!    do not run executable startup. MCP's provider-less reqwest requires the
+//!    same default, installed by its own client constructor.
 //! 2. **`Server::shutdown` consumes `self`.** The shutdown path must therefore
 //!    OWN the `Server`: ⛔ not an `Arc<Server>`, ⛔ not a clone. An
 //!    implementation that parks the server behind a shared handle and shuts it

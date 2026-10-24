@@ -209,9 +209,9 @@ impl A2aClientAdapter {
             Some(path) => TrustMode::AnchorOnly(path.to_owned()),
         };
         let client = match &trust_mode {
-            // ⛔ An unpinned peer's builder is untouched: native-tls carries the OS
-            // trust store that corporate MITM appliances and platform root policy
-            // depend on, and `default-tls` is what this declaration selects today.
+            // An unpinned peer keeps rustls native roots: the OS trust store
+            // preserves corporate CAs and platform root policy without an
+            // operator-anchor override.
             TrustMode::PlatformRoots => Ok(base_builder()
                 .build()
                 .map_err(|error| A2aError::ClientBuild(error.to_string()))?),
@@ -465,9 +465,9 @@ impl A2aClientAdapter {
 
     /// Classify a transport failure, for anchored peers only (`A21`).
     ///
-    /// ⛔ No native-tls classifier: an unpinned peer's chain carries an OpenSSL
-    /// `ErrorStack`, and labelling a connection failure as an anchor failure is
-    /// worse than the bare status.
+    /// Unpinned peers also use rustls, but a platform-trust failure is not an
+    /// operator-anchor failure. Keep the specialized classification restricted
+    /// to explicitly anchored peers.
     fn map_transport_error(&self, error: &reqwest::Error) -> A2aError {
         if self.anchored {
             if let Some(failure) = find_rustls_error(error).and_then(anchor_failure_of) {

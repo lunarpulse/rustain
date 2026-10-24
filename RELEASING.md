@@ -35,6 +35,12 @@ A2A and P2P are off by default for `cargo install`. **Published release assets u
 
 The release pipeline asserts each published binary is **≤ 38 MiB (39,845,888 bytes)** (NFR9 as amended by measurement; `tests/conformance_release_workflow.rs` pins the number). The size check lives in CI, not runtime. The existing release profile (`Cargo.toml` `[profile.release]`) already uses `lto = true`, `strip = true`, `codegen-units = 1`, `panic = "abort"` to minimize size.
 
+Linux also runs `.github/scripts/release-size-guard.sh` on the already-built release and 19.21h capture binaries. Story 18.7 measured the four-feature binary at **33,886,536 B** (2026-10-24, rustc 1.98.1, mold, locked release build). The reserve is **5,373,952 B**, so the ratchet fires above **34,471,936 B**, leaving 585,400 B of growth from that measurement. Lower `RESERVED_HEADROOM_BYTES` only in a reviewed change with a measured size table; C-2 consumes it when adding `telegram,cron`. macOS retains only the NFR9 ceiling until measured.
+
+The workspace crate stays at `opt-level = 3`; cold dependencies use `z`. The reviewed hot list in `Cargo.toml` keeps level 3 for non-generic work per rendered frame, streamed chunk, TLS record/bulk byte, regex/glob match or signed message. Startup, CLI/config, connection setup and QUIC control are cold; generic monomorphizations in rustain keep its level.
+
+Default and four-feature builds use one TLS stack, **rustls + ring**, with no `libssl`/`libcrypto` runtime dependency. Unanchored reqwest 0.12 clients use native roots; MCP retains its platform verifier. The shared provider is installed at startup and at library TLS entry points. Anchored A2A remains operator-anchor-only.
+
 ## Signing Scheme: minisign
 
 We use [minisign](https://jedisct1.github.io/minisign/) (Ed25519, prehashed `ED` algorithm) for release signing. The runtime verification in 13-3a uses `minisign-verify` (pure-Rust, zero-dependencies, no network at verify time).
@@ -42,7 +48,7 @@ We use [minisign](https://jedisct1.github.io/minisign/) (Ed25519, prehashed `ED`
 **Why minisign over cosign/Sigstore/GPG:**
 - Pure-Rust verify-only client (`minisign-verify`) — tiny, no network at verify time
 - Ed25519, trivial in GitHub Actions
-- Keeps signing overhead small. The four-feature release fits NFR9's 35 MiB bound; NFR53's < 5 MB per-feature aspiration is currently exceeded by `p2p` and remains owned by Story 18.7.
+- Keeps signing overhead small. The four-feature release fits NFR9's 38 MiB bound; NFR53's < 5 MB per-feature aspiration is currently exceeded by `p2p` and remains owned by `DF-18-7-COMPOSABILITY-REMAINDER`.
 - Trade-off accepted: long-lived secret key managed via protected-environment custody + rotation ladder, rather than PKI complexity
 
 ### Trust Model
@@ -126,7 +132,7 @@ When rotating the signing key:
 3. Push a tag: `git tag v0.2.0 && git push origin v0.2.0`
 4. The `release.yml` workflow triggers automatically:
    - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded)
-   - Size guard asserts ≤ 35 MiB / 36,700,160 bytes
+   - Size guard asserts ≤ 38 MiB / 39,845,888 bytes; Linux additionally enforces the reserved-headroom ratchet
    - Generates `SHA256SUMS`
    - Signs manifest in the protected `release` environment
    - Verifies signature fail-closed before publishing
@@ -151,11 +157,15 @@ cargo build --release --target "$TARGET" --features self-update,relay-server,a2a
 ASSET="rustain-${VERSION}-${TARGET}"
 cp "target/${TARGET}/release/rustain" "$ASSET"
 
-# 5. Size check
-SIZE=$(stat -c%s "$ASSET")
-if [ "$SIZE" -gt "36700160" ]; then
-    echo "ERROR: ${TARGET} binary exceeds 35 MiB limit (NFR9)"
-    exit 1
+# 5. Size check (Linux ratchet; macOS ceiling only)
+if [ "$TARGET" = "x86_64-unknown-linux-gnu" ]; then
+    .github/scripts/release-size-guard.sh "$ASSET"
+else
+    SIZE=$(stat -f%z "$ASSET")
+    if [ "$SIZE" -gt "39845888" ]; then
+        echo "ERROR: ${TARGET} binary exceeds 38 MiB limit (NFR9)"
+        exit 1
+    fi
 fi
 
 # 6. Generate manifest
@@ -172,7 +182,7 @@ minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P "$PUBKEY"
 #    (Use GitHub web UI or gh CLI: gh release create "v${VERSION}" ...)
 ```
 
-For macOS targets, repeat steps 3-8 on the appropriate host or cross-compile.
+For macOS targets, repeat steps 3-8 on the appropriate host or cross-compile; step 5 checks only the 38 MiB NFR9 ceiling, not the Linux reserved-headroom ratchet. Minimal/no-default builds, relay-role measurements and the NFR53 amendment remain in `DF-18-7-COMPOSABILITY-REMAINDER`.
 
 ## First Release Checklist
 

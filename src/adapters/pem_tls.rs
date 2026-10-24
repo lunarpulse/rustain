@@ -14,16 +14,16 @@
 //!
 //! # The crypto-provider install is not optional
 //!
-//! `iroh-relay`'s `server` feature enables `rustls/ring`, while rustain's own
-//! `rustls` dependency carries the default `aws-lc-rs`. With two providers
-//! linked and none installed, `rustls::ServerConfig::builder()` **panics at
-//! runtime** — not a compile error, and only on the TLS path. `a2a` is not a
-//! default feature, so a `relay-server`-only build has no other installer in
-//! the process: ⛔ do not assume something else installed one.
+//! The process uses rustls + ring only. Install the provider explicitly here
+//! as well as at executable startup: library callers can load server material
+//! without going through `main`. MCP's provider-less reqwest also requires an
+//! explicit process default; all three paths share `tls_provider`.
 
 #![cfg(any(feature = "a2a", feature = "relay-server"))]
 
 use std::path::Path;
+
+use crate::adapters::tls_provider::install_ring_crypto_provider;
 
 /// A PEM pair that could not be turned into a server configuration.
 ///
@@ -118,19 +118,6 @@ pub fn load_server_tls_config(
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|error| PemTlsError(format!("building rustls server config: {error}")))
-}
-
-/// Make `ring` the process default, best-effort.
-///
-/// An `Err` means another provider was already installed, which is safe —
-/// `ServerConfig::builder()` works with whichever provider is installed — but
-/// ⚠ it may not be `ring`: rustain's own `rustls` carries the default
-/// `aws-lc-rs`, so another component may have installed that first. The claim
-/// this function can make is only that *a* provider exists after it returns.
-/// Named as its own function because two features now depend on it and a
-/// future third must not have to rediscover the panic.
-pub fn install_ring_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 #[cfg(test)]

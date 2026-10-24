@@ -492,6 +492,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build four-feature release capture binary
         run: cargo build --locked --release --features self-update,relay-server,a2a,p2p
+      - name: Size ratchet
+        run: .github/scripts/release-size-guard.sh target/release/rustain
+      - name: Single TLS stack (rustls + ring)
+        shell: bash
+        # `shell: bash` runs with `-eo pipefail`, so a failing `cargo tree` fails the step.
+        run: |
+          for features in '' self-update,relay-server,a2a,p2p; do
+            args=()
+            if [ -n "$features" ]; then args=(--features "$features"); fi
+            cargo tree --locked -e normal --prefix none --format '{p}' "${args[@]}" \
+              | .github/scripts/single-tls-stack.sh "${features:-default}"
+          done
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"

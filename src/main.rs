@@ -39,6 +39,9 @@ async fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    #[cfg(any(feature = "mcp", feature = "a2a", feature = "relay-server"))]
+    adapters::tls_provider::install_ring_crypto_provider();
+
     if let Err(e) = infrastructure::startup::run().await {
         // Subcommand errors already printed their own output; use their exit code.
         // Only print the error for non-subcommand failures to avoid duplicate output.

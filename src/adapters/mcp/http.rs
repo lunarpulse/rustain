@@ -42,8 +42,15 @@ use super::error::{HttpFailureKind, McpError};
 
 /// HTTP client that preserves the raw JSON response long enough to wrap any
 /// task-shaped result before rmcp's untagged `ServerResult` can discard fields.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct GuardedHttpClient(reqwest13::Client);
+
+impl GuardedHttpClient {
+    fn new() -> Self {
+        crate::adapters::tls_provider::install_ring_crypto_provider();
+        Self(reqwest13::Client::new())
+    }
+}
 
 /// The rmcp transport rustain actually builds. Named once so the error
 /// downcast in [`classify_init_error`] and the construction site cannot drift
@@ -308,7 +315,7 @@ pub fn transport_config(spec: &McpServerSpec, url: &str) -> StreamableHttpClient
 /// Construct the transport. Requires a live Tokio runtime: `WorkerTransport::spawn`
 /// calls `tokio::spawn` immediately.
 pub(crate) fn build_transport(config: StreamableHttpClientTransportConfig) -> HttpTransport {
-    StreamableHttpClientTransport::with_client(GuardedHttpClient::default(), config)
+    StreamableHttpClientTransport::with_client(GuardedHttpClient::new(), config)
 }
 
 /// Map an rmcp initialize failure onto one of AC6's distinct classes.
@@ -433,6 +440,17 @@ fn looks_like_dns_failure(error: &(dyn std::error::Error + 'static)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guarded_http_client_builds_its_tls_client() {
+        // Run this test alone: no startup or other test may install the provider.
+        let client = GuardedHttpClient::new();
+        client
+            .0
+            .get("https://example.com")
+            .build()
+            .expect("HTTPS request must build without a network call");
+    }
 
     #[test]
     fn loopback_hosts_are_recognised_and_others_are_not() {
