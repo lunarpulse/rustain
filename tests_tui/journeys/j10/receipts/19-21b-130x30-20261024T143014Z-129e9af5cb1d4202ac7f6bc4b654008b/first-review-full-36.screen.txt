@@ -1,0 +1,30 @@
+[terminal] ⤷ Assistant:                                                                                                           
+[awaiting your response]                                                                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+Check this selected story assignment against ADR-047 and propose the exact finding to Lena and Jun; never send it.                
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] Assistant:                                                                                                             
+The architecture finding is a draft for your review. I have not sent it.                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ℹ item ri_ZV6oFzjTiVm7sVEDNeYtrxozJ5rPR1Xc selected as peer context for this daemon conversation — clears on /clear or daemon│  
+│   restart; view and acknowledgement do not select it│                                                                           
+│ ⚠ ← inbound ✓ accepted · peer 122096805902ce58041e1c3def1749872aad45d86e5a071925724fca93322243d629 · task│                      
+                             ╔══════════════════════════════════════════════════════════════════════╗                             
+                             ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+                             ║decision.                                                             ║                             
+                             ║To: lena-po, jun-dev                                                  ║                             
+                             ║Type: architecture_update                                             ║                             
+                             ║… more not shown — [r] Review first                                   ║                             
+                             ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║                             
+                             ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                                               Esc/Ctrl+D/Ctrl+C detach log: 5
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

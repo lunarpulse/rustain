@@ -1,0 +1,24 @@
+│   2026-10-24 14:28:06Z ← inbound ✓ accepted · peer│                           
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task rustain-1792852085874289886-4912627a5cb5b353 · task accepted and│      
+│   executing│                                                                  
+│   2026-10-24 14:28:06Z ← inbound ! surfaced · peer│                           
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task│                                                                       
+│   a2a-in/p-cGVlcjoxMjIwZTE3ZGQxYjZmOGY4YzU4Y2Y1ODYwNTc3ZjQxZmE2MTM4YTNkNGI0N│ 
+│   zQ0N2ZiNzU2M2ZhNTQ3YmQ0ZWQzNGM2Zg/t-cnVzdGFpbi0xNzkyODUyMDg1ODc0Mjg5ODg2LT│ 
+│   Q5MTI2MjdhNWNiNWIzNTM · peer interaction recorded · notification immediate│ 
+│     response: notify-and-wait · via individual — a2a-interaction.toml│        
+│     notification: immediate · via individual — a2a-interaction.toml│          
+│   2026-10-24 14:28:07Z ? unknown ✓ item-acknowledged · peer│                  
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task ri_q55nfn2xufrKafQCtAQRHhwpeg4kOzS2 · recipient item from lena-po│     
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

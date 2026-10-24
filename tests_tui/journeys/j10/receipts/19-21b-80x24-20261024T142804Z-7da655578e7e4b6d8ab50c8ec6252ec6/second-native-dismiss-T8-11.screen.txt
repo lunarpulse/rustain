@@ -1,0 +1,24 @@
+│       item ri_3Ra30ZDo043dJbLnCuI57eB4D7yMt1Y2 · arrival 1 · task│            
+│   rustain-1792852116425613779-d933bc5a0998101a · received│                    
+│ ℹ 2026-10-24 14:28:05Z ← inbound ⏸ awaiting-approval · peer│                  
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task rustain-1792852085874289886-4912627a5cb5b353 · task parked awaiting│   
+│   operator approval│                                                          
+│   2026-10-24 14:28:06Z ← inbound ↓ item-received · peer│                      
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task ri_q55nfn2xufrKafQCtAQRHhwpeg4kOzS2 · recipient item received from│    
+│   lena-po│                                                                    
+│   2026-10-24 14:28:06Z ← inbound ✓ accepted · peer│                           
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task rustain-1792852085874289886-4912627a5cb5b353 · task accepted and│      
+│   executing│                                                                  
+│   2026-10-24 14:28:06Z ← inbound ! surfaced · peer│                           
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,16 @@
+│   1220a33cebd06ff82527cfc2e45bc418d606777c05300c58061a20│ 
+│   8558e903b87e12 · task│                                  
+│   ri_LU1Ry1wDwd-8-KU02WLuowKl9XyP-wHF · recipient item│   
+│   from lena-po acknowledged│                              
+│   2026-10-24 14:33:06Z → outbound ↑ dispatched · peer│    
+│   1220a33cebd06ff82527cfc2e45bc418d606777c05300c58061a20│ 
+│   8558e903b87e12 · task│                                  
+┌──────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready        
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

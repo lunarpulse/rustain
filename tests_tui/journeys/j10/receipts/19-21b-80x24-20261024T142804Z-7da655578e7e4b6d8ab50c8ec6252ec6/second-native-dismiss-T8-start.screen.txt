@@ -1,0 +1,24 @@
+│       jun-dev  awaiting their approval│                                       
+│ ℹ Team interaction policy│                                                    
+│   Response mode: notify-and-wait│                                             
+│   Notification urgency: immediate│                                            
+│   Peers:│                                                                     
+│   - jun-dev│                                                                  
+│   (1220c1034c8d6a6a2eede3c8e1d79126237f227a2f4da6a1f0b8bdf9213cbbd8fc2c):│    
+│   not granted│                                                                
+│   - lena-po│                                                                  
+│   (1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f):│    
+│   not granted│                                                                
+│ ⚠ ← inbound ✓ accepted · peer│                                                
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task rustain-1792852085874289886-4912627a5cb5b353 · task accepted and│      
+│ ℹ Proposal dismissed. Nothing was sent.│                                      
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

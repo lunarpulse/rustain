@@ -1,0 +1,24 @@
+│ ADR-047 requires persist, then publish.                                       
+│ A crash between those steps loses the item.                                   
+│ Lena: amend the story acceptance order.                                       
+│ Jun: keep the owner lock through publication.                                 
+│ Do not acknowledge on arrival or passive View.                                
+│ Retain the peer-tainted context boundary.                                     
+│ Review is local; only an operator may Send.                                   
+│ Preserve ordered recipients and exact UTF-8 bytes.                            
+│ Résumé: preserve naïve input and é.                                           
+│ Decision: persist the row before showing its card.                            
+│ ℹ     lena-po  awaiting their approval│                                       
+│       jun-dev  awaiting their approval│                                       
+│ ⚠ ← inbound ✓ accepted · peer│                                                
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task rustain-1792852085874289886-4912627a5cb5b353 · task accepted and│      
+┌──────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                    │
+│Peer is waiting for your response.                                            │
+│[Tab] Item actions                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                      log: 7
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

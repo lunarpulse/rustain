@@ -1,0 +1,41 @@
+[
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 1
+  },
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 2
+  },
+  {
+    "method": "GET",
+    "path": "/.well-known/agent-card.json",
+    "sequence": 3
+  },
+  {
+    "method": "POST",
+    "path": "/",
+    "rpc_method": "message/send",
+    "request_sha256": "b2dc0f8306b292ca7d2848d42c5b9756013d1efb75c41dc7b8103fbd845bd63d",
+    "message_id": "rustain-1792852365432424117-b26def26cb37ac87",
+    "text_parts": [
+      "STORY-047: publish the received card before persisting its row.\nJun owns implementation; Marcus checks the architecture.\nAcceptance: an arriving item is visible before its durable append.\nPlease identify conflicts with ADR-047; do not send automatically."
+    ],
+    "text_sha256": [
+      "623d90349736f77d332d0eafe85dab2a735e828cdd66e5fa723b59e87e7a4513"
+    ],
+    "text_bytes": [
+      254
+    ],
+    "message_type": "story_assignment",
+    "metadata_keys": [
+      "x-rustain-authorship",
+      "x-rustain-item-capability",
+      "x-rustain-message-type",
+      "x-rustain-send-authorization"
+    ],
+    "sequence": 4
+  }
+]

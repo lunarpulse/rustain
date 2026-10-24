@@ -1,0 +1,30 @@
+[terminal] ⤷ System:                                                                                                              
+— session start — · Earlier sessions not loaded                                                                                   
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+┆  story_assignment · 122096805902ce58041e1c3def1749872aad45d86e5a071925724fca93322243d629                                        
+┆  STORY-047: publish the received card before persisting its row.                                                                
+┆  Jun owns implementation; Marcus checks the architecture.                                                                       
+┆  Acceptance: an arriving item is visible before its durable append.                                                             
+┆  Please identify conflicts with ADR-047; do not send automatically.                                                             
+┆  response: notify-and-wait · via individual — a2a-interaction.toml                                                              
+┆  notification: immediate · via individual — a2a-interaction.toml                                                                
+                                                                                                                                  
+                                                                                                                                  
+[terminal] ⤷ Assistant:                                                                                                           
+[awaiting your response]                                                                                                          
+                                                                                                                                  
+                             ╔══════════════════════════════════════════════════════════════════════╗                             
+                             ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+                             ║decision.                                                             ║                             
+                             ║To: lena-po, jun-dev                                                  ║                             
+                             ║Type: architecture_update                                             ║                             
+                             ║… more not shown — [r] Review first                                   ║                             
+                             ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║                             
+                             ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

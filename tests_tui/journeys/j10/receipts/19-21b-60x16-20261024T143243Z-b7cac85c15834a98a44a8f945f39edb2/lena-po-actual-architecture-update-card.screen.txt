@@ -1,0 +1,16 @@
+                                                            
+                                                            
+                                                            
+│ ⚠ ← inbound ✓ accepted · peer│                            
+│   122087533ef853a379482fa6e32f854b155f8e69df00f989f85100│ 
+│   3419baed570843 · task│                                  
+│ ℹ     marcus-arch  awaiting their approval│               
+┌──────────────────────────────────────────────────────────┐
+│architecture_update · marcus-arch                         │
+│Peer is waiting for your response.                        │
+│[Tab] Item actions                                        │
+└──────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ Ready             log: 2
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

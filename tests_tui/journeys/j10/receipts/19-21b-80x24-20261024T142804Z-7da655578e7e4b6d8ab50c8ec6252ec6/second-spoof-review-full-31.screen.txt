@@ -1,0 +1,24 @@
+│   2026-10-24 14:28:07Z ? unknown ✓ item-acknowledged · peer│                  
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task ri_q55nfn2xufrKafQCtAQRHhwpeg4kOzS2 · recipient item from lena-po│     
+│   acknowledged│                                                               
+│   2026-10-24 14:28:36Z → outbound ↑ dispatched · peer│                        
+│   1220e17dd1b6f8f8c58cf5860577f41fa6138a3d4b47447fb7563fa547bd4ed34c6f ·│     
+│   task rustain-1792852116425569416-fcd368883901a9b3 · task dispatched to│     
+│   peer (542 bytes) [agent-composed]│                                          
+│   2026-10-24 14:28:36Z → outbound ↑ dispatched · peer│                        
+│   1220c1034c8d6a6a2eede3c8e1d79126237f227a2f4da6a1f0b8bdf9213cbbd8fc2c ·│     
+│   task rustain-1792852116425613779-d933bc5a0998101a · task dispatched to│     
+│   peer (542 bytes) [agent-composed]│                                          
+    ╔══════════════════════════════════════════════════════════════════════╗    
+    ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║    
+    ║decision.                                                             ║    
+    ║To: lena-po, jun-dev                                                  ║    
+    ║Type: architecture_update                                             ║    
+    ║… more not shown — [r] Review first                                   ║    
+    ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║    
+    ╚══════════════════════════════════════════════════════════════════════╝    
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready    Esc/Ctrl+D/Ctrl+C detach
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

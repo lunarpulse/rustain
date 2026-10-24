@@ -1,0 +1,30 @@
+│ ℹ 2026-10-24 14:30:16Z ← inbound ⏸ awaiting-approval · peer│                                                                    
+│   122096805902ce58041e1c3def1749872aad45d86e5a071925724fca93322243d629 · task rustain-1792852216338346030-858d688dc948aa3a ·│   
+│   task parked awaiting operator approval│                                                                                       
+│   2026-10-24 14:30:16Z ← inbound ↓ item-received · peer 122096805902ce58041e1c3def1749872aad45d86e5a071925724fca93322243d629 ·│ 
+│   task ri_ZV6oFzjTiVm7sVEDNeYtrxozJ5rPR1Xc · recipient item received from lena-po│                                              
+│   2026-10-24 14:30:16Z ← inbound ✓ accepted · peer 122096805902ce58041e1c3def1749872aad45d86e5a071925724fca93322243d629 · task│ 
+│   rustain-1792852216338346030-858d688dc948aa3a · task accepted and executing│                                                   
+│   2026-10-24 14:30:16Z ← inbound ! surfaced · peer 122096805902ce58041e1c3def1749872aad45d86e5a071925724fca93322243d629 · task│ 
+│   a2a-in/p-cGVlcjoxMjIwOTY4MDU5MDJjZTU4MDQxZTFjM2RlZjE3NDk4NzJhYWQ0NWQ4NmU1YTA3MTkyNTcyNGZjYTkzMzIyMjQzZDYyOQ/t-cnVzdGFpbi0xNz│ 
+│   kyODUyMjE2MzM4MzQ2MDMwLTg1OGQ2ODhkYzk0OGFhM2E · peer interaction recorded · notification immediate│                           
+│     response: notify-and-wait · via individual — a2a-interaction.toml│                                                          
+│     notification: immediate · via individual — a2a-interaction.toml│                                                            
+│   2026-10-24 14:30:18Z ? unknown ✓ item-acknowledged · peer│                                                                    
+│   122096805902ce58041e1c3def1749872aad45d86e5a071925724fca93322243d629 · task ri_ZV6oFzjTiVm7sVEDNeYtrxozJ5rPR1Xc · recipient│  
+│   item from lena-po acknowledged│                                                                                               
+│   2026-10-24 14:30:48Z → outbound ↑ dispatched · peer 122096805902ce58041e1c3def1749872aad45d86e5a071925724fca93322243d629 ·│   
+│   task rustain-1792852248327803600-dfe11754a01b041f · task dispatched to peer (542 bytes) [agent-composed]│                     
+│   2026-10-24 14:30:48Z → outbound ↑ dispatched · peer 122002690bcab23a0fc32cd5ef1a48fb46ad215fd737d0b82dac88d1dd93e6bb1d78 ·│   
+                             ╔══════════════════════════════════════════════════════════════════════╗                             
+                             ║Your agent proposes a message. Nothing has been sent. Awaiting your   ║                             
+                             ║decision.                                                             ║                             
+                             ║To: lena-po, jun-dev                                                  ║                             
+                             ║Type: architecture_update                                             ║                             
+                             ║… more not shown — [r] Review first                                   ║                             
+                             ║[y] Send to lena-po, jun-dev   [r] Review first   [n] Dismiss         ║                             
+                             ╚══════════════════════════════════════════════════════════════════════╝                             
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                      Esc/Ctrl+D/Ctrl+C detach
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

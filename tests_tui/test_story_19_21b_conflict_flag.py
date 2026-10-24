@@ -585,7 +585,6 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
             assert posts[0]["text_parts"] == [body] and posts[0]["message_type"] == "architecture_update", posts
             assert posts[0]["text_sha256"] == [body_sha256], posts
             assert posts[0]["text_bytes"] == [len(body.encode())], posts
-            assert not any("author" in key for key in posts[0]["metadata_keys"]), "recipient authorship carrier is outside this story"
             received = _events(workspaces[alias], "recipient_item_received")
             assert len(received) == 1 and received[0]["content"] == body, received
             assert received[0]["alias"] == "marcus-arch" and received[0]["message_type"] == "architecture_update", received

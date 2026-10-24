@@ -1,0 +1,30 @@
+┆  Please identify conflicts with ADR-047; do not send automatically.                                                             
+┆  response: notify-and-wait · via individual — a2a-interaction.toml                                                              
+┆  notification: immediate · via individual — a2a-interaction.toml                                                                
+                                                                                                                                  
+                                                                                                                                  
+[terminal] ⤷ Assistant:                                                                                                           
+[awaiting your response]                                                                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+Check this selected story assignment against ADR-047 and propose the exact finding to Lena and Jun; never send it.                
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] Assistant:                                                                                                             
+The architecture finding is a draft for your review. I have not sent it.                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ℹ item ri_ZV6oFzjTiVm7sVEDNeYtrxozJ5rPR1Xc selected as peer context for this daemon conversation — clears on /clear or daemon│  
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│story_assignment · lena-po                                                                                                      │
+│Peer is waiting for your response.                                                                                              │
+│[Tab] Item actions                                                                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                                               Esc/Ctrl+D/Ctrl+C detach log: 7
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
