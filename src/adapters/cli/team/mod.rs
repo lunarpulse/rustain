@@ -6,6 +6,10 @@
 //! are constructed in `rows.rs`, which delegates to the same domain core the
 //! TUI uses. Divergence between the faces is the defect this shape prevents,
 //! and `tests/conformance_transparency.rs` asserts they agree.
+//!
+//! `status` reads standing sender consent and `untrust` revokes it through
+//! the same durable journal and core as the TUI, without a daemon or provider.
+//! Standing trust is granted only from a sender's consent card.
 
 use clap::Subcommand;
 
@@ -36,4 +40,43 @@ pub enum TeamAction {
         #[arg(long)]
         export: bool,
     },
+    /// Show this workspace's effective interaction policy and standing sender consent.
+    ///
+    /// Offline and read-only; no daemon or provider is needed.
+    Status,
+    /// Revoke a sender's standing consent in this workspace's durable room journal.
+    ///
+    /// Offline; a running daemon applies the revoke at its next admission or status read.
+    Untrust {
+        /// Roster alias with a pinned key, or a full PeerId.
+        target: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::adapters::cli::commands::{Cli, Command};
+
+    #[test]
+    fn consent_verbs_parse_offline_and_grant_and_send_stay_absent() {
+        assert!(Cli::try_parse_from(["rustain", "team", "status"]).is_ok());
+        let cli = Cli::try_parse_from(["rustain", "team", "untrust", "alice"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Team { action: super::TeamAction::Untrust { target } })
+                if target == "alice"
+        ));
+        assert!(Cli::try_parse_from(["rustain", "team", "untrust"]).is_err());
+        for args in [
+            vec!["rustain", "team", "trust"],
+            vec!["rustain", "team", "send", "a", "b"],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap_err().kind(),
+                clap::error::ErrorKind::InvalidSubcommand
+            );
+        }
+    }
 }

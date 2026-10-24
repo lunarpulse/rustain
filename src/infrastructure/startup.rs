@@ -581,44 +581,85 @@ pub async fn run() -> Result<()> {
         return crate::adapters::cli::relay::run_cli(action).await;
     }
 
-    // Story 18.2 (AC6) — `rustain team log`. Intercepted here, BEFORE provider
-    // construction: reading the transparency log is offline-safe, read-only
-    // and non-billable, exactly like `session list`.
+    // Offline team verbs use only the durable journal, before provider construction.
     if let Some(Command::Team { action }) = &cli.command {
-        let crate::adapters::cli::team::TeamAction::Log {
-            filter,
-            json,
-            export,
-        } = action;
-        let workspace = paths::workspace_dir()?;
-        let reader: Arc<dyn crate::domain::ports::RoomJournalReader> = Arc::new(
-            crate::infrastructure::subagent::WorkspaceJournalReader::open_workspace(&workspace),
-        );
-        let service = crate::infrastructure::transparency::TransparencyService::new(
-            reader,
-            workspace.clone(),
-        );
-        let result: anyhow::Result<()> = async {
-            let report = service.report().await?;
-            let export_summary = if *export {
-                Some(service.export_report(&report).await?)
-            } else {
-                None
-            };
-            let mut stdout = std::io::stdout();
-            crate::adapters::cli::team::log::render_team_log(
-                filter.as_deref(),
-                *json,
-                &report,
-                export_summary.as_ref(),
-                &mut stdout,
-            )
+        use crate::adapters::cli::team::TeamAction;
+        use crate::infrastructure::runtime::transparency_bridge::{
+            load_team_status_at, revoke_sender_consent_at,
+        };
+        use std::io::Write;
+        match action {
+            TeamAction::Log {
+                filter,
+                json,
+                export,
+            } => {
+                let workspace = paths::workspace_dir()?;
+                let reader: Arc<dyn crate::domain::ports::RoomJournalReader> = Arc::new(
+                    crate::infrastructure::subagent::WorkspaceJournalReader::open_workspace(
+                        &workspace,
+                    ),
+                );
+                let service = crate::infrastructure::transparency::TransparencyService::new(
+                    reader,
+                    workspace.clone(),
+                );
+                let result: anyhow::Result<()> = async {
+                    let report = service.report().await?;
+                    let export_summary = if *export {
+                        Some(service.export_report(&report).await?)
+                    } else {
+                        None
+                    };
+                    let mut stdout = std::io::stdout();
+                    crate::adapters::cli::team::log::render_team_log(
+                        filter.as_deref(),
+                        *json,
+                        &report,
+                        export_summary.as_ref(),
+                        &mut stdout,
+                    )
+                }
+                .await;
+                return result.map_err(|e| {
+                    eprintln!("rustain: team log failed: {e}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
+            }
+            TeamAction::Status => {
+                let workspace = paths::workspace_dir()?;
+                let peers = active_a2a_roster(profile_resolver_arc.resolve_active());
+                let result: anyhow::Result<()> = async {
+                    let message = load_team_status_at(&workspace, &peers)
+                        .await
+                        .map_err(anyhow::Error::msg)?;
+                    writeln!(std::io::stdout(), "{message}")?;
+                    Ok(())
+                }
+                .await;
+                return result.map_err(|e| {
+                    eprintln!("rustain: team status failed: {e}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
+            }
+            TeamAction::Untrust { target } => {
+                let workspace = paths::workspace_dir()?;
+                let peers = active_a2a_roster(profile_resolver_arc.resolve_active());
+                let result: anyhow::Result<()> = async {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let (message, _) = revoke_sender_consent_at(&workspace, &peers, target, now)
+                        .await
+                        .map_err(anyhow::Error::msg)?;
+                    writeln!(std::io::stdout(), "{message}")?;
+                    Ok(())
+                }
+                .await;
+                return result.map_err(|e| {
+                    eprintln!("rustain: team untrust failed: {e}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
+            }
         }
-        .await;
-        return result.map_err(|e| {
-            eprintln!("rustain: team log failed: {e}");
-            SubcommandExit(SubcommandExit::GENERIC).into()
-        });
     }
     if let Some(Command::Doctor {
         terminal,

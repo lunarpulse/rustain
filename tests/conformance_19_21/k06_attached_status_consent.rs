@@ -376,7 +376,7 @@ async fn k06_attached_status_uses_daemon_composed_roster_and_never_starts_a_mode
     assert_eq!(
         daemon.provider_request_count(),
         0,
-        "attached /team status, /team trust, and /team untrust are not provider prompts"
+        "attached /team status and /team untrust are not provider prompts"
     );
     assert_eq!(daemon.model_turn_count(), 0);
 

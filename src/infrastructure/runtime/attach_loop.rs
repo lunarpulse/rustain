@@ -2463,9 +2463,7 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
         }),
         Ok(TeamCommandArgs::Thread { .. }) => AttachedTeamLine::Unavailable("thread"),
         Ok(TeamCommandArgs::Followup { .. }) => AttachedTeamLine::Unavailable("followup"),
-        Ok(TeamCommandArgs::Trust | TeamCommandArgs::Status) => {
-            AttachedTeamLine::Frame(ClientFrame::TeamStatus { request })
-        }
+        Ok(TeamCommandArgs::Status) => AttachedTeamLine::Frame(ClientFrame::TeamStatus { request }),
         Ok(TeamCommandArgs::Untrust(alias)) => {
             AttachedTeamLine::Frame(ClientFrame::RevokeSenderConsent { request, alias })
         }
@@ -6691,13 +6689,15 @@ mod tests {
             ("/team context off ri-a", "context-off"),
             ("/team thread a ri-a", "thread"),
             ("/team followup a turn-1 hello", "followup"),
-            ("/team trust", "status"),
+            ("/team trust", "refused"),
+            ("/team trust x", "refused"),
             ("/team untrust a", "untrust"),
             ("/team status", "status"),
         ];
         for (line, expected) in cases {
             let classified = attached_team_line_for_request(line, "req-1".to_owned());
             let actual = match classified {
+                AttachedTeamLine::Refused(_) => "refused",
                 AttachedTeamLine::LocalLog(_) => "log",
                 AttachedTeamLine::Frame(ClientFrame::TeamBoard {
                     selector: TeamBoardRequest::Inventory,
@@ -6792,12 +6792,47 @@ mod tests {
     }
 
     #[test]
+    fn attached_trust_refusal_sends_no_frame_or_provider_input() {
+        use crate::adapters::tui::handlers::team_command::TRUST_REFUSAL;
+        use crossterm::event::KeyCode;
+
+        for read_only in [false, true] {
+            for line in ["/team trust", "/team trust x"] {
+                assert!(matches!(
+                    attached_team_line(line),
+                    AttachedTeamLine::Refused(message) if message == TRUST_REFUSAL
+                ));
+                let mut state = TuiState::new(80, 24);
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let mut requests = AttachedTeamRequests::default();
+                let mut input = line.to_owned();
+                assert!(matches!(
+                    attached_composer_key_with_team_requests(
+                        KeyCode::Enter,
+                        read_only,
+                        &mut input,
+                        &mut state,
+                        &tx,
+                        &mut requests,
+                    ),
+                    ComposerOutcome::Handled
+                ));
+                assert!(input.is_empty());
+                assert!(matches!(
+                    rx.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn attached_read_commands_precede_read_only_guard_and_mutations_do_not() {
         use crossterm::event::KeyCode;
         let mut state = TuiState::new(80, 24);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut requests = AttachedTeamRequests::default();
-        for command in ["/team board --last", "/team status", "/team trust"] {
+        for command in ["/team board --last", "/team status"] {
             let mut input = command.to_owned();
             assert!(matches!(
                 attached_composer_key_with_team_requests(

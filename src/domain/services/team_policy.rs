@@ -1072,8 +1072,7 @@ pub fn explain_effective_policy(
                      TOML policy precedence is the only live source"
                 .to_owned(),
             guidance: Some(
-                "Grant a sender with `/team trust <alias-or-peer-id>`; revocations remain \
-                 visible as journaled state."
+                "Standing trust is granted from a sender's consent card ([a] Always allow); see it with `rustain team status` and revoke it with `rustain team untrust <alias-or-peer-id>`. Revocations remain visible as journaled state."
                     .to_owned(),
             ),
             notice: PolicyNotice::Info,
@@ -2304,6 +2303,17 @@ status_request = "queue"
                 .any(|row| row.detail.contains("no journaled consent grants recorded")),
             "an empty projection must emit an explicit line, never zero output: {:?}",
             explanation.rows
+        );
+        let row = explanation
+            .rows
+            .iter()
+            .find(|row| row.key == "consent:none")
+            .unwrap();
+        assert_eq!(
+            row.guidance.as_deref(),
+            Some(
+                "Standing trust is granted from a sender's consent card ([a] Always allow); see it with `rustain team status` and revoke it with `rustain team untrust <alias-or-peer-id>`. Revocations remain visible as journaled state."
+            )
         );
     }
 

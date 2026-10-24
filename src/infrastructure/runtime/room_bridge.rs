@@ -10,7 +10,7 @@
 //! # The write authority is the journal, not a process
 //!
 //! `/room role grant|revoke` appends from the TUI side, exactly as
-//! `transparency_bridge::persist_sender_consent` does for `/team trust`, and
+//! `transparency_bridge::persist_sender_consent` does for `/team untrust`, and
 //! the projection holder refolds on a high-water sequence compare. Both halves
 //! ship together: an appending writer without a refolding holder is Story
 //! 18.3d's shipped defect.

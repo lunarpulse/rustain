@@ -1893,7 +1893,7 @@ impl Operator {
 /// The operator's `AppState` over `workspace` with `peers` as its composed
 /// roster (`ComposeContext.a2a_peers`): what `/team untrust <alias>` resolves
 /// the alias against. The host's own workspace makes the command write to the
-/// host's durable journal (`change_sender_consent`).
+/// host's durable journal (`revoke_sender_consent`).
 pub fn operator_app_state(
     workspace: &Path,
     peers: Vec<A2aPeerSpec>,

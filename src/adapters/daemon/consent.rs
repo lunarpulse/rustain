@@ -396,6 +396,91 @@ mod tests {
         PeerId::from_public_key(&[byte; 32]).unwrap()
     }
 
+    #[tokio::test]
+    async fn cli_revoke_from_a_second_journal_writer_binds_at_next_admission() {
+        use crate::infrastructure::subagent::node_journal::{NodeJournal, NodeRoomJournal};
+
+        let workspace = tempfile::tempdir().unwrap();
+        let node_journal = Arc::new(NodeJournal::open_workspace(workspace.path()).await.unwrap());
+        let (domain_tx, _domain_rx) = tokio::sync::mpsc::unbounded_channel();
+        let journal = Arc::new(NodeRoomJournal::new(node_journal.clone(), Some(domain_tx)));
+        let sender = peer(42);
+        journal
+            .record_event(RoomEvent::ConsentGranted {
+                sender: Some(sender.clone()),
+                granted_at: 10,
+                principal: Some(crate::domain::models::PrincipalKind::Pinned),
+            })
+            .await
+            .unwrap();
+        let entries = node_journal.load_entries().await.unwrap();
+        let projection = Arc::new(JournalConsentProjection::from_entries(&entries));
+        let manager = PendingConsentManager::new(
+            projection.clone(),
+            journal,
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(20)),
+            Some(node_journal.clone()),
+        );
+        let principal = PolicyPrincipal::rap(sender.clone());
+        let before = manager
+            .register(
+                principal.clone(),
+                "before CLI revoke",
+                DeliveryDisposition::MayRefuse,
+            )
+            .await;
+        assert!(
+            !before.pending,
+            "positive control: the journaled grant bypasses a card"
+        );
+        assert_eq!(
+            before.decision.await.unwrap(),
+            InboundApprovalDecision::AllowAlways
+        );
+
+        // This production CLI core opens its OWN NodeJournal, not the daemon's writer.
+        let (_, event) =
+            crate::infrastructure::runtime::transparency_bridge::revoke_sender_consent_at(
+                workspace.path(),
+                &[],
+                sender.as_str(),
+                30,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(event, Some(RoomEvent::ConsentRevoked { .. })));
+        assert_eq!(
+            projection.consent_for(&principal),
+            ConsentState::Trusted,
+            "the CLI does not mutate the daemon's in-memory projection"
+        );
+
+        // Would-RED (not executed at size S): remove register's projection refresh.
+        let after = manager
+            .register(
+                principal.clone(),
+                "after CLI revoke",
+                DeliveryDisposition::MayRefuse,
+            )
+            .await;
+        assert!(
+            after.pending,
+            "the next admission must honour the second writer without restart"
+        );
+        assert!(after.first_for_sender);
+        assert_eq!(projection.consent_for(&principal), ConsentState::Revoked);
+        let entries = node_journal.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].seq, entries[0].seq + 1);
+        manager
+            .resolve(&principal, InboundApprovalDecision::Decline)
+            .await;
+        assert_eq!(
+            after.decision.await.unwrap(),
+            InboundApprovalDecision::Decline
+        );
+    }
+
     fn manager(
         journal: Arc<RecordingJournal>,
     ) -> (

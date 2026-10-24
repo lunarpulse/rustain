@@ -302,11 +302,6 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
-                    key: "/team trust",
-                    description: "Same daemon-authoritative read as /team status; read-only attachment is allowed",
-                    available: true,
-                },
-                HelpBinding {
                     key: "/team untrust <peer>",
                     description: "Durably revoke standing consent; trusted-local writer attachment only, Peer/read-only refused",
                     available: true,

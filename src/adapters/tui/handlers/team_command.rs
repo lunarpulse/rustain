@@ -22,7 +22,10 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team trust | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+
+/// Named refusal for the retired listing misnomer; granting stays card-only.
+pub const TRUST_REFUSAL: &str = "'/team trust' does not exist: standing trust is granted only from a sender's consent card ([a] Always allow). See it with /team status; revoke it with /team untrust <alias-or-peer-id>.";
 
 /// Three verbs retract three different objects (`…addendum-team-messaging.md:116`),
 /// so every refusal of one names the others **by object** (Story 19.16f
@@ -184,7 +187,6 @@ pub enum TeamCommandArgs {
         turn_id: String,
         text: String,
     },
-    Trust,
     Untrust(String),
     Status,
 }
@@ -450,14 +452,7 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
                 item_id: item_id.to_owned(),
             })
         }
-        "trust" => {
-            if tokens.next().is_some() {
-                return Err(format!(
-                    "'/team trust' lists effective grants and takes no arguments. Use: {USAGE}"
-                ));
-            }
-            Ok(TeamCommandArgs::Trust)
-        }
+        "trust" => Err(TRUST_REFUSAL.to_owned()),
         "untrust" => {
             let target = tokens
                 .next()
@@ -1598,14 +1593,17 @@ mod tests {
     }
 
     #[test]
-    fn trust_lists_takes_no_argument_untrust_takes_a_target() {
-        // `/team trust` is a read-only listing (review D2): it takes no
-        // argument and never grants. Only `/team untrust <sender>` mutates.
+    fn trust_is_refused_by_name_status_lists_untrust_revokes() {
+        for input in ["trust", "trust x", "trust alice extra"] {
+            assert_eq!(
+                parse_team_command(Some(input)),
+                Err(TRUST_REFUSAL.to_owned())
+            );
+        }
         assert_eq!(
-            parse_team_command(Some("trust")),
-            Ok(TeamCommandArgs::Trust)
+            TRUST_REFUSAL,
+            "'/team trust' does not exist: standing trust is granted only from a sender's consent card ([a] Always allow). See it with /team status; revoke it with /team untrust <alias-or-peer-id>."
         );
-        assert!(parse_team_command(Some("trust alice")).is_err());
         assert_eq!(
             parse_team_command(Some("untrust 1220abcd")),
             Ok(TeamCommandArgs::Untrust("1220abcd".to_owned()))
@@ -1614,8 +1612,40 @@ mod tests {
             parse_team_command(Some("status")),
             Ok(TeamCommandArgs::Status)
         );
-        assert!(parse_team_command(Some("trust alice extra")).is_err());
         assert!(parse_team_command(Some("status extra")).is_err());
+    }
+
+    #[test]
+    fn usage_names_every_accepted_verb_and_trust_is_the_named_refusal() {
+        let cases = [
+            ("log", "log"),
+            ("board", "board"),
+            ("view", "view ri-a"),
+            ("context", "context"),
+            ("ack", "ack ri-a"),
+            ("remove", "remove ri-a"),
+            ("retract", "retract a ri-a"),
+            ("send", "send a hi"),
+            ("reply", "reply r hi"),
+            ("defer", "defer ri-a"),
+            ("thread", "thread a ri-a"),
+            ("followup", "followup a turn-a hi"),
+            ("status", "status"),
+            ("untrust", "untrust a"),
+            ("trust", "trust"),
+        ];
+        for (verb, input) in cases {
+            if verb == "trust" {
+                assert_eq!(
+                    parse_team_command(Some(input)),
+                    Err(TRUST_REFUSAL.to_owned())
+                );
+                assert!(!USAGE.contains("/team trust"));
+            } else {
+                assert!(parse_team_command(Some(input)).is_ok(), "{input}");
+                assert!(USAGE.contains(&format!("/team {verb}")), "{verb}");
+            }
+        }
     }
 
     #[test]

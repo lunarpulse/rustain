@@ -24,6 +24,9 @@ mod cli_completions;
 #[path = "../cli_flags.rs"]
 mod cli_flags;
 
+#[path = "../cli_team_consent.rs"]
+mod cli_team_consent;
+
 #[path = "../conformance_auth_cli.rs"]
 mod conformance_auth_cli;
 

@@ -627,7 +627,7 @@ pub enum ClientFrame {
         request: String,
         selector: TeamBoardRequest,
     },
-    /// Story 19.21 `AC4(b)` — `/team status` and `/team trust`, computed
+    /// Story 19.21 `AC4(b)` — `/team status`, computed
     /// daemon-side over the daemon's composed roster and consent projection.
     /// TrustedLocal; a read-only attachment may ask.
     TeamStatus { request: String },
@@ -965,7 +965,7 @@ pub enum DaemonFrame {
     },
     /// Explicit boundary for a complete request-correlated board response.
     TeamBoardDone { request: String, chunks: u32 },
-    /// The rendered `/team status` / `/team trust` answer.
+    /// The rendered `/team status` answer.
     TeamStatusResult { request: String, message: String },
     /// The durable answer to [`ClientFrame::RevokeSenderConsent`].
     SenderConsentRevoked {

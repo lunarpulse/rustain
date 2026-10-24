@@ -520,8 +520,6 @@ def test_act1_attached_distribution(columns, rows, monkeypatch):
         assert _turns(stub, "lena-po") == before_thread_turns, stub.rows()
 
         status_commands = [("/team status", "lena-status")]
-        if columns == 130:
-            status_commands.append(("/team trust", "lena-trust"))
         for command, name in status_commands:
             before_requests = _provider_requests(stub, "lena-po")
             before_turns = _turns(stub, "lena-po")

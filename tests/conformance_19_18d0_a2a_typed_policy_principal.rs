@@ -1584,8 +1584,9 @@ fn pending_records_cleared(host: &Host) -> bool {
 //     (`persist_sender_consent` revoke) are production writers; G2 rows are
 //     production writers observed in a real `serve()` run. This test does NOT
 //     re-drive those writers (K02/K03/K04/K07 own that); it pins the durable
-//     wire contract their bytes must keep. The `/team trust` grant branch has no
-//     production caller and is not exercised.
+//     wire contract their bytes must keep. The legacy
+//     `persist_sender_consent(.., true, ..)` grant branch has no production caller
+//     and is not exercised.
 //   * The "old reader" is a verbatim HEAD copy of the pre-change types and of
 //     `parse_entries` (R2), not a build of the previous release.
 //

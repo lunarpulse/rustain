@@ -721,16 +721,10 @@ pub async fn team_command(
                 let _ = app_state.event_bus.emit_domain(event);
             }
         }
-        TeamCommandArgs::Trust => match load_team_status(app_state).await {
+        TeamCommandArgs::Untrust(target) => match revoke_sender_consent(app_state, &target).await {
             Ok(message) => handler::show_team_status(state, message),
             Err(message) => emit_team_warning(state, conversation_id, app_state, message),
         },
-        TeamCommandArgs::Untrust(target) => {
-            match change_sender_consent(app_state, &target, false).await {
-                Ok(message) => handler::show_team_status(state, message),
-                Err(message) => emit_team_warning(state, conversation_id, app_state, message),
-            }
-        }
         TeamCommandArgs::Status => match load_team_status(app_state).await {
             Ok(message) => handler::show_team_status(state, message),
             Err(message) => emit_team_warning(state, conversation_id, app_state, message),
@@ -1526,18 +1520,13 @@ fn emit_team_warning(
         });
 }
 
-async fn change_sender_consent(
-    app_state: &AppState,
-    target: &str,
-    trust: bool,
-) -> Result<String, String> {
+async fn revoke_sender_consent(app_state: &AppState, target: &str) -> Result<String, String> {
     let workspace = &app_state.compose_snapshot.workspace_path;
     let peers = &app_state.compose_snapshot.a2a_peers;
-    let (message, event) = persist_sender_consent(
+    let (message, event) = revoke_sender_consent_at(
         workspace,
         peers,
         target,
-        trust,
         chrono::Utc::now().timestamp_millis(),
     )
     .await?;
@@ -1547,6 +1536,15 @@ async fn change_sender_consent(
             .emit_domain(crate::domain::events::AppEvent::DomainEvent(event.into()));
     }
     Ok(message)
+}
+
+pub(crate) async fn revoke_sender_consent_at(
+    workspace: &std::path::Path,
+    peers: &[crate::domain::models::A2aPeerSpec],
+    target: &str,
+    now: i64,
+) -> Result<(String, Option<crate::domain::models::RoomEvent>), String> {
+    persist_sender_consent(workspace, peers, target, false, now).await
 }
 
 async fn persist_sender_consent(
@@ -1605,8 +1603,17 @@ async fn persist_sender_consent(
 }
 
 async fn load_team_status(app_state: &AppState) -> Result<String, String> {
-    let workspace = &app_state.compose_snapshot.workspace_path;
-    let peers = &app_state.compose_snapshot.a2a_peers;
+    load_team_status_at(
+        &app_state.compose_snapshot.workspace_path,
+        &app_state.compose_snapshot.a2a_peers,
+    )
+    .await
+}
+
+pub(crate) async fn load_team_status_at(
+    workspace: &std::path::Path,
+    peers: &[crate::domain::models::A2aPeerSpec],
+) -> Result<String, String> {
     let projection = crate::adapters::policy::JournalConsentProjection::load_workspace(workspace)
         .await
         .map_err(|error| error.to_string())?;
@@ -1730,6 +1737,59 @@ pub(crate) async fn memory_command(
 mod tests {
     use super::*;
     use crate::domain::ports::{ConsentProjectionQuery, ConsentState, RoomJournalReader};
+
+    #[tokio::test]
+    async fn workspace_consent_core_shares_status_and_revokes_without_app_state() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sender = crate::domain::models::PeerId::from_public_key(&[41u8; 32]).unwrap();
+        let target = sender.as_str();
+        let empty = load_team_status_at(workspace.path(), &[]).await.unwrap();
+        assert!(empty.ends_with("Peers: no known peers."));
+        assert!(!workspace.path().join(".rustain").exists());
+
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        journal
+            .append_room(crate::domain::models::RoomEvent::ConsentGranted {
+                sender: Some(sender.clone()),
+                granted_at: 10,
+                principal: Some(crate::domain::models::PrincipalKind::Pinned),
+            })
+            .await
+            .unwrap();
+        let (app_state, _rx) = bridge_app_state(workspace.path());
+        assert_eq!(
+            load_team_status_at(workspace.path(), &[]).await.unwrap(),
+            load_team_status(&app_state).await.unwrap()
+        );
+        let (message, event) = revoke_sender_consent_at(workspace.path(), &[], target, 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            message,
+            format!("Revoked trust for {target} ({sender}). Future tasks require consent.")
+        );
+        assert!(matches!(
+            &event,
+            Some(crate::domain::models::RoomEvent::ConsentRevoked {
+                sender: Some(peer),
+                revoked_at: 20,
+            }) if peer == &sender
+        ));
+        assert!(
+            load_team_status_at(workspace.path(), &[])
+                .await
+                .unwrap()
+                .ends_with(": revoked")
+        );
+        let (_, event) = revoke_sender_consent_at(workspace.path(), &[], target, 21)
+            .await
+            .unwrap();
+        assert!(event.is_none());
+    }
 
     #[tokio::test]
     async fn trust_and_untrust_are_durable_idempotent_and_visible_in_team_log() {

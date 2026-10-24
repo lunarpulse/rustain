@@ -225,10 +225,10 @@ pub enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
-    /// Inspect A2A team activity (Story 18.2, FR95 / NFR67).
-    /// `team log` prints every recorded inbound and outbound A2A interaction
-    /// for this workspace, folded from the durable room journal. Read-only,
-    /// offline-safe, and non-billable.
+    /// Inspect A2A team activity and manage standing sender consent.
+    /// `team log` reads recorded interactions, `team status` shows policy and
+    /// consent, and `team untrust` revokes a sender's standing consent.
+    /// All operate offline on this workspace's durable room journal.
     Team {
         #[command(subcommand)]
         action: TeamAction,

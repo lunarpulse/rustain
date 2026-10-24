@@ -350,7 +350,7 @@ addressed row-operation JSON, rather than presenting replacements as new replies
 
 ### Attached operator commands (Story 19.21)
 
-The attached client composes no A2A egress. It sends `/team send` to the daemon's already-composed runtime, preserving the parsed multiline body, type and sender-local subject; sends and `/team untrust` require a trusted-local read/write attachment. `/team board`, `/team status` and `/team trust` are explicit daemon-side reads and are available to trusted-local read-only attachments. Peer-tier attachments are refused for all four command families. Board text arrives in bounded request-correlated chunks and is painted only after an in-order sequence and explicit completion boundary. Send rows use the same feature-independent typed renderer and remain in their own stable `team-send-N` Info block.
+The attached client composes no A2A egress. It sends `/team send` to the daemon's already-composed runtime, preserving the parsed multiline body, type and sender-local subject; sends and `/team untrust` require a trusted-local read/write attachment. `/team board` and `/team status` are explicit daemon-side reads and are available to trusted-local read-only attachments. Peer-tier attachments are refused for all four command families. Board text arrives in bounded request-correlated chunks and is painted only after an in-order sequence and explicit completion boundary. Send rows use the same feature-independent typed renderer and remain in their own stable `team-send-N` Info block.
 
 An unresolved `sending…` row remains visible when a recorded action's settlement cannot be published, including a `NotSent` outcome whose dispatch append and typed-settlement append both failed. The distinct action-record-failure branch has no action or settlement and may show visible `NotSent`. This matches standalone send-board behavior: the client does not invent a terminal outcome or add a timeout.
 
@@ -946,10 +946,20 @@ migration of old journal rows.
 
 `/team untrust <alias-or-peer-id>` revokes every stored kind for that peer:
 pinned, pseudonymous and legacy. A later typed grant re-trusts only its own
-kind. `/team trust` is a listing command, not a way to create a grant. Status and
-untrust refresh the journal authoritatively and refuse without reporting a
-cached success or mutating trust when that read fails; admission remains
-best-effort and may continue using the cached consent snapshot.
+kind. There is no grant verb: standing trust is granted only from a sender's
+consent card (`[a] Always allow`). The retired `/team trust` name refuses with
+that explanation; use `/team status` to read standing consent.
+
+From a shell, `rustain team status` and
+`rustain team untrust <alias-or-peer-id>` are the offline twins of those TUI
+commands, using the same durable room journal, active-profile/workspace roster
+and status renderer. Neither needs a daemon or provider. Status is text-only
+and creates no workspace files; an untrust with no active grant changes nothing.
+A running daemon applies a CLI revoke at its next admission or status read,
+without restarting. Status and untrust refresh the journal authoritatively and
+refuse without reporting a cached success or mutating trust when that read
+fails; admission remains best-effort and may continue using the cached consent
+snapshot.
 
 `/team status` keeps one row per roster alias, including aliases sharing a pin,
 plus one row per distinct journal-only peer. Multiple consent slots do not
