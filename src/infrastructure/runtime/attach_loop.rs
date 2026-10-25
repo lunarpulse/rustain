@@ -598,6 +598,8 @@ async fn open_response_surface(
         viewport_rows: 0,
         content,
         message_type: control.message_type,
+        // Story 19.22 — verdict offers are item facts; a node surface has none.
+        verdict_offer: crate::domain::models::VerdictOffer::None,
         cached_width: 0,
         cached_lines: Vec::new(),
         cached_header: Vec::new(),
@@ -813,6 +815,10 @@ async fn recipient_surface_key(
     match action {
         RecipientSurfaceAction::Respond
         | RecipientSurfaceAction::Discuss
+        // Story 19.22 `AC4(c)` — `[d] Discuss concerns` composes a typed
+        // verdict reply; the pending compose is tracked on submit like any
+        // `/team reply` line.
+        | RecipientSurfaceAction::DiscussConcerns
         | RecipientSurfaceAction::Edit => {
             if !input.is_empty() {
                 recipient_surface_flash(state,
@@ -838,7 +844,12 @@ async fn recipient_surface_key(
             } else {
                 match &surface.target {
                     RecipientSurfaceTarget::Item(address) => {
-                        *input = format!("/team reply {} ", address.item().as_str());
+                        let item_id = address.item().as_str();
+                        *input = if action == RecipientSurfaceAction::DiscussConcerns {
+                            format!("/team reply --discuss {item_id} ")
+                        } else {
+                            format!("/team reply {item_id} ")
+                        };
                         state.pinned_peer_compose = None;
                     }
                     RecipientSurfaceTarget::Node(node) => {
@@ -852,6 +863,21 @@ async fn recipient_surface_key(
             state.recipient_surface = None;
             state.focus = FocusState::Input;
             crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
+        }
+        // Story 19.22 `AC4(c)` — `[y] Accept` queues the verdict frame
+        // directly: empty text (the daemon normalizes `Accepted.`) and an
+        // Accept verdict, through the same correlated Reply slot as a typed
+        // reply.
+        RecipientSurfaceAction::Accept => {
+            let RecipientSurfaceTarget::Item(address) = &surface.target else {
+                return false;
+            };
+            let frame = ClientFrame::ReplyToRecipientItem {
+                item_id: address.item().as_str().to_owned(),
+                text: String::new(),
+                verdict: Some(crate::adapters::daemon::protocol::ReplyVerdict::Accept),
+            };
+            queue_recipient_action(state, input, frame, frame_tx, false);
         }
         RecipientSurfaceAction::Busy | RecipientSurfaceAction::Acknowledge => {
             let RecipientSurfaceTarget::Item(address) = &surface.target else {
@@ -2764,9 +2790,15 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
                 item_id,
             })
         }
-        Ok(TeamCommandArgs::Reply { item_id, text }) => {
-            AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem { item_id, text })
-        }
+        Ok(TeamCommandArgs::Reply {
+            item_id,
+            text,
+            verdict,
+        }) => AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem {
+            item_id,
+            text,
+            verdict,
+        }),
         Ok(TeamCommandArgs::Defer { item_id }) => {
             AttachedTeamLine::Frame(ClientFrame::DeferRecipientItem { item_id })
         }
@@ -4307,7 +4339,7 @@ mod tests {
                 assert!(
                     matches!(
                         self.rx.try_recv().unwrap(),
-                        ClientFrame::ReplyToRecipientItem { item_id, text }
+                        ClientFrame::ReplyToRecipientItem { item_id, text, .. }
                             if item_id == "ri_pending" && text == reply
                     ),
                     "the recipient reply must retain its target and exact operator-authored body"
@@ -5481,6 +5513,372 @@ mod tests {
             assert!(actions[4] == Some(RecipientSurfaceAction::DeclineStatus));
             assert_eq!(input, "unfinished operator text");
         }
+    }
+
+    /// Story 19.22 unit fixture: one received list item whose journal row
+    /// carries the given story holders, so the page's `verdict_offer` is
+    /// computed from real journal facts.
+    async fn append_story_list_item(
+        journal: &crate::infrastructure::subagent::node_journal::NodeJournal,
+        item_id: &str,
+        message_type: crate::domain::models::SemanticMessageType,
+        holders: Vec<crate::domain::models::StoryHolder>,
+    ) -> crate::domain::models::ItemAddress {
+        use crate::domain::models::{
+            ItemAddress, ItemId, PeerId, ReceivedStories, ReceivedStory, RoomEvent, StoryKey,
+        };
+        let address = ItemAddress::from_rap_ingress(
+            PeerId::from_public_key(&[74; 32]).unwrap(),
+            ItemId::from_replay(item_id),
+        );
+        let stories = ReceivedStories::Listed {
+            stories: holders
+                .into_iter()
+                .enumerate()
+                .map(|(index, holder)| ReceivedStory {
+                    key: StoryKey::parse(&format!("S7-{index:02}")).unwrap(),
+                    holder,
+                })
+                .collect(),
+        };
+        journal
+            .append_room(RoomEvent::RecipientItemReceived {
+                stories: Some(stories),
+                address: address.clone(),
+                task: format!("task-{item_id}"),
+                alias: Some("sender".to_owned()),
+                message_type,
+                content: "scope body".to_owned(),
+                in_reply_to: None,
+                capability_hash: None,
+                reply_capability_matched: false,
+                authorship: crate::domain::models::Authorship::Unknown,
+                send_authorization: crate::domain::models::SendAuthorization::Unknown,
+            })
+            .await
+            .unwrap();
+        address
+    }
+
+    #[tokio::test]
+    async fn story19_22_verdict_surface_slots_per_stage_and_offer() {
+        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::domain::models::{PeerRowStage, SemanticMessageType, StoryHolder, VerdictOffer};
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let you = append_story_list_item(
+            &journal,
+            "ri_verdict_you",
+            SemanticMessageType::StoryAssignment,
+            vec![StoryHolder::You],
+        )
+        .await;
+        let mut state = TuiState::new(80, 24);
+        crate::infrastructure::runtime::recipient_surface::open_received_surface(
+            workspace.path(),
+            None,
+            you.item().as_str(),
+            &mut state,
+            RecipientSurfaceAccess::Writer,
+            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+        )
+        .await
+        .unwrap();
+        let surface = state.recipient_surface.as_ref().unwrap();
+        assert_eq!(surface.verdict_offer, VerdictOffer::AcceptOrDiscuss);
+        // Writer, non-removed, no live draft: slots 0/1/2 per AC4(c).
+        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
+        assert_eq!(actions[0], Some(RecipientSurfaceAction::DiscussConcerns));
+        assert_eq!(actions[1], Some(RecipientSurfaceAction::Acknowledge));
+        assert_eq!(actions[2], Some(RecipientSurfaceAction::Accept));
+
+        state.recipient_surface.as_mut().unwrap().node_id = Some("verdict-node".to_owned());
+        // Drafting: no verdict acts at all, the acknowledgement stays.
+        for offer in [VerdictOffer::AcceptOrDiscuss, VerdictOffer::DiscussOnly] {
+            state.recipient_surface.as_mut().unwrap().verdict_offer = offer;
+            state.recipient_surface.as_mut().unwrap().item_state = Some("received");
+            let mut conversation = Conversation {
+                messages: vec![peer_row("verdict-row", "incoming")],
+                peer_row_controls: [(
+                    "verdict-row".to_owned(),
+                    peer_control("verdict-node", PeerRowStage::Drafting),
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            };
+            conversation
+                .peer_row_controls
+                .get_mut("verdict-row")
+                .unwrap()
+                .item_address = Some(you.clone());
+            let actions = recipient_surface_actions(&state, &conversation, false);
+            assert_eq!(actions[0], None, "Drafting offers no verdict");
+            assert_eq!(actions[1], Some(RecipientSurfaceAction::Acknowledge));
+            assert_eq!(actions[2], None, "Drafting offers no accept");
+        }
+
+        // Ready keeps Approve/Edit/Reject; Accept never survives it (M11).
+        state.recipient_surface.as_mut().unwrap().verdict_offer = VerdictOffer::AcceptOrDiscuss;
+        let mut conversation = Conversation {
+            messages: vec![peer_row("verdict-row", "incoming")],
+            peer_row_controls: [(
+                "verdict-row".to_owned(),
+                peer_control("verdict-node", PeerRowStage::Ready),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        conversation
+            .peer_row_controls
+            .get_mut("verdict-row")
+            .unwrap()
+            .item_address = Some(you.clone());
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert_eq!(actions[2], Some(RecipientSurfaceAction::Approve));
+        assert_eq!(actions[3], Some(RecipientSurfaceAction::Edit));
+        assert_eq!(actions[4], Some(RecipientSurfaceAction::Reject));
+        assert!(!actions.contains(&Some(RecipientSurfaceAction::Accept)));
+        conversation
+            .peer_row_controls
+            .get_mut("verdict-row")
+            .unwrap()
+            .node_resolvable = false;
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert!(
+            !actions.contains(&Some(RecipientSurfaceAction::Accept)),
+            "Ready never offers Accept, including an orphan control"
+        );
+
+        // DiscussOnly offers concerns but no accept.
+        state.recipient_surface.as_mut().unwrap().verdict_offer = VerdictOffer::DiscussOnly;
+        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
+        assert_eq!(actions[0], Some(RecipientSurfaceAction::DiscussConcerns));
+        assert_eq!(actions[2], None);
+
+        // Offer None restores today's slot 0 by type.
+        state.recipient_surface.as_mut().unwrap().verdict_offer = VerdictOffer::None;
+        for (message_type, expected) in [
+            (
+                SemanticMessageType::ArchitectureUpdate,
+                RecipientSurfaceAction::Discuss,
+            ),
+            (
+                SemanticMessageType::BugReport,
+                RecipientSurfaceAction::Discuss,
+            ),
+            (
+                SemanticMessageType::Consultation,
+                RecipientSurfaceAction::Respond,
+            ),
+        ] {
+            state.recipient_surface.as_mut().unwrap().message_type = message_type;
+            let actions = recipient_surface_actions(&state, &Conversation::default(), false);
+            assert_eq!(actions[0], Some(expected), "{message_type:?}");
+        }
+        state.recipient_surface.as_mut().unwrap().message_type =
+            SemanticMessageType::StoryAssignment;
+
+        // Scope change received: slot 1 acknowledges (M12).
+        let scope = append_story_list_item(
+            &journal,
+            "ri_verdict_scope",
+            SemanticMessageType::ScopeChange,
+            vec![StoryHolder::NoHolder],
+        )
+        .await;
+        crate::infrastructure::runtime::recipient_surface::open_received_surface(
+            workspace.path(),
+            None,
+            scope.item().as_str(),
+            &mut state,
+            RecipientSurfaceAccess::Writer,
+            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.recipient_surface.as_ref().unwrap().verdict_offer,
+            VerdictOffer::DiscussOnly,
+            "a released list offers discuss only"
+        );
+        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
+        assert_eq!(actions[1], Some(RecipientSurfaceAction::Acknowledge));
+
+        // Removed items and non-writer access offer nothing.
+        state.recipient_surface.as_mut().unwrap().item_state = Some("removed");
+        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
+        assert!(actions[0].is_none() && actions[1].is_none() && actions[2].is_none());
+        state.recipient_surface.as_mut().unwrap().item_state = Some("received");
+        for access in [
+            RecipientSurfaceAccess::ReadOnly,
+            RecipientSurfaceAccess::LocalOnly,
+        ] {
+            state.recipient_surface.as_mut().unwrap().access = access;
+            assert!(
+                recipient_surface_actions(&state, &Conversation::default(), false)
+                    .iter()
+                    .all(Option::is_none)
+            );
+        }
+        state.recipient_surface.as_mut().unwrap().access = RecipientSurfaceAccess::Writer;
+        assert!(
+            recipient_surface_actions(&state, &Conversation::default(), true)
+                .iter()
+                .all(Option::is_none)
+        );
+        // A node target never offers verdict acts.
+        state.recipient_surface.as_mut().unwrap().target =
+            RecipientSurfaceTarget::Node("verdict-node".to_owned());
+        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
+        assert!(!actions.contains(&Some(RecipientSurfaceAction::Accept)));
+        assert!(!actions.contains(&Some(RecipientSurfaceAction::DiscussConcerns)));
+    }
+
+    #[tokio::test]
+    async fn story19_22_verdict_keys_queue_frames_and_pending_suppresses_across_pages() {
+        use crate::adapters::daemon::protocol::{RecipientAction, ReplyVerdict};
+        use crate::adapters::tui::handlers::recipient_actions::action_is_pending;
+        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::domain::models::{PeerRowStage, SemanticMessageType, StoryHolder};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let address = append_story_list_item(
+            &journal,
+            "ri_verdict_keys",
+            SemanticMessageType::StoryAssignment,
+            vec![StoryHolder::You],
+        )
+        .await;
+        let mut control = peer_control("verdict-node", PeerRowStage::Settled);
+        control.item_address = Some(address.clone());
+        let conversation = Conversation {
+            messages: vec![peer_row("verdict-row", "incoming")],
+            peer_row_controls: [("verdict-row".to_owned(), control)].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut state = TuiState::new(80, 24);
+        let mut input = String::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let open = async |state: &mut TuiState| {
+            crate::infrastructure::runtime::recipient_surface::open_received_surface(
+                workspace.path(),
+                Some(&conversation),
+                address.item().as_str(),
+                state,
+                RecipientSurfaceAccess::Writer,
+                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+        };
+        open(&mut state).await.unwrap();
+        let opened_id = address.item().as_str().to_owned();
+
+        // `[y] Accept` queues the verdict frame with empty text.
+        recipient_surface_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            workspace.path(),
+            &conversation,
+            &mut input,
+            &mut state,
+            Some(&tx),
+        )
+        .await;
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ClientFrame::ReplyToRecipientItem { item_id, text, verdict: Some(ReplyVerdict::Accept) }
+                if item_id == opened_id && text.is_empty()
+        ));
+        assert!(action_is_pending(
+            &state,
+            RecipientAction::Reply,
+            &RecipientSurfaceTarget::Item(address.clone()),
+            None,
+        ));
+
+        // A pending Reply suppresses both verdict acts; the suppression
+        // survives context selection and a newer page (cache re-render).
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert_eq!(actions[0], None, "pending Reply suppresses DiscussConcerns");
+        assert_eq!(actions[2], None, "pending Reply suppresses Accept");
+        state.recipient_surface.as_mut().unwrap().context_selected = true;
+        state.recipient_context_ids.insert(opened_id.clone());
+        let suppressed = recipient_surface_actions(&state, &conversation, false);
+        assert_eq!(suppressed[0], None);
+        assert_eq!(suppressed[2], None);
+        let painted = paint_received_surface(&mut state);
+        assert!(painted.contains("[c] Stop using as context"));
+        assert!(!painted.contains("[y] Accept"));
+        assert!(!painted.contains("[d] Discuss concerns"));
+
+        // Refresh from a genuinely newer journal page while Reply is still
+        // pending; neither verdict hint may be restored by the new content.
+        journal
+            .append_room(crate::domain::models::RoomEvent::RecipientItemReplied {
+                address: crate::domain::models::TurnAddress::answering(
+                    &address,
+                    crate::domain::models::ReplyTurnId::from_replay("rr-newer"),
+                ),
+                answers: address.item().clone(),
+                content: "newer turn arrived".into(),
+                authorship: crate::domain::models::Authorship::HumanWritten,
+                send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
+                kind: crate::domain::models::ReplyKind::Answer,
+                via_node: None,
+                status: None,
+            })
+            .await
+            .unwrap();
+        open(&mut state).await.unwrap();
+        assert!(
+            state
+                .recipient_surface
+                .as_ref()
+                .unwrap()
+                .content
+                .contains("newer turn arrived")
+        );
+        let painted = paint_received_surface(&mut state);
+        assert!(!painted.contains("[y] Accept"));
+        assert!(!painted.contains("[d] Discuss concerns"));
+
+        // A newer page repaints with the verdict acts restored once the
+        // pending action clears — the widened u32 mask tracks both.
+        state.recipient_actions.clear();
+        open(&mut state).await.unwrap();
+        let painted = paint_received_surface(&mut state);
+        assert!(painted.contains("[y] Accept"));
+        assert!(painted.contains("[d] Discuss concerns"));
+        assert!(painted.contains("[a] Acknowledge"));
+
+        // `[d] Discuss concerns` prefills the typed verdict line.
+        recipient_surface_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            workspace.path(),
+            &conversation,
+            &mut input,
+            &mut state,
+            Some(&tx),
+        )
+        .await;
+        assert_eq!(
+            input,
+            format!("/team reply --discuss {opened_id} "),
+            "Discuss concerns prefills the typed verdict form"
+        );
+        assert!(state.recipient_surface.is_none());
+        assert_eq!(state.focus, crate::domain::models::FocusState::Input);
     }
 
     #[test]
@@ -8256,11 +8654,61 @@ mod tests {
     #[test]
     fn reply_remains_a_frame_and_deferred_verb_classifier_is_explicit() {
         match attached_team_line("/team reply ri_x hi  there") {
-            AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem { item_id, text }) => {
+            AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem {
+                item_id,
+                text,
+                verdict,
+            }) => {
                 assert_eq!(item_id, "ri_x");
                 assert_eq!(text, "hi  there");
+                assert_eq!(verdict, None);
             }
             other => panic!("expected the reply frame, got {other:?}"),
+        }
+        // Story 19.22 `AC4(d)` — verdict forms classify to the same frame.
+        for (line, verdict, body) in [
+            ("/team reply --accept ri_x", "accept", ""),
+            (
+                "/team reply --accept ri_x fine by me",
+                "accept",
+                "fine by me",
+            ),
+            (
+                "/team reply --discuss ri_x worried about scope",
+                "discuss",
+                "worried about scope",
+            ),
+        ] {
+            match attached_team_line(line) {
+                AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem {
+                    item_id,
+                    text,
+                    verdict: actual,
+                }) => {
+                    assert_eq!(item_id, "ri_x", "{line}");
+                    assert_eq!(
+                        actual,
+                        Some(if verdict == "accept" {
+                            crate::adapters::daemon::protocol::ReplyVerdict::Accept
+                        } else {
+                            crate::adapters::daemon::protocol::ReplyVerdict::Discuss
+                        }),
+                        "{line}"
+                    );
+                    assert_eq!(text, body, "{line}");
+                }
+                other => panic!("expected the verdict reply frame for {line}, got {other:?}"),
+            }
+        }
+        // A flag after the id is body: a plain Answer, never PassThrough.
+        match attached_team_line("/team reply ri_x --accept fine") {
+            AttachedTeamLine::Frame(ClientFrame::ReplyToRecipientItem {
+                text, verdict, ..
+            }) => {
+                assert_eq!(text, "--accept fine");
+                assert_eq!(verdict, None);
+            }
+            other => panic!("expected a plain Answer frame, got {other:?}"),
         }
         for line in [
             "/team thread b ri_x",

@@ -130,6 +130,7 @@ async fn create_linked_thread(
             &ClientFrame::ReplyToRecipientItem {
                 item_id: current_id.clone(),
                 text: answer,
+                verdict: None,
             },
         )
         .await

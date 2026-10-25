@@ -2625,6 +2625,7 @@ async fn k03_socket_defer_is_durable_and_does_not_consume_the_answer() {
         &ClientFrame::ReplyToRecipientItem {
             item_id: item_id.clone(),
             text: "answer".to_owned(),
+            verdict: None,
         },
     )
     .await
@@ -3013,6 +3014,7 @@ async fn k03_real_wait_host_accepts_defer_and_subsequent_answer() {
         &ClientFrame::ReplyToRecipientItem {
             item_id: item_id.clone(),
             text: "answer after wait".to_owned(),
+            verdict: None,
         },
     )
     .await
@@ -3191,6 +3193,7 @@ async fn k06_wait_host_restart_keeps_defer_and_direct_answer_without_reviving_ta
         &ClientFrame::ReplyToRecipientItem {
             item_id: item_id.clone(),
             text: "direct answer after restart".to_owned(),
+            verdict: None,
         },
     )
     .await

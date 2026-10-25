@@ -282,6 +282,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {
+                    key: "/team reply --accept <item-id> [<text…>] | --discuss <item-id> <text…>",
+                    description: "Verdict on an item carrying a story list — accept when it assigns a story to you; discuss concerns on any readable story list (daemon-attached session)",
+                    available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
                     key: "/team defer <item-id>",
                     description: "Record Busy — defer 30m without resolving the answer (daemon-attached)",
                     available: cfg!(feature = "a2a"),

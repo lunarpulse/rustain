@@ -10,7 +10,7 @@ pub(crate) fn pinned_response<'a>(
         (control.node_id == node).then_some((message, control))
     })
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecipientSurfaceAction {
     Respond,
     Discuss,
@@ -23,6 +23,12 @@ pub(crate) enum RecipientSurfaceAction {
     ShareStatus,
     DeclineStatus,
     Context,
+    /// Story 19.22 `AC4(c)` — `[d] Discuss concerns` on an item that carries a
+    /// story list; prefills a typed `--discuss` verdict reply.
+    DiscussConcerns,
+    /// Story 19.22 `AC4(c)` — `[y] Accept` when the list assigns a story to
+    /// you; queues the Accept verdict frame directly.
+    Accept,
 }
 impl RecipientSurfaceAction {
     pub(crate) const fn key(self) -> char {
@@ -36,6 +42,8 @@ impl RecipientSurfaceAction {
             Self::Reject | Self::Decline | Self::DeclineStatus => 'n',
             Self::ShareStatus => 's',
             Self::Context => 'c',
+            Self::DiscussConcerns => 'd',
+            Self::Accept => 'y',
         }
     }
 
@@ -52,6 +60,8 @@ impl RecipientSurfaceAction {
             Self::ShareStatus => "[s] Share status",
             Self::DeclineStatus => "[n] Decline",
             Self::Context => "[c] Use as context",
+            Self::DiscussConcerns => "[d] Discuss concerns",
+            Self::Accept => "[y] Accept",
         }
     }
 }
@@ -80,16 +90,29 @@ pub(crate) fn recipient_surface_actions(
         && surface.item_state != Some("removed")
     {
         if !live_drafting {
-            actions[0] = match surface.message_type {
-                SemanticMessageType::ArchitectureUpdate | SemanticMessageType::BugReport => {
-                    Some(RecipientSurfaceAction::Discuss)
+            // Story 19.22 `AC4(c)` — on a list item a verdict is offered in
+            // place of Respond; every other type and stage is unchanged.
+            actions[0] = if surface.verdict_offer != crate::domain::models::VerdictOffer::None {
+                Some(RecipientSurfaceAction::DiscussConcerns)
+            } else {
+                match surface.message_type {
+                    SemanticMessageType::ArchitectureUpdate | SemanticMessageType::BugReport => {
+                        Some(RecipientSurfaceAction::Discuss)
+                    }
+                    SemanticMessageType::Consultation => Some(RecipientSurfaceAction::Respond),
+                    _ if control.is_some_and(|c| c.stage != PeerRowStage::Settled) => {
+                        Some(RecipientSurfaceAction::Respond)
+                    }
+                    _ => None,
                 }
-                SemanticMessageType::Consultation => Some(RecipientSurfaceAction::Respond),
-                _ if control.is_some_and(|c| c.stage != PeerRowStage::Settled) => {
-                    Some(RecipientSurfaceAction::Respond)
-                }
-                _ => None,
             };
+            // Ready keeps its draft-review actions, including on an orphaned
+            // control that is no longer resolvable.
+            if surface.verdict_offer == crate::domain::models::VerdictOffer::AcceptOrDiscuss
+                && !control.is_some_and(|c| c.stage == PeerRowStage::Ready)
+            {
+                actions[2] = Some(RecipientSurfaceAction::Accept);
+            }
         }
         actions[1] = match surface.message_type {
             SemanticMessageType::Consultation => Some(RecipientSurfaceAction::Busy),
@@ -100,6 +123,9 @@ pub(crate) fn recipient_surface_actions(
             // Idempotent result, and the daemon's transition gate rechecks it.
             // A receipt, ⛔ not an acceptance and not a person acting.
             SemanticMessageType::ArchitectureUpdate
+            // Story 19.22 `AC4(c)` — an Act 6 scope change is acknowledged
+            // like any received notice; a receipt, never an acceptance.
+            | SemanticMessageType::ScopeChange
             | SemanticMessageType::StoryAssignment
             | SemanticMessageType::BugReport
                 if surface.item_state == Some("received") =>
@@ -166,7 +192,11 @@ pub(crate) fn recipient_surface_actions(
                 RecipientAction::ContextRemove
             }
             RecipientSurfaceAction::Context => RecipientAction::ContextSelect,
-            RecipientSurfaceAction::Respond | RecipientSurfaceAction::Discuss
+            RecipientSurfaceAction::Respond
+            | RecipientSurfaceAction::Discuss
+            // Story 19.22 — verdict acts are replies too: same suppression key.
+            | RecipientSurfaceAction::DiscussConcerns
+            | RecipientSurfaceAction::Accept
                 if matches!(surface.target, RecipientSurfaceTarget::Item(_)) =>
             {
                 RecipientAction::Reply
@@ -177,6 +207,7 @@ pub(crate) fn recipient_surface_actions(
             action,
             RecipientSurfaceAction::Respond
                 | RecipientSurfaceAction::Discuss
+                | RecipientSurfaceAction::DiscussConcerns
                 | RecipientSurfaceAction::Edit
         ) && pending_composition(state).is_some())
             || action_is_pending(
@@ -291,11 +322,13 @@ pub(crate) fn render_recipient_surface(
         surface.cached_width = inner.width;
     }
     let action_mask = actions.iter().flatten().fold(
-        (u16::from(read_only) << 15)
-            | (u16::from(surface.access == RecipientSurfaceAccess::LocalOnly) << 14)
-            | (u16::from(surface.omitted_before > 0) << 13)
-            | (u16::from(surface.omitted_after > 0) << 12)
-            | (u16::from(surface.context_selected) << 11),
+        // Story 19.22 — `u32`: 13 action discriminants (bits 0–12) plus the
+        // five flags now packed at bits 27–31.
+        (u32::from(read_only) << 31)
+            | (u32::from(surface.access == RecipientSurfaceAccess::LocalOnly) << 30)
+            | (u32::from(surface.omitted_before > 0) << 29)
+            | (u32::from(surface.omitted_after > 0) << 28)
+            | (u32::from(surface.context_selected) << 27),
         |mask, action| mask | (1 << (*action as u8)),
     );
     if width_changed || surface.cached_action_mask != action_mask {
@@ -446,5 +479,45 @@ mod tests {
         );
         assert_eq!(RecipientSurfaceAction::DeclineStatus.key(), 'n');
         assert_eq!(RecipientSurfaceAction::DeclineStatus.hint(), "[n] Decline");
+    }
+
+    // Story 19.22 `AC4(c)` — 13 action discriminants plus the five footer
+    // flag bits must stay disjoint inside a `u32` (the old `u16` collided).
+    #[test]
+    fn story19_22_action_bits_leave_room_for_the_five_flag_bits() {
+        let actions = [
+            RecipientSurfaceAction::Respond,
+            RecipientSurfaceAction::Discuss,
+            RecipientSurfaceAction::Busy,
+            RecipientSurfaceAction::Acknowledge,
+            RecipientSurfaceAction::Approve,
+            RecipientSurfaceAction::Edit,
+            RecipientSurfaceAction::Reject,
+            RecipientSurfaceAction::Decline,
+            RecipientSurfaceAction::ShareStatus,
+            RecipientSurfaceAction::DeclineStatus,
+            RecipientSurfaceAction::Context,
+            RecipientSurfaceAction::DiscussConcerns,
+            RecipientSurfaceAction::Accept,
+        ];
+        let mut bits = std::collections::BTreeSet::new();
+        for action in actions {
+            assert!(
+                (action as u8) < 27,
+                "{} crosses the flag band",
+                action as u8
+            );
+            assert!(bits.insert(1u32 << (action as u8)), "duplicate bit");
+        }
+        for flag in [27u8, 28, 29, 30, 31] {
+            assert!(bits.insert(1u32 << flag), "flag bit {flag} collides");
+        }
+        assert_eq!(RecipientSurfaceAction::DiscussConcerns.key(), 'd');
+        assert_eq!(
+            RecipientSurfaceAction::DiscussConcerns.hint(),
+            "[d] Discuss concerns"
+        );
+        assert_eq!(RecipientSurfaceAction::Accept.key(), 'y');
+        assert_eq!(RecipientSurfaceAction::Accept.hint(), "[y] Accept");
     }
 }

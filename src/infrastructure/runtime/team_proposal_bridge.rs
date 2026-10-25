@@ -316,7 +316,8 @@ pub async fn proposal_action(
                 conversation_id,
                 app_state,
                 proposal,
-            );
+            )
+            .await;
         }
         crate::domain::models::TeamProposalDecision::Dismiss => {
             show_info(

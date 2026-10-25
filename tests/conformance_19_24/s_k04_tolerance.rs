@@ -362,6 +362,7 @@ async fn reply(client: &mut AttachedClient, item: &str, text: &str) {
         .send_frame(ClientFrame::ReplyToRecipientItem {
             item_id: item.to_owned(),
             text: text.to_owned(),
+            verdict: None,
         })
         .await;
     let result = client

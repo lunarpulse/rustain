@@ -143,6 +143,7 @@ async fn k02_bug_report_acknowledgement_and_fix_reply_cross_real_hosts_without_p
         &ClientFrame::ReplyToRecipientItem {
             item_id: item.clone(),
             text: FIX.to_owned(),
+            verdict: None,
         },
     )
     .await

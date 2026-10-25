@@ -8,8 +8,270 @@ use super::{
 use super::{
     PeerDraftResolutionOutcome, RECIPIENT_ITEM_REMOVED, RecipientReplyReceipt, commit_peer_rows,
 };
+use crate::domain::models::ReplyKind;
 
 impl AttachServer {
+    /// Story 19.18 `AC2` — the `/team reply` arm: record one reply turn
+    /// answering a recipient item on THIS host. ⛔ No egress, no push, and no
+    /// write on the answered item (`A2`, `A4`).
+    ///
+    /// Order: shared gate + load + find → legality (a tombstone is refused;
+    /// a retracted item is answerable) → Story 19.22 verdict gates (`AC4a`: a
+    /// verdict on an item without a story list, or an `Accept` on a list that
+    /// assigns the operator no story, is refused; an empty `Accept` text
+    /// normalizes to `Accepted.` before the empty-text refusal) → size →
+    /// author-time scrub (`P13`) → (d′) a persisted pending card for this item
+    /// is resolved as `WriteOwn` with the same text and kind (one act, one
+    /// turn, the card clears) → otherwise one direct `RecipientItemReplied`
+    /// carrying the kind. The confirmation frame is sent only after the turn
+    /// is durable (`M25`); every refusal writes zero rows.
+    pub(super) async fn reply_to_recipient_item(
+        &self,
+        conn_id: u64,
+        mode: AttachMode,
+        tier: ConnectionTier,
+        item_id: &str,
+        text: String,
+        verdict: Option<ReplyKind>,
+    ) {
+        let target = RecipientActionTarget::Item {
+            item_id: item_id.to_owned(),
+        };
+        #[cfg(not(feature = "a2a"))]
+        {
+            let _ = (mode, tier, &text, verdict);
+            self.send_recipient_action_result(
+                conn_id,
+                RecipientAction::Reply,
+                target,
+                RecipientActionOutcome::Refused {
+                    error: ProtocolError::Malformed(
+                        "`/team reply` needs the `a2a` feature; this build was compiled without it."
+                            .to_owned(),
+                    ),
+                },
+            )
+            .await;
+        }
+        #[cfg(feature = "a2a")]
+        {
+            use crate::domain::models::{
+                Authorship, MAX_REPLY_BYTES, ReceivedStories, RecipientItemState, ReplyKind,
+                RoomEvent, TurnAddress, VerdictOffer, claim_reply_turn_id,
+                fresh_reply_turn_candidate,
+            };
+
+            let _reply_guard = self.peer_reply_serial.lock().await;
+            let (item, projection, journal) =
+                match self.find_recipient_item(mode, tier, "reply", item_id).await {
+                    Ok(found) => found,
+                    Err(error) => {
+                        drop(_reply_guard);
+                        self.send_recipient_action_result(
+                            conn_id,
+                            RecipientAction::Reply,
+                            target,
+                            RecipientActionOutcome::Refused { error },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+            let refuse = |error| RecipientActionOutcome::Refused { error };
+            if matches!(item.state, RecipientItemState::Removed { .. }) {
+                drop(_reply_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned())),
+                )
+                .await;
+                return;
+            }
+            // Story 19.22 `AC4a` — the verdict gates: every refusal writes
+            // zero rows. `verdict: None` reaches today's path byte-for-byte.
+            if let Some(kind) = verdict {
+                let offer = item
+                    .stories
+                    .as_ref()
+                    .map_or(VerdictOffer::None, ReceivedStories::verdict_offer);
+                let refusal = match (kind, offer) {
+                    (_, VerdictOffer::None) => {
+                        Some("a verdict answers an item that carries a story list")
+                    }
+                    (ReplyKind::Accept, VerdictOffer::DiscussOnly) => {
+                        Some("accept answers an item that assigns you a story")
+                    }
+                    _ => None,
+                };
+                if let Some(message) = refusal {
+                    drop(_reply_guard);
+                    self.send_recipient_action_result(
+                        conn_id,
+                        RecipientAction::Reply,
+                        target,
+                        refuse(ProtocolError::Malformed(message.to_owned())),
+                    )
+                    .await;
+                    return;
+                }
+            }
+            // Story 19.22 `AC4b` — an empty Accept text is the `[y]` key path
+            // and normalizes to the canonical statement BEFORE the empty-text
+            // refusal; a Discuss still requires text.
+            let text = match verdict {
+                Some(ReplyKind::Accept) if text.trim().is_empty() => "Accepted.".to_owned(),
+                _ => text,
+            };
+            if text.trim().is_empty() {
+                drop(_reply_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Malformed("reply text is empty".to_owned())),
+                )
+                .await;
+                return;
+            }
+            if text.len() > MAX_REPLY_BYTES {
+                drop(_reply_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Malformed(format!(
+                        "reply is longer than {MAX_REPLY_BYTES} bytes — shorten it"
+                    ))),
+                )
+                .await;
+                return;
+            }
+            let fragments =
+                crate::domain::ports::InboundPeerRuntime::disclosure_forbidden_fragments(self)
+                    .await;
+            if crate::adapters::a2a::projection::withholds(&text, &self.core.workspace, &fragments)
+            {
+                drop(_reply_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Malformed(
+                        "this reply names a host path, which peers are never shown — rephrase it"
+                            .to_owned(),
+                    )),
+                )
+                .await;
+                return;
+            }
+            if let Some(node) = self.pending_card_for_item(&projection, &item).await {
+                let outcome = match self
+                    .resolve_peer_draft_locked(
+                        &node,
+                        crate::adapters::daemon::response_modes::DraftResolution::WriteOwn(
+                            text,
+                            verdict.unwrap_or(ReplyKind::Answer),
+                        ),
+                        Some(&projection),
+                    )
+                    .await
+                {
+                    Ok(PeerDraftResolutionOutcome::Applied { reply: Some(reply) }) => {
+                        RecipientActionOutcome::Applied { reply: Some(reply) }
+                    }
+                    Ok(PeerDraftResolutionOutcome::Applied { reply: None }) => {
+                        refuse(ProtocolError::Internal(
+                            "recipient reply completed without a durable receipt".to_owned(),
+                        ))
+                    }
+                    Ok(PeerDraftResolutionOutcome::Idempotent) => {
+                        RecipientActionOutcome::Idempotent
+                    }
+                    Ok(PeerDraftResolutionOutcome::RefusedOneWay) => {
+                        refuse(ProtocolError::PeerVerification(
+                            crate::adapters::daemon::response_modes::RAP_ONE_WAY_REFUSAL.to_owned(),
+                        ))
+                    }
+                    Err(error) => refuse(ProtocolError::Internal(error)),
+                };
+                drop(_reply_guard);
+                self.send_recipient_action_result(conn_id, RecipientAction::Reply, target, outcome)
+                    .await;
+                return;
+            }
+            let turn = match claim_reply_turn_id(fresh_reply_turn_candidate(), |id| {
+                projection.holds_reply_turn_id(id)
+            }) {
+                Ok(turn) => turn,
+                Err(error) => {
+                    drop(_reply_guard);
+                    self.send_recipient_action_result(
+                        conn_id,
+                        RecipientAction::Reply,
+                        target,
+                        refuse(ProtocolError::Internal(error.to_string())),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let turn_id = turn.as_str().to_owned();
+            let kind = verdict.unwrap_or(ReplyKind::Answer);
+            let orphan_rows = self
+                .orphan_response_mutations(&projection, &item, &text, Authorship::HumanWritten)
+                .await;
+            if let Err(error) = journal
+                .record_event(RoomEvent::RecipientItemReplied {
+                    address: TurnAddress::answering(&item.address, turn),
+                    answers: item.address.item().clone(),
+                    content: text,
+                    kind,
+                    authorship: Authorship::HumanWritten,
+                    send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
+                    via_node: None,
+                    status: None,
+                })
+                .await
+            {
+                drop(_reply_guard);
+                self.send_recipient_action_result(
+                    conn_id,
+                    RecipientAction::Reply,
+                    target,
+                    refuse(ProtocolError::Internal(error.to_string())),
+                )
+                .await;
+                return;
+            }
+            if let Err(error) = commit_peer_rows(
+                &self.peer_row_serial,
+                &self.conversation,
+                &self.registry,
+                self.core.storage.as_ref(),
+                orphan_rows,
+            )
+            .await
+            {
+                tracing::error!(error = %error, "durable recipient reply could not update its orphan card");
+            }
+            drop(_reply_guard);
+            self.send_recipient_action_result(
+                conn_id,
+                RecipientAction::Reply,
+                target,
+                RecipientActionOutcome::Applied {
+                    reply: Some(RecipientReplyReceipt {
+                        item_id: item_id.to_owned(),
+                        turn_id,
+                        kind,
+                    }),
+                },
+            )
+            .await;
+        }
+    }
     /// Record an independent local defer turn without touching the pending
     /// peer-response card or its controller. The normal item gate and journal
     /// projection remain the sole authority for addressing and state.
@@ -328,7 +590,7 @@ mod tests {
     use super::super::{Conn, Conversation, PeerRowStage};
     use super::*;
     use crate::adapters::a2a::exec::{SubmitterKey, mint_inbound_node_id};
-    use crate::adapters::daemon::protocol::{ClientFrame, DaemonFrame};
+    use crate::adapters::daemon::protocol::{ClientFrame, DaemonFrame, ReplyVerdict};
     use crate::adapters::daemon::response_modes::{AWAITING_RESPONSE_PLACEHOLDER, DraftPhase};
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::NoOpMemory;
@@ -440,6 +702,77 @@ mod tests {
         fn row_id(&self) -> String {
             format!("peer-response-{}", self.node)
         }
+
+        async fn next_reply(&mut self) -> RecipientActionOutcome {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let DaemonFrame::RecipientActionResult {
+                        action: RecipientAction::Reply,
+                        target: RecipientActionTarget::Item { .. },
+                        outcome,
+                    } = self
+                        .frames
+                        .recv()
+                        .await
+                        .expect("the reply result queue stays open")
+                    {
+                        return outcome;
+                    }
+                }
+            })
+            .await
+            .expect("the reply act returns a correlated result")
+        }
+
+        async fn reply(
+            &mut self,
+            item_id: &str,
+            text: &str,
+            verdict: Option<ReplyVerdict>,
+        ) -> RecipientActionOutcome {
+            self.server
+                .handle_client_frame_tiered(
+                    ClientFrame::ReplyToRecipientItem {
+                        item_id: item_id.to_owned(),
+                        text: text.to_owned(),
+                        verdict,
+                    },
+                    AttachMode::ReadWrite,
+                    ConnectionTier::TrustedLocal,
+                    1,
+                )
+                .await;
+            self.next_reply().await
+        }
+
+        async fn reply_turns(&self) -> Vec<RoomEvent> {
+            self.journal
+                .events
+                .lock()
+                .await
+                .iter()
+                .filter(|event| matches!(event, RoomEvent::RecipientItemReplied { .. }))
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn listed_you() -> ReceivedStories {
+        ReceivedStories::Listed {
+            stories: vec![ReceivedStory {
+                key: StoryKey::parse("S7-09").unwrap(),
+                holder: StoryHolder::You,
+            }],
+        }
+    }
+
+    fn listed_no_holder() -> ReceivedStories {
+        ReceivedStories::Listed {
+            stories: vec![ReceivedStory {
+                key: StoryKey::parse("S7-07").unwrap(),
+                holder: StoryHolder::NoHolder,
+            }],
+        }
     }
 
     async fn fixture(workspace: &Path) -> StatusFixture {
@@ -449,16 +782,19 @@ mod tests {
             true,
             SemanticMessageType::StatusRequest,
             None,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fixture_with(
         workspace: &Path,
         level: StatusDisclosure,
         held: bool,
         message_type: SemanticMessageType,
         storage: Option<Arc<dyn StoragePort>>,
+        started_stories: Option<ReceivedStories>,
     ) -> StatusFixture {
         let (core, storage) = match storage {
             Some(storage) => {
@@ -505,7 +841,7 @@ mod tests {
                 alias: None,
                 message_type,
                 content: "requester text must not choose shared fields".to_owned(),
-                stories: None,
+                stories: started_stories,
                 in_reply_to: None,
                 capability_hash: None,
                 reply_capability_matched: false,
@@ -628,6 +964,7 @@ mod tests {
                 StatusDisclosure::Minimal,
                 true,
                 message_type,
+                None,
                 None,
             )
             .await;
@@ -768,6 +1105,7 @@ mod tests {
                 level,
                 held,
                 SemanticMessageType::StatusRequest,
+                None,
                 None,
             )
             .await;
@@ -933,6 +1271,7 @@ mod tests {
             true,
             SemanticMessageType::StatusRequest,
             Some(storage.clone()),
+            None,
         )
         .await;
         storage.fail.store(true, Ordering::SeqCst);
@@ -1071,6 +1410,7 @@ mod tests {
             true,
             SemanticMessageType::StatusRequest,
             Some(storage.clone()),
+            None,
         )
         .await;
         fixture.orphan().await;
@@ -1231,6 +1571,347 @@ mod tests {
             }
             assert_eq!(fixture.turns().await.len(), 1);
         }
+    }
+
+    /// Story 19.22 `AC4a` — the verdict gate order after `find_recipient_item`
+    /// and the removed check, every refusal writing zero rows, plus the
+    /// direct-path positives: an empty Accept normalizes to `Accepted.`, and a
+    /// plain reply (`verdict: None`) stays an `Answer`.
+    #[tokio::test]
+    async fn verdict_gates_refuse_in_order_and_write_zero_rows() {
+        // A verdict on an item that carries no story list is refused for both
+        // kinds, and the removed check precedes the verdict gates.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut fixture = fixture_with(
+            tmp.path(),
+            StatusDisclosure::Minimal,
+            false,
+            SemanticMessageType::Consultation,
+            None,
+            None,
+        )
+        .await;
+        fixture.orphan().await;
+        let before = fixture.journal.events.lock().await.len();
+        for verdict in [Some(ReplyVerdict::Accept), Some(ReplyVerdict::Discuss)] {
+            assert_eq!(
+                refused(fixture.reply(ITEM_ID, "a reply", verdict).await),
+                ProtocolError::Malformed(
+                    "a verdict answers an item that carries a story list".to_owned(),
+                ),
+            );
+            assert_eq!(fixture.journal.events.lock().await.len(), before);
+        }
+        fixture
+            .journal
+            .record_event(RoomEvent::RecipientItemRemoved {
+                address: fixture.address.clone(),
+            })
+            .await
+            .unwrap();
+        let before = fixture.journal.events.lock().await.len();
+        assert_eq!(
+            refused(
+                fixture
+                    .reply(ITEM_ID, "a reply", Some(ReplyVerdict::Accept))
+                    .await
+            ),
+            ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned()),
+        );
+        assert_eq!(fixture.journal.events.lock().await.len(), before);
+
+        // An Accept on a list that assigns the operator no story is refused;
+        // an empty Discuss still hits the existing empty-text refusal; a
+        // Discuss with text is the DiscussOnly path and records one Discuss
+        // turn without a via_node.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut fixture = fixture_with(
+            tmp.path(),
+            StatusDisclosure::Minimal,
+            false,
+            SemanticMessageType::StoryAssignment,
+            None,
+            Some(listed_no_holder()),
+        )
+        .await;
+        fixture.orphan().await;
+        let before = fixture.journal.events.lock().await.len();
+        assert_eq!(
+            refused(
+                fixture
+                    .reply(ITEM_ID, "concerns", Some(ReplyVerdict::Accept))
+                    .await
+            ),
+            ProtocolError::Malformed("accept answers an item that assigns you a story".to_owned()),
+        );
+        assert_eq!(fixture.journal.events.lock().await.len(), before);
+        assert_eq!(
+            refused(
+                fixture
+                    .reply(ITEM_ID, "   ", Some(ReplyVerdict::Discuss))
+                    .await
+            ),
+            ProtocolError::Malformed("reply text is empty".to_owned()),
+        );
+        assert_eq!(fixture.journal.events.lock().await.len(), before);
+        assert!(matches!(
+            fixture
+                .reply(ITEM_ID, "release it", Some(ReplyVerdict::Discuss))
+                .await,
+            RecipientActionOutcome::Applied {
+                reply: Some(RecipientReplyReceipt {
+                    kind: ReplyKind::Discuss,
+                    ..
+                }),
+            },
+        ));
+        let turns = fixture.reply_turns().await;
+        assert_eq!(turns.len(), 1);
+        assert!(matches!(
+            &turns[0],
+            RoomEvent::RecipientItemReplied {
+                kind: ReplyKind::Discuss,
+                via_node: None,
+                ..
+            }
+        ));
+
+        // On an item that assigns the operator a story, an empty Accept
+        // normalizes to `Accepted.` and a plain reply stays an Answer.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut fixture = fixture_with(
+            tmp.path(),
+            StatusDisclosure::Minimal,
+            false,
+            SemanticMessageType::StoryAssignment,
+            None,
+            Some(listed_you()),
+        )
+        .await;
+        fixture.orphan().await;
+        assert!(matches!(
+            fixture.reply(ITEM_ID, "", Some(ReplyVerdict::Accept)).await,
+            RecipientActionOutcome::Applied {
+                reply: Some(RecipientReplyReceipt {
+                    kind: ReplyKind::Accept,
+                    ..
+                }),
+            },
+        ));
+        assert!(matches!(
+            fixture.reply(ITEM_ID, "noted", None).await,
+            RecipientActionOutcome::Applied {
+                reply: Some(RecipientReplyReceipt {
+                    kind: ReplyKind::Answer,
+                    ..
+                }),
+            },
+        ));
+        let turns = fixture.reply_turns().await;
+        assert_eq!(turns.len(), 2);
+        let contents: Vec<(&str, &ReplyKind)> = turns
+            .iter()
+            .map(|event| match event {
+                RoomEvent::RecipientItemReplied { content, kind, .. } => (content.as_str(), kind),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            contents,
+            [
+                ("Accepted.", &ReplyKind::Accept),
+                ("noted", &ReplyKind::Answer),
+            ],
+        );
+    }
+
+    /// Story 19.22 Task 4 failure injection — a durable Accept turn whose card
+    /// save then fails leaves the pending card awaiting; retrying the same
+    /// content and kind replays exactly the one turn and settles the card,
+    /// while the same content as an `Answer` or a `Discuss` verdict is refused
+    /// and does not settle it.
+    #[tokio::test]
+    async fn live_accept_retry_after_failed_card_save_replays_once_and_other_kinds_refuse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FailNextSave {
+            inner: Arc::new(FileSystemStorage::with_workspace_root(
+                crate::infrastructure::paths::sessions_dir(tmp.path()),
+                tmp.path().to_path_buf(),
+            )),
+            fail: AtomicBool::new(false),
+        });
+        let mut fixture = fixture_with(
+            tmp.path(),
+            StatusDisclosure::Minimal,
+            false,
+            SemanticMessageType::StoryAssignment,
+            Some(storage.clone()),
+            Some(listed_you()),
+        )
+        .await;
+        storage.fail.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            refused(
+                fixture
+                    .reply(ITEM_ID, "", Some(ReplyVerdict::Accept))
+                    .await
+            ),
+            ProtocolError::Internal(error) if error.contains("injected card persistence failure"),
+        ));
+        assert!(
+            !storage.fail.load(Ordering::SeqCst),
+            "the card save reached the injected failure"
+        );
+        let turns = fixture.reply_turns().await;
+        assert_eq!(turns.len(), 1, "the Accept turn was already durable");
+        let turn_id = match &turns[0] {
+            RoomEvent::RecipientItemReplied {
+                address,
+                content,
+                kind,
+                authorship,
+                via_node,
+                ..
+            } => {
+                assert_eq!(content, "Accepted.");
+                assert_eq!(*kind, ReplyKind::Accept);
+                assert_eq!(*authorship, Authorship::HumanWritten);
+                assert_eq!(via_node.as_ref(), Some(&fixture.node));
+                address.turn().as_str().to_owned()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(*fixture.status.borrow(), NodeState::Waiting);
+        assert_eq!(
+            fixture
+                .server
+                .pending_drafts
+                .phase(fixture.node.as_str())
+                .await,
+            Some(DraftPhase::Ready),
+        );
+        assert!(fixture.server.take_result(&fixture.node).await.is_none());
+        let row_id = fixture.row_id();
+        for conversation in [
+            fixture.server.conversation.lock().await.clone(),
+            fixture
+                .storage
+                .load_conversation("status-acts")
+                .await
+                .unwrap()
+                .unwrap(),
+        ] {
+            assert_eq!(
+                conversation.peer_row_controls[&row_id].stage,
+                PeerRowStage::AwaitingOperator
+            );
+            assert_eq!(
+                conversation
+                    .messages
+                    .iter()
+                    .find(|row| row.id == row_id)
+                    .unwrap()
+                    .content,
+                AWAITING_RESPONSE_PLACEHOLDER,
+            );
+        }
+        let settled_events = fixture.journal.events.lock().await.len();
+
+        // The same content as an Answer is refused and does not settle the card.
+        assert_eq!(
+            refused(fixture.reply(ITEM_ID, "Accepted.", None).await),
+            ProtocolError::Internal(
+                "this card was already answered with a recorded reply; only that same answer can \
+                 be resent"
+                    .to_owned()
+            ),
+        );
+        assert_eq!(fixture.journal.events.lock().await.len(), settled_events);
+        assert_eq!(fixture.reply_turns().await.len(), 1);
+        assert_eq!(
+            fixture
+                .server
+                .pending_drafts
+                .phase(fixture.node.as_str())
+                .await,
+            Some(DraftPhase::Ready),
+        );
+        assert_eq!(*fixture.status.borrow(), NodeState::Waiting);
+
+        // The same content as a Discuss verdict is refused the same way.
+        assert_eq!(
+            refused(
+                fixture
+                    .reply(ITEM_ID, "Accepted.", Some(ReplyVerdict::Discuss))
+                    .await
+            ),
+            ProtocolError::Internal(
+                "this card was already answered with a recorded reply; only that same answer can \
+                 be resent"
+                    .to_owned()
+            ),
+        );
+        assert_eq!(fixture.journal.events.lock().await.len(), settled_events);
+        assert_eq!(fixture.reply_turns().await.len(), 1);
+        assert_eq!(
+            fixture
+                .server
+                .pending_drafts
+                .phase(fixture.node.as_str())
+                .await,
+            Some(DraftPhase::Ready),
+        );
+
+        // Retrying the same content and kind replays exactly the one turn and
+        // settles the card.
+        assert!(matches!(
+            fixture.reply(ITEM_ID, "", Some(ReplyVerdict::Accept)).await,
+            RecipientActionOutcome::Applied {
+                reply: Some(RecipientReplyReceipt {
+                    kind: ReplyKind::Accept,
+                    turn_id: replayed,
+                    ..
+                }),
+            } if replayed == turn_id,
+        ));
+        assert_eq!(
+            fixture.reply_turns().await.len(),
+            1,
+            "retry reuses the one Accept turn"
+        );
+        assert_eq!(*fixture.status.borrow(), NodeState::Completed);
+        assert_eq!(
+            fixture
+                .server
+                .pending_drafts
+                .phase(fixture.node.as_str())
+                .await,
+            Some(DraftPhase::Settled),
+        );
+        let result = fixture.server.take_result(&fixture.node).await.unwrap();
+        assert_eq!(result.text, "Accepted.");
+        assert_eq!(result.authorship, Authorship::HumanWritten);
+        assert_eq!(result.send_authorization, SendAuthorization::HumanDecided);
+        let persisted = fixture
+            .storage
+            .load_conversation("status-acts")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.peer_row_controls[&row_id].stage,
+            PeerRowStage::Settled
+        );
+        assert!(!persisted.peer_row_controls[&row_id].node_resolvable);
+        assert_eq!(
+            persisted
+                .messages
+                .iter()
+                .find(|row| row.id == row_id)
+                .unwrap()
+                .content,
+            "Accepted.",
+        );
     }
 }
 

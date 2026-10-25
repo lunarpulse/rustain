@@ -18,11 +18,11 @@
 //! ⛔ **No aggregate.** Each recipient keeps its own settlement; nothing here
 //! counts, rolls up or summarizes the set.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::domain::models::{
     DispatchAct, JournalEntry, JournalRecord, RoomEvent, SemanticMessageType, SendActionId,
-    SendActionRecipient, SendSettlement,
+    SendActionRecipient, SendSettlement, StoryKey, carries_story_list,
 };
 
 /// The longest `--subject` label, in characters (Story 19.21 `AC1(b)`).
@@ -170,6 +170,43 @@ pub fn fold_send_actions(entries: &[JournalEntry]) -> Vec<SendActionView> {
     actions
 }
 
+/// Latest story statement per key, from the first durable record of each
+/// send action. A holder-less entry releases the key; non-list types do not
+/// state a relationship, even if a future or malformed record carries one,
+/// and neither does an entry whose holder index names no recorded recipient
+/// (it must not read as a release).
+#[must_use]
+pub fn story_holders(entries: &[JournalEntry]) -> BTreeMap<StoryKey, Option<SendActionRecipient>> {
+    let mut holders = BTreeMap::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let JournalRecord::Room(RoomEvent::TeamSendActionRecorded {
+            action,
+            recipients,
+            message_type,
+            stories,
+            ..
+        }) = &entry.record
+        else {
+            continue;
+        };
+        if !seen.insert(action) || !carries_story_list(*message_type) {
+            continue;
+        }
+        for story in stories {
+            let holder = match story.to {
+                None => None,
+                Some(index) => match recipients.get(index as usize) {
+                    Some(recipient) => Some(recipient.clone()),
+                    None => continue,
+                },
+            };
+            holders.insert(story.key.clone(), holder);
+        }
+    }
+    holders
+}
+
 fn recipient_mut<'a>(
     actions: &'a mut [SendActionView],
     by_id: &HashMap<SendActionId, usize>,
@@ -218,6 +255,63 @@ mod tests {
             body_bytes: 4,
             stories: Vec::new(),
         }
+    }
+
+    #[test]
+    fn story19_22_holder_fold_latest_release_duplicate_and_type() {
+        use crate::domain::models::{RecordedStory, StoryKey};
+        let key = StoryKey::parse("S7-07").unwrap();
+        let (b, c) = (recipient("b", 1), recipient("c", 2));
+        let fact = |id: &str, kind, holder| {
+            let mut event = recorded(id, vec![b.clone(), c.clone()]);
+            if let RoomEvent::TeamSendActionRecorded {
+                message_type,
+                stories,
+                ..
+            } = &mut event
+            {
+                *message_type = kind;
+                *stories = vec![RecordedStory {
+                    key: key.clone(),
+                    to: holder,
+                }];
+            }
+            event
+        };
+        let first = entry(
+            1,
+            fact("first", SemanticMessageType::StoryAssignment, Some(0)),
+        );
+        assert_eq!(
+            story_holders(std::slice::from_ref(&first)).get(&key),
+            Some(&Some(b.clone()))
+        );
+        let release = entry(2, fact("release", SemanticMessageType::ScopeChange, None));
+        assert_eq!(
+            story_holders(&[first.clone(), release.clone()]).get(&key),
+            Some(&None)
+        );
+        let entries = [
+            first,
+            release,
+            entry(
+                3,
+                fact("third", SemanticMessageType::StoryAssignment, Some(1)),
+            ),
+            entry(4, fact("third", SemanticMessageType::ScopeChange, None)),
+            entry(5, fact("other", SemanticMessageType::DesignUpdate, None)),
+            entry(
+                6,
+                fact("other", SemanticMessageType::StoryAssignment, Some(0)),
+            ),
+            // A holder index naming no recorded recipient states nothing: it
+            // must not read as a release of `c`.
+            entry(
+                7,
+                fact("corrupt", SemanticMessageType::StoryAssignment, Some(9)),
+            ),
+        ];
+        assert_eq!(story_holders(&entries).get(&key), Some(&Some(c)));
     }
 
     fn dispatched(id: &str, index: u32, peer: PeerId, task: &str) -> RoomEvent {

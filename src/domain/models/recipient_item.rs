@@ -576,6 +576,8 @@ pub enum ReplyKind {
     #[default]
     Answer,
     Status,
+    Accept,
+    Discuss,
     Defer {
         minutes: u16,
     },
@@ -594,6 +596,8 @@ impl ReplyKind {
         match self {
             Self::Answer => "answer",
             Self::Status => "status",
+            Self::Accept => "accept",
+            Self::Discuss => "discuss",
             Self::Defer { .. } => "defer",
             Self::Unknown => "unknown",
         }
@@ -625,6 +629,8 @@ impl Serialize for ReplyKind {
 enum Tag {
     Answer,
     Status,
+    Accept,
+    Discuss,
     Defer,
     Other,
 }
@@ -654,6 +660,8 @@ impl<'de> Deserialize<'de> for LooseValue {
                 Ok(LooseValue::Tag(match value {
                     "answer" => Tag::Answer,
                     "status" => Tag::Status,
+                    "accept" => Tag::Accept,
+                    "discuss" => Tag::Discuss,
                     "defer" => Tag::Defer,
                     _ => Tag::Other,
                 }))
@@ -663,6 +671,8 @@ impl<'de> Deserialize<'de> for LooseValue {
                 Ok(LooseValue::Tag(match value {
                     "answer" => Tag::Answer,
                     "status" => Tag::Status,
+                    "accept" => Tag::Accept,
+                    "discuss" => Tag::Discuss,
                     "defer" => Tag::Defer,
                     _ => Tag::Other,
                 }))
@@ -772,6 +782,8 @@ impl<'de> Deserialize<'de> for ReplyKind {
                 match (tag, minutes) {
                     (Some(LooseValue::Tag(Tag::Answer)), None) => Ok(ReplyKind::Answer),
                     (Some(LooseValue::Tag(Tag::Status)), None) => Ok(ReplyKind::Status),
+                    (Some(LooseValue::Tag(Tag::Accept)), None) => Ok(ReplyKind::Accept),
+                    (Some(LooseValue::Tag(Tag::Discuss)), None) => Ok(ReplyKind::Discuss),
                     (Some(LooseValue::Tag(Tag::Defer)), Some(LooseValue::Unsigned(value)))
                         if (1..=u64::from(u16::MAX)).contains(&value) =>
                     {
@@ -880,6 +892,38 @@ pub fn claim_reply_turn_id(
 mod tests {
     use super::*;
 
+    #[test]
+    fn story19_22_verdict_kind_round_trip_and_tolerance() {
+        for token in ["accept", "discuss"] {
+            let json = format!(r#"{{"type":"{token}"}}"#);
+            let kind: ReplyKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind.wire_name(), token);
+            assert!(!kind.is_answer());
+            assert_eq!(serde_json::to_string(&kind).unwrap(), json);
+            for json in [
+                format!(r#"{{"type":"{token}","x":1}}"#),
+                format!(r#"{{"type":"{token}","minutes":30}}"#),
+                format!(r#"{{"type":"{token}","type":"{token}"}}"#),
+            ] {
+                assert_eq!(
+                    serde_json::from_str::<ReplyKind>(&json).unwrap(),
+                    ReplyKind::Unknown
+                );
+            }
+        }
+        for json in [
+            r#"{"type":"answer"}"#,
+            r#"{"type":"status"}"#,
+            r#"{"type":"defer","minutes":30}"#,
+        ] {
+            let kind: ReplyKind = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                json,
+                "legacy encoding is unchanged"
+            );
+        }
+    }
     #[tokio::test]
     async fn a_history_collision_is_refused_without_reminting() {
         let peer = PeerId::from_public_key(&[4; 32]).unwrap();

@@ -34,6 +34,7 @@ pub enum SendError {
     /// or I/O.
     InvalidSubject(crate::domain::services::send_action_ledger::SubjectRefusal),
     InvalidStories(crate::domain::models::StoryRefusal),
+    StoryHistory(crate::domain::ports::RoomJournalError),
 }
 
 impl std::fmt::Display for SendError {
@@ -64,6 +65,9 @@ impl std::fmt::Display for SendError {
             }
             Self::InvalidSubject(refusal) => write!(f, "{refusal}"),
             Self::InvalidStories(refusal) => write!(f, "{refusal}"),
+            Self::StoryHistory(error) => {
+                write!(f, "could not read earlier story statements: {error}")
+            }
         }
     }
 }
@@ -203,6 +207,41 @@ pub struct SendRequest<'a> {
     pub send_authorization: crate::domain::models::SendAuthorization,
 }
 
+/// A changed holder must be told, resolved to today's roster binding rather
+/// than the earlier alias, and named by its current alias. Read then append is
+/// not atomic across concurrent sends.
+///
+/// # Errors
+///
+/// The prior holder is still addressable but absent from this send, or the
+/// sender's durable story history cannot be read.
+pub async fn validate_story_holders(
+    runtime: &A2aDelegationRuntime,
+    request: &SendRequest<'_>,
+) -> Result<(), SendError> {
+    let Some(stories) = request.stories.filter(|_| request.reply_to.is_none()) else {
+        return Ok(());
+    };
+    let holders = runtime
+        .story_holders()
+        .await
+        .map_err(SendError::StoryHistory)?;
+    for story in &stories.stories {
+        let Some(Some(holder)) = holders.get(&story.key) else {
+            continue;
+        };
+        if let Some(alias) = runtime.unaddressed_holder_alias(holder, request.recipients) {
+            return Err(SendError::InvalidStories(
+                crate::domain::models::StoryRefusal::HolderNotAddressed {
+                    key: story.key.to_string(),
+                    alias,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The one send coordinator (Story 19.21 `C1`): validate the whole action,
 /// journal it, drive N independent sends and settle each recipient as it
 /// lands. Rail-neutral — the standalone TUI arm calls it today, the daemon's
@@ -241,8 +280,12 @@ pub struct SendRequest<'a> {
 ///
 /// # Errors
 ///
-/// [`SendError::UnknownPeer`] / [`SendError::InvalidSubject`] when the whole
-/// action is refused; nothing was journaled or sent.
+/// [`SendError::UnknownPeer`] / [`SendError::InvalidSubject`] /
+/// [`SendError::InvalidStories`] when the whole action is refused; nothing was
+/// journaled or sent. A story-holder refusal or unreadable story history found
+/// here — after a rail's own pre-check passed, by a concurrent send or a failed
+/// read — also settles every row `NotSent`, as the record-failure branch does,
+/// so no painted row or attached request is left pending.
 pub async fn coordinate_send<S, F>(
     runtime: &A2aDelegationRuntime,
     request: SendRequest<'_>,
@@ -257,6 +300,12 @@ where
     use futures::{StreamExt, stream::FuturesUnordered};
 
     validate_send_request(runtime, &request)?;
+    if let Err(error) = validate_story_holders(runtime, &request).await {
+        for index in 0..request.recipients.len() {
+            on_settle(index, RecipientOutcome::NotSent);
+        }
+        return Err(error);
+    }
 
     let slots: Vec<
         Option<(
@@ -1304,6 +1353,8 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
                     None => ReplyKind::Answer,
                     Some(serde_json::Value::String(kind)) => match kind.as_str() {
                         "answer" => ReplyKind::Answer,
+                        "accept" => ReplyKind::Accept,
+                        "discuss" => ReplyKind::Discuss,
                         "status" => ReplyKind::Status,
                         "defer" => {
                             match turn.get("deferMinutes").and_then(serde_json::Value::as_u64) {
@@ -1379,6 +1430,20 @@ mod tests {
             .expect("additive status cannot refuse a thread")
             .turns
             .remove(0)
+    }
+
+    #[test]
+    fn story19_22_wire_verdict_tokens_are_typed() {
+        use crate::domain::models::ReplyKind;
+        for (token, kind) in [
+            ("accept", ReplyKind::Accept),
+            ("discuss", ReplyKind::Discuss),
+        ] {
+            let turn = parse_status_turn(Some(token), None, Some("body"));
+            assert_eq!(turn.kind, kind);
+            assert_eq!(turn.content.as_deref(), Some("body"));
+            assert!(turn.status.is_none());
+        }
     }
 
     #[test]
@@ -1533,6 +1598,149 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::unbounded_channel::<AppEvent>();
         A2aDelegationRuntime::new(NodeTree::new(), Arc::new(AcceptingJournal), event_tx)
             .with_peer_bindings(peers.into())
+    }
+
+    /// Story 19.22 review — the holder was an UNPINNED send to alias `old-b`,
+    /// whose host the roster now names `b`: the record carries the old alias's
+    /// pseudonym and the origin digest, exactly as `record_send_action`
+    /// freezes it. The rule must survive the rename and name today's alias.
+    #[tokio::test]
+    async fn story19_22_holder_validation_uses_identity_and_current_roster() {
+        use super::{SendRequest, validate_story_holders};
+        use crate::domain::models::{
+            Authorship, ContentHash, JournalEntry, JournalRecord, RecordedStory,
+            SemanticMessageType, SendActionId, SendActionRecipient, SendAuthorization, StoryKey,
+            StoryManifest,
+        };
+        use crate::domain::ports::RoomJournalReader;
+        struct History(Vec<JournalEntry>);
+        #[async_trait]
+        impl RoomJournalReader for History {
+            async fn load_entries(&self) -> Result<Vec<JournalEntry>, RoomJournalError> {
+                Ok(self.0.clone())
+            }
+        }
+        // Its own origin: an unpinned record matches any binding at the same
+        // origin (19.18c `PQ2`), and `peer()` shares one origin for all.
+        let holder = A2aPeerSpec::new(
+            "b",
+            RedactedUrl::from("http://127.0.0.2:9"),
+            A2aPeerSource::Workspace,
+        );
+        let holder_client = Arc::new(client::A2aClientAdapter::new(&holder, None).unwrap());
+        let history = Arc::new(History(vec![JournalEntry::new(
+            1,
+            JournalRecord::Room(RoomEvent::TeamSendActionRecorded {
+                action: SendActionId::from_replay("sa-holder"),
+                recipients: vec![SendActionRecipient {
+                    alias: "old-b".into(),
+                    peer: peer("old-b").alias_pseudonym(),
+                    endpoint: Some(holder_client.origin_digest()),
+                }],
+                message_type: SemanticMessageType::StoryAssignment,
+                subject: None,
+                body_hash: ContentHash::from_bytes([0; 32]),
+                body_bytes: 4,
+                stories: vec![RecordedStory {
+                    key: StoryKey::parse("S7-07").unwrap(),
+                    to: Some(0),
+                }],
+            }),
+            1,
+        )]));
+        let c = peer("c");
+        let client = Arc::new(client::A2aClientAdapter::new(&c, None).unwrap());
+        let rt = runtime(vec![(holder, holder_client), (c.clone(), client.clone())])
+            .with_journal_reader(history.clone());
+        let recipients = vec!["c".into()];
+        let stories = StoryManifest::parse("S7-07=c").unwrap();
+        let request = SendRequest {
+            recipients: &recipients,
+            text: "body",
+            message_type: Some(SemanticMessageType::StoryAssignment),
+            reply_to: None,
+            subject: None,
+            stories: Some(&stories),
+            authorship: Authorship::HumanWritten,
+            send_authorization: SendAuthorization::HumanDecided,
+        };
+        assert_eq!(
+            validate_story_holders(&rt, &request)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "story 'S7-07' was assigned to 'b' by your earlier send; address 'b' too, so the change is not silent"
+        );
+        let addressed = vec!["b".into(), "c".into()];
+        assert!(
+            validate_story_holders(
+                &rt,
+                &SendRequest {
+                    recipients: &addressed,
+                    ..request
+                }
+            )
+            .await
+            .is_ok(),
+            "current alias addresses the frozen identity"
+        );
+        let removed = runtime(vec![(c.clone(), client.clone())]).with_journal_reader(history);
+        assert!(
+            validate_story_holders(&removed, &request).await.is_ok(),
+            "a removed roster member cannot be addressed"
+        );
+        let no_reader = runtime(vec![]);
+        assert!(
+            validate_story_holders(
+                &no_reader,
+                &SendRequest {
+                    stories: None,
+                    ..request
+                }
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            validate_story_holders(
+                &no_reader,
+                &SendRequest {
+                    reply_to: Some("ri-parent"),
+                    ..request
+                }
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            validate_story_holders(&no_reader, &request).await.is_err(),
+            "an unreadable history is not an empty history"
+        );
+
+        // The coordinator's own re-check runs after a rail painted its rows:
+        // its refusal records nothing, starts nothing and settles every row
+        // `NotSent`, never leaving a row or attached request pending.
+        let journal = Arc::new(RecordingJournal(Mutex::new(Vec::new())));
+        let (event_tx, _event_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let unreadable = A2aDelegationRuntime::new(NodeTree::new(), journal.clone(), event_tx)
+            .with_peer_bindings(vec![(c, client)].into());
+        let mut settled = Vec::new();
+        let mut started = false;
+        let refused = super::coordinate_send(
+            &unreadable,
+            request,
+            tokio_util::sync::CancellationToken::new(),
+            |_| started = true,
+            |index, outcome| settled.push((index, outcome)),
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(super::SendError::StoryHistory(_))),
+            "{refused:?}"
+        );
+        assert!(!started, "a refused action never starts");
+        assert_eq!(settled, vec![(0, RecipientOutcome::NotSent)]);
+        assert!(journal.0.lock().await.is_empty(), "nothing is journaled");
     }
 
     /// Story 19.21 rule 9 — the live-send registry's lifecycle, observed on the

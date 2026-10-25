@@ -2,7 +2,7 @@
 
 use super::{
     ReceivedStories, RecipientItemState, RecipientItemView, SemanticMessageType, StoryHolder,
-    StoryKey,
+    StoryKey, carries_story_list,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -75,12 +75,12 @@ pub struct StatusStatement {
 }
 
 /// Per-sender supersession follows Story 19.21d D6. Only readable, live
-/// assignment lists participate; aliases never identify a holding host.
+/// story lists participate; aliases never identify a holding host.
 pub fn held_stories<'a>(views: impl IntoIterator<Item = &'a RecipientItemView>) -> Vec<HeldStory> {
     let mut items = views
         .into_iter()
         .filter(|item| {
-            item.message_type == SemanticMessageType::StoryAssignment
+            carries_story_list(item.message_type)
                 && item.retracted_at_ms.is_none()
                 && !matches!(item.state, RecipientItemState::Removed { .. })
                 && matches!(item.stories, Some(ReceivedStories::Listed { .. }))
@@ -417,6 +417,22 @@ mod tests {
         );
         let reverse = held_stories(views.iter().rev());
         assert_eq!(reverse, held_stories(views.iter()));
+    }
+
+    #[test]
+    fn story19_22_scope_change_supersedes_a_holding_list() {
+        let first = item("sender-a", 1, &[("S7-07", StoryHolder::You)]);
+        let mut release = item("sender-a", 2, &[("S7-07", StoryHolder::NoHolder)]);
+        release.message_type = SemanticMessageType::ScopeChange;
+        assert_eq!(held_stories([&first]).len(), 1);
+        assert!(held_stories([&first, &release]).is_empty());
+        release.stories = Some(ReceivedStories::Listed {
+            stories: vec![ReceivedStory {
+                key: StoryKey::parse("S7-07").unwrap(),
+                holder: StoryHolder::You,
+            }],
+        });
+        assert_eq!(held_stories([&first, &release]).len(), 1);
     }
 
     #[test]

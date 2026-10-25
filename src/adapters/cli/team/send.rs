@@ -24,7 +24,7 @@ pub struct SendArgs {
     /// Optional sender-local, single-token label (at most 64 characters).
     #[arg(long, value_parser = parse_subject)]
     pub subject: Option<String>,
-    /// Story keys and optional recipient aliases, for story_assignment only.
+    /// Story keys and optional recipient aliases, for story_assignment or scope_change.
     #[arg(long, value_parser = parse_stories)]
     pub stories: Option<StoryManifest>,
     /// Comma-separated peers followed by message text; everything after peers is body.

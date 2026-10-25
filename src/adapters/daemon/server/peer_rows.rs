@@ -7,7 +7,7 @@ use crate::domain::models::{
     PeerRowStage, ResponseMode, StorySummary,
 };
 #[cfg(feature = "a2a")]
-use crate::domain::models::{SemanticMessageType, story_summary};
+use crate::domain::models::{SemanticMessageType, carries_story_list, story_summary};
 
 pub(super) fn peer_row_control(
     node_id: &AgentId,
@@ -91,7 +91,7 @@ impl AttachServer {
                 crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
             crate::adapters::a2a::exec::recipient_item_for_node(&projection, node_id).map(|item| {
                 PeerItemContext {
-                    stories: (item.message_type == SemanticMessageType::StoryAssignment)
+                    stories: carries_story_list(item.message_type)
                         .then(|| {
                             item.stories
                                 .as_ref()
@@ -287,9 +287,7 @@ mod tests {
                     assert!(server.inbound_results.lock().await.is_empty());
                     assert_eq!(server.pending_drafts.phase(node.as_str()).await.is_some(), case == "live-phase");
                     if linked && boot == 1 {
-                        write_frame(&mut client, &ClientFrame::ReplyToRecipientItem {
-                            item_id: "ri_restart".into(), text: "Direct reply after restart".into(),
-                        }).await.unwrap();
+                        write_frame(&mut client, &ClientFrame::ReplyToRecipientItem { item_id: "ri_restart".into(), text: "Direct reply after restart".into(), verdict: None }).await.unwrap();
                         loop {
                             if let Some(DaemonFrame::RecipientActionResult {
                                 action: RecipientAction::Reply, outcome, ..

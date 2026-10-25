@@ -183,6 +183,7 @@ async fn k09_architecture_update_ack_is_durable_idempotent_and_discussion_remain
         &ClientFrame::ReplyToRecipientItem {
             item_id: item_id.clone(),
             text: answer.to_owned(),
+            verdict: None,
         },
     )
     .await
@@ -640,6 +641,7 @@ async fn k09_gated_ack_and_discuss_actions_keep_distinct_targets_and_outcomes() 
         &ClientFrame::ReplyToRecipientItem {
             item_id: second_item.clone(),
             text: "A separate human discussion while Ack is pending.".to_owned(),
+            verdict: None,
         },
     )
     .await

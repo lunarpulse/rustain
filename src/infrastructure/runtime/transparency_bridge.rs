@@ -579,7 +579,8 @@ pub async fn team_command(
                 subject,
                 stories,
                 crate::domain::models::Authorship::HumanWritten,
-            );
+            )
+            .await;
         }
         // Story 19.18 `AC7` — a follow-up IS a 19.17 delivery, N = 1, with the
         // reply-to carrier: the same validation, block, settle handler, rows
@@ -602,7 +603,8 @@ pub async fn team_command(
                 None,
                 None,
                 crate::domain::models::Authorship::HumanWritten,
-            );
+            )
+            .await;
         }
         // Story 19.18 `AC6` — rail 3 SERVES the thread read: the only rail
         // holding this session's own A2A egress. Spawned, never awaited
@@ -757,7 +759,7 @@ impl TeamSendPayload {
 }
 
 #[cfg(feature = "a2a")]
-pub(crate) fn start_proposed_team_send(
+pub(crate) async fn start_proposed_team_send(
     state: &mut TuiState,
     conversation_id: &str,
     app_state: &AppState,
@@ -774,7 +776,8 @@ pub(crate) fn start_proposed_team_send(
         None,
         None,
         crate::domain::models::Authorship::AgentComposed,
-    );
+    )
+    .await;
 }
 
 /// The rail-3 addressed send (Story 19.17), shared by `/team send` and Story
@@ -784,7 +787,7 @@ pub(crate) fn start_proposed_team_send(
 /// send action before any recipient I/O and each recipient's typed settlement
 /// before its row settles; a follow-up records no action.
 #[allow(clippy::too_many_arguments)]
-fn start_team_send(
+async fn start_team_send(
     state: &mut TuiState,
     conversation_id: &str,
     app_state: &AppState,
@@ -803,7 +806,9 @@ fn start_team_send(
     let block_id = format!("team-send-{}", state.team_send_next_id);
     #[cfg(feature = "a2a")]
     {
-        use crate::adapters::a2a::send::{SendRequest, coordinate_send, validate_send_request};
+        use crate::adapters::a2a::send::{
+            SendRequest, coordinate_send, validate_send_request, validate_story_holders,
+        };
         use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
         let (recipients, text) = payload.parts();
         let Some(runtime) = app_state.a2a_send.clone() else {
@@ -816,19 +821,20 @@ fn start_team_send(
         };
         // Whole-action validation before any row is painted, journal write or
         // I/O (19.17 `G4`): a refused action leaves no trace.
-        let refusal = validate_send_request(
-            &runtime,
-            &SendRequest {
-                recipients,
-                text,
-                message_type,
-                reply_to: reply_to.as_deref(),
-                subject: subject.as_deref(),
-                stories: stories.as_ref(),
-                authorship,
-                send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
-            },
-        );
+        let request = SendRequest {
+            recipients,
+            text,
+            message_type,
+            reply_to: reply_to.as_deref(),
+            subject: subject.as_deref(),
+            stories: stories.as_ref(),
+            authorship,
+            send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
+        };
+        let refusal = match validate_send_request(&runtime, &request) {
+            Ok(()) => validate_story_holders(&runtime, &request).await,
+            Err(error) => Err(error),
+        };
         if let Err(refusal) = refusal {
             show_team_send(state, &block_id, refusal.to_string());
             return;
@@ -2398,6 +2404,111 @@ mod tests {
             "Focus must retain the Info block rather than queue an advisory notice"
         );
         assert!(state.needs_redraw);
+    }
+
+    /// Story 19.22 review (`AC2`) — rail 3 refuses a displaced-holder send
+    /// through its typed front door BEFORE any row is painted, any journal row
+    /// is written or any byte is sent; the refusal names the holder.
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn story19_22_standalone_holder_refusal_paints_no_rows() {
+        use std::sync::Arc;
+
+        use crate::adapters::a2a::client::A2aClientAdapter;
+        use crate::adapters::a2a::driver::A2aDelegationRuntime;
+        use crate::domain::models::{
+            A2aPeerSource, A2aPeerSpec, ContentHash, JournalEntry, JournalRecord, RecordedStory,
+            RedactedUrl, RoomEvent, SemanticMessageType, SendActionId, SendActionRecipient,
+            StoryKey,
+        };
+        use crate::domain::ports::{RoomJournal, RoomJournalError};
+
+        struct Journal {
+            rows: tokio::sync::Mutex<Vec<RoomEvent>>,
+            history: Vec<JournalEntry>,
+        }
+        #[async_trait::async_trait]
+        impl RoomJournal for Journal {
+            async fn record_event(&self, event: RoomEvent) -> Result<(), RoomJournalError> {
+                self.rows.lock().await.push(event);
+                Ok(())
+            }
+        }
+        #[async_trait::async_trait]
+        impl RoomJournalReader for Journal {
+            async fn load_entries(&self) -> Result<Vec<JournalEntry>, RoomJournalError> {
+                Ok(self.history.clone())
+            }
+        }
+
+        // One origin per peer: an unpinned record matches any binding at the
+        // same origin (19.18c `PQ2`).
+        let spec = |alias: &str, origin: &str| {
+            A2aPeerSpec::new(alias, RedactedUrl::from(origin), A2aPeerSource::Workspace)
+        };
+        let (b, c) = (
+            spec("b", "http://127.0.0.2:9"),
+            spec("c", "http://127.0.0.3:9"),
+        );
+        let (b_client, c_client) = (
+            Arc::new(A2aClientAdapter::new(&b, None).unwrap()),
+            Arc::new(A2aClientAdapter::new(&c, None).unwrap()),
+        );
+        // An earlier unpinned `story_assignment S7-07=b`, frozen exactly as
+        // `record_send_action` records it.
+        let journal = Arc::new(Journal {
+            rows: tokio::sync::Mutex::new(Vec::new()),
+            history: vec![JournalEntry::new(
+                1,
+                JournalRecord::Room(RoomEvent::TeamSendActionRecorded {
+                    action: SendActionId::from_replay("sa-holder"),
+                    recipients: vec![SendActionRecipient {
+                        alias: "b".into(),
+                        peer: b.alias_pseudonym(),
+                        endpoint: Some(b_client.origin_digest()),
+                    }],
+                    message_type: SemanticMessageType::StoryAssignment,
+                    subject: None,
+                    body_hash: ContentHash::from_bytes([0; 32]),
+                    body_bytes: 4,
+                    stories: vec![RecordedStory {
+                        key: StoryKey::parse("S7-07").unwrap(),
+                        to: Some(0),
+                    }],
+                }),
+                1,
+            )],
+        });
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = A2aDelegationRuntime::new(
+            crate::infrastructure::subagent::NodeTree::new(),
+            journal.clone(),
+            event_tx,
+        )
+        .with_peer_bindings(vec![(b, b_client), (c, c_client)].into())
+        .with_journal_reader(journal.clone());
+        let workspace = tempfile::tempdir().unwrap();
+        let (mut app_state, _domain_rx) = bridge_app_state(workspace.path());
+        app_state.a2a_send = Some(Arc::new(runtime));
+
+        let mut state = crate::adapters::tui::state::TuiState::new(120, 40);
+        super::team_command(
+            &mut state,
+            "conv",
+            Some("send --type scope_change --stories S7-07 c S7-07 deferred to Sprint 8"),
+            &app_state,
+        )
+        .await;
+        assert_eq!(
+            state.feedback_blocks["team-send-1"].message,
+            "story 'S7-07' was assigned to 'b' by your earlier send; address 'b' too, so the \
+             change is not silent"
+        );
+        assert!(state.team_send_blocks.is_empty(), "no row was painted");
+        assert!(
+            journal.rows.lock().await.is_empty(),
+            "nothing was journaled"
+        );
     }
 }
 

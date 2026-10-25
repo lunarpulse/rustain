@@ -931,6 +931,35 @@ mod tests {
         assert_eq!(reply.status, None);
     }
 
+    #[test]
+    fn story19_22_journal_verdict_tolerance_preserves_the_reply() {
+        let legacy = r#"{"event":"recipient_item_replied","address":{"principal":{"kind":"unknown"},"turn":"rr_old"},"answers":"ri_old","content":"answer","authorship":"human-written"}"#;
+        let legacy_event: RoomEvent = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&legacy_event).unwrap(), legacy);
+        for (token, kind) in [
+            ("accept", ReplyKind::Accept),
+            ("discuss", ReplyKind::Discuss),
+        ] {
+            for extra in [false, true] {
+                let mut raw: serde_json::Value = serde_json::from_str(legacy).unwrap();
+                raw["kind"] = serde_json::json!({"type":token});
+                if extra {
+                    raw["kind"]["x"] = serde_json::json!(1);
+                }
+                let event: RoomEvent = serde_json::from_value(raw)
+                    .expect("extra verdict fields are not a corrupt journal record");
+                let encoded = serde_json::to_string(&event).unwrap();
+                let decoded: RoomEvent = serde_json::from_str(&encoded).unwrap();
+                let projection = JournalRecipientItemProjection::from_entries(&[entry(1, decoded)]);
+                let snapshot = projection.snapshot();
+                let reply = snapshot.replies.values().next().unwrap();
+                assert_eq!(reply.kind, if extra { ReplyKind::Unknown } else { kind });
+                assert_eq!(reply.content, "answer");
+                assert!(reply.status.is_none());
+            }
+        }
+    }
+
     fn story_event(
         address: &ItemAddress,
         stories: Option<crate::domain::models::ReceivedStories>,

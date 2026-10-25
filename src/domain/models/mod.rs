@@ -272,7 +272,7 @@ pub use skill_catalog_delta::SkillCatalogDelta;
 pub use skill_metadata::SkillMetadata;
 pub use story_manifest::{
     ReceivedStories, ReceivedStory, RecordedStory, StoryEntry, StoryHolder, StoryKey,
-    StoryManifest, StoryRefusal, StorySummary, story_summary,
+    StoryManifest, StoryRefusal, StorySummary, VerdictOffer, carries_story_list, story_summary,
 };
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};

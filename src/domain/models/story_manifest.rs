@@ -8,8 +8,16 @@ use std::fmt;
 pub const MAX_STORIES: usize = 64;
 pub const MAX_STORY_ALIAS_BYTES: usize = 256;
 
+/// The message types whose durable carrier states story relationships.
+pub const fn carries_story_list(kind: SemanticMessageType) -> bool {
+    matches!(
+        kind,
+        SemanticMessageType::StoryAssignment | SemanticMessageType::ScopeChange
+    )
+}
+
 /// A sender-local key; deserialized manifests are checked at the send boundary.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StoryKey(String);
 
@@ -106,7 +114,7 @@ impl StoryManifest {
         message_type: Option<SemanticMessageType>,
         recipients: &[String],
     ) -> Result<(), StoryRefusal> {
-        if message_type != Some(SemanticMessageType::StoryAssignment) {
+        if !message_type.is_some_and(carries_story_list) {
             return Err(StoryRefusal::WrongType);
         }
         self.check_shape()?;
@@ -132,13 +140,16 @@ pub enum StoryRefusal {
     DuplicateKey(String),
     TooMany,
     NotAddressed { key: String, alias: String },
+    HolderNotAddressed { key: String, alias: String },
     AliasTooLong(String),
 }
 
 impl fmt::Display for StoryRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WrongType => f.write_str("'--stories' needs '--type story_assignment'"),
+            Self::WrongType => {
+                f.write_str("'--stories' needs '--type story_assignment' or '--type scope_change'")
+            }
             Self::Missing => f.write_str("Missing story list after '/team send --stories'"),
             Self::InvalidKey(key) => write!(
                 f,
@@ -149,6 +160,10 @@ impl fmt::Display for StoryRefusal {
             Self::NotAddressed { key, alias } => write!(
                 f,
                 "story '{key}' is assigned to '{alias}', who is not addressed by this send"
+            ),
+            Self::HolderNotAddressed { key, alias } => write!(
+                f,
+                "story '{key}' was assigned to '{alias}' by your earlier send; address '{alias}' too, so the change is not silent"
             ),
             Self::AliasTooLong(key) => write!(
                 f,
@@ -175,6 +190,32 @@ pub enum ReceivedStories {
     Unreadable,
     #[serde(other)]
     Unrecognized,
+}
+
+/// Story 19.22 `D6` — which verdicts an item's story list offers; gate and
+/// surface state only, never on a wire or in the journal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VerdictOffer {
+    #[default]
+    None,
+    DiscussOnly,
+    AcceptOrDiscuss,
+}
+
+impl ReceivedStories {
+    pub fn verdict_offer(&self) -> VerdictOffer {
+        match self {
+            Self::Listed { stories }
+                if stories
+                    .iter()
+                    .any(|story| matches!(story.holder, StoryHolder::You)) =>
+            {
+                VerdictOffer::AcceptOrDiscuss
+            }
+            Self::Listed { .. } => VerdictOffer::DiscussOnly,
+            Self::Unreadable | Self::Unrecognized => VerdictOffer::None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +265,67 @@ mod tests {
     use crate::domain::models::{PeerId, SemanticMessageType};
 
     #[test]
+    fn story19_22_list_types_and_verdict_offer_matrix() {
+        for (kind, expected) in [
+            (SemanticMessageType::StoryAssignment, true),
+            (SemanticMessageType::ScopeChange, true),
+            (SemanticMessageType::DesignUpdate, false),
+            (SemanticMessageType::Consultation, false),
+            (SemanticMessageType::Unknown, false),
+        ] {
+            assert_eq!(carries_story_list(kind), expected);
+        }
+        for (holders, expected) in [
+            (vec![StoryHolder::You], VerdictOffer::AcceptOrDiscuss),
+            (
+                vec![StoryHolder::NoHolder, StoryHolder::You],
+                VerdictOffer::AcceptOrDiscuss,
+            ),
+            (vec![StoryHolder::NoHolder], VerdictOffer::DiscussOnly),
+            (
+                vec![StoryHolder::Member {
+                    alias: "b".into(),
+                    peer: None,
+                }],
+                VerdictOffer::DiscussOnly,
+            ),
+            (vec![StoryHolder::Unrecognized], VerdictOffer::DiscussOnly),
+            (vec![], VerdictOffer::DiscussOnly),
+        ] {
+            let list = ReceivedStories::Listed {
+                stories: holders
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, holder)| ReceivedStory {
+                        key: StoryKey::parse(&format!("S{n}")).unwrap(),
+                        holder,
+                    })
+                    .collect(),
+            };
+            assert_eq!(list.verdict_offer(), expected);
+        }
+        for list in [
+            None,
+            Some(ReceivedStories::Unreadable),
+            Some(ReceivedStories::Unrecognized),
+        ] {
+            assert_eq!(
+                list.as_ref()
+                    .map_or(VerdictOffer::None, ReceivedStories::verdict_offer),
+                VerdictOffer::None
+            );
+        }
+        assert_eq!(
+            StoryRefusal::HolderNotAddressed {
+                key: "S7-07".into(),
+                alias: "b".into()
+            }
+            .to_string(),
+            "story 'S7-07' was assigned to 'b' by your earlier send; address 'b' too, so the change is not silent"
+        );
+    }
+
+    #[test]
     fn key_grammar_boundaries() {
         for key in ["A", "0", "S7-04", "a._-9", &"A".repeat(32)] {
             assert!(StoryKey::parse(key).is_ok(), "{key}");
@@ -239,14 +341,14 @@ mod tests {
         let manifest = StoryManifest::parse("S1,S2=b").unwrap();
         assert_eq!(
             manifest.check(None, &["b".into()]).unwrap_err().to_string(),
-            "'--stories' needs '--type story_assignment'"
+            "'--stories' needs '--type story_assignment' or '--type scope_change'"
         );
         assert_eq!(
             manifest
                 .check(Some(SemanticMessageType::DesignUpdate), &["b".into()])
                 .unwrap_err()
                 .to_string(),
-            "'--stories' needs '--type story_assignment'"
+            "'--stories' needs '--type story_assignment' or '--type scope_change'"
         );
         assert!(manifest.check(kind, &["b".into()]).is_ok());
         assert_eq!(

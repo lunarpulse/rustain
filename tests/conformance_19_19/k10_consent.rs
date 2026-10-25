@@ -134,6 +134,7 @@ async fn k10_context_requires_explicit_selection_and_injects_only_current_receiv
         &ClientFrame::ReplyToRecipientItem {
             item_id: chosen_id.clone(),
             text: reply.to_owned(),
+            verdict: None,
         },
     )
     .await

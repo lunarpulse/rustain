@@ -107,3 +107,11 @@ mod s_k05_gates;
 #[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_21b/tool_provider.rs"]
 mod tool_provider;
+#[path = "conformance_19_22/v_k01_accept.rs"]
+mod v_k01_accept;
+#[path = "conformance_19_22/v_k02_gates.rs"]
+mod v_k02_gates;
+#[path = "conformance_19_22/v_k03_scope_lists.rs"]
+mod v_k03_scope_lists;
+#[path = "conformance_19_22/v_k04_displacement.rs"]
+mod v_k04_displacement;

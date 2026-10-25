@@ -77,6 +77,7 @@ pub(crate) async fn open_received_surface(
         viewport_rows: 0,
         content: page.content,
         message_type: page.message_type,
+        verdict_offer: page.verdict_offer,
         cached_width: 0,
         cached_lines: Vec::new(),
         cached_header: Vec::new(),

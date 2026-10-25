@@ -24,8 +24,8 @@ async fn d_k02_raw_frame_refusals_are_exact_keyed_and_make_no_posts() {
         AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
     let entry = |key: &str, alias: Option<&str>| json!({"key":key,"to":alias});
     let cases = vec![
-        (None, vec!["b".into()], vec![entry("S1", None)], "'--stories' needs '--type story_assignment'".to_owned()),
-        (Some(SemanticMessageType::DesignUpdate), vec!["b".into()], vec![entry("S1", None)], "'--stories' needs '--type story_assignment'".to_owned()),
+        (None, vec!["b".into()], vec![entry("S1", None)], "'--stories' needs '--type story_assignment' or '--type scope_change'".to_owned()),
+        (Some(SemanticMessageType::DesignUpdate), vec!["b".into()], vec![entry("S1", None)], "'--stories' needs '--type story_assignment' or '--type scope_change'".to_owned()),
         (Some(SemanticMessageType::StoryAssignment), vec!["b".into()], vec![entry("S1", Some("not-addressed"))], "story 'S1' is assigned to 'not-addressed', who is not addressed by this send".to_owned()),
         (Some(SemanticMessageType::StoryAssignment), vec![oversized.clone()], vec![entry("S1", Some(&oversized))], "story 'S1' is assigned to an alias longer than 256 bytes".to_owned()),
         (Some(SemanticMessageType::StoryAssignment), vec!["b".into()], vec![entry("S1", None), entry("S1", Some("b"))], "story key 'S1' is listed twice".to_owned()),

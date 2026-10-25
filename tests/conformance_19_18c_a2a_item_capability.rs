@@ -927,6 +927,7 @@ async fn operator_reply(
         &ClientFrame::ReplyToRecipientItem {
             item_id: item_id.to_owned(),
             text: text.to_owned(),
+            verdict: None,
         },
     )
     .await

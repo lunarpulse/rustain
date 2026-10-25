@@ -22,7 +22,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team untrust <alias-or-peer-id>";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team reply --accept <item-id> [<text…>] | /team reply --discuss <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team untrust <alias-or-peer-id>";
 
 /// Named refusal for the retired listing misnomer; granting stays card-only.
 pub const TRUST_REFUSAL: &str = "'/team trust' does not exist: standing trust is granted only from a sender's consent card ([a] Always allow). See it with /team status; revoke it with /team untrust <alias-or-peer-id>.";
@@ -159,10 +159,14 @@ pub enum TeamCommandArgs {
         item_id: String,
     },
     /// Story 19.18 `G3` — answer an item that arrived on THIS host (rail 4
-    /// only). The body is the raw remainder after the id, verbatim.
+    /// only). The body is the raw remainder after the id, verbatim. Story
+    /// 19.22 `D7` — a leading `--accept`/`--discuss` flags a verdict reply:
+    /// flags are recognised only BEFORE the id, so a flag after the id stays
+    /// body text (positional, no `PassThrough`).
     Reply {
         item_id: String,
         text: String,
+        verdict: Option<crate::adapters::daemon::protocol::ReplyVerdict>,
     },
     /// Record a fixed 30-minute reported defer on this answering host.
     Defer {
@@ -365,16 +369,61 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
         // Story 19.18 `AC1` — bodies are located by TOKEN POSITION, ⛔ never
         // by searching for the id (an id may recur inside the body). An empty
         // or whitespace-only body is refused on purpose.
+        //
+        // Story 19.22 `D7` — a leading `--accept`/`--discuss` flags a verdict
+        // reply. Flags live only before the id; after the id every token is
+        // body, so `reply ri_x --accept hi` is a plain Answer whose text
+        // starts with "--accept" (positional, consistent, never PassThrough).
+        // Accept's text is optional (the daemon normalizes empty to
+        // `Accepted.`); Discuss and plain replies require text. A second
+        // verdict flag, or any other leading `--` token, is a named refusal,
+        // never an item id (item ids never start with `--`).
         "reply" => {
-            let item_id = tokens
+            use crate::adapters::daemon::protocol::ReplyVerdict;
+            let mut next = tokens
                 .next()
                 .ok_or_else(|| format!("Missing item id after '/team reply'. Use: {USAGE}"))?;
-            let text = raw_remainder_after_tokens(arg, 1).ok_or_else(|| {
-                format!("Missing reply text after item `{item_id}`. Use: {USAGE}")
-            })?;
+            let mut verdict = None;
+            if next == "--accept" || next == "--discuss" {
+                verdict = Some(if next == "--accept" {
+                    ReplyVerdict::Accept
+                } else {
+                    ReplyVerdict::Discuss
+                });
+                next = tokens.next().ok_or_else(|| {
+                    format!("Missing item id after '/team reply {next}'. Use: {USAGE}")
+                })?;
+            }
+            if next.starts_with("--") {
+                return Err(if next == "--accept" || next == "--discuss" {
+                    format!(
+                        "'/team reply' takes one verdict: '--accept' or '--discuss'. Use: {USAGE}"
+                    )
+                } else {
+                    format!(
+                        "Unknown /team reply flag '{}'. Use: {USAGE}",
+                        crate::domain::services::transparency::sanitize_disclosable(
+                            next,
+                            crate::domain::services::transparency::MAX_PEER_ID_BYTES
+                        )
+                    )
+                });
+            }
+            let flags = usize::from(verdict.is_some());
+            let item_id = next;
+            let text = match raw_remainder_after_tokens(arg, 1 + flags) {
+                Some(text) => text,
+                None if verdict == Some(ReplyVerdict::Accept) => String::new(),
+                None => {
+                    return Err(format!(
+                        "Missing reply text after item `{item_id}`. Use: {USAGE}"
+                    ));
+                }
+            };
             Ok(TeamCommandArgs::Reply {
                 item_id: item_id.to_owned(),
                 text,
+                verdict,
             })
         }
         "thread" => {
@@ -951,6 +1000,10 @@ pub fn render_team_thread(
         if turn.reply {
             match turn.kind {
                 crate::domain::models::ReplyKind::Answer => {}
+                crate::domain::models::ReplyKind::Accept => text.push_str(" [verdict: accept]"),
+                crate::domain::models::ReplyKind::Discuss => {
+                    text.push_str(" [verdict: discuss concerns]")
+                }
                 crate::domain::models::ReplyKind::Defer { minutes } => {
                     let _ = write!(text, " [defer {minutes}m — reported expectation]");
                 }
@@ -1171,7 +1224,9 @@ mod tests {
         ] {
             assert_eq!(
                 parse_team_command(Some(input)).unwrap_err(),
-                format!("'--stories' needs '--type story_assignment'. Use: {USAGE}")
+                format!(
+                    "'--stories' needs '--type story_assignment' or '--type scope_change'. Use: {USAGE}"
+                )
             );
         }
         assert_eq!(
@@ -1971,6 +2026,7 @@ mod tests {
             Ok(TeamCommandArgs::Reply {
                 item_id: "ri_x".to_owned(),
                 text: "two  words".to_owned(),
+                verdict: None,
             })
         );
         assert_eq!(
@@ -1978,6 +2034,7 @@ mod tests {
             Ok(TeamCommandArgs::Reply {
                 item_id: "r".to_owned(),
                 text: "r hi".to_owned(),
+                verdict: None,
             })
         );
         assert_eq!(
@@ -2029,6 +2086,7 @@ mod tests {
             Ok(TeamCommandArgs::Reply {
                 item_id: "ri_x".to_owned(),
                 text: "Καλημέρα 🌕\n second".to_owned(),
+                verdict: None,
             })
         );
         // The shared helper still serves `/team send` (N = 1).
@@ -2042,6 +2100,94 @@ mod tests {
                 stories: None,
             })
         );
+    }
+
+    // Story 19.22 `AC4(d)` — typed verdict front doors. Flags are recognised
+    // only BEFORE the id: a flag after the id is body text, so nothing here
+    // can fall through to `PassThrough`.
+    #[test]
+    fn story19_22_reply_verdict_flags_parse_per_story() {
+        use crate::adapters::daemon::protocol::ReplyVerdict;
+
+        assert_eq!(
+            parse_team_command(Some("reply --accept ri_x")),
+            Ok(TeamCommandArgs::Reply {
+                item_id: "ri_x".to_owned(),
+                text: String::new(),
+                verdict: Some(ReplyVerdict::Accept),
+            })
+        );
+        assert_eq!(
+            parse_team_command(Some("reply --accept ri_x sounds good")),
+            Ok(TeamCommandArgs::Reply {
+                item_id: "ri_x".to_owned(),
+                text: "sounds good".to_owned(),
+                verdict: Some(ReplyVerdict::Accept),
+            })
+        );
+        assert_eq!(
+            parse_team_command(Some("reply --discuss ri_x let us talk scope")),
+            Ok(TeamCommandArgs::Reply {
+                item_id: "ri_x".to_owned(),
+                text: "let us talk scope".to_owned(),
+                verdict: Some(ReplyVerdict::Discuss),
+            })
+        );
+        // An accept flag without an id is refused, never silent.
+        assert_eq!(
+            parse_team_command(Some("reply --accept")),
+            Err(format!(
+                "Missing item id after '/team reply --accept'. Use: {USAGE}"
+            ))
+        );
+        // Discuss without text is refused — concerns need words.
+        assert_eq!(
+            parse_team_command(Some("reply --discuss ri_x")),
+            Err(format!(
+                "Missing reply text after item `ri_x`. Use: {USAGE}"
+            ))
+        );
+        // A flag AFTER the id is body, positionally: a plain Answer.
+        assert_eq!(
+            parse_team_command(Some("reply ri_x --accept confirmed")),
+            Ok(TeamCommandArgs::Reply {
+                item_id: "ri_x".to_owned(),
+                text: "--accept confirmed".to_owned(),
+                verdict: None,
+            })
+        );
+        assert_eq!(
+            parse_team_command(Some("reply ri_x --discuss")),
+            Ok(TeamCommandArgs::Reply {
+                item_id: "ri_x".to_owned(),
+                text: "--discuss".to_owned(),
+                verdict: None,
+            })
+        );
+        // Review: one verdict per reply, and no leading flag becomes an id.
+        for input in [
+            "reply --accept --discuss ri_x worried",
+            "reply --discuss --accept ri_x",
+            "reply --accept --accept ri_x",
+        ] {
+            assert_eq!(
+                parse_team_command(Some(input)),
+                Err(format!(
+                    "'/team reply' takes one verdict: '--accept' or '--discuss'. Use: {USAGE}"
+                )),
+                "{input}"
+            );
+        }
+        for (input, flag) in [
+            ("reply --accpet ri_x", "--accpet"),
+            ("reply --accept --verbose ri_x", "--verbose"),
+        ] {
+            assert_eq!(
+                parse_team_command(Some(input)),
+                Err(format!("Unknown /team reply flag '{flag}'. Use: {USAGE}")),
+                "{input}"
+            );
+        }
     }
 
     #[cfg(feature = "a2a")]
@@ -2122,6 +2268,9 @@ mod tests {
 
         for (kind, suffix) in [
             (ReplyKind::Answer, ""),
+            // Story 19.22 `AC3` — verdict kinds render their full suffix.
+            (ReplyKind::Accept, " [verdict: accept]"),
+            (ReplyKind::Discuss, " [verdict: discuss concerns]"),
             (
                 ReplyKind::Defer { minutes: 30 },
                 " [defer 30m — reported expectation]",

@@ -6,7 +6,7 @@ use crate::adapters::policy::recipient_item::{JournalRecipientItemProjection, Th
 use crate::domain::models::provenance::provenance_tags;
 use crate::domain::models::{
     ItemScope, ReceivedStories, RecipientItemState, RecipientItemView, ReplyKind,
-    SemanticMessageType, StoryHolder, story_summary,
+    SemanticMessageType, StoryHolder, VerdictOffer, story_summary,
 };
 use crate::domain::ports::RoomJournalReader;
 use crate::domain::services::{
@@ -44,6 +44,9 @@ pub struct ReceivedThreadPage {
     pub last_non_pinned_ordinal: Option<usize>,
     pub omitted_before: usize,
     pub omitted_after: usize,
+    /// Story 19.22 `AC4(c)` — computed from the opened item's story list via
+    /// `ReceivedStories::verdict_offer`; `None` for absent/unreadable lists.
+    pub verdict_offer: VerdictOffer,
 }
 
 pub(crate) fn recipient_context_available(item: &RecipientItemView) -> bool {
@@ -65,17 +68,17 @@ fn context_available_with_cost(item: &RecipientItemView, cost: usize) -> bool {
 }
 
 fn item_story_block(item: &RecipientItemView) -> String {
-    if item.message_type != SemanticMessageType::StoryAssignment
+    if !crate::domain::models::carries_story_list(item.message_type)
         || matches!(item.state, RecipientItemState::Removed { .. })
     {
         return String::new();
     }
-    item.stories
-        .as_ref()
-        .map_or_else(String::new, render_story_list)
+    item.stories.as_ref().map_or_else(String::new, |list| {
+        render_story_list(list, item.message_type)
+    })
 }
 
-fn render_story_list(list: &ReceivedStories) -> String {
+fn render_story_list(list: &ReceivedStories, kind: SemanticMessageType) -> String {
     use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
     use std::fmt::Write as _;
 
@@ -87,6 +90,9 @@ fn render_story_list(list: &ReceivedStories) -> String {
     for story in stories {
         let _ = write!(block, "    {}", story.key);
         match &story.holder {
+            StoryHolder::NoHolder if kind == SemanticMessageType::ScopeChange => {
+                block.push_str("  assigned to no one");
+            }
             StoryHolder::NoHolder => {}
             StoryHolder::You => block.push_str("  assigned to you"),
             StoryHolder::Member { alias, .. } => {
@@ -334,6 +340,10 @@ pub(crate) async fn load_received_thread(
         last_non_pinned_ordinal: last,
         omitted_before,
         omitted_after,
+        verdict_offer: opened
+            .stories
+            .as_ref()
+            .map_or(VerdictOffer::None, ReceivedStories::verdict_offer),
     })
 }
 
@@ -386,6 +396,8 @@ fn turn_cost(turn: &ThreadTurnRef<'_>, opened: bool) -> TurnCost {
         ThreadTurnRef::Reply(reply) => {
             let kind = match reply.kind {
                 ReplyKind::Answer => "answer".len(),
+                ReplyKind::Accept => "verdict: accept".len(),
+                ReplyKind::Discuss => "verdict: discuss concerns".len(),
                 ReplyKind::Defer { minutes } => {
                     "[defer ".len() + decimal_digits(minutes) + "m — reported expectation]".len()
                 }
@@ -478,6 +490,8 @@ fn append_turn(output: &mut String, turn: &ThreadTurnRef<'_>, include_body: bool
             );
             match reply.kind {
                 ReplyKind::Answer => output.push_str("answer"),
+                ReplyKind::Accept => output.push_str("verdict: accept"),
+                ReplyKind::Discuss => output.push_str("verdict: discuss concerns"),
                 ReplyKind::Defer { minutes } => {
                     let _ = write!(output, "[defer {minutes}m — reported expectation]");
                 }
@@ -580,6 +594,9 @@ mod tests {
         .unwrap();
         for (kind, status, label) in [
             (ReplyKind::Answer, None, "answer"),
+            // Story 19.22 `AC3` — verdict kinds render and charge identically.
+            (ReplyKind::Accept, None, "verdict: accept"),
+            (ReplyKind::Discuss, None, "verdict: discuss concerns"),
             (
                 ReplyKind::Defer { minutes: 30 },
                 None,
@@ -633,6 +650,85 @@ mod tests {
                 assert!(rendered.starts_with(&format!("{expected}\n")));
                 assert_eq!(rendered.len(), turn_cost(&turn, false).full);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn story19_22_received_thread_page_computes_the_verdict_offer() {
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, PeerId, ReceivedStories, ReceivedStory, RoomEvent,
+            SendAuthorization, StoryHolder, StoryKey, VerdictOffer,
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        for (item_id, message_type, stories, expected) in [
+            (
+                "ri_offer_you",
+                SemanticMessageType::StoryAssignment,
+                Some(ReceivedStories::Listed {
+                    stories: vec![ReceivedStory {
+                        key: StoryKey::parse("S7-09").unwrap(),
+                        holder: StoryHolder::You,
+                    }],
+                }),
+                VerdictOffer::AcceptOrDiscuss,
+            ),
+            (
+                "ri_offer_member",
+                SemanticMessageType::StoryAssignment,
+                Some(ReceivedStories::Listed {
+                    stories: vec![ReceivedStory {
+                        key: StoryKey::parse("S7-09").unwrap(),
+                        holder: StoryHolder::Member {
+                            alias: "b".into(),
+                            peer: None,
+                        },
+                    }],
+                }),
+                VerdictOffer::DiscussOnly,
+            ),
+            (
+                "ri_offer_unreadable",
+                SemanticMessageType::ScopeChange,
+                Some(ReceivedStories::Unreadable),
+                VerdictOffer::None,
+            ),
+            (
+                "ri_offer_absent",
+                SemanticMessageType::ScopeChange,
+                None,
+                VerdictOffer::None,
+            ),
+        ] {
+            let address = ItemAddress::from_a2a_ingress(
+                PeerId::from_public_key(&[75; 32]).unwrap(),
+                ItemId::from_replay(item_id),
+            );
+            journal
+                .append_room(RoomEvent::RecipientItemReceived {
+                    stories,
+                    address,
+                    task: format!("task-{item_id}"),
+                    alias: Some("sender".into()),
+                    message_type,
+                    authorship: Authorship::HumanWritten,
+                    send_authorization: SendAuthorization::HumanDecided,
+                    content: "list body".into(),
+                    in_reply_to: None,
+                    capability_hash: None,
+                    reply_capability_matched: false,
+                })
+                .await
+                .unwrap();
+            let page =
+                load_received_thread(workspace.path(), item_id, ReceivedThreadWindow::Newest)
+                    .await
+                    .unwrap();
+            assert_eq!(page.verdict_offer, expected, "{item_id}");
         }
     }
 
@@ -1046,7 +1142,7 @@ mod story_view_tests {
                 },
             ],
         };
-        let block = render_story_list(&list);
+        let block = render_story_list(&list, SemanticMessageType::StoryAssignment);
         assert!(block.starts_with("  4 stories, 1 assigned to you\n"));
         assert!(block.contains("    S1\n"));
         assert!(block.contains("    S2  assigned to you\n"));
@@ -1055,11 +1151,17 @@ mod story_view_tests {
         assert!(block.contains("    S4  holder not readable by this build\n"));
         assert!(block.ends_with("    other names are the sender's roster aliases\n"));
         assert_eq!(
-            render_story_list(&ReceivedStories::Unreadable),
+            render_story_list(
+                &ReceivedStories::Unreadable,
+                SemanticMessageType::StoryAssignment
+            ),
             "  story list not readable by this build\n"
         );
         assert_eq!(
-            render_story_list(&ReceivedStories::Unrecognized),
+            render_story_list(
+                &ReceivedStories::Unrecognized,
+                SemanticMessageType::StoryAssignment
+            ),
             "  story list not readable by this build\n"
         );
     }
@@ -1106,6 +1208,48 @@ mod story_view_tests {
         }
     }
 
+    #[tokio::test]
+    async fn story19_22_scope_release_view_and_legacy_list() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        for (id, kind, expected) in [
+            (
+                "assignment",
+                SemanticMessageType::StoryAssignment,
+                "    S7-07\n",
+            ),
+            (
+                "release",
+                SemanticMessageType::ScopeChange,
+                "    S7-07  assigned to no one\n",
+            ),
+        ] {
+            journal
+                .append_room(received_event(
+                    id,
+                    None,
+                    "body".into(),
+                    Some(ReceivedStories::Listed {
+                        stories: vec![ReceivedStory {
+                            key: StoryKey::parse("S7-07").unwrap(),
+                            holder: StoryHolder::NoHolder,
+                        }],
+                    }),
+                    kind,
+                ))
+                .await
+                .unwrap();
+            let page = load_received_thread(workspace.path(), id, ReceivedThreadWindow::Newest)
+                .await
+                .unwrap();
+            assert!(page.content.contains(expected), "{}", page.content);
+        }
+    }
+
     #[test]
     fn story_block_preserves_order_and_sanitizes_member_aliases() {
         use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
@@ -1135,7 +1279,7 @@ mod story_view_tests {
             ],
         };
         assert_eq!(
-            render_story_list(&list),
+            render_story_list(&list, SemanticMessageType::StoryAssignment),
             format!(
                 "  4 stories, 1 assigned to you\n\
                  \x20   Z-last  assigned to you\n\
@@ -1147,12 +1291,15 @@ mod story_view_tests {
             ),
         );
         assert_eq!(
-            render_story_list(&ReceivedStories::Listed {
-                stories: vec![ReceivedStory {
-                    key: StoryKey::parse("Only").unwrap(),
-                    holder: StoryHolder::NoHolder,
-                }],
-            }),
+            render_story_list(
+                &ReceivedStories::Listed {
+                    stories: vec![ReceivedStory {
+                        key: StoryKey::parse("Only").unwrap(),
+                        holder: StoryHolder::NoHolder,
+                    }],
+                },
+                SemanticMessageType::StoryAssignment
+            ),
             "  1 story, none assigned to you\n    Only\n",
         );
     }
@@ -1191,7 +1338,7 @@ mod story_view_tests {
             previous = id;
         }
         let list = maximal_story_list();
-        let block = render_story_list(&list);
+        let block = render_story_list(&list, SemanticMessageType::StoryAssignment);
         assert!(block.len() > 19_000);
         assert_eq!(block.lines().count(), 66);
         assert!(!block.contains(crate::domain::services::transparency::TRUNCATION_MARKER));
@@ -1253,7 +1400,7 @@ mod story_view_tests {
         .await
         .unwrap();
         let list = maximal_story_list();
-        let block = render_story_list(&list);
+        let block = render_story_list(&list, SemanticMessageType::StoryAssignment);
         journal
             .append_room(received_event(
                 "list-boundary",

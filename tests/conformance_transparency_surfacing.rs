@@ -123,6 +123,9 @@ fn the_palette_row_names_the_cross_host_retract_and_the_narrowed_board() {
         "/team reply <item-id> <text…>",
         "/team thread <peer-id> <item-id>",
         "/team followup <peer-id> <turn-id> <text…>",
+        // Story 19.22 `AC4(d)` — the verdict forms.
+        "/team reply --accept <item-id> [<text…>]",
+        "/team reply --discuss <item-id> <text…>",
     ] {
         assert!(entry.description.contains(verb), "{verb}: {entry:?}");
         assert!(

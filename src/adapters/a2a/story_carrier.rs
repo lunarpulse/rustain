@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::domain::models::story_manifest::{MAX_STORIES, MAX_STORY_ALIAS_BYTES};
 use crate::domain::models::{
     PeerId, ReceivedStories, ReceivedStory, SemanticMessageType, StoryHolder, StoryKey,
+    carries_story_list,
 };
 
 /// Missing and unrelated carriers are absent; malformed story statements retain
@@ -15,7 +16,7 @@ pub(super) fn parse_story_carrier(
     kind: SemanticMessageType,
     raw: Option<&Value>,
 ) -> Option<ReceivedStories> {
-    if kind != SemanticMessageType::StoryAssignment {
+    if !carries_story_list(kind) {
         return None;
     }
     let raw = raw?;

@@ -48,7 +48,8 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// request-keyed shared view streams; reject older clients before proof.
 /// v11 (Story 19.21d): TeamSend carries stories; PeerRowControl carries the story summary; an undecodable client frame is answered and skipped
 /// v12 (Story 19.24): ShareRecipientStatus; PeerRowControl carries the status preview
-pub const PROTOCOL_VERSION: u32 = 12;
+/// v13 (Story 19.22): ReplyToRecipientItem carries an optional Accept/Discuss verdict
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -466,6 +467,14 @@ impl std::fmt::Display for ProtocolError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProposalToken(pub u64);
 
+/// Human-decided verdict on a received story list, recorded as a reply turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReplyVerdict {
+    Accept,
+    Discuss,
+}
+
 /// Per-item identity for a consolidation proposal — the forward-compat seam for per-item
 /// toggle (AI-12.2d-2). Stable within a generation; meaningless across generations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -593,7 +602,12 @@ pub enum ClientFrame {
     /// turn recorded on THIS host (`/team reply`). Trusted-local + read-write
     /// + room-content role, the ack/remove gate. ⛔ Nothing leaves the host:
     /// the asker reads the turn by pulling the thread.
-    ReplyToRecipientItem { item_id: String, text: String },
+    ReplyToRecipientItem {
+        item_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict: Option<ReplyVerdict>,
+    },
     /// Record a fixed local defer turn without resolving the pending real answer.
     /// Trusted-local + read-write + room-content role; no reverse delivery.
     DeferRecipientItem { item_id: String },
@@ -1176,6 +1190,36 @@ mod tests {
     use super::*;
     use crate::domain::models::{NoticeLevel, StreamChunk};
     use crate::infrastructure::runtime::event_bus::RawEventKind;
+
+    #[test]
+    fn story19_22_reply_verdict_field_is_optional_and_round_trips() {
+        let legacy = serde_json::json!({"replyToRecipientItem":{"item_id":"ri-story","text":"plain answer"}});
+        let frame: ClientFrame = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(matches!(
+            &frame,
+            ClientFrame::ReplyToRecipientItem { verdict: None, .. }
+        ));
+        assert_eq!(serde_json::to_value(frame).unwrap(), legacy);
+        for (token, expected) in [
+            ("accept", ReplyVerdict::Accept),
+            ("discuss", ReplyVerdict::Discuss),
+        ] {
+            let mut wire = legacy.clone();
+            wire["replyToRecipientItem"]["verdict"] = serde_json::json!(token);
+            let frame: ClientFrame = serde_json::from_value(wire.clone()).unwrap();
+            assert!(
+                matches!(
+                    &frame,
+                    ClientFrame::ReplyToRecipientItem {
+                        verdict: Some(actual),
+                        ..
+                    } if *actual == expected
+                ),
+                "{token}"
+            );
+            assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+        }
+    }
 
     /// A well-formed PeerIdentity for wire round-trip fixtures (correctness of
     /// the proof itself is exercised by the daemon/server tests, not here).

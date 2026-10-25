@@ -312,11 +312,16 @@ pub struct RecipientSurface {
     pub viewport_rows: usize,
     pub content: String,
     pub message_type: crate::domain::models::SemanticMessageType,
+    /// Story 19.22 `AC4(c)` — whether the opened item carries a story list and
+    /// which verdicts it offers; `VerdictOffer::None` elsewhere.
+    pub verdict_offer: crate::domain::models::VerdictOffer,
     pub cached_width: u16,
     pub cached_lines: Vec<ratatui::text::Line<'static>>,
     pub cached_header: Vec<ratatui::text::Line<'static>>,
     pub cached_footer: Vec<ratatui::text::Line<'static>>,
-    pub cached_action_mask: u16,
+    /// Story 19.22 — widened to `u32`: 13 action bits (0–12) plus five flag
+    /// bits at 27–31 no longer fit a `u16`.
+    pub cached_action_mask: u32,
     pub results: Vec<String>,
 }
 

@@ -466,6 +466,7 @@ async fn k09_orphan_settlement_and_tool_evidence_record_their_facts() {
         &ClientFrame::ReplyToRecipientItem {
             item_id,
             text: content.into(),
+            verdict: None,
         },
     )
     .await

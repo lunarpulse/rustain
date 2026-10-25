@@ -97,6 +97,7 @@ async fn k01_writer_reader_standalone_bytes_peer_gate_and_reply_privacy() {
         .send_frame(ClientFrame::ReplyToRecipientItem {
             item_id: item.clone(),
             text: PRIVATE_REPLY.into(),
+            verdict: None,
         })
         .await;
     recipient_writer

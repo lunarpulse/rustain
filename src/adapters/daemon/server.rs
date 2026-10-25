@@ -3270,26 +3270,23 @@ impl AttachServer {
             .resolve(node_id.as_str(), resolution)
             .await
             .ok_or_else(|| "peer draft resolution was rejected".to_owned())?;
-        let (content, authorship, send_authorization, status, sent) = match state {
+        let (content, authorship, send_authorization, status, kind, sent) = match state {
             super::response_modes::DraftState::Sent {
                 content,
                 authorship,
                 send_authorization,
                 status,
-            } => (content, authorship, send_authorization, status, true),
+                kind,
+            } => (content, authorship, send_authorization, status, kind, true),
             super::response_modes::DraftState::Rejected => (
                 String::new(),
                 crate::domain::models::Authorship::HumanWritten,
                 crate::domain::models::SendAuthorization::Unknown,
                 None,
+                crate::domain::models::ReplyKind::Answer,
                 false,
             ),
             _ => return Err("peer draft did not reach a terminal resolution".to_owned()),
-        };
-        let kind = if status.is_some() {
-            crate::domain::models::ReplyKind::Status
-        } else {
-            crate::domain::models::ReplyKind::Answer
         };
         let journal = self
             .room_journal
@@ -3941,223 +3938,6 @@ impl AttachServer {
             .await;
     }
 
-    /// Story 19.18 `AC2` — the `/team reply` arm: record one reply turn
-    /// answering a recipient item on THIS host. ⛔ No egress, no push, and no
-    /// write on the answered item (`A2`, `A4`).
-    ///
-    /// Order: shared gate + load + find → legality (a tombstone is refused;
-    /// a retracted item is answerable) → size → author-time scrub (`P13`) →
-    /// (d′) a persisted pending card for this item is resolved as `WriteOwn`
-    /// with the same text (one act, one turn, the card clears) → otherwise one
-    /// direct `RecipientItemReplied`. The confirmation frame is sent only
-    /// after the turn is durable (`M25`); every refusal writes zero rows.
-    async fn reply_to_recipient_item(
-        &self,
-        conn_id: u64,
-        mode: AttachMode,
-        tier: ConnectionTier,
-        item_id: &str,
-        text: String,
-    ) {
-        let target = RecipientActionTarget::Item {
-            item_id: item_id.to_owned(),
-        };
-        #[cfg(not(feature = "a2a"))]
-        {
-            let _ = (mode, tier, &text);
-            self.send_recipient_action_result(
-                conn_id,
-                RecipientAction::Reply,
-                target,
-                RecipientActionOutcome::Refused {
-                    error: ProtocolError::Malformed(
-                        "`/team reply` needs the `a2a` feature; this build was compiled without it."
-                            .to_owned(),
-                    ),
-                },
-            )
-            .await;
-        }
-        #[cfg(feature = "a2a")]
-        {
-            use crate::domain::models::{
-                Authorship, MAX_REPLY_BYTES, RecipientItemState, ReplyKind, RoomEvent, TurnAddress,
-                claim_reply_turn_id, fresh_reply_turn_candidate,
-            };
-
-            let _reply_guard = self.peer_reply_serial.lock().await;
-            let (item, projection, journal) =
-                match self.find_recipient_item(mode, tier, "reply", item_id).await {
-                    Ok(found) => found,
-                    Err(error) => {
-                        drop(_reply_guard);
-                        self.send_recipient_action_result(
-                            conn_id,
-                            RecipientAction::Reply,
-                            target,
-                            RecipientActionOutcome::Refused { error },
-                        )
-                        .await;
-                        return;
-                    }
-                };
-            let refuse = |error| RecipientActionOutcome::Refused { error };
-            if matches!(item.state, RecipientItemState::Removed { .. }) {
-                drop(_reply_guard);
-                self.send_recipient_action_result(
-                    conn_id,
-                    RecipientAction::Reply,
-                    target,
-                    refuse(ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned())),
-                )
-                .await;
-                return;
-            }
-            if text.trim().is_empty() {
-                drop(_reply_guard);
-                self.send_recipient_action_result(
-                    conn_id,
-                    RecipientAction::Reply,
-                    target,
-                    refuse(ProtocolError::Malformed("reply text is empty".to_owned())),
-                )
-                .await;
-                return;
-            }
-            if text.len() > MAX_REPLY_BYTES {
-                drop(_reply_guard);
-                self.send_recipient_action_result(
-                    conn_id,
-                    RecipientAction::Reply,
-                    target,
-                    refuse(ProtocolError::Malformed(format!(
-                        "reply is longer than {MAX_REPLY_BYTES} bytes — shorten it"
-                    ))),
-                )
-                .await;
-                return;
-            }
-            let fragments =
-                crate::domain::ports::InboundPeerRuntime::disclosure_forbidden_fragments(self)
-                    .await;
-            if crate::adapters::a2a::projection::withholds(&text, &self.core.workspace, &fragments)
-            {
-                drop(_reply_guard);
-                self.send_recipient_action_result(
-                    conn_id,
-                    RecipientAction::Reply,
-                    target,
-                    refuse(ProtocolError::Malformed(
-                        "this reply names a host path, which peers are never shown — rephrase it"
-                            .to_owned(),
-                    )),
-                )
-                .await;
-                return;
-            }
-            if let Some(node) = self.pending_card_for_item(&projection, &item).await {
-                let outcome = match self
-                    .resolve_peer_draft_locked(
-                        &node,
-                        super::response_modes::DraftResolution::WriteOwn(text),
-                        Some(&projection),
-                    )
-                    .await
-                {
-                    Ok(PeerDraftResolutionOutcome::Applied { reply: Some(reply) }) => {
-                        RecipientActionOutcome::Applied { reply: Some(reply) }
-                    }
-                    Ok(PeerDraftResolutionOutcome::Applied { reply: None }) => {
-                        refuse(ProtocolError::Internal(
-                            "recipient reply completed without a durable receipt".to_owned(),
-                        ))
-                    }
-                    Ok(PeerDraftResolutionOutcome::Idempotent) => {
-                        RecipientActionOutcome::Idempotent
-                    }
-                    Ok(PeerDraftResolutionOutcome::RefusedOneWay) => {
-                        refuse(ProtocolError::PeerVerification(
-                            super::response_modes::RAP_ONE_WAY_REFUSAL.to_owned(),
-                        ))
-                    }
-                    Err(error) => refuse(ProtocolError::Internal(error)),
-                };
-                drop(_reply_guard);
-                self.send_recipient_action_result(conn_id, RecipientAction::Reply, target, outcome)
-                    .await;
-                return;
-            }
-            let turn = match claim_reply_turn_id(fresh_reply_turn_candidate(), |id| {
-                projection.holds_reply_turn_id(id)
-            }) {
-                Ok(turn) => turn,
-                Err(error) => {
-                    drop(_reply_guard);
-                    self.send_recipient_action_result(
-                        conn_id,
-                        RecipientAction::Reply,
-                        target,
-                        refuse(ProtocolError::Internal(error.to_string())),
-                    )
-                    .await;
-                    return;
-                }
-            };
-            let turn_id = turn.as_str().to_owned();
-            let orphan_rows = self
-                .orphan_response_mutations(&projection, &item, &text, Authorship::HumanWritten)
-                .await;
-            if let Err(error) = journal
-                .record_event(RoomEvent::RecipientItemReplied {
-                    address: TurnAddress::answering(&item.address, turn),
-                    answers: item.address.item().clone(),
-                    content: text,
-                    kind: ReplyKind::Answer,
-                    authorship: Authorship::HumanWritten,
-                    send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
-                    via_node: None,
-                    status: None,
-                })
-                .await
-            {
-                drop(_reply_guard);
-                self.send_recipient_action_result(
-                    conn_id,
-                    RecipientAction::Reply,
-                    target,
-                    refuse(ProtocolError::Internal(error.to_string())),
-                )
-                .await;
-                return;
-            }
-            if let Err(error) = commit_peer_rows(
-                &self.peer_row_serial,
-                &self.conversation,
-                &self.registry,
-                self.core.storage.as_ref(),
-                orphan_rows,
-            )
-            .await
-            {
-                tracing::error!(error = %error, "durable recipient reply could not update its orphan card");
-            }
-            drop(_reply_guard);
-            self.send_recipient_action_result(
-                conn_id,
-                RecipientAction::Reply,
-                target,
-                RecipientActionOutcome::Applied {
-                    reply: Some(RecipientReplyReceipt {
-                        item_id: item_id.to_owned(),
-                        turn_id,
-                        kind: ReplyKind::Answer,
-                    }),
-                },
-            )
-            .await;
-        }
-    }
-
     /// A card resolves only while its process-owned controller is live.
     /// A restart orphan's item remains directly answerable; its display can
     /// be replaced without reviving or resolving the failed A2A task.
@@ -4576,7 +4356,10 @@ impl AttachServer {
                                     super::response_modes::DraftResolution::Reject
                                 }
                                 super::protocol::PeerDraftAction::WriteOwn { content } => {
-                                    super::response_modes::DraftResolution::WriteOwn(content)
+                                    super::response_modes::DraftResolution::WriteOwn(
+                                        content,
+                                        crate::domain::models::ReplyKind::Answer,
+                                    )
                                 }
                             };
                             match self.resolve_peer_draft(&node_id, resolution).await {
@@ -4719,8 +4502,20 @@ impl AttachServer {
                     }
                 }
             }
-            ClientFrame::ReplyToRecipientItem { item_id, text } => {
-                self.reply_to_recipient_item(conn_id, mode, tier, &item_id, text)
+            ClientFrame::ReplyToRecipientItem {
+                item_id,
+                text,
+                verdict,
+            } => {
+                let verdict = verdict.map(|verdict| match verdict {
+                    crate::adapters::daemon::protocol::ReplyVerdict::Accept => {
+                        crate::domain::models::ReplyKind::Accept
+                    }
+                    crate::adapters::daemon::protocol::ReplyVerdict::Discuss => {
+                        crate::domain::models::ReplyKind::Discuss
+                    }
+                });
+                self.reply_to_recipient_item(conn_id, mode, tier, &item_id, text, verdict)
                     .await;
             }
             ClientFrame::DeferRecipientItem { item_id } => {
@@ -11974,7 +11769,8 @@ mod tests {
                 .resolve_peer_draft(
                     &node,
                     crate::adapters::daemon::response_modes::DraftResolution::WriteOwn(
-                        "human answer".to_owned()
+                        "human answer".to_owned(),
+                        crate::domain::models::ReplyKind::Answer,
                     )
                 )
                 .await
@@ -12023,7 +11819,13 @@ mod tests {
         assert!(server.pending_drafts.complete(node.as_str(), "draft").await);
         let (first, second) = tokio::join!(
             server.resolve_peer_draft(&node, DraftResolution::Approve),
-            server.resolve_peer_draft(&node, DraftResolution::WriteOwn("human answer".to_owned()))
+            server.resolve_peer_draft(
+                &node,
+                DraftResolution::WriteOwn(
+                    "human answer".to_owned(),
+                    crate::domain::models::ReplyKind::Answer,
+                ),
+            )
         );
         let outcomes = [first.unwrap(), second.unwrap()];
         assert_eq!(
@@ -12141,6 +11943,7 @@ mod tests {
                 &draft_node,
                 crate::adapters::daemon::response_modes::DraftResolution::WriteOwn(
                     "human answer".to_owned(),
+                    crate::domain::models::ReplyKind::Answer,
                 ),
             )
             .await
@@ -12273,6 +12076,7 @@ mod tests {
                 &wait_node,
                 crate::adapters::daemon::response_modes::DraftResolution::WriteOwn(
                     "manual response after reattach".to_owned(),
+                    crate::domain::models::ReplyKind::Answer,
                 ),
             )
             .await
@@ -12897,7 +12701,7 @@ mod tests {
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: 11,
+                protocol_version: 12,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -12910,8 +12714,8 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, 11);
-                assert_eq!(daemon, 12);
+                assert_eq!(client, 12);
+                assert_eq!(daemon, 13);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }

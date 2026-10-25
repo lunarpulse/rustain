@@ -551,6 +551,7 @@ mod tests {
         let reply = ClientFrame::ReplyToRecipientItem {
             item_id: "ri-a".to_owned(),
             text: "first\n second".to_owned(),
+            verdict: None,
         };
         assert!(begin_action(&mut state, &reply, Some(&mut input)));
         input.push_str("must remain editable if refused before enqueue");
@@ -695,6 +696,7 @@ mod tests {
             viewport_rows: 0,
             content: String::new(),
             message_type: crate::domain::models::SemanticMessageType::Unknown,
+            verdict_offer: crate::domain::models::VerdictOffer::None,
             cached_width: 0,
             cached_lines: Vec::new(),
             cached_header: Vec::new(),

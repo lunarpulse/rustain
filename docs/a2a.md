@@ -197,12 +197,13 @@ For story distribution, place `--stories` after the optional sender-local `--sub
 ```text
 /team send --type story_assignment [--subject <label>] --stories <key>[=<alias>],… <aliases> <body>
 /team send --type story_assignment --stories S1,S2=jun-dev,S3=tom-dev jun-dev,tom-dev Sprint stories
+/team send --type scope_change --stories S7-09=jun-dev,S7-07 jun-dev,tom-dev Sprint 7 scope change
 ```
 
-A key is 1–32 ASCII characters from `A–Z a–z 0–9 . _ -`, starting with a letter or digit. A send lists 1–64 unique keys. A bare key has no holder; `KEY=ALIAS` states a holder who must be addressed by that send, with an alias of at most 256 UTF-8 bytes. Only `--type story_assignment` accepts this option. Agent proposals carry no stories.
+A key is 1–32 ASCII characters from `A–Z a–z 0–9 . _ -`, starting with a letter or digit. A send lists 1–64 unique keys. A bare key has no holder; `KEY=ALIAS` states a holder who must be addressed by that send, with an alias of at most 256 UTF-8 bytes. Both `--type story_assignment` and `--type scope_change` accept this option. Agent proposals carry no stories.
 
 Both rails use the same refusals (the parser appends `. Use: …`):
-- `'--stories' needs '--type story_assignment'`
+- `'--stories' needs '--type story_assignment' or '--type scope_change'`
 - `Missing story list after '/team send --stories'`
 - `story key '<key>' is not valid: 1–32 characters from A–Z a–z 0–9 . _ -, starting with a letter or digit`
 - `story key '<key>' is listed twice`
@@ -245,7 +246,8 @@ read-only; interrupt the CLI after the action ID appears to free the slot.
 Flags must precede the peer list. Every token after peers is body, even `--help`
 or `--type`; multiple body arguments join with one space, while a single quoted
 body preserves internal spaces, newlines and Unicode. The daemon validates the
-roster, cached cards and send policy. `--stories` requires `--type story_assignment`.
+roster, cached cards and send policy. `--stories` requires `--type story_assignment`
+or `--type scope_change`.
 
 Exit **0** means every recipient was delivered, accepted without an item, or is
 awaiting approval. Exit **1** means a refusal, incomplete wait, protocol fault or
@@ -370,13 +372,33 @@ A typed or untyped `/team send` is also one **send action**. After the whole act
 
 An action board is headed by the type, the label (only when one was given) and `attempted <age> · <N> addressed`. `N` is the number of aliases the record froze — not the rows rendered and not how many have settled. Beneath it, one row per addressed alias in the order typed: `✓ acknowledged` (the recipient's own deliberate acknowledgement was reported), `● delivered`, `✗ declined`, `⚠ unreachable` (with the recorded cause on its own line), or a tokenless state in words (`sending…` while this process is still sending, `no outcome recorded` after an interruption or when another process sent it, `awaiting their approval`, `no usable answer`, `not sent — …`). There is no completion count, percentage or list of who has not answered. The recorded send-time outcome always wins; the board then asks each addressed peer that could change the answer (one `x-rustain-items/list` each, never the whole roster) and joins only the items that arrived through **this action's** dispatches, so an earlier send's acknowledgement is never shown as this one's. A recipient that was reached but whose read fails is never `⚠`, and a recipient whose peer binding changed since the send (a changed key, a removed alias) is not read at all and says so. A newer action never hides an older one's declines: `--action <id>` and `--actions` reach them. Refreshing is an explicit command; the board has a 500 ms refresh floor and does not poll. Attached trusted-local clients read these same daemon-owned action facts; a writer may send and a read-only observer may read the board.
 
-On the receiving host, an opened `story_assignment` item offers `[a] Acknowledge` to an attached writer while the item is `received`. Viewing it, discussing it, or an automatic reply never acknowledges it, and none of them selects the item as model context. Acknowledging records receipt, not acceptance.
+On the receiving host, an opened `story_assignment` or `scope_change` item offers `[a] Acknowledge` to an attached writer while the item is `received`. Viewing it, discussing it, or an automatic reply never acknowledges it, and none of them selects the item as model context. Acknowledging records receipt, not acceptance.
 
-A story relationship exists only when the sender explicitly supplies `--stories`: the sender journals indexed holders in its send-action record before contacting anyone, and each recipient records the readable `x-rustain-stories` list on its received item. A `story_assignment` without a list proves receipt only; neither its body, subject, type, view nor acknowledgement establishes a story relationship. Every addressed recipient receives the **whole list**, including the sending host's aliases and actual peer pins for other holders (never alias-derived pseudonyms). `you: true` means this recipient host; other unpinned names are display-only, never resolved by alias text.
+A story relationship exists only when the sender explicitly supplies `--stories`: the sender journals indexed holders in its send-action record before contacting anyone, and each recipient records the readable `x-rustain-stories` list on its received item. A `story_assignment` or `scope_change` without a list proves receipt only; neither its body, subject, type, view nor acknowledgement establishes a story relationship. Every addressed recipient receives the **whole list**, including the sending host's aliases and actual peer pins for other holders (never alias-derived pseudonyms). `you: true` means this recipient host; other unpinned names are display-only, never resolved by alias text.
 
 The arrival card and opened item show `8 stories, 2 assigned to you` (singular `1 story, 1 assigned to you`; zero uses `none assigned to you`). The opened item lists keys in manifest order as `S1`, `S2  assigned to you`, or `S3  assigned to <alias>`, followed by `other names are the sender's roster aliases` when a member is named. Unreadable or future lists say `story list not readable by this build`; future holders say `holder not readable by this build`. No list means no summary, even if the body imitates it. Removed items show no story block. Lines wrap without clipping at the 60-column floor.
 
 The list is the sending host's statement; it starts no work and grants nothing. It changes no response mode, policy, context selection, capability, or acknowledgement transition. Acknowledgement remains receipt, not an Accept/Discuss verdict.
+
+A `scope_change` list can release a story: `--stories S7-07` states that the sender
+now assigns that key to no one, and the opened View reads
+`S7-07  assigned to no one`. The bare-key rendering on `story_assignment` is
+unchanged. “Deferred to Sprint 8” and its reason remain sender prose; rustain
+does not model sprints, backlog moves, urgency or sender priority.
+
+The sender's latest durable story statement wins across both list types.
+Reassigning or releasing a key must also address its previous holder:
+`story '<key>' was assigned to '<alias>' by your earlier send; address '<alias>' too, so the change is not silent`.
+This compares current roster identities with the identity frozen by the earlier
+send, not alias spelling. A member no longer present under any current roster
+binding cannot be addressed and is exempt. A refusal appends no action, paints
+no recipient rows and posts no `message/send`; unreadable story history is
+refused rather than treated as empty. Read-then-append is not atomic: two
+concurrent story sends from the same operator can race.
+
+Act 6 uses ordinary sends: an assignment, a `scope_change` release notice to the
+displaced holder, and a `scope_change` broadcast to everyone. Each remains an
+independent send, not a group transaction.
 
 A retract (`/team retract`) whose dispatch row cannot be journaled is not sent either: it renders `not sent — this host could not record the attempt` (a local fact: nothing is attributed to the peer).
 
@@ -390,7 +412,7 @@ ratified remedies 512) are disclosure bounds, not a width rule, and keep their
 
 ## Live daemon recipient rows
 
-Daemon attachments use protocol **v12**. Continuously attached trusted-local
+Daemon attachments use protocol **v13**. Continuously attached trusted-local
 writers and read-only observers receive revisioned peer-row upserts and removals
 only after successful persistence. Snapshot and live updates use the same row
 identity; duplicate or older updates cannot restore a settled/deleted card.
@@ -539,6 +561,13 @@ Use the verb on the rail that holds its object:
 - `/team reply <item-id> <text…>` is rail 4 only. It answers an item received
   on this host. Rail 3 refuses it because a recipient item needs a
   daemon-attached session.
+- `/team reply --accept <item-id> [<text…>]` and
+  `/team reply --discuss <item-id> <text…>` are rail 4 verdict replies on an
+  item carrying a readable story list. Accept needs that item to name you as
+  the holder of at least one story; its optional empty text becomes
+  `Accepted.`. Discuss concerns requires text, including on a list that gives
+  you no story. Standalone sessions keep the same daemon-attached-session
+  refusal.
 - `/team defer <item-id>` is rail 4 only. It records the fixed `Busy — defer
   30m` body as an independent human-written reply on this host. Standalone
   sessions refuse it; it does not resolve an answer card or select context.
@@ -583,6 +612,20 @@ only after its durable append; a repeated/raced Ack reports already recorded
 without another append. Its hint disappears after acknowledgement. It does not
 resolve a pending answer or select model context.
 
+On a readable story-list Item surface, `[d] Discuss concerns` seeds
+`/team reply --discuss <item-id> `. When the item names you as a story's
+holder, `[y] Accept` records the same verdict as the typed accept form. A live
+Drafting card offers neither verdict; Ready keeps Approve/Edit/Reject instead of
+the Accept key.
+Settled items remain answerable from their View, including NotifyAndAuto items,
+but no automatic verdict is produced. Verdicts are human-written,
+human-decided reply turns: they never acknowledge the item, change its state,
+or select context. A live answer card settles; without one, a direct turn is
+appended. Later deliberate verdicts are new turns, not edits to earlier ones.
+The asker's `/team thread` shows ` [verdict: accept]` or
+` [verdict: discuss concerns]`; the local View shows `verdict: accept` or
+`verdict: discuss concerns`. `/team log` keeps its generic reply row.
+
 Action results carry their originating action and item/node target. Each
 pending marker survives closing/reopening the reader until its own outcome;
 unrelated completions cannot clear it. Item-turn outcomes show the recorded turn
@@ -599,6 +642,14 @@ with `[defer <N>m — reported expectation]`; incoming valid intervals are
 1–65,535 minutes, not local timer values. Future or malformed kinds/intervals
 retain the body and render `[reply kind not recognised]`, never a peer-chosen
 badge or a fabricated interval. Old readers retain the ordinary Busy body.
+
+Verdicts use journal `kind: {"type":"accept"}` or `{"type":"discuss"}` and served
+`replyKind:"accept"` or `"discuss"` with structural `kind:"reply"`. Extra journal
+kind fields conservatively decode as Unknown without corrupting the record.
+Older askers preserve the body and show `[reply kind not recognised]`.
+Protocol v13 adds the optional verdict to `ReplyToRecipientItem`; an older daemon
+would otherwise silently record an Answer, so the attach handshake refuses
+mixed protocol versions.
 
 The answering host records received items (including raw
 `x-rustain-in-reply-to` links), reply turns, and the existing draft-resolution

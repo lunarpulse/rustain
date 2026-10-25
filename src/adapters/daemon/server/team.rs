@@ -694,6 +694,22 @@ impl AttachServer {
                 .await;
                 return;
             }
+            if let Err(error) =
+                crate::adapters::a2a::send::validate_story_holders(&runtime, &send_request).await
+            {
+                drop(permit);
+                // A displaced holder is the client's request to fix; an
+                // unreadable story history is this daemon's own failure.
+                let error = match error {
+                    crate::adapters::a2a::send::SendError::StoryHistory(_) => {
+                        ProtocolError::Internal(error.to_string())
+                    }
+                    _ => ProtocolError::Malformed(error.to_string()),
+                };
+                self.refuse_team_send(conn_id, request, error, proposed)
+                    .await;
+                return;
+            }
             let mut tasks = self.team_send_tasks.lock().await;
             if !self.team_send_accepting.load(Ordering::Acquire) {
                 drop(tasks);

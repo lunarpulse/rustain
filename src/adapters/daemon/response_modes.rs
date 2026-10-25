@@ -153,6 +153,10 @@ pub(crate) enum DraftState {
         authorship: Authorship,
         send_authorization: SendAuthorization,
         status: Option<crate::domain::models::StatusStatement>,
+        /// Story 19.22 `AC4b` — the one kind source: decided by the
+        /// resolution, carried by the sent state, forwarded to the reply turn
+        /// (through both cfg variants of `reply_turn_for_resolution`).
+        kind: crate::domain::models::ReplyKind,
     },
     Rejected,
 }
@@ -170,7 +174,10 @@ pub(crate) enum DraftResolution {
     Approve,
     Edit(String),
     Reject,
-    WriteOwn(String),
+    /// The operator's own text, with the reply kind it records (Story 19.22
+    /// `AC4b`): `Answer` for the card `[write]` action, `Accept`/`Discuss`
+    /// for a verdict reply that resolves the pending list card.
+    WriteOwn(String, crate::domain::models::ReplyKind),
     ShareStatus(crate::domain::models::StatusStatement),
 }
 
@@ -239,25 +246,29 @@ impl PendingDraftController {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                kind: crate::domain::models::ReplyKind::Answer,
             },
             DraftResolution::Edit(edited) => DraftState::Sent {
                 content: edited,
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                kind: crate::domain::models::ReplyKind::Answer,
             },
             DraftResolution::Reject => DraftState::Rejected,
-            DraftResolution::WriteOwn(human) => DraftState::Sent {
+            DraftResolution::WriteOwn(human, kind) => DraftState::Sent {
                 content: human,
                 authorship: Authorship::HumanWritten,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                kind,
             },
             DraftResolution::ShareStatus(statement) => DraftState::Sent {
                 content: statement.text(),
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: Some(statement),
+                kind: crate::domain::models::ReplyKind::Status,
             },
         };
         *state = next;
@@ -325,6 +336,7 @@ mod tests {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                kind: crate::domain::models::ReplyKind::Answer,
             })
         );
         assert_eq!(
@@ -334,6 +346,7 @@ mod tests {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                kind: crate::domain::models::ReplyKind::Answer,
             }),
             "a settled resolution is idempotent"
         );
@@ -348,7 +361,10 @@ mod tests {
             controller
                 .resolve(
                     "task-2",
-                    DraftResolution::WriteOwn("human response".to_owned()),
+                    DraftResolution::WriteOwn(
+                        "human response".to_owned(),
+                        crate::domain::models::ReplyKind::Answer,
+                    ),
                 )
                 .await,
             Some(DraftState::Sent {
@@ -356,6 +372,7 @@ mod tests {
                 authorship: Authorship::HumanWritten,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                kind: crate::domain::models::ReplyKind::Answer,
             })
         );
     }
@@ -374,6 +391,7 @@ mod tests {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                kind: crate::domain::models::ReplyKind::Answer,
             })
         );
     }
@@ -535,6 +553,7 @@ mod tests {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: Some(statement),
+                kind: crate::domain::models::ReplyKind::Status,
             }
         );
         assert_eq!(

@@ -2289,6 +2289,9 @@ fn thread_turn_json(
             });
             match reply.kind {
                 ReplyKind::Answer => {}
+                ReplyKind::Accept | ReplyKind::Discuss => {
+                    value["replyKind"] = serde_json::Value::from(reply.kind.wire_name());
+                }
                 ReplyKind::Defer { minutes } => {
                     value["replyKind"] = serde_json::Value::from("defer");
                     value["deferMinutes"] = serde_json::Value::from(minutes);
@@ -3126,6 +3129,28 @@ mod tests {
             via_node: None,
             journal_order: 1,
         })
+    }
+
+    #[test]
+    fn story19_22_served_verdict_round_trip_keeps_kind_and_body() {
+        use crate::domain::models::ReplyKind;
+        let (_workspace, state) = thread_status_fixture();
+        for kind in [ReplyKind::Accept, ReplyKind::Discuss] {
+            let turn = thread_status_reply(kind, None, "human verdict body");
+            let wire = thread_turn_json(&state, 0, &turn);
+            assert_eq!(wire["replyKind"], kind.wire_name());
+            assert_eq!(wire["content"], "human verdict body");
+            let thread = super::super::send::parse_thread(&serde_json::json!({
+                "root":"ri_status", "turns":[wire]
+            }))
+            .unwrap();
+            assert_eq!(thread.turns[0].kind, kind);
+            assert_eq!(
+                thread.turns[0].content.as_deref(),
+                Some("human verdict body")
+            );
+            assert!(thread.turns[0].status.is_none());
+        }
     }
 
     #[test]

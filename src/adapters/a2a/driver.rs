@@ -837,6 +837,40 @@ impl A2aDelegationRuntime {
             .cloned()
     }
 
+    /// Story 19.22 `D4` — the current roster alias a displaced holder must be
+    /// addressed under, or `None` when this send already addresses it or no
+    /// binding resolves to it (a removed member cannot be addressed).
+    ///
+    /// The holder is a recorded recipient, so it resolves exactly as
+    /// [`Self::eligible_binding`] resolves one: the 19.18c `PQ2` predicate
+    /// ([`dispatch_row_is_own`]) — a pin by that pin, an unpinned record by
+    /// alias pseudonym or origin digest — so renaming the holder never lapses
+    /// the rule. Of several bindings the one still named as at send time wins.
+    pub(crate) fn unaddressed_holder_alias(
+        &self,
+        holder: &SendActionRecipient,
+        recipients: &[String],
+    ) -> Option<String> {
+        let mut named: Option<&str> = None;
+        for (spec, client) in self.peer_bindings.iter() {
+            if !dispatch_row_is_own(
+                holder.peer.as_str(),
+                holder.endpoint.as_deref(),
+                spec,
+                Some(client.origin_digest().as_str()),
+            ) {
+                continue;
+            }
+            if recipients.contains(&spec.id) {
+                return None;
+            }
+            if named.is_none() || spec.id == holder.alias {
+                named = Some(&spec.id);
+            }
+        }
+        named.map(str::to_owned)
+    }
+
     /// Story 19.21 `AC2` identity precheck — the **current** roster binding a
     /// recorded recipient resolves to, or `None`.
     ///
@@ -1283,6 +1317,28 @@ impl A2aDelegationRuntime {
                 None
             }
         }
+    }
+
+    /// Read the sender's current holder statements once, never an inbound
+    /// projection. A read failure must not permit a silent displacement.
+    pub(crate) async fn story_holders(
+        &self,
+    ) -> Result<
+        std::collections::BTreeMap<
+            crate::domain::models::StoryKey,
+            Option<crate::domain::models::SendActionRecipient>,
+        >,
+        crate::domain::ports::RoomJournalError,
+    > {
+        let reader = self.journal_reader.as_ref().ok_or_else(|| {
+            crate::domain::ports::RoomJournalError::Read(
+                "room journal reader is unavailable".to_owned(),
+            )
+        })?;
+        let entries = reader.load_entries().await?;
+        Ok(crate::domain::services::send_action_ledger::story_holders(
+            &entries,
+        ))
     }
 
     /// Remember the board just assembled (Story 19.16f `AC10(d)`).

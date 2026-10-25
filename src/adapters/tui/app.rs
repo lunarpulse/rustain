@@ -4496,6 +4496,7 @@ mod tests {
             viewport_rows: 20,
             content: "reader body".into(),
             message_type: crate::domain::models::SemanticMessageType::Unknown,
+            verdict_offer: crate::domain::models::VerdictOffer::None,
             cached_width: 0,
             cached_lines: Vec::new(),
             cached_header: Vec::new(),

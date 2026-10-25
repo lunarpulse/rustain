@@ -488,7 +488,7 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v12**; a client speaking another version
+attach handshake negotiates **protocol v13**; a client speaking another version
 receives `VersionMismatch` before proof verification, registration or other
 attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
@@ -668,6 +668,21 @@ reply text; the local preview reason is never served. No conversation, plan,
 file, activity or other-item metadata is added. See
 [Sharing status under your policy](a2a.md#sharing-status-under-your-policy-story-1924)
 for the exhaustive field/privacy rules.
+
+Protocol v13 (Story 19.22): `ReplyToRecipientItem` carries an optional
+Accept/Discuss verdict. Omitting it preserves the plain Answer path. A
+trusted-local writer can Accept a readable story list that gives this host a
+story, or Discuss concerns on any readable story list; empty Accept text becomes
+`Accepted.`, while Discuss requires text. A verdict is a human-written,
+human-decided reply turn, never an acknowledgement or item-state change.
+A live card settles through the same kinded resolution; a settled/orphan item
+gets one direct turn. A retry after a partial live-card failure must match
+content, kind and status to reuse the durable turn; a conflicting kind is refused.
+Read-only and Peer-tier attachments cannot give verdicts. A pre-v13 daemon
+would ignore the optional field and record an Answer, so mixed versions are
+rejected before proof verification. Story lists also ride `scope_change`;
+see [Sending to configured peers](a2a.md#sending-to-configured-peers-from-the-tui)
+for release notices and the displaced-holder rule.
 
 The status action board pulls existing threads under their normal
 `threadReads`, bound-peer and item-capability gates; read failures do not become
