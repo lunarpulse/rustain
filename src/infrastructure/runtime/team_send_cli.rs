@@ -71,14 +71,21 @@ async fn run_team_send_over<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     };
     let submitted = write_frame(writer, &frame).await;
     // Reuse the recipient strings after serialization instead of copying them.
-    let ClientFrame::TeamSend { recipients, .. } = frame else {
+    let ClientFrame::TeamSend {
+        recipients,
+        message_type,
+        ..
+    } = frame
+    else {
         unreachable!()
     };
+    let message_type = message_type.unwrap_or_default();
     let mut rows: Vec<_> = recipients
         .into_iter()
         .map(|alias| TeamSendRow {
             alias,
             outcome: None,
+            message_type,
         })
         .collect();
     if let Err(error) = submitted {
@@ -124,10 +131,20 @@ async fn run_team_send_over<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 if pending == 0 {
                     print_rows(out, &rows)?;
                     let _ = write_frame(writer, &ClientFrame::Detach).await;
-                    if rows
-                        .iter()
-                        .all(|row| row.outcome.as_ref().is_some_and(copy::reached))
-                    {
+                    // Story 19.25 D7: a `retro_request` row that reads `sent`
+                    // (a policy decline included) cannot fail the command, or
+                    // the exit status would name the member the rows mask.
+                    if rows.iter().all(|row| {
+                        row.outcome.as_ref().is_some_and(|outcome| {
+                            copy::reached(outcome)
+                                || (row.message_type
+                                    == crate::domain::models::SemanticMessageType::RetroRequest
+                                    && matches!(
+                                        outcome,
+                                        crate::domain::models::RecipientOutcome::Declined
+                                    ))
+                        })
+                    }) {
                         return Ok(());
                     }
                     anyhow::bail!(copy::NOT_EVERY_RECIPIENT);
@@ -212,6 +229,13 @@ mod tests {
         }
     }
     async fn scripted(frames: Vec<DaemonFrame>, complete: bool) -> (anyhow::Result<()>, String) {
+        scripted_with(request(), frames, complete).await
+    }
+    async fn scripted_with(
+        args: SendRequest,
+        frames: Vec<DaemonFrame>,
+        complete: bool,
+    ) -> (anyhow::Result<()>, String) {
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
         let task = tokio::spawn(async move {
             let (mut reader, mut writer) = server.into_split();
@@ -230,7 +254,7 @@ mod tests {
         });
         let (mut reader, mut writer) = client.into_split();
         let mut output = Vec::new();
-        let result = run_team_send_over(&mut reader, &mut writer, request(), &mut output).await;
+        let result = run_team_send_over(&mut reader, &mut writer, args, &mut output).await;
         task.await.unwrap();
         (result, String::from_utf8(output).unwrap())
     }
@@ -263,10 +287,12 @@ mod tests {
             TeamSendRow {
                 alias: "alice".into(),
                 outcome: Some(RecipientOutcome::Delivered),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
             },
             TeamSendRow {
                 alias: "bob".into(),
                 outcome: Some(RecipientOutcome::AcceptedWithoutItem),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
             },
         ]);
         assert_eq!(
@@ -275,6 +301,70 @@ mod tests {
                 "{}\n{expected}\n",
                 copy::started(2, &SendActionId::from_replay("sa_test"))
             )
+        );
+    }
+    #[tokio::test]
+    async fn story19_25_cli_retro_rows_keep_the_type_on_settled_and_interrupted_prints() {
+        use crate::adapters::tui::handlers::team_command::TEAM_SEND_RETRO_NOTE;
+        use crate::domain::models::SemanticMessageType;
+
+        let retro = || SendRequest {
+            message_type: Some(SemanticMessageType::RetroRequest),
+            ..request()
+        };
+        let (result, output) = scripted_with(
+            retro(),
+            vec![
+                start(),
+                settled(1, TeamSendOutcome::Declined),
+                settled(0, TeamSendOutcome::Delivered),
+            ],
+            true,
+        )
+        .await;
+        // A policy decline reads `sent`, so it cannot fail the command either.
+        result.unwrap();
+        assert_eq!(
+            output,
+            format!(
+                "{}\n  ● alice  sent\n  ● bob    sent\n{TEAM_SEND_RETRO_NOTE}\n",
+                copy::started(2, &SendActionId::from_replay("sa_test"))
+            )
+        );
+
+        // Interrupted: the daemon closes with one row still sending.
+        let (result, output) = scripted_with(
+            retro(),
+            vec![start(), settled(0, TeamSendOutcome::Declined)],
+            false,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(output.contains(&format!(
+            "  ● alice  sent\n    bob    sending…\n{TEAM_SEND_RETRO_NOTE}\n"
+        )));
+        assert_eq!(output.matches(TEAM_SEND_RETRO_NOTE).count(), 1);
+
+        // Control: a consultation decline stays `✗ declined`, without the note.
+        let (result, output) = scripted_with(
+            SendRequest {
+                message_type: Some(SemanticMessageType::Consultation),
+                ..request()
+            },
+            vec![
+                start(),
+                settled(1, TeamSendOutcome::Declined),
+                settled(0, TeamSendOutcome::Delivered),
+            ],
+            true,
+        )
+        .await;
+        assert!(output.contains("  ✗ bob    declined"));
+        assert!(!output.contains(TEAM_SEND_RETRO_NOTE));
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            copy::NOT_EVERY_RECIPIENT,
+            "a non-retro decline still fails the command"
         );
     }
     #[tokio::test]

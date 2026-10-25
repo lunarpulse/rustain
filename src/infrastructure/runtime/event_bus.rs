@@ -709,6 +709,7 @@ mod tests {
                 send_authorization: SendAuthorization::Automatic,
             },
             RoomEvent::RecipientItemReplied {
+                retro: None,
                 address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_answer")),
                 answers: address.item().clone(),
                 content: "body".to_owned(),

@@ -50,7 +50,8 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// v12 (Story 19.24): ShareRecipientStatus; PeerRowControl carries the status preview
 /// v13 (Story 19.22): ReplyToRecipientItem carries an optional Accept/Discuss verdict
 /// v14 (Story 19.23): TeamSend carries holders_of; PeerRowControl carries the selection line
-pub const PROTOCOL_VERSION: u32 = 14;
+/// v15 (Story 19.25): ShareRecipientRetro; PeerRowControl carries the retrospective preview
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -615,6 +616,12 @@ pub enum ClientFrame {
     /// Share the prepared arrival-time status statement, or canonical nothing.
     /// Trusted-local writer only; never accepts client-supplied status fields.
     ShareRecipientStatus { item_id: String, decline: bool },
+    /// Explicit human decision over the daemon's stored retrospective manifest.
+    ShareRecipientRetro {
+        item_id: String,
+        leave_out: Vec<crate::domain::models::RetroField>,
+        decline: bool,
+    },
     /// Read cached selection/last-use diagnostics without assembly or mutation.
     InspectRecipientContext,
     /// Select/off a daemon-owned received item reference, never a client body.
@@ -828,6 +835,7 @@ pub enum RecipientAction {
     Reply,
     Defer,
     ShareStatus,
+    ShareRetro,
     Acknowledge,
     Response,
     ContextSelect,
@@ -1403,6 +1411,16 @@ mod tests {
                 item_id: "ri-1".into(),
                 decline: true,
             },
+            ClientFrame::ShareRecipientRetro {
+                item_id: "ri-1".into(),
+                leave_out: vec![crate::domain::models::RetroField::ReplyTimes],
+                decline: false,
+            },
+            ClientFrame::ShareRecipientRetro {
+                item_id: "ri-1".into(),
+                leave_out: vec![],
+                decline: true,
+            },
             ClientFrame::EnableTeamProposals,
             ClientFrame::TeamProposalDecision {
                 proposal: "tp_send".into(),
@@ -1531,6 +1549,7 @@ mod tests {
                         message_type: crate::domain::models::SemanticMessageType::Consultation,
                         stories: None,
                         status: None,
+                        retro: None,
                         selected_for: None,
                         sender_label: "peer-1".into(),
                         stage: crate::domain::models::PeerRowStage::AwaitingOperator,
@@ -1627,6 +1646,19 @@ mod tests {
                         item_id: "ri-1".into(),
                         turn_id: "rr-status".into(),
                         kind: crate::domain::models::ReplyKind::Status,
+                    }),
+                },
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::ShareRetro,
+                target: RecipientActionTarget::Item {
+                    item_id: "ri-1".into(),
+                },
+                outcome: RecipientActionOutcome::Applied {
+                    reply: Some(RecipientReplyReceipt {
+                        item_id: "ri-1".into(),
+                        turn_id: "rr-retro".into(),
+                        kind: crate::domain::models::ReplyKind::Retro,
                     }),
                 },
             },
@@ -1984,10 +2016,24 @@ mod tests {
 #[cfg(test)]
 mod selection_version_tests {
     use super::*;
+    #[test]
+    fn story19_25_requires_attach_protocol_fifteen() {
+        assert_eq!(PROTOCOL_VERSION, 15);
+    }
 
     #[test]
-    fn story19_23_selection_requires_attach_protocol_fourteen() {
-        assert_eq!(PROTOCOL_VERSION, 14);
+    fn story19_25_retro_share_frame_decodes_closed_manifest_fields() {
+        let raw = serde_json::json!({"shareRecipientRetro":{"item_id":"ri-retro","leave_out":["replyTimes"],"decline":false}});
+        let frame: ClientFrame =
+            serde_json::from_value(raw.clone()).expect("typed retrospective share act");
+        assert_eq!(serde_json::to_value(frame).unwrap(), raw);
+        let bad = serde_json::json!({"shareRecipientRetro":{"item_id":"ri-retro","leave_out":["content"],"decline":false}});
+        assert!(serde_json::from_value::<ClientFrame>(bad).is_err());
+    }
+
+    #[test]
+    fn story19_23_selection_requires_current_attach_protocol() {
+        assert_eq!(PROTOCOL_VERSION, 15);
         let frame = ClientFrame::TeamSend {
             request: "selection".into(),
             recipients: vec![],

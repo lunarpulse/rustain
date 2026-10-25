@@ -58,6 +58,7 @@ use crate::adapters::tui::state::{AttachInfo, RecipientSurfaceTarget, TabRenderS
 use crate::adapters::tui::terminal;
 use crate::adapters::tui::widgets::recipient_surface::{
     RecipientSurfaceAction, pinned_response, recipient_surface_actions, render_recipient_surface,
+    retro_overlay,
 };
 use crate::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use crate::domain::clock::{Clock, SystemClock};
@@ -337,6 +338,8 @@ struct PendingPeerResponse<'a> {
     stories: Option<&'a crate::domain::models::StorySummary>,
     status: Option<&'a crate::domain::models::StatusPreview>,
     selected_for: Option<&'a crate::domain::models::SelectionSummary>,
+    retro: Option<&'a crate::domain::models::RetroPreview>,
+    retro_left_out: Option<&'a crate::domain::models::RetroFieldSet>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,7 +381,22 @@ fn pending_peer_response(conversation: &Conversation) -> Option<PendingPeerRespo
         stories: control.stories.as_ref(),
         status: control.status.as_ref(),
         selected_for: control.selected_for.as_ref(),
+        retro: control.retro.as_ref(),
+        retro_left_out: None,
     })
+}
+
+/// Story 19.25 `AC3` — the card as drawn: the pending response plus this
+/// client's leave-out overlay for its item.
+fn pending_peer_card<'a>(
+    conversation: &'a Conversation,
+    retro_left_out: &'a HashMap<String, crate::domain::models::RetroFieldSet>,
+) -> Option<PendingPeerResponse<'a>> {
+    let mut pending = pending_peer_response(conversation)?;
+    pending.retro_left_out = pending
+        .item_address
+        .and_then(|address| retro_left_out.get(address.item().as_str()));
+    Some(pending)
 }
 
 /// The most recent unretracted automatic response supported by the daemon.
@@ -477,6 +495,22 @@ fn peer_response_card_lines<'a>(
         for text in [shares.as_str(), NOT_SHARED] {
             lines.extend(
                 wrap_text(text, width.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|line| Line::from(format!("  {line}"))),
+            );
+        }
+    }
+    if let Some(preview) = pending.retro {
+        use crate::adapters::tui::widgets::chat_pane::word_wrap::wrap_text;
+        // The card's own width, like the status preview: a floor wider than
+        // the pane would cut lines the card promises never to truncate.
+        let wrap_width = width.saturating_sub(2).max(1);
+        for text in crate::adapters::tui::widgets::recipient_surface::retro_preview_lines(
+            preview,
+            pending.retro_left_out,
+        ) {
+            lines.extend(
+                wrap_text(&text, wrap_width)
                     .into_iter()
                     .map(|line| Line::from(format!("  {line}"))),
             );
@@ -678,6 +712,7 @@ fn queue_recipient_action(
             | ClientFrame::DeferRecipientItem { .. }
             | ClientFrame::AcknowledgeRecipientItem { .. }
             | ClientFrame::ShareRecipientStatus { .. }
+            | ClientFrame::ShareRecipientRetro { .. }
             | ClientFrame::ResolvePeerDraft { .. }
             | ClientFrame::SetRecipientContext { .. }
     );
@@ -817,7 +852,7 @@ async fn recipient_surface_key(
     let Some(action) = recipient_surface_actions(state, conversation, read_only)
         .into_iter()
         .flatten()
-        .find(|action| key.code == KeyCode::Char(action.key()))
+        .find(|action| matches!(key.code, KeyCode::Char(c) if action.accepts(c)))
     else {
         return false;
     };
@@ -940,6 +975,52 @@ async fn recipient_surface_key(
                 decline: action == RecipientSurfaceAction::DeclineStatus,
             };
             queue_recipient_action(state, input, frame, frame_tx, false);
+        }
+        // Story 19.25 `AC3` — Share sends the stored overlay as its leave-out
+        // list; Decline sends no fields (the daemon refuses decline + fields).
+        RecipientSurfaceAction::RetroShare | RecipientSurfaceAction::RetroDecline => {
+            let RecipientSurfaceTarget::Item(address) = &surface.target else {
+                return false;
+            };
+            let item_id = address.item().as_str().to_owned();
+            let decline = action == RecipientSurfaceAction::RetroDecline;
+            let leave_out = if decline {
+                Vec::new()
+            } else {
+                state
+                    .retro_left_out
+                    .get(&item_id)
+                    .map(|set| set.iter().copied().collect())
+                    .unwrap_or_default()
+            };
+            let frame = ClientFrame::ShareRecipientRetro {
+                item_id,
+                leave_out,
+                decline,
+            };
+            queue_recipient_action(state, input, frame, frame_tx, false);
+        }
+        // Story 19.25 `AC3` — a digit toggles one field of this client's
+        // overlay; the card and the surface re-render from it.
+        RecipientSurfaceAction::RetroLeaveOut => {
+            let (RecipientSurfaceTarget::Item(address), KeyCode::Char(digit)) =
+                (&surface.target, key.code)
+            else {
+                return false;
+            };
+            let Some(field) =
+                crate::adapters::tui::widgets::recipient_surface::retro_field_for_key(digit)
+            else {
+                return false;
+            };
+            let item_id = address.item().as_str().to_owned();
+            let set = state.retro_left_out.entry(item_id.clone()).or_default();
+            if !set.insert(field) {
+                set.remove(&field);
+            }
+            if set.is_empty() {
+                state.retro_left_out.remove(&item_id);
+            }
         }
         RecipientSurfaceAction::Context => {
             let RecipientSurfaceTarget::Item(address) = &surface.target else {
@@ -1678,6 +1759,8 @@ enum AttachedTeamRequest {
     Send {
         block_id: String,
         action: Option<crate::domain::models::SendActionId>,
+        /// The action's type, kept for rows a later start frame names.
+        message_type: crate::domain::models::SemanticMessageType,
     },
     Board {
         next_sequence: u32,
@@ -1970,7 +2053,11 @@ fn after_attached_draw(state: &mut TuiState, drawn: bool, visible_feedback_ids: 
     }
 }
 
-fn begin_attached_team_send(state: &mut TuiState, recipients: &[String]) -> AttachedTeamRequest {
+fn begin_attached_team_send(
+    state: &mut TuiState,
+    recipients: &[String],
+    message_type: crate::domain::models::SemanticMessageType,
+) -> AttachedTeamRequest {
     use crate::adapters::tui::handlers::team_command::{
         TeamSendRow, render_team_send_rows, show_team_send,
     };
@@ -1981,6 +2068,7 @@ fn begin_attached_team_send(state: &mut TuiState, recipients: &[String]) -> Atta
         .map(|alias| TeamSendRow {
             alias: alias.clone(),
             outcome: None,
+            message_type,
         })
         .collect();
     show_team_send(state, &block_id, render_team_send_rows(&rows));
@@ -1988,6 +2076,7 @@ fn begin_attached_team_send(state: &mut TuiState, recipients: &[String]) -> Atta
     AttachedTeamRequest::Send {
         block_id,
         action: None,
+        message_type,
     }
 }
 
@@ -2298,11 +2387,19 @@ fn enqueue_attached_team_frame(
         ClientFrame::TeamSend {
             request,
             recipients,
+            message_type,
             ..
-        } => (request.clone(), begin_attached_team_send(state, recipients)),
+        } => (
+            request.clone(),
+            begin_attached_team_send(state, recipients, message_type.unwrap_or_default()),
+        ),
         ClientFrame::TeamFollowup { request, peer, .. } => (
             request.clone(),
-            begin_attached_team_send(state, std::slice::from_ref(peer)),
+            begin_attached_team_send(
+                state,
+                std::slice::from_ref(peer),
+                crate::domain::models::SemanticMessageType::Unknown,
+            ),
         ),
         ClientFrame::TeamThread { request, .. } => {
             requests
@@ -2351,7 +2448,7 @@ fn enqueue_attached_team_frame(
             };
             (
                 proposal.clone(),
-                begin_attached_team_send(state, &snapshot.recipients),
+                begin_attached_team_send(state, &snapshot.recipients, snapshot.message_type),
             )
         }
         ClientFrame::TeamBoard { request, .. } => {
@@ -2424,6 +2521,7 @@ fn apply_attached_team_frame(
             let Some(AttachedTeamRequest::Send {
                 block_id,
                 action: bound,
+                message_type,
             }) = requests.pending.get_mut(&request)
             else {
                 tracing::warn!(%request, "attach: unmatched team send start");
@@ -2435,12 +2533,14 @@ fn apply_attached_team_frame(
             }
             *bound = Some(action);
             if !recipients.is_empty() {
+                let message_type = *message_type;
                 let rows = recipients
                     .into_iter()
                     .map(
                         |alias| crate::adapters::tui::handlers::team_command::TeamSendRow {
                             alias,
                             outcome: None,
+                            message_type,
                         },
                     )
                     .collect();
@@ -3014,6 +3114,11 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
         let mut visible_feedback_ids: Vec<String> = Vec::new();
         let mut visible_proposal = None;
         let mut visible_approval = None;
+        // Story 19.25 `AC3` — a card that left takes its leave-out overlay.
+        crate::adapters::tui::handlers::recipient_actions::prune_retro_left_out(
+            &mut state,
+            &conversation,
+        );
         let drawn = term.draw(|f| {
             let area = f.area();
             let Some(mut layout) = crate::adapters::tui::layout::compute_layout(
@@ -3040,8 +3145,13 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 && attached_proposal_pending(&state).is_none()
                 && approvals.pending.is_empty()
             {
-                pending_peer_response(&conversation)
-                    .map(|pending| peer_response_card_lines(&pending, read_only, usize::from(layout.chat_pane.width.saturating_sub(2))))
+                pending_peer_card(&conversation, &state.retro_left_out).map(|pending| {
+                    peer_response_card_lines(
+                        &pending,
+                        read_only,
+                        usize::from(layout.chat_pane.width.saturating_sub(2)),
+                    )
+                })
             } else {
                 None
             };
@@ -3115,9 +3225,14 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 },
             );
             let actions = recipient_surface_actions(&state, &conversation, read_only);
+            let retro_left_out = &state.retro_left_out;
+            let retro = state
+                .recipient_surface
+                .as_ref()
+                .and_then(|surface| retro_overlay(&conversation, surface, retro_left_out));
             if let Some(surface) = state.recipient_surface.as_mut() {
                 render_recipient_surface(f, layout.chat_pane, surface, &state.recipient_actions,
-                    &actions, read_only, &state.theme);
+                    &actions, retro, read_only, &state.theme);
             }
             // Story 12.2d AC3 — render the consolidation card with the IDENTICAL
             // bottom-anchored inline grammar the local TUI uses (bordered + accent,
@@ -4328,6 +4443,8 @@ mod tests {
                                 surface,
                                 &self.state.recipient_actions,
                                 &actions,
+                                // No conversation, so no pinned retro card.
+                                None,
                                 read_only,
                                 &self.state.theme,
                             );
@@ -4931,6 +5048,7 @@ mod tests {
                 AttachedTeamRequest::Send {
                     block_id,
                     action: None,
+                    ..
                 } => block_id.clone(),
                 other => panic!(
                     "human Send must open the ordinary send block before receipts: {other:?}"
@@ -5329,6 +5447,7 @@ mod tests {
             stories: None,
             status: None,
             selected_for: None,
+            retro: None,
             message_type: crate::domain::models::SemanticMessageType::Consultation,
             sender_label: "sender".to_owned(),
             stage,
@@ -5620,6 +5739,400 @@ mod tests {
             assert!(actions[4] == Some(RecipientSurfaceAction::DeclineStatus));
             assert_eq!(input, "unfinished operator text");
         }
+    }
+
+    fn retro_test_preview() -> crate::domain::models::RetroPreview {
+        crate::domain::models::RetroPreview {
+            contribution: crate::domain::models::RetroContribution {
+                received: [("consultation".to_owned(), 3)].into_iter().collect(),
+                reply_minutes: vec![4, 25, 90],
+                ack_minutes: vec![60],
+            },
+            nothing_in_window: false,
+        }
+    }
+
+    /// Story 19.25 fixture: a journal-backed `retro_request` item, its pinned
+    /// AwaitingOperator card with a stored preview, and a Writer surface.
+    async fn open_retro_surface(item_id: &str) -> (tempfile::TempDir, Conversation, TuiState) {
+        use crate::adapters::tui::state::RecipientSurfaceAccess;
+        use crate::domain::models::{PeerRowStage, SemanticMessageType};
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let address = append_received_test_item(
+            &journal,
+            item_id,
+            SemanticMessageType::RetroRequest,
+            "Sprint 7 retro",
+        )
+        .await;
+        let mut control = peer_control("retro-node", PeerRowStage::AwaitingOperator);
+        control.item_address = Some(address.clone());
+        control.message_type = SemanticMessageType::RetroRequest;
+        control.retro = Some(retro_test_preview());
+        let conversation = Conversation {
+            messages: vec![peer_row("retro-row", "waiting")],
+            peer_row_controls: [("retro-row".to_owned(), control)].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut state = TuiState::new(100, 40);
+        super::super::recipient_surface::open_received_surface(
+            workspace.path(),
+            Some(&conversation),
+            address.item().as_str(),
+            &mut state,
+            RecipientSurfaceAccess::Writer,
+            super::super::recipient_view::ReceivedThreadWindow::Newest,
+        )
+        .await
+        .unwrap();
+        (workspace, conversation, state)
+    }
+
+    async fn press_surface_key(
+        key: char,
+        workspace: &Path,
+        conversation: &Conversation,
+        input: &mut String,
+        state: &mut TuiState,
+        tx: &mpsc::UnboundedSender<ClientFrame>,
+    ) {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        recipient_surface_key(
+            KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+            workspace,
+            conversation,
+            input,
+            state,
+            Some(tx),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn story19_25_retro_surface_slots_per_stage_type_and_restored_card() {
+        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::domain::models::{PeerRowStage, SemanticMessageType};
+        let (_workspace, mut conversation, mut state) = open_retro_surface("ri_retro_slots").await;
+        // Compare against the unchanged no-preview surface at every other stage/type.
+        for message_type in [
+            SemanticMessageType::RetroRequest,
+            SemanticMessageType::StatusRequest,
+            SemanticMessageType::Consultation,
+            SemanticMessageType::ArchitectureUpdate,
+            SemanticMessageType::StoryAssignment,
+            SemanticMessageType::BugReport,
+            SemanticMessageType::Unknown,
+        ] {
+            for stage in [
+                PeerRowStage::AwaitingOperator,
+                PeerRowStage::Drafting,
+                PeerRowStage::Ready,
+                PeerRowStage::Settled,
+            ] {
+                for resolvable in [false, true] {
+                    state.recipient_surface.as_mut().unwrap().message_type = message_type;
+                    let control = conversation.peer_row_controls.get_mut("retro-row").unwrap();
+                    control.message_type = message_type;
+                    control.stage = stage;
+                    control.node_resolvable = resolvable;
+                    control.retro = None;
+                    let baseline = recipient_surface_actions(&state, &conversation, false);
+                    conversation
+                        .peer_row_controls
+                        .get_mut("retro-row")
+                        .unwrap()
+                        .retro = Some(retro_test_preview());
+                    let actions = recipient_surface_actions(&state, &conversation, false);
+                    // A restored (unresolvable) card keeps the retro acts,
+                    // as it keeps `[r] Respond` (19-24 BH-1).
+                    if message_type == SemanticMessageType::RetroRequest
+                        && stage == PeerRowStage::AwaitingOperator
+                    {
+                        assert_eq!(
+                            actions,
+                            [
+                                Some(RecipientSurfaceAction::Respond),
+                                Some(RecipientSurfaceAction::Busy),
+                                Some(RecipientSurfaceAction::RetroShare),
+                                Some(RecipientSurfaceAction::RetroLeaveOut),
+                                Some(RecipientSurfaceAction::RetroDecline),
+                                baseline[5],
+                            ],
+                            "resolvable: {resolvable}"
+                        );
+                    } else {
+                        assert_eq!(
+                            actions, baseline,
+                            "{message_type:?} {stage:?} resolvable: {resolvable}"
+                        );
+                    }
+                }
+            }
+        }
+        state.recipient_surface.as_mut().unwrap().message_type = SemanticMessageType::RetroRequest;
+        let control = conversation.peer_row_controls.get_mut("retro-row").unwrap();
+        control.message_type = SemanticMessageType::RetroRequest;
+        control.stage = PeerRowStage::AwaitingOperator;
+        control.node_resolvable = true;
+        let no_overlay = std::collections::HashMap::new();
+        assert!(
+            retro_overlay(
+                &conversation,
+                state.recipient_surface.as_ref().unwrap(),
+                &no_overlay
+            )
+            .is_some_and(|overlay| overlay.left_out.is_none())
+        );
+        for access in [
+            RecipientSurfaceAccess::ReadOnly,
+            RecipientSurfaceAccess::LocalOnly,
+        ] {
+            state.recipient_surface.as_mut().unwrap().access = access;
+            assert!(
+                recipient_surface_actions(&state, &conversation, false)
+                    .iter()
+                    .all(Option::is_none)
+            );
+        }
+        state.recipient_surface.as_mut().unwrap().access = RecipientSurfaceAccess::Writer;
+        assert!(
+            recipient_surface_actions(&state, &conversation, true)
+                .iter()
+                .all(Option::is_none)
+        );
+        let retro_acts = [
+            Some(RecipientSurfaceAction::RetroShare),
+            Some(RecipientSurfaceAction::RetroLeaveOut),
+            Some(RecipientSurfaceAction::RetroDecline),
+        ];
+        state.recipient_surface.as_mut().unwrap().item_state = Some("removed");
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert!(retro_acts.iter().all(|act| !actions.contains(act)));
+        assert!(
+            retro_overlay(
+                &conversation,
+                state.recipient_surface.as_ref().unwrap(),
+                &no_overlay
+            )
+            .is_none()
+        );
+        state.recipient_surface.as_mut().unwrap().item_state = Some("received");
+        state.recipient_surface.as_mut().unwrap().target =
+            RecipientSurfaceTarget::Node("retro-node".to_owned());
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert!(retro_acts.iter().all(|act| !actions.contains(act)));
+        assert!(
+            retro_overlay(
+                &conversation,
+                state.recipient_surface.as_ref().unwrap(),
+                &no_overlay
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn story19_25_retro_keys_toggle_overlay_hint_card_and_send_frames() {
+        use crate::adapters::daemon::protocol::{
+            ProtocolError, RecipientAction, RecipientActionOutcome, RecipientActionTarget,
+        };
+        use crate::adapters::tui::handlers::recipient_actions::{
+            apply_action_result, prune_retro_left_out, surface_action_notices,
+        };
+        use crate::adapters::tui::state::RecipientActionState;
+        use crate::domain::models::{PeerRowStage, RetroField, RetroFieldSet};
+        let item = "ri_retro_keys";
+        let (workspace, mut conversation, mut state) = open_retro_surface(item).await;
+        let workspace = workspace.path();
+        let mut input = "unfinished operator text".to_owned();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let card = |conversation: &Conversation, state: &TuiState| {
+            peer_response_card_lines(
+                &pending_peer_card(conversation, &state.retro_left_out).unwrap(),
+                false,
+                60,
+            )
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        let overlay = |state: &TuiState| state.retro_left_out.get(item).cloned();
+        let set = |fields: &[RetroField]| fields.iter().copied().collect::<RetroFieldSet>();
+
+        assert!(card(&conversation, &state).contains("  [2] reply times: 3 replies, median 25m"));
+        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        assert!(painted.contains("Shares (last 14 days):"), "{painted}");
+        assert!(painted.contains("[s] Share") && !painted.contains("with redactions"));
+        assert!(painted.contains("[1-3] Leave out") && painted.contains("[n] Decline"));
+
+        // `[2]` leaves reply times out: no frame, the card and the surface
+        // (same width: the overlay bits invalidate its cache) both re-render.
+        press_surface_key('2', workspace, &conversation, &mut input, &mut state, &tx).await;
+        assert!(rx.try_recv().is_err());
+        assert_eq!(overlay(&state), Some(set(&[RetroField::ReplyTimes])));
+        let text = card(&conversation, &state);
+        assert!(text.contains("  [2] reply times: left out"), "{text}");
+        assert!(
+            text.contains("  Not shared: reply times · message content"),
+            "{text}"
+        );
+        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        assert!(painted.contains("[2] reply times: left out"), "{painted}");
+        assert!(painted.contains("Not shared: reply times · message content"));
+        assert!(painted.contains("[s] Share with redactions"), "{painted}");
+
+        // Toggling back empties (and drops) the overlay.
+        press_surface_key('2', workspace, &conversation, &mut input, &mut state, &tx).await;
+        assert!(!state.retro_left_out.contains_key(item));
+        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        assert!(!painted.contains("with redactions") && !painted.contains("left out"));
+
+        // A field-level change under a non-empty overlay still re-renders.
+        press_surface_key('1', workspace, &conversation, &mut input, &mut state, &tx).await;
+        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        assert!(painted.contains("[1] received items: left out"));
+        press_surface_key('3', workspace, &conversation, &mut input, &mut state, &tx).await;
+        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        assert!(
+            painted.contains("[3] acknowledgement times: left out"),
+            "{painted}"
+        );
+        assert!(painted.contains("[2] reply times: 3 replies, median 25m"));
+        for unowned in ['0', '4', '9'] {
+            press_surface_key(
+                unowned,
+                workspace,
+                &conversation,
+                &mut input,
+                &mut state,
+                &tx,
+            )
+            .await;
+        }
+        assert_eq!(
+            overlay(&state),
+            Some(set(&[RetroField::Received, RetroField::AckTimes]))
+        );
+        assert!(rx.try_recv().is_err());
+
+        // `[s]` sends the overlay as the leave-out list, correlated.
+        press_surface_key('s', workspace, &conversation, &mut input, &mut state, &tx).await;
+        assert!(matches!(rx.try_recv().unwrap(),
+            ClientFrame::ShareRecipientRetro { item_id, leave_out, decline: false }
+                if item_id == item
+                    && leave_out == vec![RetroField::Received, RetroField::AckTimes]));
+        let action_key = (
+            RecipientAction::ShareRetro,
+            RecipientActionTarget::Item {
+                item_id: item.to_owned(),
+            },
+        );
+        assert!(matches!(
+            state.recipient_actions.get(&action_key),
+            Some(RecipientActionState::Pending { .. })
+        ));
+        let surface = state.recipient_surface.as_ref().unwrap();
+        let notices = surface_action_notices(
+            &state.recipient_actions,
+            &surface.target,
+            surface.node_id.as_deref(),
+        )
+        .map(|notice| notice.into_owned())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            notices,
+            vec!["applying retrospective reply for ri_retro_keys…"]
+        );
+        // Pending suppresses all three retro acts, toggles included.
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert_eq!(actions[1], Some(RecipientSurfaceAction::Busy));
+        assert!(actions[2].is_none() && actions[3].is_none() && actions[4].is_none());
+        for duplicate in ['2', 's', 'n'] {
+            press_surface_key(
+                duplicate,
+                workspace,
+                &conversation,
+                &mut input,
+                &mut state,
+                &tx,
+            )
+            .await;
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            overlay(&state),
+            Some(set(&[RetroField::Received, RetroField::AckTimes]))
+        );
+        assert_eq!(input, "unfinished operator text");
+
+        // Settling releases the overlay and the acts.
+        apply_action_result(
+            &mut state,
+            &mut input,
+            RecipientAction::ShareRetro,
+            action_key.1.clone(),
+            RecipientActionOutcome::Applied { reply: None },
+        );
+        assert!(state.retro_left_out.is_empty());
+        assert!(!card(&conversation, &state).contains("left out"));
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert_eq!(actions[2], Some(RecipientSurfaceAction::RetroShare));
+
+        // `[n]` declines with no fields even over a non-empty overlay, which
+        // a refusal keeps for the retry.
+        press_surface_key('2', workspace, &conversation, &mut input, &mut state, &tx).await;
+        press_surface_key('n', workspace, &conversation, &mut input, &mut state, &tx).await;
+        assert!(matches!(rx.try_recv().unwrap(),
+            ClientFrame::ShareRecipientRetro { item_id, leave_out, decline: true }
+                if item_id == item && leave_out.is_empty()));
+        apply_action_result(
+            &mut state,
+            &mut input,
+            RecipientAction::ShareRetro,
+            action_key.1.clone(),
+            RecipientActionOutcome::Refused {
+                error: ProtocolError::ReadOnly,
+            },
+        );
+        assert_eq!(overlay(&state), Some(set(&[RetroField::ReplyTimes])));
+
+        // A failed enqueue releases the pending key, not the overlay.
+        drop(rx);
+        assert!(!queue_recipient_action(
+            &mut state,
+            &mut input,
+            ClientFrame::ShareRecipientRetro {
+                item_id: item.to_owned(),
+                leave_out: vec![RetroField::ReplyTimes],
+                decline: false,
+            },
+            &tx,
+            false,
+        ));
+        assert!(matches!(state.recipient_actions.get(&action_key),
+            Some(RecipientActionState::Completed { notice }) if !notice.is_empty()));
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert_eq!(actions[2], Some(RecipientSurfaceAction::RetroShare));
+        assert_eq!(overlay(&state), Some(set(&[RetroField::ReplyTimes])));
+        assert_eq!(input, "unfinished operator text");
+
+        // The card leaving takes the overlay and the surface preview with it.
+        conversation
+            .peer_row_controls
+            .get_mut("retro-row")
+            .unwrap()
+            .stage = PeerRowStage::Settled;
+        prune_retro_left_out(&mut state, &conversation);
+        assert!(state.retro_left_out.is_empty());
+        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        assert!(!painted.contains("Shares (last 14 days):"), "{painted}");
+        assert!(!painted.contains("[s] Share"));
     }
 
     /// Story 19.22 unit fixture: one received list item whose journal row
@@ -5934,6 +6447,7 @@ mod tests {
         // pending; neither verdict hint may be restored by the new content.
         journal
             .append_room(crate::domain::models::RoomEvent::RecipientItemReplied {
+                retro: None,
                 address: crate::domain::models::TurnAddress::answering(
                     &address,
                     crate::domain::models::ReplyTurnId::from_replay("rr-newer"),
@@ -6054,6 +6568,182 @@ mod tests {
             }
             assert!(!joined.contains("private request body"));
         }
+    }
+
+    #[test]
+    fn story19_25_retro_card_preview_forms_wrap_without_truncation() {
+        use crate::domain::models::{
+            PeerRowStage, RetroContribution, RetroField, RetroFieldSet, RetroPreview,
+        };
+        let contribution = RetroContribution {
+            received: [
+                ("consultation".to_owned(), 3),
+                ("story_assignment".to_owned(), 2),
+            ]
+            .into_iter()
+            .collect(),
+            reply_minutes: vec![10, 20, 25, 30, 40],
+            ack_minutes: Vec::new(),
+        };
+        let full = contribution.text_lines();
+        let not_shared_tail =
+            "message content, senders, your sends, conversations, plans, files, activity";
+        let render = |preview: RetroPreview, left_out: Option<&RetroFieldSet>| {
+            let mut control = peer_control("retro", PeerRowStage::AwaitingOperator);
+            control.retro = Some(preview);
+            let conversation = Conversation {
+                messages: vec![peer_row("retro", "private request body")],
+                peer_row_controls: [("retro".to_owned(), control)].into_iter().collect(),
+                ..Default::default()
+            };
+            let mut pending = pending_peer_response(&conversation).unwrap();
+            assert!(pending.retro_left_out.is_none());
+            pending.retro_left_out = left_out;
+            let text = peer_response_card_lines(&pending, false, 60)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            assert!(
+                text.iter()
+                    .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 60),
+                "{text:?}"
+            );
+            assert!(!text.join(" ").contains("private request body"));
+            text
+        };
+        let joined = |lines: &[String]| {
+            lines
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+
+        let shared = render(
+            RetroPreview {
+                contribution: contribution.clone(),
+                nothing_in_window: false,
+            },
+            None,
+        );
+        assert_eq!(shared[1], "  Shares (last 14 days):");
+        assert_eq!(
+            shared[2],
+            "  [1] received items: consultation 3 · story_assignment 2"
+        );
+        assert_eq!(shared[3], "  [2] reply times: 5 replies, median 25m");
+        assert_eq!(shared[4], "  [3] acknowledgement times: none");
+        assert_eq!(full[1], "[2] reply times: 5 replies, median 25m");
+        let tail = joined(&shared[5..]);
+        assert!(
+            tail.starts_with(&format!("Not shared: {not_shared_tail}")),
+            "{tail}"
+        );
+        assert!(shared[5].starts_with("  Not shared: message content,"));
+
+        let left_out: RetroFieldSet = [RetroField::ReplyTimes].into_iter().collect();
+        let redacted = render(
+            RetroPreview {
+                contribution: contribution.clone(),
+                nothing_in_window: false,
+            },
+            Some(&left_out),
+        );
+        assert_eq!(redacted[2], shared[2]);
+        assert_eq!(redacted[3], "  [2] reply times: left out");
+        assert_eq!(redacted[4], shared[4]);
+        assert!(redacted[5].starts_with("  Not shared: reply times · message content,"));
+        assert!(
+            joined(&redacted[5..])
+                .starts_with(&format!("Not shared: reply times · {not_shared_tail}")),
+            "{redacted:?}"
+        );
+
+        let all: RetroFieldSet = RetroField::ALL.into_iter().collect();
+        let everything = render(
+            RetroPreview {
+                contribution: contribution.clone(),
+                nothing_in_window: false,
+            },
+            Some(&all),
+        );
+        assert_eq!(everything[2], "  [1] received items: left out");
+        assert_eq!(everything[3], "  [2] reply times: left out");
+        assert_eq!(everything[4], "  [3] acknowledgement times: left out");
+        assert!(
+            joined(&everything[5..]).starts_with(&format!(
+                "Not shared: received items · reply times · acknowledgement times · {not_shared_tail}"
+            )),
+            "{everything:?}"
+        );
+
+        let nothing = render(
+            RetroPreview {
+                contribution: RetroContribution::nothing(),
+                nothing_in_window: true,
+            },
+            None,
+        );
+        let nothing_text = joined(&nothing);
+        assert!(
+            nothing_text.contains(&format!(
+                "Shares nothing: no team messages reached this host in the last 14 days Not shared: {not_shared_tail}"
+            )),
+            "{nothing_text}"
+        );
+        assert!(!nothing_text.contains("Shares (last 14 days):"));
+        assert!(nothing.iter().all(|line| !line.contains("[1]")));
+
+        // Narrower than 60 columns the preview still wraps inside the card.
+        let mut narrow = peer_control("retro", PeerRowStage::AwaitingOperator);
+        narrow.retro = Some(RetroPreview {
+            contribution: contribution.clone(),
+            nothing_in_window: false,
+        });
+        let conversation = Conversation {
+            messages: vec![peer_row("retro", "private request body")],
+            peer_row_controls: [("retro".to_owned(), narrow)].into_iter().collect(),
+            ..Default::default()
+        };
+        let narrow =
+            peer_response_card_lines(&pending_peer_response(&conversation).unwrap(), false, 40)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+        let preview = narrow
+            .iter()
+            .skip(1)
+            .take_while(|line| line.starts_with("  "))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            preview
+                .iter()
+                .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 40),
+            "{narrow:?}"
+        );
+        assert!(
+            joined(&preview[..]).ends_with(&format!("Not shared: {not_shared_tail}")),
+            "{narrow:?}"
+        );
+
+        let mut plain = peer_control("plain", PeerRowStage::AwaitingOperator);
+        plain.retro = None;
+        let conversation = Conversation {
+            messages: vec![peer_row("plain", "body")],
+            peer_row_controls: [("plain".to_owned(), plain)].into_iter().collect(),
+            ..Default::default()
+        };
+        let pending = pending_peer_response(&conversation).unwrap();
+        assert!(pending.retro.is_none());
+        let plain_text = joined(
+            &peer_response_card_lines(&pending, false, 60)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert!(!plain_text.contains("Shares"), "{plain_text}");
+        assert!(!plain_text.contains("Not shared"), "{plain_text}");
     }
 
     #[test]
@@ -6362,6 +7052,7 @@ mod tests {
                     stories: None,
                     status: None,
                     selected_for: None,
+                    retro: None,
                     message_type,
                     sender_label: "test sender".to_owned(),
                     stage: PeerRowStage::AwaitingOperator,
@@ -6494,6 +7185,7 @@ mod tests {
                         stories: None,
                         status: None,
                         selected_for: None,
+                        retro: None,
                         message_type,
                         sender_label: "test sender".to_owned(),
                         stage: crate::domain::models::PeerRowStage::AwaitingOperator,
@@ -6678,6 +7370,7 @@ mod tests {
                         stories: None,
                         status: None,
                         selected_for: None,
+                        retro: None,
                         message_type: SemanticMessageType::BugReport,
                         sender_label: "sender".into(),
                         stage,
@@ -6769,18 +7462,35 @@ mod tests {
     }
 
     fn paint_received_surface(state: &mut TuiState) -> String {
-        let backend = ratatui::backend::TestBackend::new(80, 24);
+        paint_surface(state, &Conversation::default(), 80, 24)
+    }
+
+    /// Paints through the production overlay lookup; the surface's own cache
+    /// persists across calls, as across frames.
+    fn paint_surface(
+        state: &mut TuiState,
+        conversation: &Conversation,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let actions = recipient_surface_actions(state, &Conversation::default(), false);
+        let actions = recipient_surface_actions(state, conversation, false);
         terminal
             .draw(|frame| {
                 let area = frame.area();
+                let retro_left_out = &state.retro_left_out;
+                let retro = state
+                    .recipient_surface
+                    .as_ref()
+                    .and_then(|surface| retro_overlay(conversation, surface, retro_left_out));
                 render_recipient_surface(
                     frame,
                     area,
                     state.recipient_surface.as_mut().unwrap(),
                     &state.recipient_actions,
                     &actions,
+                    retro,
                     false,
                     &state.theme,
                 );

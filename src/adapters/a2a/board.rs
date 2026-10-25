@@ -66,6 +66,7 @@ use crate::domain::services::transparency::{
     MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, sanitize_disclosable,
 };
 
+mod retro_report;
 mod status_report;
 use status_report::{StatusReport, render_status_row, report_for_item};
 
@@ -846,6 +847,9 @@ pub struct ActionBoardView {
     pub rows: Vec<ActionBoardRow>,
     pub unnameable: usize,
     pub principal_collapsed: bool,
+    /// Story 19.25 D6 — the aggregate report, filled only for a
+    /// `retro_request` action; a snapshot at read time.
+    pub retro_report: Option<crate::domain::models::RetroReport>,
 }
 
 /// Why an action board (or the action list) was not shown.
@@ -1105,6 +1109,7 @@ pub async fn collect_action_board(
         rows: Vec::with_capacity(latest_action.recipients.len()),
         unnameable: 0,
         principal_collapsed: false,
+        retro_report: None,
     };
     for ((recipient, (bound_alias, raw_read)), live) in
         latest_action.recipients.iter().zip(reads).zip(live)
@@ -1145,6 +1150,12 @@ pub async fn collect_action_board(
         }))
         .await;
         view.principal_collapsed |= collapsed.into_iter().any(|collapsed| collapsed);
+    }
+    if view.message_type == crate::domain::models::SemanticMessageType::RetroRequest {
+        let (report, collapsed) =
+            retro_report::collect_retro_report(runtime, &view.rows, view.unnameable).await;
+        view.principal_collapsed |= collapsed;
+        view.retro_report = Some(report);
     }
     runtime
         .remember_board(RememberedBoard::Action(view.clone()))
@@ -1262,6 +1273,9 @@ fn bounded(text: &str) -> String {
 pub fn render_action_board(view: &ActionBoardView, now_unix_secs: i64) -> String {
     use std::fmt::Write;
 
+    if view.message_type == crate::domain::models::SemanticMessageType::RetroRequest {
+        return retro_report::render_retro_report(view, now_unix_secs);
+    }
     let mut out = String::new();
     match type_noun(view.message_type) {
         Some(noun) => {
@@ -2287,6 +2301,7 @@ mod tests {
             rows,
             unnameable: 0,
             principal_collapsed: false,
+            retro_report: None,
         }
     }
 

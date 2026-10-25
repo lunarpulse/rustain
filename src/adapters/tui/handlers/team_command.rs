@@ -850,12 +850,17 @@ pub(crate) fn show_team_board(state: &mut TuiState, message: String) {
 }
 
 /// Typed, action-local row state. The block text is always a projection of
-/// these rows, never mutated by line number or completion order.
+/// these rows, never mutated by line number or completion order. The action's
+/// type travels with each row so every redraw renders the same projection.
 #[derive(Clone)]
 pub struct TeamSendRow {
     pub alias: String,
     pub outcome: Option<crate::domain::models::RecipientOutcome>,
+    pub message_type: crate::domain::models::SemanticMessageType,
 }
+
+/// Story 19.25 D7: the one line under a `retro_request` action's send rows.
+pub const TEAM_SEND_RETRO_NOTE: &str = "Read the report with '/team board --last'. It holds only what members choose to share, never who or how many.";
 
 /// The single feature-independent renderer for standalone and attached sends.
 pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
@@ -866,7 +871,7 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
         TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL, TEAM_SEND_DECLINED_LABEL, TEAM_SEND_DELIVERED_LABEL,
         TEAM_SEND_NOT_SENT_LABEL, TEAM_SEND_UNREACHABLE_LABEL,
     };
-    use crate::domain::models::{RecipientOutcome, SendCause};
+    use crate::domain::models::{RecipientOutcome, SemanticMessageType, SendCause};
     use crate::domain::services::transparency::{
         MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, sanitize_disclosable,
     };
@@ -876,13 +881,23 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
         .map(|row| row.alias.chars().count())
         .max()
         .unwrap_or(0);
+    let mut retro = false;
     let mut text = String::new();
     for row in rows {
+        let row_retro = row.message_type == SemanticMessageType::RetroRequest;
+        retro |= row_retro;
         let (token, label, cause): (&str, Cow<'_, str>, Option<&SendCause>) = match row
             .outcome
             .as_ref()
         {
             None => (" ", Cow::Borrowed("sending…"), None),
+            // D7: whether a member shares is theirs alone; a policy decline
+            // or a pending approval never reads as a per-member answer.
+            Some(
+                RecipientOutcome::Delivered
+                | RecipientOutcome::Declined
+                | RecipientOutcome::AwaitingApproval,
+            ) if row_retro => ("●", Cow::Borrowed("sent"), None),
             Some(RecipientOutcome::Delivered) => {
                 ("●", Cow::Borrowed(TEAM_SEND_DELIVERED_LABEL), None)
             }
@@ -930,7 +945,9 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
             text.push('\n');
         }
     }
-    if text.ends_with('\n') {
+    if retro {
+        text.push_str(TEAM_SEND_RETRO_NOTE);
+    } else if text.ends_with('\n') {
         text.pop();
     }
     text
@@ -993,6 +1010,7 @@ pub fn render_team_thread(
                 render_team_send_rows(&[TeamSendRow {
                     alias: alias.clone(),
                     outcome: Some(outcome.clone()),
+                    message_type: crate::domain::models::SemanticMessageType::Unknown,
                 }])
             );
         }
@@ -1057,6 +1075,9 @@ pub fn render_team_thread(
                 }
                 crate::domain::models::ReplyKind::Unknown => {
                     text.push_str(" [reply kind not recognised]");
+                }
+                crate::domain::models::ReplyKind::Retro => {
+                    text.push_str(" [retrospective reply — counted only in the report]");
                 }
             }
         }
@@ -1595,6 +1616,7 @@ mod tests {
             TeamSendRow {
                 alias: "long-peer".into(),
                 outcome: None,
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
             },
             TeamSendRow {
                 alias: "b".into(),
@@ -1603,6 +1625,7 @@ mod tests {
                         "unavailable\n  ● forged  delivered".into(),
                     )),
                 }),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
             },
         ];
         assert_eq!(
@@ -1615,6 +1638,113 @@ mod tests {
             render_team_send_rows(&settled),
             "  ● long-peer  delivered\n  ⚠ b          unreachable\n    unavailable  ● forged  delivered"
         );
+    }
+
+    #[test]
+    fn story19_25_retro_send_rows_mask_acceptance_and_add_the_note_once() {
+        use crate::domain::models::team_send::{
+            TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL, TEAM_SEND_DECLINED_LABEL,
+            TEAM_SEND_DELIVERED_LABEL, TEAM_SEND_NOT_SENT_LABEL, TEAM_SEND_UNREACHABLE_LABEL,
+        };
+        use crate::domain::models::{RecipientOutcome, SemanticMessageType};
+
+        let row = |outcome: Option<RecipientOutcome>, message_type| TeamSendRow {
+            alias: "b".into(),
+            outcome,
+            message_type,
+        };
+        let note = TEAM_SEND_RETRO_NOTE;
+        assert_eq!(
+            note,
+            "Read the report with '/team board --last'. It holds only what members choose to share, never who or how many."
+        );
+        let cases: [(Option<RecipientOutcome>, String, String); 8] = [
+            (None, "    b  sending…".into(), "    b  sending…".into()),
+            (
+                Some(RecipientOutcome::Delivered),
+                "  ● b  sent".into(),
+                format!("  ● b  {TEAM_SEND_DELIVERED_LABEL}"),
+            ),
+            (
+                Some(RecipientOutcome::Declined),
+                "  ● b  sent".into(),
+                format!("  ✗ b  {TEAM_SEND_DECLINED_LABEL}"),
+            ),
+            (
+                Some(RecipientOutcome::AwaitingApproval),
+                "  ● b  sent".into(),
+                "    b  awaiting their approval".into(),
+            ),
+            (
+                Some(RecipientOutcome::Unreachable { cause: None }),
+                format!("  ⚠ b  {TEAM_SEND_UNREACHABLE_LABEL}"),
+                format!("  ⚠ b  {TEAM_SEND_UNREACHABLE_LABEL}"),
+            ),
+            (
+                Some(RecipientOutcome::AcceptedWithoutItem),
+                format!("    b  {TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL}"),
+                format!("    b  {TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL}"),
+            ),
+            (
+                Some(RecipientOutcome::NoUsableAnswer),
+                "    b  no usable answer — '/team board' shows whether it arrived".into(),
+                "    b  no usable answer — '/team board' shows whether it arrived".into(),
+            ),
+            (
+                Some(RecipientOutcome::NotSent),
+                format!("    b  {TEAM_SEND_NOT_SENT_LABEL}"),
+                format!("    b  {TEAM_SEND_NOT_SENT_LABEL}"),
+            ),
+        ];
+        for (outcome, retro_line, plain_line) in cases {
+            assert_eq!(
+                render_team_send_rows(&[row(outcome.clone(), SemanticMessageType::RetroRequest)]),
+                format!("{retro_line}\n{note}")
+            );
+            // Control: every other type, Unknown included, is unchanged.
+            for other in [
+                SemanticMessageType::Consultation,
+                SemanticMessageType::Unknown,
+            ] {
+                assert_eq!(
+                    render_team_send_rows(&[row(outcome.clone(), other)]),
+                    plain_line
+                );
+            }
+        }
+        let asked = Some(RecipientOutcome::AskedQuestion {
+            task_id: "t1".into(),
+        });
+        let plain = render_team_send_rows(&[row(asked.clone(), SemanticMessageType::Unknown)]);
+        assert_eq!(
+            render_team_send_rows(&[row(asked, SemanticMessageType::RetroRequest)]),
+            format!("{plain}\n{note}")
+        );
+
+        // Several rows, a cause line included: the note follows the rows once.
+        let rows = [
+            row(
+                Some(RecipientOutcome::Declined),
+                SemanticMessageType::RetroRequest,
+            ),
+            TeamSendRow {
+                alias: "long-peer".into(),
+                outcome: Some(RecipientOutcome::Unreachable {
+                    cause: Some(crate::domain::models::SendCause::PeerInfluenced(
+                        "down".into(),
+                    )),
+                }),
+                message_type: SemanticMessageType::RetroRequest,
+            },
+        ];
+        let text = render_team_send_rows(&rows);
+        assert_eq!(
+            text,
+            format!(
+                "  ● b          sent\n  ⚠ long-peer  {TEAM_SEND_UNREACHABLE_LABEL}\n    down\n{note}"
+            )
+        );
+        assert_eq!(text.matches(note).count(), 1);
     }
 
     #[test]
@@ -2258,6 +2388,7 @@ mod tests {
             authorship: crate::domain::models::Authorship::HumanWritten,
             kind: crate::domain::models::ReplyKind::Answer,
             status: None,
+            retro: None,
             retracted_at_ms: None,
         }
     }
@@ -2334,6 +2465,39 @@ mod tests {
                 rendered,
                 format!("thread · marcus · ri_q\n  marcus    rr_1{suffix}\n      body")
             );
+        }
+    }
+
+    /// Story 19.25 `D10` — a Retro turn renders its marker and the canonical
+    /// content only; its contribution values never reach `/team thread`.
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn thread_retro_reply_renders_marker_without_values() {
+        use crate::adapters::a2a::send::ThreadRead;
+        use crate::domain::models::{RETRO_REPLY_TEXT, ReplyKind, RetroContribution};
+
+        let mut turn = served_turn("rr_retro", true, RETRO_REPLY_TEXT);
+        turn.kind = ReplyKind::Retro;
+        turn.retro = Some(RetroContribution {
+            received: [("consultation".to_owned(), 987_654)].into_iter().collect(),
+            reply_minutes: vec![123_457],
+            ack_minutes: vec![765_432],
+        });
+        let rendered = render_team_thread(
+            "marcus",
+            "ri_q",
+            &ThreadRead::Read {
+                thread: served_thread(vec![turn]),
+                mine: vec![false],
+            },
+            false,
+        );
+        assert_eq!(
+            rendered,
+            "thread · marcus · ri_q\n  marcus    rr_retro [retrospective reply — counted only in the report]\n      Retrospective reply."
+        );
+        for leaked in ["987654", "123457", "765432", "consultation", "declin"] {
+            assert!(!rendered.contains(leaked), "{rendered}");
         }
     }
 

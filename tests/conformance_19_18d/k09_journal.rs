@@ -142,6 +142,7 @@ fn replied(address: TurnAddress) -> RoomEvent {
 
 fn replied_with_kind(address: TurnAddress, kind: ReplyKind) -> RoomEvent {
     RoomEvent::RecipientItemReplied {
+        retro: None,
         address,
         answers: item("ri_bound"),
         content: "done".to_owned(),

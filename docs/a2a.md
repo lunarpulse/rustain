@@ -497,7 +497,7 @@ ratified remedies 512) are disclosure bounds, not a width rule, and keep their
 
 ## Live daemon recipient rows
 
-Daemon attachments use protocol **v14**. Continuously attached trusted-local
+Daemon attachments use protocol **v15**. Continuously attached trusted-local
 writers and read-only observers receive revisioned peer-row upserts and removals
 only after successful persistence. Snapshot and live updates use the same row
 identity; duplicate or older updates cannot restore a settled/deleted card.
@@ -824,6 +824,9 @@ read. Rows show shared keys and their source, limited-detail disclosure for
 send-time decline show `no status shared` / `Source: —`; unanswered or Defer-only
 rows show `awaiting reply` (with the reported defer expectation). Unknown or
 withheld status shows `status not readable by this build`, never raw content.
+If the peer omitted earlier turns and no served Status reply answers this item,
+the row instead says `status not among the turns this peer served` / `Source: —`;
+an Answer-only or empty served window cannot establish that no status was shared.
 A row whose send never reached an item (sending, awaiting approval, a question
 asked, accepted without an item, no usable answer, no outcome recorded, or an
 unrecognised outcome), a failed read, unreachable and not sent keep their usual
@@ -837,6 +840,87 @@ reveals the norm to the requester.
 NotifyAndAuto remains **template-only**: it adds no automatic Status reply,
 so its report row remains `awaiting reply`. This feature adds no inference
 path; NotifyAndDraft retains its existing inference/approval path.
+
+## Sharing a retrospective (Story 19.25)
+
+Send `/team send --type retro_request B,C Sprint 7 retro`, then read
+`/team board --last` (or `--action <action-id>`). For NotifyAndWait, each receiving
+host prepares a fixed manifest once, at the request's journaled arrival. The
+requester cannot select more fields by changing the body, subject or sender.
+The contribution is the sharing host's report, not evidence of work or progress.
+
+The window is **[arrival − 14 days, arrival)** on the sharing host's journal:
+
+| Field / key | Facts offered |
+|---|---|
+| `[1] received items` / `received` | Counts of received team items per FR163 type, with unknown types grouped as `other`. |
+| `[2] reply times` / `replyTimes` | Whole minutes from each item's arrival to its first non-Retro reply recorded before the request arrived. |
+| `[3] acknowledgement times` / `ackTimes` | Whole minutes from each item's arrival to its acknowledgement recorded before the request arrived. |
+
+Unstamped legacy entries are excluded. Each time list keeps at most the 512
+newest eligible items, then sorts the minutes ascending; journal order and
+absolute timestamps never travel. The card shows received counts and the
+sample count/lower median of each time list. Empty fields read `none`; with no
+received items in the window it says
+`Shares nothing: no team messages reached this host in the last 14 days`.
+
+**Never shared:** message content or subjects, sender aliases or identities,
+your own sends or action metadata, conversations, plans, files, tool/model or
+operator activity, absolute timestamps, consent, roster or policy contents.
+The card always lists
+`Not shared: message content, senders, your sends, conversations, plans, files, activity`.
+
+Focus the item's actions with Tab. `[1-3] Leave out` toggles fields locally;
+left-out fields and the expanded `Not shared:` line show precisely what will
+not travel. `[s] Share` sends the stored preview; after any field is left out
+the hint is `[s] Share with redactions`. `[n] Decline` sends the empty
+contribution, identical to sharing nothing. Both acts
+are deliberate, human-decided, agent-composed Retro reply turns, with at most
+one Retro turn per item. Later journal changes cannot expand the snapshot.
+Read-only and Peer-tier attachments cannot decide. Restored pending cards
+retain the same preview and acts.
+
+Every Retro turn has `replyKind:"retro"` and content `Retrospective reply.`.
+An example contribution is
+`{"received":{"consultation":3},"replyTimes":[4,25,90],"ackTimes":[60]}`.
+Empty or left-out fields are omitted. Decline, nothing in the window, and
+leaving every field out all produce exactly `retro:{}` and the same content,
+apart from identifiers. Withheld content also withholds `retro`. Malformed or
+unrecognised contributions become an unknown reply kind, never raw report data.
+
+The retrospective report replaces the per-recipient distribution board. It
+sums received counts and merges the time samples, showing their lower median
+and sample count, not member counts. It includes only direct replies to each
+row's latest action-correlated item and uses the ordinary thread-read, bound-peer
+and item-capability gates. Empty aggregates say `Nothing has been shared so far.`
+Each read is a snapshot; unanswered, declined, empty and all-left-out contributions
+do not change a non-empty aggregate. No aliases, per-member states, addressed
+count or participation count appear. The report always says:
+
+> This report contains only what was consented. It does not report who contributed, or how many.
+
+Generic notes, each at most once, disclose read failures (including a recipient
+this host no longer has an eligible binding for), omitted thread turns,
+unreadable reply kinds and unrecognised send outcomes without identities or
+counts: `Some replies could not be read now; read the report again later.`,
+`Some replies may be in thread turns a peer did not serve.`,
+`Some replies are not readable by this build.`, and
+`Some send outcomes are not recognised by this build.`
+
+On standalone TUI, attached TUI and CLI send rows, Delivered, Declined and
+AwaitingApproval all read `● <alias> sent` for `retro_request`; other send
+outcomes retain their ordinary labels. Settlement redraws keep this rule, and
+`rustain team send` exits successfully when every row reads `sent`.
+The rows add: `Read the report with '/team board --last'. It holds only what members choose to share, never who or how many.`
+
+There is **no automatic contribution**: NotifyAndAuto and NotifyAndDraft
+prepare no retrospective preview and add no Retro turn. Their existing
+behaviour is unchanged; no inference path is added. Generic `/team thread`,
+the inventory reply count and `/team log` still disclose that a reply turn
+exists, never its values or whether it was a decline. Thread and View label
+it ` [retrospective reply — counted only in the report]`. The requesting host
+necessarily receives each reply from its sender's endpoint; no anonymity claim
+is made beyond the rendered surfaces.
 
 ## Per-item capabilities (Story 19.18c, 2026-09-30)
 

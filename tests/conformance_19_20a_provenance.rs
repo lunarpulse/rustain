@@ -71,6 +71,7 @@ async fn journal_rows_keep_unknown_defaults_and_survive_future_tokens() {
                     send_authorization,
                 },
                 1 => RoomEvent::RecipientItemReplied {
+                    retro: None,
                     address: TurnAddress::answering(
                         &address,
                         ReplyTurnId::from_replay("rr_answer"),

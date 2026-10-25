@@ -18,6 +18,9 @@ pub(super) enum StatusReport {
     },
     Nothing,
     Note(String),
+    /// Story 19.25 D8 — no served Status turn answers the item and the host
+    /// left turns out: the status may be among them.
+    Omitted,
     Unreadable,
 }
 
@@ -54,6 +57,9 @@ pub(super) fn report_for_item(thread: &ServedThread, item_id: &str) -> StatusRep
             }
             _ => {}
         }
+    }
+    if status.is_none() && thread.omitted_before > 0 {
+        return StatusReport::Omitted;
     }
     let note = match answer {
         Some(turn) => match &turn.content {
@@ -122,6 +128,10 @@ pub(super) fn render_status_row(out: &mut String, row: &ActionBoardRow, width: u
         }
         StatusReport::Unreadable => {
             details.push("status not readable by this build".to_owned());
+            details.push("Source: —".to_owned());
+        }
+        StatusReport::Omitted => {
+            details.push("status not among the turns this peer served".to_owned());
             details.push("Source: —".to_owned());
         }
         StatusReport::Note(note) => append_note(&mut details, note),
@@ -247,6 +257,7 @@ mod tests {
 
     fn reply(kind: ReplyKind, content: &str) -> ServedTurn {
         ServedTurn {
+            retro: None,
             turn_id: "reply".to_owned(),
             reply: true,
             task: None,
@@ -263,6 +274,7 @@ mod tests {
 
     fn status(statement: StatusStatement) -> ServedTurn {
         ServedTurn {
+            retro: None,
             status: Some(statement),
             authorship: Authorship::AgentComposed,
             ..reply(ReplyKind::Status, "never render this status body")
@@ -298,6 +310,60 @@ mod tests {
         let mut out = String::new();
         render_status_row(&mut out, row, row.alias.width());
         out
+    }
+
+    #[test]
+    fn story19_25_omitted_status_turn_is_not_definite() {
+        let report = report_for_item(
+            &ServedThread {
+                root: "item".to_owned(),
+                turns: vec![reply(ReplyKind::Answer, "own words")],
+                omitted_before: 1,
+                principal_collapsed: false,
+                principal_bound: true,
+            },
+            "item",
+        );
+        let text = render(&row(report));
+        assert!(
+            text.contains("status not among the turns this peer served"),
+            "{text}"
+        );
+        assert!(text.contains("Source: —"), "{text}");
+    }
+
+    /// D8 control: a served Status turn (or an Unknown newest reply) keeps
+    /// its precedence over the omission row.
+    #[test]
+    fn story19_25_served_status_wins_over_omitted_turns() {
+        let omitted = |turns: Vec<ServedTurn>| {
+            report_for_item(
+                &ServedThread {
+                    root: "item".to_owned(),
+                    turns,
+                    omitted_before: 4,
+                    principal_collapsed: false,
+                    principal_bound: true,
+                },
+                "item",
+            )
+        };
+        let shared = statement(StatusDisclosure::Status);
+        assert_eq!(
+            omitted(vec![status(shared.clone())]),
+            report(vec![status(shared)])
+        );
+        assert_eq!(
+            omitted(vec![reply(ReplyKind::Unknown, "x")]),
+            StatusReport::Unreadable
+        );
+        assert_eq!(omitted(vec![]), StatusReport::Omitted);
+        assert_eq!(
+            report(vec![]),
+            StatusReport::Awaiting {
+                defer_minutes: None
+            }
+        );
     }
 
     #[test]

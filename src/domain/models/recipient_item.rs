@@ -577,6 +577,7 @@ pub enum ReplyKind {
     #[default]
     Answer,
     Status,
+    Retro,
     Accept,
     Discuss,
     Defer {
@@ -597,6 +598,7 @@ impl ReplyKind {
         match self {
             Self::Answer => "answer",
             Self::Status => "status",
+            Self::Retro => "retro",
             Self::Accept => "accept",
             Self::Discuss => "discuss",
             Self::Defer { .. } => "defer",
@@ -630,6 +632,7 @@ impl Serialize for ReplyKind {
 enum Tag {
     Answer,
     Status,
+    Retro,
     Accept,
     Discuss,
     Defer,
@@ -661,6 +664,7 @@ impl<'de> Deserialize<'de> for LooseValue {
                 Ok(LooseValue::Tag(match value {
                     "answer" => Tag::Answer,
                     "status" => Tag::Status,
+                    "retro" => Tag::Retro,
                     "accept" => Tag::Accept,
                     "discuss" => Tag::Discuss,
                     "defer" => Tag::Defer,
@@ -672,6 +676,7 @@ impl<'de> Deserialize<'de> for LooseValue {
                 Ok(LooseValue::Tag(match value {
                     "answer" => Tag::Answer,
                     "status" => Tag::Status,
+                    "retro" => Tag::Retro,
                     "accept" => Tag::Accept,
                     "discuss" => Tag::Discuss,
                     "defer" => Tag::Defer,
@@ -783,6 +788,7 @@ impl<'de> Deserialize<'de> for ReplyKind {
                 match (tag, minutes) {
                     (Some(LooseValue::Tag(Tag::Answer)), None) => Ok(ReplyKind::Answer),
                     (Some(LooseValue::Tag(Tag::Status)), None) => Ok(ReplyKind::Status),
+                    (Some(LooseValue::Tag(Tag::Retro)), None) => Ok(ReplyKind::Retro),
                     (Some(LooseValue::Tag(Tag::Accept)), None) => Ok(ReplyKind::Accept),
                     (Some(LooseValue::Tag(Tag::Discuss)), None) => Ok(ReplyKind::Discuss),
                     (Some(LooseValue::Tag(Tag::Defer)), Some(LooseValue::Unsigned(value)))
@@ -845,6 +851,8 @@ pub struct ReplyTurnView {
     pub kind: ReplyKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<super::StatusStatement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retro: Option<super::RetroContribution>,
     /// The peer-response node whose card this turn resolved, when it came
     /// through a draft resolution (`Q1`). At most one turn per node.
     pub via_node: Option<AgentId>,

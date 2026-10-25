@@ -260,6 +260,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
     ));
 
     let replied = RoomEvent::RecipientItemReplied {
+        retro: None,
         address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_answer")),
         answers: address.item().clone(),
         content: "durable answer".to_owned(),
@@ -718,6 +719,7 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
     };
     let raw_reply = |id: &str| {
         serde_json::to_value(RoomEvent::RecipientItemReplied {
+            retro: None,
             address: TurnAddress::answering(&address, ReplyTurnId::from_replay(id)),
             answers: address.item().clone(),
             content: format!("body {id}"),
@@ -818,6 +820,7 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
         serde_json::json!({"type":"defer","minutes":30})
     );
     let answer_event = serde_json::to_value(RoomEvent::RecipientItemReplied {
+        retro: None,
         address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_default")),
         answers: address.item().clone(),
         content: "answer".to_owned(),
@@ -831,6 +834,7 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
     assert!(answer_event.get("kind").is_none(), "Answer remains omitted");
 
     let deferred_event = serde_json::to_value(RoomEvent::RecipientItemReplied {
+        retro: None,
         address: TurnAddress::answering(&address, ReplyTurnId::from_replay("rr_defer")),
         answers: address.item().clone(),
         content: "Busy — defer 30m".to_owned(),

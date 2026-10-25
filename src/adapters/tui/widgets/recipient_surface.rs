@@ -1,5 +1,7 @@
-use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
-use crate::domain::models::{ChatMessage, Conversation};
+use crate::adapters::tui::state::{
+    RecipientSurface, RecipientSurfaceAccess, RecipientSurfaceTarget,
+};
+use crate::domain::models::{ChatMessage, Conversation, RetroField, RetroFieldSet, RetroPreview};
 
 pub(crate) fn pinned_response<'a>(
     conversation: &'a Conversation,
@@ -29,6 +31,13 @@ pub(crate) enum RecipientSurfaceAction {
     /// Story 19.22 `AC4(c)` — `[y] Accept` when the list assigns a story to
     /// you; queues the Accept verdict frame directly.
     Accept,
+    /// Story 19.25 `AC3` — `[s] Share` the stored retrospective preview,
+    /// minus the fields left out.
+    RetroShare,
+    /// Story 19.25 `AC3` — `[1-3] Leave out` toggles one preview field.
+    RetroLeaveOut,
+    /// Story 19.25 `AC3` — `[n] Decline`, indistinguishable from nothing.
+    RetroDecline,
 }
 impl RecipientSurfaceAction {
     pub(crate) const fn key(self) -> char {
@@ -39,11 +48,21 @@ impl RecipientSurfaceAction {
             Self::Acknowledge => 'a',
             Self::Approve => 'y',
             Self::Edit => 'e',
-            Self::Reject | Self::Decline | Self::DeclineStatus => 'n',
-            Self::ShareStatus => 's',
+            Self::Reject | Self::Decline | Self::DeclineStatus | Self::RetroDecline => 'n',
+            Self::ShareStatus | Self::RetroShare => 's',
+            Self::RetroLeaveOut => '1',
             Self::Context => 'c',
             Self::DiscussConcerns => 'd',
             Self::Accept => 'y',
+        }
+    }
+
+    /// Whether `key` triggers this action: `[1-3] Leave out` owns three
+    /// digits, one per `RetroField::ALL` entry; every other action one key.
+    pub(crate) fn accepts(self, key: char) -> bool {
+        match self {
+            Self::RetroLeaveOut => retro_field_for_key(key).is_some(),
+            _ => key == self.key(),
         }
     }
 
@@ -62,8 +81,117 @@ impl RecipientSurfaceAction {
             Self::Context => "[c] Use as context",
             Self::DiscussConcerns => "[d] Discuss concerns",
             Self::Accept => "[y] Accept",
+            Self::RetroShare => "[s] Share",
+            Self::RetroLeaveOut => "[1-3] Leave out",
+            Self::RetroDecline => "[n] Decline",
         }
     }
+}
+
+/// Story 19.25 `AC3` — the manifest field a `[1-3] Leave out` digit names.
+pub(crate) fn retro_field_for_key(key: char) -> Option<RetroField> {
+    let index = key.to_digit(10)?.checked_sub(1)?;
+    RetroField::ALL.get(usize::try_from(index).ok()?).copied()
+}
+
+/// Story 19.25 `AC3` — the persisted preview a retro surface acts on: a
+/// non-removed `retro_request` item whose pinned control awaits the operator
+/// with a stored preview (restored cards included, the 19-24 BH-1 rule).
+pub(crate) fn retro_preview<'a>(
+    conversation: &'a Conversation,
+    surface: &RecipientSurface,
+) -> Option<&'a RetroPreview> {
+    if !matches!(surface.target, RecipientSurfaceTarget::Item(_))
+        || surface.item_state == Some("removed")
+        || surface.message_type != crate::domain::models::SemanticMessageType::RetroRequest
+    {
+        return None;
+    }
+    let (_, control) = pinned_response(conversation, surface.node_id.as_deref()?)?;
+    if control.stage != crate::domain::models::PeerRowStage::AwaitingOperator {
+        return None;
+    }
+    control.retro.as_ref()
+}
+
+/// Story 19.25 `AC3` — the preview plus this client's leave-out overlay.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RetroOverlay<'a> {
+    pub(crate) preview: &'a RetroPreview,
+    pub(crate) left_out: Option<&'a RetroFieldSet>,
+}
+
+/// Story 19.25 `AC3` — borrows only the conversation and the overlay map, so
+/// the caller may still borrow the surface mutably to render it.
+pub(crate) fn retro_overlay<'a>(
+    conversation: &'a Conversation,
+    surface: &RecipientSurface,
+    left_out: &'a std::collections::HashMap<String, RetroFieldSet>,
+) -> Option<RetroOverlay<'a>> {
+    let preview = retro_preview(conversation, surface)?;
+    let RecipientSurfaceTarget::Item(address) = &surface.target else {
+        return None;
+    };
+    Some(RetroOverlay {
+        preview,
+        left_out: left_out.get(address.item().as_str()),
+    })
+}
+
+/// Story 19.25 `AC2`/`AC3` — the preview's unwrapped text lines, shared by
+/// the pending card and the item surface: header (or the nothing line),
+/// one line per field (`left out` when deselected), then the `Not shared:`
+/// line with the left-out names prepended.
+pub(crate) fn retro_preview_lines(
+    preview: &RetroPreview,
+    left_out: Option<&RetroFieldSet>,
+) -> Vec<String> {
+    use crate::domain::models::NOT_SHARED_RETRO;
+    let mut lines = Vec::with_capacity(RetroField::ALL.len() + 2);
+    let mut not_shared = String::from("Not shared: ");
+    if preview.nothing_in_window {
+        lines.push(
+            "Shares nothing: no team messages reached this host in the last 14 days".to_owned(),
+        );
+    } else {
+        lines.push("Shares (last 14 days):".to_owned());
+        for ((index, field), text) in RetroField::ALL
+            .into_iter()
+            .enumerate()
+            .zip(preview.contribution.text_lines())
+        {
+            if left_out.is_some_and(|set| set.contains(&field)) {
+                lines.push(format!("[{}] {}: left out", index + 1, field.label()));
+                not_shared.push_str(field.label());
+                not_shared.push_str(" · ");
+            } else {
+                lines.push(text);
+            }
+        }
+    }
+    not_shared.push_str(
+        NOT_SHARED_RETRO
+            .strip_prefix("Not shared: ")
+            .unwrap_or(NOT_SHARED_RETRO),
+    );
+    lines.push(not_shared);
+    lines
+}
+
+/// Story 19.25 — footer-mask bits of the retrospective overlay: bit 23 when
+/// the preview is shown, bits 24–26 per left-out `RetroField::ALL` entry.
+/// Disjoint from the action bits below and the five flags at 27–31.
+const RETRO_OVERLAY_BITS: u32 = 0b1111 << 23;
+
+fn retro_overlay_bits(overlay: Option<&RetroOverlay<'_>>) -> u32 {
+    let Some(overlay) = overlay else {
+        return 0;
+    };
+    RetroField::ALL
+        .into_iter()
+        .enumerate()
+        .filter(|(_, field)| overlay.left_out.is_some_and(|set| set.contains(field)))
+        .fold(1 << 23, |bits, (index, _)| bits | (1 << (24 + index)))
 }
 pub(crate) fn recipient_surface_actions(
     state: &crate::adapters::tui::state::TuiState,
@@ -170,6 +298,14 @@ pub(crate) fn recipient_surface_actions(
         actions[2] = Some(RecipientSurfaceAction::ShareStatus);
         actions[4] = Some(RecipientSurfaceAction::DeclineStatus);
     }
+    // Story 19.25 `AC3` — the same rule for the retrospective preview: `[s]
+    // Share` (with any redactions), `[1-3] Leave out`, `[n] Decline`.
+    if retro_preview(conversation, surface).is_some() {
+        actions[1] = Some(RecipientSurfaceAction::Busy);
+        actions[2] = Some(RecipientSurfaceAction::RetroShare);
+        actions[3] = Some(RecipientSurfaceAction::RetroLeaveOut);
+        actions[4] = Some(RecipientSurfaceAction::RetroDecline);
+    }
     if matches!(surface.target, RecipientSurfaceTarget::Item(_))
         && (surface.context_available || surface.context_selected)
     {
@@ -189,6 +325,11 @@ pub(crate) fn recipient_surface_actions(
             RecipientSurfaceAction::ShareStatus | RecipientSurfaceAction::DeclineStatus => {
                 RecipientAction::ShareStatus
             }
+            // Toggles are suppressed too: the overlay never changes while
+            // the act built from it is in flight.
+            RecipientSurfaceAction::RetroShare
+            | RecipientSurfaceAction::RetroLeaveOut
+            | RecipientSurfaceAction::RetroDecline => RecipientAction::ShareRetro,
             RecipientSurfaceAction::Context if surface.context_selected => {
                 RecipientAction::ContextRemove
             }
@@ -246,6 +387,7 @@ pub(crate) fn render_recipient_surface(
         crate::adapters::tui::state::RecipientActionState,
     >,
     actions: &[Option<RecipientSurfaceAction>; 6],
+    retro: Option<RetroOverlay<'_>>,
     read_only: bool,
     theme: &crate::adapters::tui::theme::Theme,
 ) {
@@ -261,24 +403,51 @@ pub(crate) fn render_recipient_surface(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width_changed = surface.cached_width != inner.width;
-    if width_changed {
-        surface.cached_lines = surface
-            .content
-            .split('\n')
-            .chain(surface.results.iter().flat_map(|result| result.split('\n')))
-            .flat_map(|line| {
-                wrap_recipient_line(
-                    line,
-                    usize::from(inner.width),
-                    0,
-                    if line.starts_with("      ") {
-                        theme.colors.fg_primary
-                    } else {
-                        theme.colors.fg_secondary
-                    },
-                )
-            })
-            .collect();
+    let action_mask = actions.iter().flatten().fold(
+        // Story 19.22 — `u32`: action discriminants from bit 0 plus the five
+        // flags packed at bits 27–31; Story 19.25's overlay sits at 23–26.
+        (u32::from(read_only) << 31)
+            | (u32::from(surface.access == RecipientSurfaceAccess::LocalOnly) << 30)
+            | (u32::from(surface.omitted_before > 0) << 29)
+            | (u32::from(surface.omitted_after > 0) << 28)
+            | (u32::from(surface.context_selected) << 27)
+            | retro_overlay_bits(retro.as_ref()),
+        |mask, action| mask | (1 << (*action as u8)),
+    );
+    // Story 19.25 — a toggled field re-renders the body's preview lines.
+    let retro_changed = (surface.cached_action_mask ^ action_mask) & RETRO_OVERLAY_BITS != 0;
+    if width_changed || retro_changed {
+        let width = usize::from(inner.width);
+        let paint = |line: &str| {
+            wrap_recipient_line(
+                line,
+                width,
+                0,
+                if line.starts_with("      ") {
+                    theme.colors.fg_primary
+                } else {
+                    theme.colors.fg_secondary
+                },
+            )
+        };
+        surface.cached_lines = surface.content.split('\n').flat_map(paint).collect();
+        if let Some(overlay) = retro {
+            for text in retro_preview_lines(overlay.preview, overlay.left_out) {
+                surface.cached_lines.extend(wrap_recipient_line(
+                    &text,
+                    width,
+                    2,
+                    theme.colors.fg_primary,
+                ));
+            }
+        }
+        surface.cached_lines.extend(
+            surface
+                .results
+                .iter()
+                .flat_map(|result| result.split('\n'))
+                .flat_map(paint),
+        );
         for notice in crate::adapters::tui::handlers::recipient_actions::surface_action_notices(
             notices,
             &surface.target,
@@ -322,16 +491,9 @@ pub(crate) fn render_recipient_surface(
             .collect();
         surface.cached_width = inner.width;
     }
-    let action_mask = actions.iter().flatten().fold(
-        // Story 19.22 — `u32`: 13 action discriminants (bits 0–12) plus the
-        // five flags now packed at bits 27–31.
-        (u32::from(read_only) << 31)
-            | (u32::from(surface.access == RecipientSurfaceAccess::LocalOnly) << 30)
-            | (u32::from(surface.omitted_before > 0) << 29)
-            | (u32::from(surface.omitted_after > 0) << 28)
-            | (u32::from(surface.context_selected) << 27),
-        |mask, action| mask | (1 << (*action as u8)),
-    );
+    let redacted = retro
+        .and_then(|overlay| overlay.left_out)
+        .is_some_and(|set| !set.is_empty());
     if width_changed || surface.cached_action_mask != action_mask {
         let mut footer = String::new();
         if surface.access == RecipientSurfaceAccess::LocalOnly {
@@ -343,13 +505,13 @@ pub(crate) fn render_recipient_surface(
                 if !footer.is_empty() {
                     footer.push_str("  ");
                 }
-                footer.push_str(
-                    if *action == RecipientSurfaceAction::Context && surface.context_selected {
+                footer.push_str(match action {
+                    RecipientSurfaceAction::Context if surface.context_selected => {
                         "[c] Stop using as context"
-                    } else {
-                        action.hint()
-                    },
-                );
+                    }
+                    RecipientSurfaceAction::RetroShare if redacted => "[s] Share with redactions",
+                    _ => action.hint(),
+                });
             }
             footer.push('\n');
         }
@@ -482,8 +644,9 @@ mod tests {
         assert_eq!(RecipientSurfaceAction::DeclineStatus.hint(), "[n] Decline");
     }
 
-    // Story 19.22 `AC4(c)` — 13 action discriminants plus the five footer
-    // flag bits must stay disjoint inside a `u32` (the old `u16` collided).
+    // Story 19.22 `AC4(c)` — action discriminants plus the five footer flag
+    // bits must stay disjoint inside a `u32` (the old `u16` collided); Story
+    // 19.25 adds three actions and the four overlay bits at 23–26.
     #[test]
     fn story19_22_action_bits_leave_room_for_the_five_flag_bits() {
         let actions = [
@@ -500,16 +663,27 @@ mod tests {
             RecipientSurfaceAction::Context,
             RecipientSurfaceAction::DiscussConcerns,
             RecipientSurfaceAction::Accept,
+            RecipientSurfaceAction::RetroShare,
+            RecipientSurfaceAction::RetroLeaveOut,
+            RecipientSurfaceAction::RetroDecline,
         ];
         let mut bits = std::collections::BTreeSet::new();
         for action in actions {
             assert!(
-                (action as u8) < 27,
-                "{} crosses the flag band",
+                (action as u8) < 23,
+                "{} crosses the overlay band",
                 action as u8
             );
             assert!(bits.insert(1u32 << (action as u8)), "duplicate bit");
         }
+        for overlay in 23u8..=26 {
+            assert!(
+                bits.insert(1u32 << overlay),
+                "overlay bit {overlay} collides"
+            );
+            assert_ne!(super::RETRO_OVERLAY_BITS & (1u32 << overlay), 0);
+        }
+        assert_eq!(super::RETRO_OVERLAY_BITS.count_ones(), 4);
         for flag in [27u8, 28, 29, 30, 31] {
             assert!(bits.insert(1u32 << flag), "flag bit {flag} collides");
         }
@@ -520,5 +694,50 @@ mod tests {
         );
         assert_eq!(RecipientSurfaceAction::Accept.key(), 'y');
         assert_eq!(RecipientSurfaceAction::Accept.hint(), "[y] Accept");
+    }
+
+    #[test]
+    fn story19_25_retro_action_keys_labels_and_overlay_bits_are_exact() {
+        use crate::domain::models::{RetroContribution, RetroField, RetroFieldSet, RetroPreview};
+        assert_eq!(RecipientSurfaceAction::RetroShare.key(), 's');
+        assert_eq!(RecipientSurfaceAction::RetroShare.hint(), "[s] Share");
+        assert_eq!(RecipientSurfaceAction::RetroDecline.key(), 'n');
+        assert_eq!(RecipientSurfaceAction::RetroDecline.hint(), "[n] Decline");
+        assert_eq!(
+            RecipientSurfaceAction::RetroLeaveOut.hint(),
+            "[1-3] Leave out"
+        );
+        for (key, field) in ['1', '2', '3'].into_iter().zip(RetroField::ALL) {
+            assert!(RecipientSurfaceAction::RetroLeaveOut.accepts(key));
+            assert_eq!(super::retro_field_for_key(key), Some(field));
+        }
+        for key in ['0', '4', '9', 's', 'n'] {
+            assert!(!RecipientSurfaceAction::RetroLeaveOut.accepts(key), "{key}");
+            assert_eq!(super::retro_field_for_key(key), None);
+        }
+        assert!(RecipientSurfaceAction::RetroShare.accepts('s'));
+        assert!(!RecipientSurfaceAction::RetroShare.accepts('1'));
+        assert!(RecipientSurfaceAction::RetroDecline.accepts('n'));
+
+        let preview = RetroPreview {
+            contribution: RetroContribution::nothing(),
+            nothing_in_window: false,
+        };
+        assert_eq!(super::retro_overlay_bits(None), 0);
+        let plain = super::RetroOverlay {
+            preview: &preview,
+            left_out: None,
+        };
+        assert_eq!(super::retro_overlay_bits(Some(&plain)), 1 << 23);
+        let mut seen = std::collections::BTreeSet::new();
+        for field in RetroField::ALL {
+            let set: RetroFieldSet = [field].into_iter().collect();
+            let bits = super::retro_overlay_bits(Some(&super::RetroOverlay {
+                preview: &preview,
+                left_out: Some(&set),
+            }));
+            assert_eq!(bits & !super::RETRO_OVERLAY_BITS, 0);
+            assert!(seen.insert(bits), "each field changes the cache key");
+        }
     }
 }

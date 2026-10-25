@@ -373,6 +373,9 @@ fn semantic_type_token(kind: SemanticMessageType) -> &'static str {
     crate::domain::models::semantic_message_type_metadata(kind).token
 }
 
+/// Story 19.25 `D10` — a Retro turn's View marker; never its values or a decline.
+const RETRO_SUFFIX: &str = " [retrospective reply — counted only in the report]";
+
 fn turn_cost(turn: &ThreadTurnRef<'_>, opened: bool) -> TurnCost {
     match turn {
         ThreadTurnRef::Item(item) => {
@@ -432,6 +435,7 @@ fn turn_cost(turn: &ThreadTurnRef<'_>, opened: bool) -> TurnCost {
                             + level.as_str().len()
                             + "]".len()
                     }),
+                ReplyKind::Retro => RETRO_SUFFIX.len(),
                 ReplyKind::Unknown => "[reply kind not recognised]".len(),
             };
             let metadata = 2
@@ -528,6 +532,7 @@ fn append_turn(output: &mut String, turn: &ThreadTurnRef<'_>, include_body: bool
                         output.push_str(" [no status shared]");
                     }
                 }
+                ReplyKind::Retro => output.push_str(RETRO_SUFFIX),
                 ReplyKind::Unknown => output.push_str("[reply kind not recognised]"),
             }
             let _ = write!(output, " · {}", reply.answers.as_str());
@@ -641,6 +646,12 @@ mod tests {
             ),
             (ReplyKind::Status, None, " [no status shared]"),
             (ReplyKind::Unknown, None, "[reply kind not recognised]"),
+            // Story 19.25 `D10` — Retro renders and charges its marker only.
+            (
+                ReplyKind::Retro,
+                None,
+                " [retrospective reply — counted only in the report]",
+            ),
         ] {
             let mut reply = ReplyTurnView {
                 address: TurnAddress::answering(&item, ReplyTurnId::from_replay("rr_status")),
@@ -649,6 +660,13 @@ mod tests {
                 authorship: Authorship::HumanWritten,
                 kind,
                 status,
+                retro: matches!(kind, ReplyKind::Retro).then(|| {
+                    crate::domain::models::RetroContribution {
+                        received: [("consultation".to_owned(), 987_654)].into_iter().collect(),
+                        reply_minutes: vec![123_457],
+                        ack_minutes: vec![765_432],
+                    }
+                }),
                 via_node: None,
                 journal_order: 1,
             };
@@ -662,6 +680,9 @@ mod tests {
                 let mut metadata = String::new();
                 append_turn(&mut metadata, &turn, false);
                 assert_eq!(metadata, expected);
+                for leaked in ["987654", "123457", "765432", "consultation", "declin"] {
+                    assert!(!metadata.contains(leaked), "{metadata}");
+                }
                 assert_eq!(metadata.len(), turn_cost(&turn, false).metadata);
                 metadata.push('\n');
                 assert_eq!(metadata.len(), turn_cost(&turn, true).full);

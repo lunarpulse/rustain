@@ -802,13 +802,20 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
             authorship,
             kind,
             status,
+            retro,
             via_node,
             ..
         } => {
             let parsed_status = status
                 .as_ref()
                 .and_then(crate::domain::models::StatusStatement::from_wire);
-            let kind = if status.is_some() && parsed_status.is_none() {
+            let parsed_retro = retro
+                .as_ref()
+                .and_then(crate::domain::models::RetroContribution::from_wire);
+            let kind = if (status.is_some() && parsed_status.is_none())
+                || (retro.is_some() && parsed_retro.is_none())
+                || (*kind == ReplyKind::Retro && parsed_retro.is_none())
+            {
                 ReplyKind::Unknown
             } else {
                 *kind
@@ -823,6 +830,7 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
                     authorship: *authorship,
                     kind,
                     status: parsed_status,
+                    retro: parsed_retro,
                     via_node: via_node.clone(),
                     journal_order: order,
                 });
@@ -848,6 +856,39 @@ fn touched_item_address(event: &RoomEvent) -> Option<&ItemAddress> {
 mod tests {
     use super::*;
     use crate::domain::models::{ItemId, PeerId};
+
+    #[test]
+    fn story19_25_journal_retro_round_trip_and_tolerance() {
+        let legacy = r#"{"event":"recipient_item_replied","address":{"principal":{"kind":"unknown"},"turn":"rr_old"},"answers":"ri_old","content":"answer","authorship":"human-written"}"#;
+        let old: RoomEvent = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&old).unwrap(), legacy);
+        let mut raw: serde_json::Value = serde_json::from_str(legacy).unwrap();
+        raw["kind"] = serde_json::json!({"type":"retro"});
+        raw["retro"] = serde_json::json!({});
+        let event: RoomEvent = serde_json::from_value(raw.clone()).unwrap();
+        let projection = JournalRecipientItemProjection::from_entries(&[entry(1, event)]);
+        let snapshot = projection.snapshot();
+        let turn = snapshot.replies.values().next().unwrap();
+        assert_eq!(turn.kind.wire_name(), "retro");
+        assert_eq!(
+            serde_json::to_value(turn).unwrap()["retro"],
+            serde_json::json!({})
+        );
+        for bad in [
+            serde_json::Value::Null,
+            serde_json::json!({"replyTimes":[2,1]}),
+            serde_json::json!({"received":{}}),
+        ] {
+            raw["retro"] = bad;
+            let event: RoomEvent =
+                serde_json::from_value(raw.clone()).expect("not a corrupt journal line");
+            let projection = JournalRecipientItemProjection::from_entries(&[entry(1, event)]);
+            assert_eq!(
+                projection.snapshot().replies.values().next().unwrap().kind,
+                ReplyKind::Unknown
+            );
+        }
+    }
 
     #[test]
     fn every_item_state_change_routes_through_the_instrumented_transition() {
@@ -1193,6 +1234,7 @@ mod tests {
             send_authorization: crate::domain::models::SendAuthorization::Unknown,
         };
         let reply = |turn: &str, kind: ReplyKind| RoomEvent::RecipientItemReplied {
+            retro: None,
             address: TurnAddress::answering(
                 &address,
                 crate::domain::models::ReplyTurnId::from_replay(turn),
@@ -1439,6 +1481,7 @@ mod tests {
                 send_authorization: crate::domain::models::SendAuthorization::Unknown,
             };
         let reply = |answered: &str, turn: &str| RoomEvent::RecipientItemReplied {
+            retro: None,
             address: TurnAddress::answering(
                 &ItemAddress::from_a2a_ingress(asker.clone(), ItemId::from_replay(answered)),
                 ReplyTurnId::from_replay(turn),

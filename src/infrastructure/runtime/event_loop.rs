@@ -9356,7 +9356,7 @@ fn render(
                 if !recipient_blocked {
                     if let Some(surface) = state.recipient_surface.as_mut() {
                         crate::adapters::tui::widgets::recipient_surface::render_recipient_surface(
-                            frame, app_layout.chat_pane, surface, &state.recipient_actions, &[None; 6], true, theme,
+                            frame, app_layout.chat_pane, surface, &state.recipient_actions, &[None; 6], None, true, theme,
                         );
                     }
                 }

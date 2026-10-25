@@ -153,6 +153,7 @@ pub(crate) enum DraftState {
         authorship: Authorship,
         send_authorization: SendAuthorization,
         status: Option<crate::domain::models::StatusStatement>,
+        retro: Option<crate::domain::models::RetroContribution>,
         /// Story 19.22 `AC4b` — the one kind source: decided by the
         /// resolution, carried by the sent state, forwarded to the reply turn
         /// (through both cfg variants of `reply_turn_for_resolution`).
@@ -179,6 +180,7 @@ pub(crate) enum DraftResolution {
     /// for a verdict reply that resolves the pending list card.
     WriteOwn(String, crate::domain::models::ReplyKind),
     ShareStatus(crate::domain::models::StatusStatement),
+    ShareRetro(crate::domain::models::RetroContribution),
 }
 
 #[derive(Default)]
@@ -246,6 +248,7 @@ impl PendingDraftController {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                retro: None,
                 kind: crate::domain::models::ReplyKind::Answer,
             },
             DraftResolution::Edit(edited) => DraftState::Sent {
@@ -253,6 +256,7 @@ impl PendingDraftController {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                retro: None,
                 kind: crate::domain::models::ReplyKind::Answer,
             },
             DraftResolution::Reject => DraftState::Rejected,
@@ -261,6 +265,7 @@ impl PendingDraftController {
                 authorship: Authorship::HumanWritten,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                retro: None,
                 kind,
             },
             DraftResolution::ShareStatus(statement) => DraftState::Sent {
@@ -268,7 +273,16 @@ impl PendingDraftController {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: Some(statement),
+                retro: None,
                 kind: crate::domain::models::ReplyKind::Status,
+            },
+            DraftResolution::ShareRetro(contribution) => DraftState::Sent {
+                content: crate::domain::models::RETRO_REPLY_TEXT.to_owned(),
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
+                kind: crate::domain::models::ReplyKind::Retro,
+                status: None,
+                retro: Some(contribution),
             },
         };
         *state = next;
@@ -336,6 +350,7 @@ mod tests {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                retro: None,
                 kind: crate::domain::models::ReplyKind::Answer,
             })
         );
@@ -346,6 +361,7 @@ mod tests {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                retro: None,
                 kind: crate::domain::models::ReplyKind::Answer,
             }),
             "a settled resolution is idempotent"
@@ -372,6 +388,7 @@ mod tests {
                 authorship: Authorship::HumanWritten,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                retro: None,
                 kind: crate::domain::models::ReplyKind::Answer,
             })
         );
@@ -391,6 +408,7 @@ mod tests {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: None,
+                retro: None,
                 kind: crate::domain::models::ReplyKind::Answer,
             })
         );
@@ -553,11 +571,42 @@ mod tests {
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
                 status: Some(statement),
+                retro: None,
                 kind: crate::domain::models::ReplyKind::Status,
             }
         );
         assert_eq!(
             controller.resolve("status", DraftResolution::Reject).await,
+            Some(sent)
+        );
+    }
+
+    #[tokio::test]
+    async fn story19_25_retro_resolution_carries_only_canonical_human_decided_payload() {
+        use crate::domain::models::{RETRO_REPLY_TEXT, ReplyKind, RetroContribution};
+        let controller = PendingDraftController::default();
+        let contribution =
+            RetroContribution::from_wire(&serde_json::json!({"received":{"consultation":1}}))
+                .unwrap();
+        assert!(controller.begin("retro").await);
+        assert!(controller.complete("retro", "must not be sent").await);
+        let sent = controller
+            .resolve("retro", DraftResolution::ShareRetro(contribution.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            sent,
+            DraftState::Sent {
+                content: RETRO_REPLY_TEXT.to_owned(),
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
+                kind: ReplyKind::Retro,
+                status: None,
+                retro: Some(contribution),
+            }
+        );
+        assert_eq!(
+            controller.resolve("retro", DraftResolution::Reject).await,
             Some(sent)
         );
     }

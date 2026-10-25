@@ -1156,6 +1156,18 @@ impl RecipientHost {
         Self::start_on_with_journal_and_policy(listener, admission, journal, None, Some(policy))
             .await
     }
+    pub async fn start_with_clock_and_policy(
+        admission: A2aAdmissionPolicy,
+        clock: Arc<rustain::domain::clock::MockClock>,
+        policy: Arc<rustain::domain::models::EffectivePolicy>,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind clocked recipient");
+        let journal = Journal::open_with_clock(clock).await;
+        Self::start_on_with_journal_and_policy(listener, admission, journal, None, Some(policy))
+            .await
+    }
     pub async fn start_on(
         listener: TcpListener,
         admission: A2aAdmissionPolicy,

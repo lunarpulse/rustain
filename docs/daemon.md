@@ -488,7 +488,7 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v14**; a client speaking another version
+attach handshake negotiates **protocol v15**; a client speaking another version
 receives `VersionMismatch` before proof verification, registration or other
 attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
@@ -712,4 +712,28 @@ Comparison is explicit `[c] Use as context` plus a local turn; questions are
 ordinary consultation sends. Older attach versions are refused before proof
 verification because they could silently discard the selector.
 See [Sending to story holders](a2a.md#sending-to-story-holders-story-1923).
+
+Protocol v15 (Story 19.25): `ShareRecipientRetro`; `PeerRowControl` carries the
+arrival-time retrospective preview. Only a trusted-local writer can Share,
+leave fields out, or Decline a NotifyAndWait `retro_request`. The frame carries
+an item id, a closed leave-out field list and a decline flag, never client-chosen
+facts. Read-only/Peer-tier, removed/wrong-type items, absent previews and a
+decline with fields are refused before mutation.
+
+Both decisions append one human-decided, agent-composed Retro reply per item.
+An equal retry completes a failed card save or repairs an orphan without a
+second turn; conflicting content, kind, status or retrospective payload cannot
+replace a durable reply. Decline, no facts and every field left out have the
+same canonical empty contribution and `Retrospective reply.` text. NotifyAndAuto
+and NotifyAndDraft prepare no retro preview and add no Retro turn.
+
+The aggregate report replaces retro distribution rows; send rows on standalone,
+attached and CLI rails mask Delivered/Declined/AwaitingApproval as `sent` (the
+CLI exit status included).
+Generic thread/View surfaces disclose only a retrospective reply marker, not
+values or a decline. Contributions use the ordinary content-withholding gate.
+Status reports now disclose when the served thread window may omit a Status
+reply instead of claiming a definite empty/Answer-only status.
+See [Sharing a retrospective](a2a.md#sharing-a-retrospective-story-1925) for the
+fixed received-side manifest, 14-day bounds and transport/privacy limits.
 

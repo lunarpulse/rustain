@@ -122,6 +122,7 @@ async fn k01_plain_send_through_real_binary_and_daemon() {
     let rows = render_team_send_rows(&[TeamSendRow {
         alias: "lena-po".into(),
         outcome: Some(RecipientOutcome::Delivered),
+        message_type: rustain::domain::models::SemanticMessageType::Unknown,
     }]);
     assert!(stdout.ends_with(&format!("{rows}\n")), "{stdout}");
     assert_eq!(host.counts(), HttpCounts { get: 0, post: 1 });

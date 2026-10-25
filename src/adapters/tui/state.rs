@@ -319,8 +319,8 @@ pub struct RecipientSurface {
     pub cached_lines: Vec<ratatui::text::Line<'static>>,
     pub cached_header: Vec<ratatui::text::Line<'static>>,
     pub cached_footer: Vec<ratatui::text::Line<'static>>,
-    /// Story 19.22 — widened to `u32`: 13 action bits (0–12) plus five flag
-    /// bits at 27–31 no longer fit a `u16`.
+    /// Story 19.22 — widened to `u32`: action bits from 0 plus five flag
+    /// bits at 27–31; Story 19.25 adds the retrospective overlay at 23–26.
     pub cached_action_mask: u32,
     pub results: Vec<String>,
 }
@@ -2502,6 +2502,9 @@ pub struct TuiState {
         RecipientActionState,
     >,
     pub recipient_context_ids: std::collections::BTreeSet<String>,
+    /// Story 19.25 `AC3` — client-local fields left out of a retrospective
+    /// preview, per item id. Cleared when the act settles or the card leaves.
+    pub retro_left_out: HashMap<String, crate::domain::models::RetroFieldSet>,
     pub needs_redraw: bool,
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -3100,6 +3103,7 @@ impl TuiState {
             pinned_peer_compose: None,
             recipient_actions: BTreeMap::new(),
             recipient_context_ids: std::collections::BTreeSet::new(),
+            retro_left_out: HashMap::new(),
             needs_redraw: true,
             terminal_width: width,
             terminal_height: height,

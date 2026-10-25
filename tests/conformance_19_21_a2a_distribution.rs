@@ -101,6 +101,20 @@ mod k07_k08_recipient;
 #[allow(clippy::duplicate_mod)] // private copy per root, as when each root was its own crate
 #[path = "conformance_19_21b/observed_host.rs"]
 mod observed_host;
+#[path = "conformance_19_25/r_harness.rs"]
+mod r_harness;
+#[path = "conformance_19_25/r_k01_share.rs"]
+mod r_k01_share;
+#[path = "conformance_19_25/r_k02_identity.rs"]
+mod r_k02_identity;
+#[path = "conformance_19_25/r_k02_uniform.rs"]
+mod r_k02_uniform;
+#[path = "conformance_19_25/r_k03_bounds.rs"]
+mod r_k03_bounds;
+#[path = "conformance_19_25/r_k04_tolerance.rs"]
+mod r_k04_tolerance;
+#[path = "conformance_19_25/r_k05_gates.rs"]
+mod r_k05_gates;
 #[path = "conformance_19_24/s_harness.rs"]
 mod s_harness;
 #[path = "conformance_19_24/s_k01_share.rs"]

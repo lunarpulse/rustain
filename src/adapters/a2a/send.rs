@@ -1203,6 +1203,9 @@ pub struct ServedTurn {
     pub content_hash: Option<crate::domain::models::ContentHash>,
     pub kind: crate::domain::models::ReplyKind,
     pub status: Option<crate::domain::models::StatusStatement>,
+    /// A `retro` turn's validated contribution; `None` when withheld or
+    /// past this host's body bound.
+    pub retro: Option<crate::domain::models::RetroContribution>,
     pub authorship: crate::domain::models::Authorship,
     pub retracted_at_ms: Option<i64>,
 }
@@ -1351,7 +1354,9 @@ fn transport_failure(error: &A2aError) -> RecipientOutcome {
 /// over `MAX_PEER_ID_BYTES`, or a kind this build cannot name — ⛔ never
 /// rendered as if it were a partial thread.
 pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
-    use crate::domain::models::{Authorship, MAX_REPLY_BYTES, ReplyKind, StatusStatement};
+    use crate::domain::models::{
+        Authorship, MAX_REPLY_BYTES, ReplyKind, RetroContribution, StatusStatement,
+    };
 
     let bounded = |value: Option<&serde_json::Value>| {
         value
@@ -1380,6 +1385,14 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
         let parsed_status = turn.get("status").map(StatusStatement::from_wire);
         let malformed_status = matches!(parsed_status, Some(None));
         let status = parsed_status.flatten().filter(|_| content.is_some());
+        let retro_kind = turn.get("replyKind").and_then(serde_json::Value::as_str) == Some("retro");
+        // Only a `retro` turn reads the payload; a missing or malformed one
+        // names nothing this build can trust.
+        let parsed_retro = retro_kind
+            .then(|| turn.get("retro").and_then(RetroContribution::from_wire))
+            .flatten();
+        let malformed_retro = retro_kind && parsed_retro.is_none();
+        let retro = parsed_retro.filter(|_| content.is_some());
         turns.push(ServedTurn {
             turn_id,
             reply,
@@ -1389,11 +1402,12 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
             content,
             content_hash,
             status,
+            retro,
             authorship: turn
                 .get("authorship")
                 .and_then(serde_json::Value::as_str)
                 .map_or(Authorship::Unknown, Authorship::from_wire),
-            kind: if malformed_status {
+            kind: if malformed_status || malformed_retro {
                 ReplyKind::Unknown
             } else {
                 match turn.get("replyKind") {
@@ -1403,6 +1417,7 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
                         "accept" => ReplyKind::Accept,
                         "discuss" => ReplyKind::Discuss,
                         "status" => ReplyKind::Status,
+                        "retro" => ReplyKind::Retro,
                         "defer" => {
                             match turn.get("deferMinutes").and_then(serde_json::Value::as_u64) {
                                 Some(minutes) if (1..=u64::from(u16::MAX)).contains(&minutes) => {
@@ -1594,6 +1609,121 @@ mod tests {
         .expect("legacy defer");
         assert_eq!(thread.turns[0].kind, ReplyKind::Defer { minutes: 30 });
         assert_eq!(thread.turns[0].status, None);
+    }
+
+    fn parse_retro_turn(
+        kind: Option<&str>,
+        retro: Option<serde_json::Value>,
+        content: Option<&str>,
+    ) -> super::ServedTurn {
+        let mut turn = serde_json::json!({"turnId":"rr_retro", "kind":"reply"});
+        if let Some(kind) = kind {
+            turn["replyKind"] = serde_json::json!(kind);
+        }
+        if let Some(retro) = retro {
+            turn["retro"] = retro;
+        }
+        if let Some(content) = content {
+            turn["content"] = serde_json::json!(content);
+        }
+        parse_thread(&serde_json::json!({"root":"ri_q", "turns":[turn]}))
+            .expect("an additive retro payload cannot refuse a thread")
+            .turns
+            .remove(0)
+    }
+
+    #[test]
+    fn story19_25_valid_retro_is_typed_through_from_wire() {
+        use crate::domain::models::{
+            MAX_REPLY_BYTES, RETRO_REPLY_TEXT, ReplyKind, RetroContribution,
+        };
+
+        for wire in [
+            serde_json::json!({}),
+            serde_json::json!({"received":{"consultation":3},"replyTimes":[4,25,90],"ackTimes":[60]}),
+            serde_json::json!({"received":{"other":1}}),
+            serde_json::json!({"replyTimes":[0,20160]}),
+            serde_json::json!({"ackTimes":[5,5]}),
+        ] {
+            let turn = parse_retro_turn(Some("retro"), Some(wire.clone()), Some(RETRO_REPLY_TEXT));
+            assert_eq!(turn.kind, ReplyKind::Retro, "{wire}");
+            let expected = RetroContribution::from_wire(&wire).unwrap();
+            assert_eq!(turn.retro.as_ref(), Some(&expected), "{wire}");
+            assert_eq!(expected.to_wire(), wire);
+            assert!(turn.status.is_none());
+            // Missing or oversized body: the payload stays behind the gate.
+            let oversized = "x".repeat(MAX_REPLY_BYTES + 1);
+            for content in [None, Some(oversized.as_str())] {
+                let turn = parse_retro_turn(Some("retro"), Some(wire.clone()), content);
+                assert_eq!(turn.kind, ReplyKind::Retro);
+                assert_eq!(turn.content, None);
+                assert_eq!(turn.retro, None);
+            }
+        }
+    }
+
+    #[test]
+    fn story19_25_missing_or_malformed_retro_downgrades_to_unknown() {
+        use crate::domain::models::{RETRO_REPLY_TEXT, ReplyKind, RetroContribution};
+
+        let samples: Vec<u32> = (0..513).collect();
+        let invalid = [
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!(1),
+            serde_json::json!("retro"),
+            serde_json::json!([]),
+            serde_json::json!({"senders":[]}),
+            serde_json::json!({"received":{}}),
+            serde_json::json!({"received":[]}),
+            serde_json::json!({"received":{"gossip":1}}),
+            serde_json::json!({"received":{"consultation":0}}),
+            serde_json::json!({"received":{"consultation":1_000_001}}),
+            serde_json::json!({"received":{"consultation":-1}}),
+            serde_json::json!({"received":{"consultation":"3"}}),
+            serde_json::json!({"replyTimes":[]}),
+            serde_json::json!({"replyTimes":{}}),
+            serde_json::json!({"replyTimes":[20161]}),
+            serde_json::json!({"replyTimes":[-1]}),
+            serde_json::json!({"replyTimes":[1.5]}),
+            serde_json::json!({"replyTimes":[25,4]}),
+            serde_json::json!({"ackTimes":[]}),
+            serde_json::json!({"ackTimes":[60,1]}),
+            serde_json::json!({"ackTimes":samples}),
+        ];
+        for retro in invalid {
+            assert_eq!(RetroContribution::from_wire(&retro), None, "{retro}");
+            let turn = parse_retro_turn(Some("retro"), Some(retro.clone()), Some(RETRO_REPLY_TEXT));
+            assert_eq!(turn.kind, ReplyKind::Unknown, "{retro}");
+            assert_eq!(turn.retro, None, "{retro}");
+            assert_eq!(turn.content.as_deref(), Some(RETRO_REPLY_TEXT));
+        }
+        let turn = parse_retro_turn(Some("retro"), None, Some(RETRO_REPLY_TEXT));
+        assert_eq!(turn.kind, ReplyKind::Unknown);
+        assert_eq!(turn.retro, None);
+    }
+
+    #[test]
+    fn story19_25_retro_payload_on_legacy_kinds_is_ignored() {
+        use crate::domain::models::ReplyKind;
+
+        for retro in [
+            None,
+            Some(serde_json::json!({"received":{"consultation":3}})),
+            Some(serde_json::json!("malformed")),
+        ] {
+            for (wire, expected) in [
+                (None, ReplyKind::Answer),
+                (Some("answer"), ReplyKind::Answer),
+                (Some("accept"), ReplyKind::Accept),
+                (Some("discuss"), ReplyKind::Discuss),
+            ] {
+                let turn = parse_retro_turn(wire, retro.clone(), Some("body"));
+                assert_eq!(turn.kind, expected);
+                assert_eq!(turn.retro, None);
+                assert_eq!(turn.content.as_deref(), Some("body"));
+            }
+        }
     }
 
     use std::sync::Arc;

@@ -1669,6 +1669,7 @@ async fn draft_resolutions_record_exactly_the_sending_turns() {
                 content_hash: None,
                 kind: rustain::domain::models::ReplyKind::Answer,
                 status: None,
+                retro: None,
                 authorship: Authorship::Unknown,
                 retracted_at_ms: None,
             }],

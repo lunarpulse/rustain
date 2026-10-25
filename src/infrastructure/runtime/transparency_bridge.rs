@@ -869,11 +869,13 @@ async fn start_team_send(
             show_team_send(state, &block_id, refusal.to_string());
             return;
         }
+        let row_type = message_type.unwrap_or_default();
         let rows: Vec<_> = recipients
             .iter()
             .map(|alias| TeamSendRow {
                 alias: alias.clone(),
                 outcome: None,
+                message_type: row_type,
             })
             .collect();
         show_team_send(state, &block_id, render_team_send_rows(&rows));
@@ -2375,6 +2377,7 @@ mod tests {
         let sending_row = TeamSendRow {
             alias: "jun-dev".to_owned(),
             outcome: None,
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
         };
         let sending_block = FeedbackBlock {
             id: BLOCK_ID.to_owned(),
@@ -2436,6 +2439,74 @@ mod tests {
             "Focus must retain the Info block rather than queue an advisory notice"
         );
         assert!(state.needs_redraw);
+    }
+
+    /// Story 19.25 D7 — the stored rows keep the action's type, so each
+    /// settlement redraw of a `retro_request` block masks a decline as `sent`
+    /// and keeps the one note, while a consultation decline stays `✗`.
+    #[test]
+    fn story19_25_settlement_redraw_keeps_the_retro_type_of_stored_rows() {
+        use crate::adapters::tui::handlers::team_command::{
+            TEAM_SEND_RETRO_NOTE, TeamSendRow, render_team_send_rows,
+        };
+        use crate::domain::models::{
+            FeedbackBlock, FeedbackLevel, RecipientOutcome, SemanticMessageType,
+        };
+
+        const BLOCK_ID: &str = "team-send-1";
+        let settle = |message_type| {
+            let rows: Vec<_> = ["a", "bb"]
+                .into_iter()
+                .map(|alias| TeamSendRow {
+                    alias: alias.to_owned(),
+                    outcome: None,
+                    message_type,
+                })
+                .collect();
+            let mut feedback = std::collections::BTreeMap::new();
+            feedback.insert(
+                BLOCK_ID.to_owned(),
+                FeedbackBlock {
+                    id: BLOCK_ID.to_owned(),
+                    level: FeedbackLevel::Info,
+                    message: render_team_send_rows(&rows),
+                    actions: Vec::new(),
+                },
+            );
+            let mut blocks = std::collections::BTreeMap::new();
+            blocks.insert(BLOCK_ID.to_owned(), rows);
+            assert!(settle_team_send_row(
+                &mut blocks,
+                &mut feedback,
+                BLOCK_ID,
+                1,
+                RecipientOutcome::Declined,
+            ));
+            let first = feedback[BLOCK_ID].message.clone();
+            assert!(settle_team_send_row(
+                &mut blocks,
+                &mut feedback,
+                BLOCK_ID,
+                0,
+                RecipientOutcome::AwaitingApproval,
+            ));
+            assert!(!blocks.contains_key(BLOCK_ID));
+            (first, feedback[BLOCK_ID].message.clone())
+        };
+        assert_eq!(
+            settle(SemanticMessageType::RetroRequest),
+            (
+                format!("    a   sending…\n  ● bb  sent\n{TEAM_SEND_RETRO_NOTE}"),
+                format!("  ● a   sent\n  ● bb  sent\n{TEAM_SEND_RETRO_NOTE}"),
+            )
+        );
+        assert_eq!(
+            settle(SemanticMessageType::Consultation),
+            (
+                "    a   sending…\n  ✗ bb  declined".to_owned(),
+                "    a   awaiting their approval\n  ✗ bb  declined".to_owned(),
+            )
+        );
     }
 
     /// Story 19.22 review (`AC2`) — rail 3 refuses a displaced-holder send
@@ -2771,6 +2842,7 @@ mod credential_tests {
             render_team_send_rows(&[TeamSendRow {
                 alias: alias.to_owned(),
                 outcome: Some(outcome),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
             }]),
             format!("  ⚠ {alias}  unreachable\n    {}", cause.as_str()),
             "the cause is a separate row line, never a transient notice"
@@ -3381,6 +3453,7 @@ mod credential_tests {
             render_team_send_rows(&[TeamSendRow {
                 alias: "plain".to_owned(),
                 outcome: Some(outcome),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
             }]),
             "    plain  accepted — this peer keeps no item id"
         );
@@ -3411,6 +3484,7 @@ mod credential_tests {
             render_team_send_rows(&[TeamSendRow {
                 alias: "welcome".to_owned(),
                 outcome: Some(outcome),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
             }]),
             "    welcome  accepted — this peer keeps no item id"
         );
@@ -3450,6 +3524,7 @@ mod credential_tests {
         let succeeded = render_team_send_rows(&[TeamSendRow {
             alias: ALIAS.to_owned(),
             outcome: Some(success),
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
         }]);
         assert_eq!(refused, format!("{ALIAS} rejected this credential"));
         tokio::spawn(async move {
@@ -3614,6 +3689,7 @@ mod credential_tests {
             render_team_send_rows(&[TeamSendRow {
                 alias: "gone".to_owned(),
                 outcome: Some(outcome),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
             }]),
             "  ⚠ gone  unreachable"
         );

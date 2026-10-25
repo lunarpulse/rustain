@@ -2305,6 +2305,12 @@ fn thread_turn_json(
                         value["status"] = status.to_wire();
                     }
                 }
+                ReplyKind::Retro => {
+                    value["replyKind"] = serde_json::Value::from("retro");
+                    if let Some(retro) = &reply.retro {
+                        value["retro"] = retro.to_wire();
+                    }
+                }
                 ReplyKind::Unknown => {
                     value["replyKind"] = serde_json::Value::from("unknown");
                 }
@@ -2328,6 +2334,7 @@ fn withhold_turn_content(value: &mut serde_json::Value) {
     if let Some(object) = value.as_object_mut() {
         object.remove("content");
         object.remove("status");
+        object.remove("retro");
         object.insert("contentWithheld".to_owned(), serde_json::Value::Bool(true));
     }
 }
@@ -3129,9 +3136,83 @@ mod tests {
             authorship: Authorship::HumanWritten,
             kind,
             status,
+            retro: None,
             via_node: None,
             journal_order: 1,
         })
+    }
+
+    fn thread_retro_reply(
+        retro: Option<crate::domain::models::RetroContribution>,
+        content: &str,
+    ) -> ThreadTurn {
+        let mut turn = thread_status_reply(crate::domain::models::ReplyKind::Retro, None, content);
+        if let ThreadTurn::Reply(view) = &mut turn {
+            view.retro = retro;
+        }
+        turn
+    }
+
+    fn sample_retro() -> crate::domain::models::RetroContribution {
+        crate::domain::models::RetroContribution::from_wire(&serde_json::json!({
+            "received":{"consultation":3},"replyTimes":[4,25,90],"ackTimes":[60]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn story19_25_served_retro_round_trips_canonical_payload() {
+        use crate::domain::models::{RETRO_REPLY_TEXT, ReplyKind, RetroContribution};
+
+        let (_workspace, state) = thread_status_fixture();
+        for retro in [sample_retro(), RetroContribution::nothing()] {
+            let turn = thread_retro_reply(Some(retro.clone()), RETRO_REPLY_TEXT);
+            let wire = thread_turn_json(&state, 1, &turn);
+            assert_eq!(wire["replyKind"], "retro");
+            assert_eq!(wire["retro"], retro.to_wire());
+            assert_eq!(wire["content"], RETRO_REPLY_TEXT);
+            assert!(wire.get("status").is_none());
+            let thread = super::super::send::parse_thread(&serde_json::json!({
+                "root":"ri_status", "turns":[wire]
+            }))
+            .unwrap();
+            assert_eq!(thread.turns[0].kind, ReplyKind::Retro);
+            assert_eq!(thread.turns[0].retro.as_ref(), Some(&retro));
+            assert_eq!(thread.turns[0].content.as_deref(), Some(RETRO_REPLY_TEXT));
+        }
+        assert_eq!(
+            RetroContribution::nothing().to_wire(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn story19_25_served_retro_is_withheld_with_content() {
+        use crate::domain::models::ReplyKind;
+
+        let (_workspace, state) = thread_status_fixture();
+        let content = state.workspace.to_string_lossy().into_owned();
+        let turn = thread_retro_reply(Some(sample_retro()), &content);
+        let value = thread_turn_json(&state, 0, &turn);
+        assert_eq!(value["replyKind"], "retro");
+        assert_eq!(value["contentWithheld"], true);
+        assert!(value.get("content").is_none());
+        assert!(value.get("retro").is_none());
+        assert!(!value.to_string().contains("consultation"));
+        let thread = super::super::send::parse_thread(&serde_json::json!({
+            "root":"ri_status", "turns":[value]
+        }))
+        .unwrap();
+        assert_eq!(thread.turns[0].kind, ReplyKind::Unknown);
+        assert_eq!(thread.turns[0].retro, None);
+        // The outer size boundary uses the same helper after projection.
+        let turn = thread_retro_reply(Some(sample_retro()), "Retrospective reply.");
+        let mut value = thread_turn_json(&state, 0, &turn);
+        assert!(value.get("retro").is_some());
+        withhold_turn_content(&mut value);
+        assert_eq!(value["contentWithheld"], true);
+        assert!(value.get("content").is_none());
+        assert!(value.get("retro").is_none());
     }
 
     #[test]

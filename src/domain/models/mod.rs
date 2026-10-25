@@ -67,6 +67,7 @@ pub mod recipient_item;
 pub mod redacted_url;
 pub mod redaction;
 pub mod relay;
+pub mod retro_contribution;
 pub mod room_role;
 pub mod router;
 pub mod sandbox;
@@ -339,6 +340,10 @@ pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
 pub use provider_capabilities::{NativeRetrievalKind, ProviderCapabilities, TransportKind};
 #[allow(unused_imports)]
 pub use redaction::{RedactionOp, RedactionRecord};
+pub use retro_contribution::{
+    NOT_SHARED_RETRO, RETRO_HONESTY_LINE, RETRO_REPLY_TEXT, RETRO_WINDOW_MS, RetroContribution,
+    RetroField, RetroFieldSet, RetroPreview, RetroReport,
+};
 #[allow(unused_imports)]
 pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
 pub use search_hit::SearchHit;

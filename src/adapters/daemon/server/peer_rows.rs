@@ -34,6 +34,7 @@ pub(super) fn peer_row_control(
         item_address,
         stories,
         status: None,
+        retro: None,
         selected_for,
         message_type: provenance.message_type,
         sender_label,
@@ -47,6 +48,8 @@ pub(super) struct PeerItemContext {
     pub(super) alias: Option<String>,
     pub(super) stories: Option<StorySummary>,
     pub(super) status: Option<crate::domain::models::StatusPreview>,
+    /// Story 19.25 D1: retro preview fixed once at request arrival.
+    pub(super) retro: Option<crate::domain::models::RetroPreview>,
     /// Raw ingested selection; the card sentence is built from the final label.
     pub(super) selected_for: Option<ReceivedSelection>,
 }
@@ -87,6 +90,7 @@ impl AttachServer {
         &self,
         node_id: &AgentId,
         level: crate::domain::models::StatusDisclosure,
+        prepare_retro: bool,
     ) -> Option<PeerItemContext> {
         #[cfg(feature = "a2a")]
         {
@@ -117,6 +121,14 @@ impl AttachServer {
                             ),
                         )
                     }),
+                    retro: (prepare_retro
+                        && item.message_type == SemanticMessageType::RetroRequest)
+                        .then(|| {
+                            crate::domain::models::RetroContribution::compose(
+                                &entries,
+                                &item.address,
+                            )
+                        }),
                     address: item.address,
                     alias: item.alias,
                     selected_for: item.selected_for,
@@ -125,7 +137,7 @@ impl AttachServer {
         }
         #[cfg(not(feature = "a2a"))]
         {
-            let _ = (node_id, level);
+            let _ = (node_id, level, prepare_retro);
             None
         }
     }

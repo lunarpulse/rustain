@@ -2,13 +2,119 @@
 
 use super::{
     AttachMode, AttachServer, ConnectionTier, ProtocolError, RecipientAction,
-    RecipientActionOutcome, RecipientActionTarget,
+    RecipientActionOutcome, RecipientActionTarget, RecipientReplyReceipt,
 };
 #[cfg(feature = "a2a")]
-use super::{
-    PeerDraftResolutionOutcome, RECIPIENT_ITEM_REMOVED, RecipientReplyReceipt, commit_peer_rows,
-};
+use super::{PeerDraftResolutionOutcome, RECIPIENT_ITEM_REMOVED, commit_peer_rows};
 use crate::domain::models::ReplyKind;
+
+/// The refusal for a second Status turn on one item (Story 19.24).
+#[cfg(feature = "a2a")]
+const STATUS_ALREADY_SHARED: &str = "status was already shared for this item";
+/// The refusal for a second Retro turn on one item (Story 19.25 `AC4`).
+#[cfg(feature = "a2a")]
+const RETRO_ALREADY_SENT: &str = "a retrospective reply was already sent for this item";
+
+/// Story 19.25 `D11` — the payload of one human-decided share act. Status
+/// (19.24) and retrospective (19.25) acts differ only in their gates and in
+/// this payload; [`AttachServer::settle_shared_reply`] is their one tail.
+#[cfg(feature = "a2a")]
+pub(super) enum SharedReply {
+    Status(crate::domain::models::StatusStatement),
+    Retro(crate::domain::models::RetroContribution),
+}
+
+#[cfg(feature = "a2a")]
+impl SharedReply {
+    fn kind(&self) -> ReplyKind {
+        match self {
+            Self::Status(_) => ReplyKind::Status,
+            Self::Retro(_) => ReplyKind::Retro,
+        }
+    }
+
+    /// The word naming this act in its internal error and log lines.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Status(_) => "status",
+            Self::Retro(_) => "retrospective",
+        }
+    }
+
+    fn refusal(&self) -> &'static str {
+        match self {
+            Self::Status(_) => STATUS_ALREADY_SHARED,
+            Self::Retro(_) => RETRO_ALREADY_SENT,
+        }
+    }
+
+    /// The turn text: a Retro turn never carries values or a decline (`D3`).
+    fn content(&self) -> String {
+        match self {
+            Self::Status(statement) => statement.text(),
+            Self::Retro(_) => crate::domain::models::RETRO_REPLY_TEXT.to_owned(),
+        }
+    }
+
+    /// Whether an already-recorded turn of this kind carries this payload.
+    fn matches(&self, turn: &crate::domain::models::ReplyTurnView) -> bool {
+        match self {
+            Self::Status(statement) => turn.status.as_ref() == Some(statement),
+            Self::Retro(contribution) => turn.retro.as_ref() == Some(contribution),
+        }
+    }
+
+    fn into_resolution(self) -> crate::adapters::daemon::response_modes::DraftResolution {
+        use crate::adapters::daemon::response_modes::DraftResolution;
+        match self {
+            Self::Status(statement) => DraftResolution::ShareStatus(statement),
+            Self::Retro(contribution) => DraftResolution::ShareRetro(contribution),
+        }
+    }
+
+    /// The journal's raw `(status, retro)` values.
+    fn into_wire(self) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+        match self {
+            Self::Status(statement) => (Some(statement.to_wire()), None),
+            Self::Retro(contribution) => (None, Some(contribution.to_wire())),
+        }
+    }
+}
+
+/// The one-per-item refusal for a share kind; `None` for every other kind.
+#[cfg(feature = "a2a")]
+fn already_shared_refusal(kind: ReplyKind) -> Option<&'static str> {
+    match kind {
+        ReplyKind::Status => Some(STATUS_ALREADY_SHARED),
+        ReplyKind::Retro => Some(RETRO_ALREADY_SENT),
+        _ => None,
+    }
+}
+
+/// A recorded turn replays a resolution only with the same content, kind and
+/// payload.
+#[cfg(feature = "a2a")]
+fn replays(
+    existing: &crate::domain::models::ReplyTurnView,
+    content: &str,
+    kind: ReplyKind,
+    status: Option<&crate::domain::models::StatusStatement>,
+    retro: Option<&crate::domain::models::RetroContribution>,
+) -> bool {
+    existing.content == content
+        && existing.kind == kind
+        && existing.status.as_ref() == status
+        && existing.retro.as_ref() == retro
+}
+
+#[cfg(feature = "a2a")]
+fn receipt_for(existing: &crate::domain::models::ReplyTurnView) -> RecipientReplyReceipt {
+    RecipientReplyReceipt {
+        item_id: existing.answers.as_str().to_owned(),
+        turn_id: existing.address.turn().as_str().to_owned(),
+        kind: existing.kind,
+    }
+}
 
 impl AttachServer {
     /// Story 19.18 `AC2` — the `/team reply` arm: record one reply turn
@@ -224,6 +330,7 @@ impl AttachServer {
                 .await;
             if let Err(error) = journal
                 .record_event(RoomEvent::RecipientItemReplied {
+                    retro: None,
                     address: TurnAddress::answering(&item.address, turn),
                     answers: item.address.item().clone(),
                     content: text,
@@ -353,6 +460,7 @@ impl AttachServer {
             let turn_id = turn.as_str().to_owned();
             if let Err(error) = journal
                 .record_event(crate::domain::models::RoomEvent::RecipientItemReplied {
+                    retro: None,
                     address: crate::domain::models::TurnAddress::answering(&item.address, turn),
                     answers: item.address.item().clone(),
                     content: "Busy — defer 30m".to_owned(),
@@ -416,16 +524,13 @@ impl AttachServer {
         };
         #[cfg(feature = "a2a")]
         let result = {
-            use crate::domain::models::{
-                Authorship, RecipientItemState, ReplyKind, RoomEvent, SemanticMessageType,
-                SendAuthorization, StatusStatement, TurnAddress, claim_reply_turn_id,
-                fresh_reply_turn_candidate,
-            };
+            use crate::domain::models::{RecipientItemState, SemanticMessageType, StatusStatement};
 
             let _reply_guard = self.peer_reply_serial.lock().await;
             async {
-                let (item, projection, journal) =
-                    self.find_recipient_item(mode, tier, "reply", item_id).await?;
+                let (item, projection, journal) = self
+                    .find_recipient_item(mode, tier, "reply", item_id)
+                    .await?;
                 if matches!(item.state, RecipientItemState::Removed { .. }) {
                     return Err(ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned()));
                 }
@@ -455,112 +560,14 @@ impl AttachServer {
                         "no status statement was prepared for this item".to_owned(),
                     )
                 })?;
-
-                // A durable turn left by a failed card save must replay the
-                // resolution, not short-circuit before completing its task.
-                if let Some(node) = self.pending_card_for_item(&projection, &item).await {
-                    return match self
-                        .resolve_peer_draft_locked(
-                            &node,
-                            crate::adapters::daemon::response_modes::DraftResolution::ShareStatus(
-                                statement,
-                            ),
-                            Some(&projection),
-                        )
-                        .await
-                    {
-                        Ok(PeerDraftResolutionOutcome::Applied { reply: Some(reply) }) => {
-                            Ok(RecipientActionOutcome::Applied { reply: Some(reply) })
-                        }
-                        Ok(PeerDraftResolutionOutcome::Applied { reply: None }) => {
-                            Err(ProtocolError::Internal(
-                                "status sharing completed without a durable receipt".to_owned(),
-                            ))
-                        }
-                        Ok(PeerDraftResolutionOutcome::Idempotent) => {
-                            Ok(RecipientActionOutcome::Idempotent)
-                        }
-                        Ok(PeerDraftResolutionOutcome::RefusedOneWay) => {
-                            Err(ProtocolError::PeerVerification(
-                                crate::adapters::daemon::response_modes::RAP_ONE_WAY_REFUSAL
-                                    .to_owned(),
-                            ))
-                        }
-                        Err(error) => Err(ProtocolError::Internal(error)),
-                    };
-                }
-                let snapshot = projection.snapshot();
-                if let Some(existing) = status_reply_for_item(&snapshot, &item) {
-                    if existing.status.as_ref() != Some(&statement) {
-                        return Err(ProtocolError::Malformed(
-                            "status was already shared for this item".to_owned(),
-                        ));
-                    }
-                    // A failed orphan card save, or a restart between a live
-                    // append and its card save, left the row awaiting: settle
-                    // it now, so the equal retry is idempotent and repairs.
-                    let orphan_rows = self
-                        .orphan_response_mutations(
-                            &projection,
-                            &item,
-                            &existing.content,
-                            Authorship::AgentComposed,
-                        )
-                        .await;
-                    if !orphan_rows.is_empty()
-                        && let Err(error) = commit_peer_rows(
-                            &self.peer_row_serial,
-                            &self.conversation,
-                            &self.registry,
-                            self.core.storage.as_ref(),
-                            orphan_rows,
-                        )
-                        .await
-                    {
-                        tracing::error!(error = %error, "durable status reply could not update its orphan card");
-                    }
-                    return Ok(RecipientActionOutcome::Idempotent);
-                }
-                let turn = claim_reply_turn_id(fresh_reply_turn_candidate(), |id| {
-                    projection.holds_reply_turn_id(id)
-                })
-                .map_err(|error| ProtocolError::Internal(error.to_string()))?;
-                let receipt = RecipientReplyReceipt {
-                    item_id: item_id.to_owned(),
-                    turn_id: turn.as_str().to_owned(),
-                    kind: ReplyKind::Status,
-                };
-                let content = statement.text();
-                let orphan_rows = self
-                    .orphan_response_mutations(
-                        &projection, &item, &content, Authorship::AgentComposed,
-                    )
-                    .await;
-                journal
-                    .record_event(RoomEvent::RecipientItemReplied {
-                        address: TurnAddress::answering(&item.address, turn),
-                        answers: item.address.item().clone(),
-                        content,
-                        kind: ReplyKind::Status,
-                        status: Some(statement.to_wire()),
-                        authorship: Authorship::AgentComposed,
-                        send_authorization: SendAuthorization::HumanDecided,
-                        via_node: None,
-                    })
-                    .await
-                    .map_err(|error| ProtocolError::Internal(error.to_string()))?;
-                if let Err(error) = commit_peer_rows(
-                    &self.peer_row_serial,
-                    &self.conversation,
-                    &self.registry,
-                    self.core.storage.as_ref(),
-                    orphan_rows,
+                self.settle_shared_reply(
+                    item_id,
+                    &item,
+                    &projection,
+                    journal.as_ref(),
+                    SharedReply::Status(statement),
                 )
                 .await
-                {
-                    tracing::error!(error = %error, "durable status reply could not update its orphan card");
-                }
-                Ok(RecipientActionOutcome::Applied { reply: Some(receipt) })
             }
             .await
         };
@@ -568,22 +575,282 @@ impl AttachServer {
         self.send_recipient_action_result(conn_id, RecipientAction::ShareStatus, target, outcome)
             .await;
     }
+
+    /// Story 19.25 `D11` — the one durable tail of every share act, entered
+    /// under `peer_reply_serial` after the act's own gates.
+    ///
+    /// A live card resolves through `resolve_peer_draft_locked`, which
+    /// replays an identical turn already recorded by a failed card save.
+    /// Without one, an existing turn of the act's kind is the item's one
+    /// answer: the same payload re-settles unsettled orphan rows and is
+    /// `Idempotent`, a different one is refused; with none, one turn
+    /// (`via_node: None`) is appended and the orphan row replaced. Every
+    /// refusal writes zero rows.
+    #[cfg(feature = "a2a")]
+    pub(super) async fn settle_shared_reply(
+        &self,
+        item_id: &str,
+        item: &crate::domain::models::RecipientItemView,
+        projection: &crate::adapters::policy::JournalRecipientItemProjection,
+        journal: &dyn crate::domain::ports::RoomJournal,
+        shared: SharedReply,
+    ) -> Result<RecipientActionOutcome, ProtocolError> {
+        use crate::domain::models::{
+            Authorship, RoomEvent, SendAuthorization, TurnAddress, claim_reply_turn_id,
+            fresh_reply_turn_candidate,
+        };
+
+        let kind = shared.kind();
+        let label = shared.label();
+        // A durable turn left by a failed card save must replay the
+        // resolution, not short-circuit before completing its task.
+        if let Some(node) = self.pending_card_for_item(projection, item).await {
+            return match self
+                .resolve_peer_draft_locked(&node, shared.into_resolution(), Some(projection))
+                .await
+            {
+                Ok(PeerDraftResolutionOutcome::Applied { reply: Some(reply) }) => {
+                    Ok(RecipientActionOutcome::Applied { reply: Some(reply) })
+                }
+                Ok(PeerDraftResolutionOutcome::Applied { reply: None }) => {
+                    Err(ProtocolError::Internal(format!(
+                        "{label} sharing completed without a durable receipt"
+                    )))
+                }
+                Ok(PeerDraftResolutionOutcome::Idempotent) => {
+                    Ok(RecipientActionOutcome::Idempotent)
+                }
+                Ok(PeerDraftResolutionOutcome::RefusedOneWay) => {
+                    Err(ProtocolError::PeerVerification(
+                        crate::adapters::daemon::response_modes::RAP_ONE_WAY_REFUSAL.to_owned(),
+                    ))
+                }
+                Err(error) => Err(ProtocolError::Internal(error)),
+            };
+        }
+        let snapshot = projection.snapshot();
+        if let Some(existing) = shared_reply_for_item(&snapshot, item, kind) {
+            if !shared.matches(existing) {
+                return Err(ProtocolError::Malformed(shared.refusal().to_owned()));
+            }
+            // A failed orphan card save, or a restart between a live append
+            // and its card save, left the row awaiting: settle it now, so the
+            // equal retry is idempotent and repairs.
+            let orphan_rows = self
+                .orphan_response_mutations(
+                    projection,
+                    item,
+                    &existing.content,
+                    Authorship::AgentComposed,
+                )
+                .await;
+            if !orphan_rows.is_empty()
+                && let Err(error) = commit_peer_rows(
+                    &self.peer_row_serial,
+                    &self.conversation,
+                    &self.registry,
+                    self.core.storage.as_ref(),
+                    orphan_rows,
+                )
+                .await
+            {
+                tracing::error!(error = %error, "durable {label} reply could not update its orphan card");
+            }
+            return Ok(RecipientActionOutcome::Idempotent);
+        }
+        let turn = claim_reply_turn_id(fresh_reply_turn_candidate(), |id| {
+            projection.holds_reply_turn_id(id)
+        })
+        .map_err(|error| ProtocolError::Internal(error.to_string()))?;
+        let receipt = RecipientReplyReceipt {
+            item_id: item_id.to_owned(),
+            turn_id: turn.as_str().to_owned(),
+            kind,
+        };
+        let content = shared.content();
+        let orphan_rows = self
+            .orphan_response_mutations(projection, item, &content, Authorship::AgentComposed)
+            .await;
+        let (status, retro) = shared.into_wire();
+        journal
+            .record_event(RoomEvent::RecipientItemReplied {
+                address: TurnAddress::answering(&item.address, turn),
+                answers: item.address.item().clone(),
+                content,
+                kind,
+                status,
+                retro,
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
+                via_node: None,
+            })
+            .await
+            .map_err(|error| ProtocolError::Internal(error.to_string()))?;
+        if let Err(error) = commit_peer_rows(
+            &self.peer_row_serial,
+            &self.conversation,
+            &self.registry,
+            self.core.storage.as_ref(),
+            orphan_rows,
+        )
+        .await
+        {
+            tracing::error!(error = %error, "durable {label} reply could not update its orphan card");
+        }
+        Ok(RecipientActionOutcome::Applied {
+            reply: Some(receipt),
+        })
+    }
+
+    /// Story 19.18 `AC3(a)`/`Q1` — the reply-turn half of a card resolution.
+    ///
+    /// Reads the journal once and joins the node to its item through the
+    /// fold (`P4`). **One turn per node, enforced by the journal**: when the
+    /// fold already holds a turn with this `via_node` (a retry after a
+    /// partial failure, or a card answered by `/team reply` and then
+    /// resolved again), nothing is appended — the same content, kind and
+    /// payload replay the remaining steps, and a different turn or a reject
+    /// is refused (`M37`). A Status (19.24) or Retro (19.25 `D3`) turn is
+    /// also at most one per item, across every card node. A reject with no
+    /// turn, and a node with no item, record nothing.
+    #[cfg(feature = "a2a")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn reply_turn_for_resolution(
+        &self,
+        node_id: &crate::domain::models::AgentId,
+        content: &str,
+        kind: ReplyKind,
+        status: Option<&crate::domain::models::StatusStatement>,
+        retro: Option<&crate::domain::models::RetroContribution>,
+        authorship: crate::domain::models::Authorship,
+        send_authorization: crate::domain::models::SendAuthorization,
+        sent: bool,
+        preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
+    ) -> Result<Option<RecipientReplyReceipt>, String> {
+        use crate::domain::models::{
+            RoomEvent, TurnAddress, claim_reply_turn_id, fresh_reply_turn_candidate,
+        };
+
+        let reader = self
+            .room_journal_reader
+            .as_ref()
+            .ok_or_else(|| "room journal reader is unavailable".to_owned())?;
+        let journal = self
+            .room_journal
+            .as_ref()
+            .ok_or_else(|| "room journal is unavailable".to_owned())?;
+        let loaded;
+        let projection = if let Some(projection) = preloaded {
+            projection
+        } else {
+            let entries = reader
+                .load_entries()
+                .await
+                .map_err(|error| error.to_string())?;
+            loaded =
+                crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries);
+            &loaded
+        };
+        if let Some(existing) = projection.reply_for_node(node_id) {
+            if sent && replays(&existing, content, kind, status, retro) {
+                return Ok(Some(receipt_for(&existing)));
+            }
+            if existing.kind == kind
+                && let Some(refusal) = already_shared_refusal(kind)
+            {
+                return Err(refusal.to_owned());
+            }
+            return Err(
+                "this card was already answered with a recorded reply; only that same answer can \
+                 be resent"
+                    .to_owned(),
+            );
+        }
+        if !sent {
+            return Ok(None);
+        }
+        if content.len() > crate::domain::models::MAX_REPLY_BYTES {
+            return Err(format!(
+                "reply is longer than {} bytes — shorten it",
+                crate::domain::models::MAX_REPLY_BYTES
+            ));
+        }
+        let Some(item) = crate::adapters::a2a::exec::recipient_item_for_node(projection, node_id)
+        else {
+            tracing::info!(node = %node_id, "peer response resolved for a node with no recipient item; no reply turn recorded");
+            return Ok(None);
+        };
+        if let Some(refusal) = already_shared_refusal(kind) {
+            let snapshot = projection.snapshot();
+            if let Some(existing) = shared_reply_for_item(&snapshot, &item, kind) {
+                if replays(existing, content, kind, status, retro) {
+                    return Ok(Some(receipt_for(existing)));
+                }
+                return Err(refusal.to_owned());
+            }
+        }
+        let turn = claim_reply_turn_id(fresh_reply_turn_candidate(), |id| {
+            projection.holds_reply_turn_id(id)
+        })
+        .map_err(|error| error.to_string())?;
+        journal
+            .record_event(RoomEvent::RecipientItemReplied {
+                address: TurnAddress::answering(&item.address, turn.clone()),
+                answers: item.address.item().clone(),
+                content: content.to_owned(),
+                kind,
+                authorship,
+                via_node: Some(node_id.clone()),
+                send_authorization,
+                status: status.map(crate::domain::models::StatusStatement::to_wire),
+                retro: retro.map(crate::domain::models::RetroContribution::to_wire),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Some(RecipientReplyReceipt {
+            item_id: item.address.item().as_str().to_owned(),
+            turn_id: turn.as_str().to_owned(),
+            kind,
+        }))
+    }
+
+    /// Without the `a2a` feature no inbound A2A node exists, so no card
+    /// resolution can answer a recipient item.
+    #[cfg(not(feature = "a2a"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn reply_turn_for_resolution(
+        &self,
+        _node_id: &crate::domain::models::AgentId,
+        _content: &str,
+        _kind: ReplyKind,
+        _status: Option<&crate::domain::models::StatusStatement>,
+        _retro: Option<&crate::domain::models::RetroContribution>,
+        _authorship: crate::domain::models::Authorship,
+        _send_authorization: crate::domain::models::SendAuthorization,
+        _sent: bool,
+        _preloaded: Option<&crate::adapters::policy::JournalRecipientItemProjection>,
+    ) -> Result<Option<RecipientReplyReceipt>, String> {
+        Ok(None)
+    }
 }
 
+/// The item's one turn of a share kind (Status or Retro), whichever card or
+/// act recorded it.
 #[cfg(feature = "a2a")]
-pub(super) fn status_reply_for_item<'a>(
+fn shared_reply_for_item<'a>(
     snapshot: &'a crate::adapters::policy::recipient_item::RecipientItemSnapshot,
     item: &crate::domain::models::RecipientItemView,
+    kind: ReplyKind,
 ) -> Option<&'a crate::domain::models::ReplyTurnView> {
     snapshot.replies.values().find(|turn| {
         turn.address.principal() == item.address.principal()
             && &turn.answers == item.address.item()
-            && turn.kind == crate::domain::models::ReplyKind::Status
+            && turn.kind == kind
     })
 }
 
 #[cfg(all(test, feature = "a2a"))]
-mod tests {
+pub(super) mod tests {
     use super::super::tests::{
         RecordingJournal, journaled_server, mock_core, mock_core_with_storage,
     };
@@ -609,17 +876,19 @@ mod tests {
     use tokio::sync::{Mutex, mpsc, watch};
     use tokio_util::sync::CancellationToken;
 
-    const ITEM_ID: &str = "ri_status_request";
+    pub(in super::super) const ITEM_ID: &str = "ri_status_request";
 
-    struct StatusFixture {
-        server: Arc<AttachServer>,
-        journal: Arc<RecordingJournal>,
-        storage: Arc<dyn StoragePort>,
-        frames: mpsc::Receiver<DaemonFrame>,
-        node: AgentId,
-        address: ItemAddress,
+    /// Story 19.25: the retrospective act tests (`server/retro_share.rs`)
+    /// reuse this NotifyAndWait card fixture with a `retro_request` item.
+    pub(in super::super) struct StatusFixture {
+        pub(in super::super) server: Arc<AttachServer>,
+        pub(in super::super) journal: Arc<RecordingJournal>,
+        pub(in super::super) storage: Arc<dyn StoragePort>,
+        pub(in super::super) frames: mpsc::Receiver<DaemonFrame>,
+        pub(in super::super) node: AgentId,
+        pub(in super::super) address: ItemAddress,
         assignment: ItemAddress,
-        status: watch::Receiver<NodeState>,
+        pub(in super::super) status: watch::Receiver<NodeState>,
     }
 
     impl StatusFixture {
@@ -788,7 +1057,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn fixture_with(
+    pub(in super::super) async fn fixture_with(
         workspace: &Path,
         level: StatusDisclosure,
         held: bool,
@@ -911,7 +1180,7 @@ mod tests {
         .unwrap()
     }
 
-    fn refused(outcome: RecipientActionOutcome) -> ProtocolError {
+    pub(in super::super) fn refused(outcome: RecipientActionOutcome) -> ProtocolError {
         match outcome {
             RecipientActionOutcome::Refused { error } => error,
             other => panic!("expected a refusal, got {other:?}"),
@@ -1219,9 +1488,9 @@ mod tests {
         assert_eq!(fixture.journal.events.lock().await.len(), before);
     }
 
-    struct FailNextSave {
-        inner: Arc<dyn StoragePort>,
-        fail: AtomicBool,
+    pub(in super::super) struct FailNextSave {
+        pub(in super::super) inner: Arc<dyn StoragePort>,
+        pub(in super::super) fail: AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -1489,6 +1758,7 @@ mod tests {
             fixture
                 .journal
                 .record_event(RoomEvent::RecipientItemReplied {
+                    retro: None,
                     address: TurnAddress::answering(&fixture.address, turn),
                     answers: fixture.address.item().clone(),
                     content: minimal_statement().text(),
@@ -1534,6 +1804,7 @@ mod tests {
             fixture
                 .journal
                 .record_event(RoomEvent::RecipientItemReplied {
+                    retro: None,
                     address: TurnAddress::answering(&fixture.address, turn),
                     answers: fixture.address.item().clone(),
                     content: statement.text(),
