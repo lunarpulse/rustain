@@ -104,6 +104,8 @@ pub(crate) fn plan_auto_response_retraction(
 
 pub(crate) const DRAFTING_PLACEHOLDER: &str = "[drafting...]";
 pub(crate) const DRAFT_INTERRUPTED_NOTICE: &str = "[draft interrupted] The daemon restarted while this reply was being drafted; nothing was sent.";
+pub(crate) const PARKED_CANCELLED_NOTICE: &str =
+    "[cancelled] This request was cancelled before you answered; no response was sent.";
 pub(crate) const AWAITING_RESPONSE_PLACEHOLDER: &str = "[awaiting your response]";
 pub(crate) const DRAFT_APPROVAL_PREFIX: &str =
     "[y] Approve  [e] Edit  [n] Reject  [write] My own\n";

@@ -7,11 +7,10 @@
 //! is deterministically testable without SSE framing. `message/stream` +
 //! `tasks/resubscribe` are OUT OF SCOPE (see DF-17-4b-STREAMING in deferred-work).
 //!
-//! R-C: `input-required` / `auth-required` is NOT a resumable local state — there
-//! is no mechanism for a human to answer a waiting node. The driver issues a real
-//! `tasks/cancel` to the peer (never leak an open task onto their host) and hands
-//! the caller an [`LifecycleOutcome::InputRequired`] carrying `taskId`/`contextId`
-//! for the node layer to journal + terminate as a named `Failed`.
+//! `input-required` is an in-band question: return it without cancelling so the
+//! model delegation runtime can park and answer on the same remote task.
+//! `auth-required` needs authorization or a decision on the peer's side; cancel
+//! it and return a separately named outcome. A failed cancel remains an error.
 
 use std::time::Duration;
 
@@ -104,6 +103,11 @@ impl TaskSnapshot {
 /// wiremock cassettes in tests.
 #[async_trait]
 pub trait A2aTaskTransport: Send + Sync {
+    /// Host-owned binding retained with a parked transport; never a peer-chosen id.
+    fn own_task(&self) -> Option<super::driver::OwnTask> {
+        None
+    }
+
     async fn message_send(&self, message: serde_json::Value)
     -> Result<serde_json::Value, A2aError>;
     async fn tasks_get(&self, task_id: &str) -> Result<serde_json::Value, A2aError>;
@@ -141,9 +145,10 @@ pub enum LifecycleOutcome {
         state: RapTaskState,
         task: TaskSnapshot,
     },
-    /// The peer asked for input/auth. The driver already sent `tasks/cancel`; the
-    /// node layer journals `taskId`/`contextId` and terminates as a named `Failed`.
+    /// The peer asked this caller a question. The remote task remains open.
     InputRequired { task: TaskSnapshot },
+    /// The peer needs out-of-band authorization; `tasks/cancel` succeeded.
+    AuthRequired { task: TaskSnapshot },
 }
 
 /// Drive a delegated task from dispatch to a decision point via `message/send`
@@ -250,11 +255,12 @@ where
     }
 
     match next {
-        RapTaskState::InputRequired | RapTaskState::AuthRequired => {
-            // R-C: close the peer's task before we terminate locally. A failed
-            // cancel is a transport failure, never a successful local refusal.
+        RapTaskState::InputRequired => Ok(Some(LifecycleOutcome::InputRequired {
+            task: snapshot.clone(),
+        })),
+        RapTaskState::AuthRequired => {
             transport.tasks_cancel(&snapshot.id).await?;
-            Ok(Some(LifecycleOutcome::InputRequired {
+            Ok(Some(LifecycleOutcome::AuthRequired {
                 task: snapshot.clone(),
             }))
         }
@@ -391,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_required_cancels_the_peer_and_returns_input_required() {
+    async fn input_required_keeps_the_peer_task_open() {
         let transport = ScriptedTransport::new(&["working", "input-required"]);
         let outcome = drive_task(
             &transport,
@@ -403,11 +409,26 @@ mod tests {
         .await
         .expect("input-required is a decision point, not an error");
         assert!(matches!(outcome, LifecycleOutcome::InputRequired { .. }));
-        assert_eq!(
-            transport.cancels.lock().as_slice(),
-            ["task-1"],
-            "R-C: the peer's task must be cancelled, never leaked"
+        assert!(
+            transport.cancels.lock().is_empty(),
+            "input-required must stay open for an in-band answer"
         );
+    }
+
+    #[tokio::test]
+    async fn auth_required_cancels_and_returns_its_own_outcome() {
+        let transport = ScriptedTransport::new(&["working", "auth-required"]);
+        let outcome = drive_task(
+            &transport,
+            serde_json::json!({}),
+            &fast_config(),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect("auth-required cleanup succeeds");
+        assert!(matches!(outcome, LifecycleOutcome::AuthRequired { .. }));
+        assert_eq!(transport.cancels.lock().as_slice(), ["task-1"]);
     }
 
     #[tokio::test]
@@ -441,17 +462,17 @@ mod tests {
     }
     #[tokio::test]
     async fn remote_cancel_failure_is_never_reported_as_local_success() {
-        let input_required =
-            ScriptedTransport::new(&["working", "input-required"]).with_cancel_error();
+        let auth_required =
+            ScriptedTransport::new(&["working", "auth-required"]).with_cancel_error();
         let error = drive_task(
-            &input_required,
+            &auth_required,
             serde_json::json!({}),
             &fast_config(),
             &CancellationToken::new(),
             |_| {},
         )
         .await
-        .expect_err("input-required cleanup failure must surface");
+        .expect_err("auth-required cleanup failure must surface");
         assert!(matches!(error, A2aError::Request(_)));
 
         let owner_cancel = ScriptedTransport::new(&["working"]).with_cancel_error();

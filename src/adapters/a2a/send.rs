@@ -616,6 +616,7 @@ async fn deliver_one(
         text,
         message_type,
         MessageCarriers {
+            continuation: None,
             selected_for,
             reply_to,
             item_key: item_key.as_deref(),
@@ -2068,6 +2069,7 @@ mod tests {
             text,
             None,
             super::MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 reply_to: None,
                 item_key: None,

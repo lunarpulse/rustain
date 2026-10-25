@@ -179,6 +179,7 @@ path = "perf-tests/subagent_spawn.rs"
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal", "net", "io-util", "io-std"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt", "compat"] }
+parking_lot = "0.12"  # Story 19.18b: synchronous single-claim parked continuation registry
 futures = "0.3"
 agent-client-protocol = { version = "=0.10.4", features = ["unstable_session_resume", "unstable_session_close"] }
 globset = "0.4"
@@ -399,7 +400,6 @@ rand = "0.9"  # deterministic seeded shuffle for stratified eval partition (Stor
 proptest = "1"  # NN2 property test for synonym collisions (Story 9-7c)
 trybuild = "1"  # Story 14.3 AC5: Window<Handle> inlining-mutant compile_fail + pass-twin pair
 minisign = "0.7"  # Story 13.3a: test-signing fixtures with ephemeral keys (NOT shipped in binary)
-parking_lot = "0.12"  # Story 17.4b: scripted A2A transport mocks (rs-parking-lot rule)
 
 # Story 18.1b — self-signed certificates for the non-loopback TLS keystone.
 # Dev-only: the production TLS path loads operator-supplied PEM files, and a

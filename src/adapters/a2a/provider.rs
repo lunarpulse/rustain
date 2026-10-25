@@ -76,6 +76,22 @@ impl A2aProvider {
                 )
             })?;
 
+        // A null optional argument is an ordinary first send, never a continuation.
+        if input.get("continue").is_some_and(|value| !value.is_null()) {
+            return runtime
+                .resume(spec, input, cancel, authorship, send_authorization)
+                .await
+                .map(|result| ToolResult {
+                    tool_use_id: String::new(),
+                    content: serde_json::to_string_pretty(&result)
+                        .unwrap_or_else(|_| result.to_string()),
+                    is_error: false,
+                })
+                .map_err(|error| {
+                    CapabilityError::InvocationFailed(capability_id.to_string(), error.to_string())
+                });
+        }
+
         // Slot-type migration only: the model rail keeps today's refusal for every
         // non-`Ready` state (`A28` item 5). Its RPCs still get origin binding,
         // because that check lives in `post_jsonrpc`.
@@ -101,6 +117,7 @@ impl A2aProvider {
         let (message, own_task) = super::driver::build_message(
             &input,
             super::driver::MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 item_key: item_key.as_deref(),
                 reply_to: None,
@@ -187,6 +204,10 @@ impl CapabilityProvider for A2aProvider {
                     input_schema: serde_json::json!({
                         "type": "object",
                         "properties": {
+                            "continue": {
+                                "type": "string",
+                                "description": "Single-use handle returned by this peer's input-required question; provide message with your answer"
+                            },
                             "message": {
                                 "type": "string",
                                 "description": "Task message for the remote A2A skill"

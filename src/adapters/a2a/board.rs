@@ -127,7 +127,7 @@ impl BoardOutcome {
 #[must_use]
 pub fn asked_question_label(task_id: &str) -> String {
     format!(
-        "asked a question this verb cannot answer (task `{}` cancelled) — this peer uses A2A input-required, which rustain does not continue yet",
+        "asked a question this verb cannot answer (task `{}` cancelled) — /team send does not continue A2A input-required questions",
         crate::domain::services::transparency::sanitize_disclosable(
             task_id,
             crate::domain::services::transparency::MAX_PEER_ID_BYTES
@@ -1481,6 +1481,22 @@ impl RememberedBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_required_copy_names_the_single_turn_verb_in_both_renderers() {
+        let expected = "asked a question this verb cannot answer (task `task-1` cancelled) — /team send does not continue A2A input-required questions";
+        assert_eq!(asked_question_label("task-1"), expected);
+        let rows = crate::adapters::tui::handlers::team_command::render_team_send_rows(&[
+            crate::adapters::tui::handlers::team_command::TeamSendRow {
+                alias: "peer".to_owned(),
+                outcome: Some(crate::domain::models::RecipientOutcome::AskedQuestion {
+                    task_id: "task-1".to_owned(),
+                }),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
+            },
+        ]);
+        assert_eq!(rows.trim_end(), format!("    peer  {expected}"));
+    }
 
     /// Story 19.16b AC3(e) — a `removed` row renders at the last sender-visible
     /// outcome, ⛔ never through the not-found path's `⚠ unreachable`.

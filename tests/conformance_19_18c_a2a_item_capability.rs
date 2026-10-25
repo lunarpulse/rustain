@@ -2959,6 +2959,9 @@ fn invoke(egress: &A2aEgress, peer: &str) -> tokio::task::JoinHandle<Result<Stri
     })
 }
 
+/// Story 19.18b `AC5`: the auth-required refusal, up to the remote task id.
+const AUTH_REQUIRED_PREFIX: &str = "remote agent requires authorization or a decision on its side that this delegation cannot provide (task ";
+
 /// `K13` (`A9`, `A18`, `P12`) — the model rail against a 19.18c API-key host.
 /// (i) Poll: B (`NotifyAndDraft`) holds its provider until the test has
 /// observed the first `tasks/get` journaled — which only a SERVED poll is —
@@ -3018,7 +3021,7 @@ async fn k13_the_model_rail_polls_and_cancels_with_its_own_capability() {
     let error =
         outcome.expect_err("the draft parks the task: the rail stops at its decision point");
     assert!(
-        error.contains("remote agent requested input"),
+        error.contains(AUTH_REQUIRED_PREFIX) && error.contains(" cancelled)"),
         "the polls and the closing cancel were served: {error}"
     );
     let key = ItemCapabilityKeyStore::new(keys.path())
@@ -3061,7 +3064,10 @@ async fn k13_the_model_rail_polls_and_cancels_with_its_own_capability() {
         .expect("delegation settles")
         .expect("join");
     let error = outcome.expect_err("auth-required stops the rail");
-    assert!(error.contains("remote agent requested input"), "{error}");
+    assert!(
+        error.contains(AUTH_REQUIRED_PREFIX) && error.contains(" cancelled)"),
+        "{error}"
+    );
     let task = room_events(&journal)
         .await
         .into_iter()

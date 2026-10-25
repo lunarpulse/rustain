@@ -602,10 +602,15 @@ fn test_import_site_count_pinned() {
     // the real delegation runtime only under `#[cfg(test)]` to prove one
     // journal snapshot and the unreadable-journal refusal. Production receives
     // the composed runtime; no new domain/executor concrete-tree coupling.
+    // 31 -> 33 (Story 19.18b): `adapters/daemon/server/inbound_turn.rs`
+    // mechanically owns the extracted inbound turn context, and
+    // `adapters/daemon/server/parked_cancel.rs` watches the same composed tree
+    // while an inbound response is parked. Both are daemon-owned context
+    // slices, not new tree instances or domain/executor concrete coupling.
     //
     // Not covered by `ratchet-signoff-guard.yml`, which gates only the seven named
     // constants in `tests/conformance.rs`.
-    const EXPECTED: usize = 31;
+    const EXPECTED: usize = 33;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

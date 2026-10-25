@@ -927,7 +927,7 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
                 " ",
                 Cow::Owned(crate::domain::services::transparency::sanitize_disclosable(
                     &format!(
-                        "asked a question this verb cannot answer (task `{task_id}` cancelled) — this peer uses A2A input-required, which rustain does not continue yet"
+                        "asked a question this verb cannot answer (task `{task_id}` cancelled) — /team send does not continue A2A input-required questions"
                     ),
                     MAX_PEER_ID_BYTES,
                 )),

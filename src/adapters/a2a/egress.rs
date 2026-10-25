@@ -722,6 +722,7 @@ mod item_capability_tests {
         let (message, own) = super::super::driver::build_message(
             &serde_json::json!({ "message": "q" }),
             super::super::driver::MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 item_key: Some(&key),
                 reply_to: None,

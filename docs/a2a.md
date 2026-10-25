@@ -219,7 +219,7 @@ The optional leading `--type <type>` accepts `consultation`, `story_assignment`,
 
 Inherited outer whitespace trimming is unchanged. Interior spaces, tabs, newlines and code snippets remain verbatim; the parser consumes the type/recipient prefix by token position, not by searching for repeated words in the body.
 
-The action creates one stable, keyless `Info` block with one row per alias in the order typed. It has no header or aggregate result. Each recipient settles independently at its **first** `message/send` answer: `● delivered` means that answer carried a non-empty recipient item ID; `✗ declined` is a send-time rejection (including a `-32040` policy refusal); `⚠ unreachable` names a send that did not land, with a named preflight cause on its indented line when available. Tokenless rows name `sending…`, `awaiting their approval` (`auth-required` without an item), `accepted — this peer keeps no item id`, `no usable answer — '/team board' shows whether it arrived`, `asked a question this verb cannot answer (task … cancelled) — this peer uses A2A input-required, which rustain does not continue yet`, or `not sent — this host could not record the attempt`. The recipient's `server.admission` defaults to `deny`, so an unconfigured recipient declines a team message.
+The action creates one stable, keyless `Info` block with one row per alias in the order typed. It has no header or aggregate result. Each recipient settles independently at its **first** `message/send` answer: `● delivered` means that answer carried a non-empty recipient item ID; `✗ declined` is a send-time rejection (including a `-32040` policy refusal); `⚠ unreachable` names a send that did not land, with a named preflight cause on its indented line when available. Tokenless rows name `sending…`, `awaiting their approval` (`auth-required` without an item), `accepted — this peer keeps no item id`, `no usable answer — '/team board' shows whether it arrived`, ``asked a question this verb cannot answer (task `…` cancelled) — /team send does not continue A2A input-required questions``, or `not sent — this host could not record the attempt`. The recipient's `server.admission` defaults to `deny`, so an unconfigured recipient declines a team message.
 
 There is exactly one `message/send` attempt per recipient and no automatic retry or queue. To send again, re-type `/team send` with the recipients you choose; the block has no retry control. A recipient with an item ID is delivered even when its first answer is `auth-required`: this rail does not poll or cancel that task. An item-less `input-required` triggers a single-turn `tasks/cancel`; if that cleanup fails or its answer is not `canceled`, the row says `no usable answer` rather than claiming cancellation. A peer that answers with an A2A Message instead of a task, and no item ID, is `accepted — this peer keeps no item id`.
 
@@ -342,6 +342,49 @@ action ID: interrupting stops only the CLI wait, not the daemon-owned send.
 Inspect the rest with `/team board --action <id>`. A lost connection after submission
 does not prove nothing was sent. No timeout is imposed: a settlement whose journal
 append fails is not published, so interrupt the wait and inspect the board.
+
+### Model delegation and A2A input-required (Story 19.18b)
+
+The model's `a2a__<peer>__<skill>` tool can answer an A2A peer's in-band
+clarification question. An `input-required` result is a successful tool result,
+not a refusal: the node is tainted and parks as **awaiting your answer**. The
+pretty-printed result contains `state: "input-required"`, the raw remote `task`,
+`instructions`, and a host-minted opaque `continue` handle. The task stays open;
+no `tasks/cancel` is sent just because the peer asked a question.
+
+Call the same peer's tool again with `"continue": "<handle>"` and a non-empty
+`"message": "<answer>"`. The answer uses the parked transport, a fresh
+`messageId`, the remote `taskId`, and its `contextId` when known. Its reply
+capability is presented only when that remote task id is the transport's own
+bound message id. A terminal answer settles the same local node; another
+question mints a new handle.
+
+Handles are single-use and bound to the peer. An unknown or used handle is
+refused as `continuation handle is unknown or already used`; another peer's
+tool refuses it as `continuation handle belongs to another peer` without
+consuming it. A present, non-null `continue` that is not a non-empty string is
+refused as `continue must be a non-empty string` (a `null` value is an ordinary
+first send). Missing/empty answer text is refused as
+`continuing a remote task needs a message`. These refusals send no request,
+write no journal row and leave the node untouched. Handles never appear in
+the wire message.
+
+The question survives the originating turn ending or being interrupted: while
+parked, its owner observes the **node** token and Kill, not that tool call's
+token. Cancelling the node removes the handle and sends `tasks/cancel` for the
+remote task. A confirmed `canceled` answer is journaled as such; transport
+failure or another state is explicitly `remote task cancel was not confirmed`,
+never claimed as remote cancellation. A question that arrives as the active
+call is cancelled or the node is killed, or that cannot be parked or delivered,
+is never left open: it is cancelled the same way. There is no TTL and no
+restart durability.
+
+`auth-required` remains distinct: it asks for credentials or a decision on the
+peer's side, which an in-band answer cannot supply. The model rail cancels that
+task and reports `remote agent requires authorization or a decision on its side
+that this delegation cannot provide (task … cancelled)`. A failed cancel is an
+error. This does not change `/team send`: that single-turn verb still cancels
+item-less `input-required` questions and has no human continuation verb.
 
 ### Agent-proposed messages (standalone and attached TUI)
 
@@ -1244,9 +1287,9 @@ which every key bound to the peer may query.
 
 | Method | Behaviour |
 |---|---|
-| `message/send` | Admits the task and answers immediately. Never blocks on a human |
+| `message/send` | Admits a new task and answers immediately; an optional `message.taskId` resolves a scoped follow-up reference, not the new task's key. Never blocks on a human |
 | `tasks/get` | Current state, scoped to the submitting credential (a bound key with adoption also reaches its adopted keys' recovered tasks) |
-| `tasks/cancel` | Cancels the running turn, scoped to the submitting credential (a bound key with adoption also reaches its adopted keys' recovered tasks) |
+| `tasks/cancel` | Cancels the running turn or a parked wait/Ready draft, scoped to the submitting credential (a bound key with adoption also reaches its adopted keys' recovered tasks) |
 
 Under `admission: "ask"`, `message/send` answers `auth-required` and the client
 polls `tasks/get`; the operator's decision arrives out of band. The request is
@@ -1257,6 +1300,31 @@ and each retry would queue another prompt.
 exactly what a task that does not exist returns. That is deliberate: telling
 "not yours" apart from "not found" would let a peer enumerate task ids and map
 the host's federation for free.
+
+For `message/send`, absent or null `taskId` keeps the ordinary ingress path.
+A present `taskId` must be a non-empty string of at most 256 bytes and cannot
+be combined with a non-null `x-rustain-in-reply-to`; malformed/conflicting references are
+`-32602`. The task must resolve in the caller's scope and pass its task
+reply-capability gate. Unknown, out-of-scope and wrong-capability tasks all
+answer exactly `-32001 "Task not found"` before any state is revealed.
+An authorized terminal task answers `-32004 "Task is in a terminal state and
+cannot accept further messages"`; a pending-approval task with no admitted
+item answers `-32004 "Task cannot accept messages until it is admitted"`.
+
+A live admitted task's recipient item then passes the ordinary FR169 follow-up
+gates. The send mints a **new item and a new task with the new messageId**,
+linked to that recipient item; the referenced task, card and node are unchanged.
+Thus the returned task id differs from `taskId`. This is a follow-up reference
+under AD-1829, not mutation of the original execution. `contextId` stays ignored
+on the served ingress.
+
+Cancelling a parked NotifyAndWait or Ready NotifyAndDraft response settles its
+card with `[cancelled] This request was cancelled before you answered; no
+response was sent.` The pending card disappears on attached clients, and the
+notice stays in the transcript. Operator resolution and cancellation are
+serialized: the first settlement wins. If saving the settlement fails, the
+card and controller remain answerable and a still-waiting task truthfully
+remains `auth-required`; the failure is logged, not relabeled as cancellation.
 
 If the host restarts mid-task, a task whose capability class can be recovered
 resolves to `failed` with a restart reason — never a zombie `working`. If the

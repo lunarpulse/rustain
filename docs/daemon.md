@@ -619,6 +619,15 @@ RAP-rooted interrupted drafts use the one-way notice above instead. Live draft
 phases and other stages are unchanged. Settlement creates no reply, provider
 turn or journal event; a direct `/team reply <item-id> …` remains available.
 
+A parked inbound A2A NotifyAndWait request or Ready draft still observes its
+owner's `tasks/cancel` and a local node kill. Cancellation durably settles the
+pending card as `[cancelled] This request was cancelled before you answered; no response was sent.`
+The card disappears and the notice remains in the attached transcript; no reply
+turn is appended. A previously resolved card remains resolved. If saving the
+settlement fails, the pending card stays answerable and a still-Waiting node is
+left unchanged; the daemon logs the persistence failure rather than claiming a
+remote cancellation.
+
 Legacy rows are never backfilled: without recorded send authorization, that
 fact is Unknown. A legacy approved draft loses its false `[auto-sent]` label.
 A legacy genuine auto-response shows `[agent-composed]` only and is no longer

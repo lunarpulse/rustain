@@ -96,8 +96,8 @@ use super::item_capability::{
 use super::jsonrpc::{
     A2A_PROTOCOL_VERSION, A2A_VERSION_HEADER, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS,
     CODE_INVALID_REQUEST, CODE_ITEM_REMOVED, CODE_METHOD_NOT_FOUND, CODE_PARSE_ERROR,
-    CODE_REFUSED_BY_POLICY, CODE_TASK_NOT_FOUND, CODE_VERSION_NOT_SUPPORTED, JsonRpcErrorResponse,
-    JsonRpcResponse,
+    CODE_REFUSED_BY_POLICY, CODE_TASK_NOT_FOUND, CODE_UNSUPPORTED_OPERATION,
+    CODE_VERSION_NOT_SUPPORTED, JsonRpcErrorResponse, JsonRpcResponse,
 };
 use super::projection::{RemotePeerViewer, RoomProjection};
 use super::story_carrier::{parse_selection_carrier, parse_story_carrier};
@@ -1056,7 +1056,7 @@ async fn message_send(
     // check below runs on the caller's exact item principal, ⛔ never scope.
     let peer_id = caller.key.policy_principal().peer().clone();
     let reference =
-        follow_up_reference(state, caller, params, &echo, reply_capability.as_ref()).await?;
+        continued_task_reference(state, caller, params, &echo, reply_capability.as_ref()).await?;
     // Story 19.18c `A22` — one capability class per `(principal, task)`,
     // checked for every admission verdict before `admit`, so a refusal
     // writes zero rows. A co-holder that resubmits another sender's task id
@@ -1273,6 +1273,17 @@ async fn follow_up_reference(
                 JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params")
             })?,
     };
+    reference_gate(state, caller, reference, echo, reply_capability).await
+}
+
+/// Both wire references enter the unchanged FR169 item gate.
+async fn reference_gate(
+    state: &ServerState,
+    caller: &Caller,
+    reference: &str,
+    echo: &serde_json::Value,
+    reply_capability: Option<&PresentedCapability>,
+) -> Result<Option<FollowUpReference>, JsonRpcErrorResponse> {
     let setting = state.security.thread_reads;
     let refused =
         |reason: &str| JsonRpcErrorResponse::new(echo.clone(), CODE_REFUSED_BY_POLICY, reason);
@@ -1309,6 +1320,80 @@ async fn follow_up_reference(
         CapabilityVerdict::NotFound => Err(not_found()),
         CapabilityVerdict::AccessOff => Err(refused(THREAD_ACCESS_OFF)),
     }
+}
+
+/// Resolve a client's taskId in its scope, authorize it before revealing state,
+/// and translate the admitted task to its recipient item. The next message still
+/// creates its own task, keyed only by its new messageId (AD-1829).
+async fn continued_task_reference(
+    state: &ServerState,
+    caller: &Caller,
+    params: &serde_json::Value,
+    echo: &serde_json::Value,
+    reply_capability: Option<&PresentedCapability>,
+) -> Result<Option<FollowUpReference>, JsonRpcErrorResponse> {
+    let invalid = || JsonRpcErrorResponse::new(echo.clone(), CODE_INVALID_PARAMS, "Invalid params");
+    let task_id = match params.pointer("/message/taskId") {
+        None | Some(serde_json::Value::Null) => {
+            return follow_up_reference(state, caller, params, echo, reply_capability).await;
+        }
+        Some(value) => value
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= MAX_TASK_ID_BYTES)
+            .ok_or_else(invalid)?,
+    };
+    // One thread key per message; a null reply-to is absent, as in the FR169 path.
+    if !matches!(
+        params.pointer(&format!(
+            "/message/metadata/{}",
+            super::REPLY_TO_METADATA_KEY
+        )),
+        None | Some(serde_json::Value::Null)
+    ) {
+        return Err(invalid());
+    }
+    let not_found = || JsonRpcErrorResponse::new(echo.clone(), CODE_TASK_NOT_FOUND, TASK_NOT_FOUND);
+    let task = state
+        .tasks
+        .get_in_scope(task_id, &caller.key, || adopted_submitters(state, caller))
+        .await
+        .ok_or_else(not_found)?;
+    let hash = task.capability_hash.as_deref();
+    if !matches!(
+        post_lookup(
+            caller.trust,
+            CapabilityGatedVerb::RetractOrTask,
+            hash,
+            presented_matches(hash, reply_capability),
+            state.security.thread_reads,
+        ),
+        CapabilityVerdict::Serve
+    ) {
+        return Err(not_found());
+    }
+    let snapshot = task.snapshot().await;
+    if snapshot.state.is_terminal() {
+        return Err(JsonRpcErrorResponse::new(
+            echo.clone(),
+            CODE_UNSUPPORTED_OPERATION,
+            "Task is in a terminal state and cannot accept further messages",
+        ));
+    }
+    let address = snapshot.item_address.ok_or_else(|| {
+        JsonRpcErrorResponse::new(
+            echo.clone(),
+            CODE_UNSUPPORTED_OPERATION,
+            "Task cannot accept messages until it is admitted",
+        )
+    })?;
+    reference_gate(
+        state,
+        caller,
+        address.item().as_str(),
+        echo,
+        reply_capability,
+    )
+    .await
 }
 
 /// Admit a task: register the store entry, then either run it or park it on a

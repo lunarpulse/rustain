@@ -2526,3 +2526,21 @@ impl RoomJournal for GateJournal {
         self.inner.record_event(event).await
     }
 }
+
+#[path = "conformance_19_18b/b_k06_parked_cancel.rs"]
+mod b_k06_parked_cancel;
+
+#[path = "conformance_19_18b/b_k04_served_task.rs"]
+mod b_k04_served_task;
+
+#[path = "conformance_19_18b/b_k05_auth_split.rs"]
+mod b_k05_auth_split;
+
+#[path = "conformance_19_18b/b_k01_model_park.rs"]
+mod b_k01_model_park;
+
+#[path = "conformance_19_18b/b_k02_model_resume.rs"]
+mod b_k02_model_resume;
+
+#[path = "conformance_19_18b/b_k03_model_cancel.rs"]
+mod b_k03_model_cancel;

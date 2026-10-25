@@ -345,8 +345,8 @@ pub enum WaitReason {
     BudgetPaused,
     /// Downstream node parked until durable upstream artifact handles land.
     AwaitingUpstreamArtifact,
-    /// MCP task parked on a human answer to an elicitation request (17.5b).
-    /// The first writer of `WaitReason` in the product — see R-2.
+    /// MCP task parked on a human answer to an elicitation request (17.5b),
+    /// or an A2A peer's input-required question (19.18b).
     AwaitingHumanInput,
     /// Inbound peer interaction parked until the local operator responds.
     AwaitingPeerResponse,

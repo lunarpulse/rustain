@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::events::{AppEvent, DomainEventPayload};
@@ -219,6 +219,10 @@ impl TaskClient {
 
 #[async_trait]
 impl A2aTaskTransport for TaskClient {
+    fn own_task(&self) -> Option<OwnTask> {
+        self.own_task.clone()
+    }
+
     async fn message_send(
         &self,
         message: serde_json::Value,
@@ -257,14 +261,16 @@ pub enum DelegationError {
     Journal(RoomJournalError),
     /// The peer/task terminated as failed/rejected.
     Refused { reason: String },
-    /// The peer asked for input/auth — multi-turn is not supported (R-C). The
-    /// peer's task was already cancelled; `task_id`/`context_id` are journaled.
-    InputRequired {
+    /// The peer needs authorization or a decision this caller cannot provide.
+    /// Its remote task was cancelled before returning this refusal.
+    AuthRequired {
         task_id: String,
         context_id: Option<String>,
     },
     /// The delegation was cancelled by the owner.
     Cancelled,
+    /// A continuation was refused before dispatch or node mutation.
+    Continuation(String),
 }
 
 impl std::fmt::Display for DelegationError {
@@ -277,11 +283,11 @@ impl std::fmt::Display for DelegationError {
             Self::Driver(reason) => write!(f, "A2A driver task failure: {reason}"),
             Self::Journal(error) => write!(f, "could not record A2A room event: {error}"),
             Self::Refused { reason } => write!(f, "remote task refused/failed: {reason}"),
-            Self::InputRequired { task_id, .. } => write!(
+            Self::AuthRequired { task_id, .. } => write!(
                 f,
-                "remote agent requested input; multi-turn delegation is not supported \
-                 (task {task_id} cancelled)"
+                "remote agent requires authorization or a decision on its side that this delegation cannot provide (task {task_id} cancelled)"
             ),
+            Self::Continuation(reason) => f.write_str(reason),
             Self::Cancelled => write!(f, "delegation cancelled by owner"),
         }
     }
@@ -425,6 +431,35 @@ fn prune_dead_send_slots(
     });
 }
 
+/// Instructions accompany untrusted peer content; the opaque handle is host-minted.
+pub const ANSWER_INSTRUCTIONS: &str = "The remote agent asked for input. Answer by calling this tool again with \"continue\" set to this value and \"message\" set to your answer. The remote task stays open until you answer or this node is cancelled.";
+
+struct Parked {
+    peer: String,
+    node: AgentId,
+    task_id: String,
+    context_id: Option<String>,
+    transport: Arc<dyn A2aTaskTransport>,
+    own_task: Option<OwnTask>,
+    resume: oneshot::Sender<ResumeRequest>,
+}
+
+struct ResumeRequest {
+    node: AgentId,
+    transport: Arc<dyn A2aTaskTransport>,
+    message: serde_json::Value,
+    cancel: CancellationToken,
+    authorship: Authorship,
+    send_authorization: SendAuthorization,
+    reply: oneshot::Sender<Result<serde_json::Value, DelegationError>>,
+}
+
+#[derive(Debug)]
+enum DriverOutcome {
+    Finished(serde_json::Value),
+    InputRequired(TaskSnapshot),
+}
+
 /// Shared A2A delegation runtime. Injected by the composition root with the
 /// live node tree, the durable journal, and the domain event sink.
 #[derive(Clone)]
@@ -434,6 +469,7 @@ pub struct A2aDelegationRuntime {
     event_tx: mpsc::UnboundedSender<AppEvent>,
     peer_bindings: A2aPeerBindings,
     journal_failure_latch: Arc<JournalFailureLatch>,
+    parked: Arc<parking_lot::Mutex<std::collections::HashMap<String, Parked>>>,
     /// Last admitted Act 1 board refresh (Story 19.16b `AC5(d)`).
     ///
     /// Held on the runtime rather than a UI state so the stated poll floor
@@ -645,6 +681,7 @@ impl A2aDelegationRuntime {
             event_tx,
             peer_bindings: Arc::from([]),
             journal_failure_latch: Arc::new(JournalFailureLatch::new()),
+            parked: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             board_refresh_gate: Arc::new(tokio::sync::Mutex::new(None)),
             journal_reader: None,
             board_in_flight: Arc::new(tokio::sync::Mutex::new(())),
@@ -1654,17 +1691,27 @@ impl A2aDelegationRuntime {
             .await
             .map_err(|error| DelegationError::State(error.to_string()))?;
 
-        self.run_live_driver(
-            &node_id,
-            &peer,
-            &parent_tool_call_id,
-            transport.as_ref(),
-            first,
-            cancel,
-            node_cancel,
-            command_rx,
-        )
-        .await
+        let (reply, answer) = oneshot::channel();
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            runtime
+                .run_live_driver(
+                    spec,
+                    node_id,
+                    peer,
+                    parent_tool_call_id,
+                    transport,
+                    first,
+                    cancel,
+                    node_cancel,
+                    command_rx,
+                    reply,
+                )
+                .await;
+        });
+        answer
+            .await
+            .map_err(|error| DelegationError::Driver(error.to_string()))?
     }
 
     /// Re-drive a peer node that a restart recovered as `Suspended` (Task 8 /
@@ -1700,65 +1747,499 @@ impl A2aDelegationRuntime {
             .try_set_state(node_id, NodeState::Running)
             .await
             .map_err(|error| DelegationError::State(error.to_string()))?;
-        self.run_lifecycle(
-            node_id,
-            &peer,
-            "restart-reconcile",
-            transport,
-            snapshot,
-            cancel,
-        )
-        .await
-        .map(|_| ())
+        match self
+            .run_lifecycle(
+                node_id,
+                &peer,
+                "restart-reconcile",
+                transport,
+                snapshot,
+                cancel,
+            )
+            .await?
+        {
+            DriverOutcome::Finished(_) => Ok(()),
+            DriverOutcome::InputRequired(task) => {
+                // Recovered tasks have no live model call to receive a handle, and
+                // continuation durability across restart is out of scope. Settle it
+                // like a parked kill: journal whether the peer confirmed the cancel.
+                self.cancel_parked(node_id, &peer, "restart-reconcile", transport, &task.id)
+                    .await?;
+                Err(DelegationError::Refused {
+                    reason: "remote agent requested input during restart reconciliation; \
+                             no live caller can answer it"
+                        .to_owned(),
+                })
+            }
+        }
     }
 
-    /// Link the owner token and the registered node's local control plane to
-    /// one lifecycle token while keeping the `Op::Kill` receiver alive.
+    /// One process-owned session retains the node control plane across every park.
+    /// Only the active call observes its invocation token; parked questions survive it.
     async fn run_live_driver(
         &self,
-        node_id: &AgentId,
+        spec: A2aPeerSpec,
+        node_id: AgentId,
+        peer: PeerId,
+        parent_tool_call_id: String,
+        transport: Arc<dyn A2aTaskTransport>,
+        mut first: TaskSnapshot,
+        mut owner_cancel: CancellationToken,
+        node_cancel: CancellationToken,
+        mut command_rx: mpsc::Receiver<Op>,
+        mut reply: oneshot::Sender<Result<serde_json::Value, DelegationError>>,
+    ) {
+        let mut commands_open = true;
+        // The node token or a bare `Op::Kill` ends the session. A kill consumed
+        // while another branch wins is remembered here, never dropped.
+        let killed = node_cancel.child_token();
+        loop {
+            let lifecycle_cancel = CancellationToken::new();
+            let outcome = {
+                let drive = self.run_lifecycle(
+                    &node_id,
+                    &peer,
+                    &parent_tool_call_id,
+                    transport.as_ref(),
+                    first,
+                    lifecycle_cancel.clone(),
+                );
+                tokio::pin!(drive);
+                loop {
+                    tokio::select! {
+                        result = &mut drive => break result,
+                        () = owner_cancel.cancelled(), if !lifecycle_cancel.is_cancelled() => lifecycle_cancel.cancel(),
+                        () = killed.cancelled(), if !lifecycle_cancel.is_cancelled() => lifecycle_cancel.cancel(),
+                        command = command_rx.recv(), if commands_open => {
+                            match command {
+                                Some(Op::Kill) => {
+                                    killed.cancel();
+                                    lifecycle_cancel.cancel();
+                                }
+                                None => commands_open = false,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            };
+            let task = match outcome {
+                Ok(DriverOutcome::Finished(value)) => {
+                    let _ = reply.send(Ok(value));
+                    return;
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+                Ok(DriverOutcome::InputRequired(task)) => task,
+            };
+            // A question that races the active call's cancellation or a kill is
+            // not parked: nobody would hold its handle.
+            if lifecycle_cancel.is_cancelled() {
+                let result = self
+                    .cancel_parked(
+                        &node_id,
+                        &peer,
+                        &parent_tool_call_id,
+                        transport.as_ref(),
+                        &task.id,
+                    )
+                    .await
+                    .and(Err(DelegationError::Cancelled));
+                let _ = reply.send(result);
+                return;
+            }
+            let parked = async {
+                self.node_tree
+                    .try_set_state(&node_id, NodeState::Waiting)
+                    .await
+                    .map_err(|error| DelegationError::State(error.to_string()))?;
+                self.node_tree
+                    .stamp_wait_reason(
+                        &node_id,
+                        Some(crate::domain::models::WaitReason::AwaitingHumanInput),
+                    )
+                    .await
+                    .map_err(|error| DelegationError::State(error.to_string()))?;
+                self.node_tree.mark_tainted(&node_id).await;
+                let (resume, request) = oneshot::channel();
+                let handle = {
+                    use rand_core::RngCore;
+                    let mut registry = self.parked.lock();
+                    loop {
+                        let mut bytes = [0u8; 8];
+                        rand_core::OsRng.fill_bytes(&mut bytes);
+                        let handle = format!("a2a-continue-{}", hex::encode(bytes));
+                        if !registry.contains_key(&handle) {
+                            registry.insert(
+                                handle.clone(),
+                                Parked {
+                                    peer: spec.id.clone(),
+                                    node: node_id.clone(),
+                                    task_id: task.id.clone(),
+                                    context_id: task.context_id.clone(),
+                                    transport: transport.clone(),
+                                    own_task: transport.own_task(),
+                                    resume,
+                                },
+                            );
+                            break handle;
+                        }
+                    }
+                };
+                Ok::<_, DelegationError>((handle, request))
+            }
+            .await;
+            let (handle, request) = match parked {
+                Ok(parked) => parked,
+                Err(error) => {
+                    // An unparked question has no owner: settle it like a kill.
+                    let error = if killed.is_cancelled() {
+                        DelegationError::Cancelled
+                    } else {
+                        error
+                    };
+                    let result = self
+                        .cancel_parked(
+                            &node_id,
+                            &peer,
+                            &parent_tool_call_id,
+                            transport.as_ref(),
+                            &task.id,
+                        )
+                        .await
+                        .and(Err(error));
+                    let _ = reply.send(result);
+                    return;
+                }
+            };
+            let question = serde_json::json!({
+                "state": "input-required", "continue": handle,
+                "instructions": ANSWER_INSTRUCTIONS, "task": task.result,
+            });
+            if reply.send(Ok(question)).is_err() {
+                // The caller is gone and can never answer this handle.
+                self.parked.lock().remove(&handle);
+                if let Err(error) = self
+                    .cancel_parked(
+                        &node_id,
+                        &peer,
+                        &parent_tool_call_id,
+                        transport.as_ref(),
+                        &task.id,
+                    )
+                    .await
+                {
+                    tracing::error!(%error, node = %node_id, "settling an undelivered A2A question failed");
+                }
+                return;
+            }
+            let Some(request) = self
+                .await_parked_resume(
+                    &handle,
+                    &node_id,
+                    &peer,
+                    &parent_tool_call_id,
+                    transport.as_ref(),
+                    &task.id,
+                    &killed,
+                    &mut command_rx,
+                    &mut commands_open,
+                    request,
+                )
+                .await
+            else {
+                return;
+            };
+            let ResumeRequest {
+                node: answer_node,
+                transport: answer_transport,
+                message,
+                cancel,
+                authorship,
+                send_authorization,
+                reply: answer_reply,
+            } = request;
+            owner_cancel = cancel;
+            reply = answer_reply;
+            if killed.is_cancelled() {
+                let result = self
+                    .cancel_parked(
+                        &node_id,
+                        &peer,
+                        &parent_tool_call_id,
+                        transport.as_ref(),
+                        &task.id,
+                    )
+                    .await
+                    .and(Err(DelegationError::Cancelled));
+                let _ = reply.send(result);
+                return;
+            }
+            let dispatched = async {
+                let (submitted_task, bytes) = outbound_message_fact(&message);
+                self.emit_room(RoomEvent::RemoteEnvelopeDispatched {
+                    peer: peer.clone(),
+                    task: submitted_task,
+                    bytes,
+                    act: crate::domain::models::DispatchAct::Task,
+                    content_hash: None,
+                    endpoint: self.dispatch_endpoint(&spec),
+                    action: None,
+                    authorship,
+                    send_authorization,
+                })
+                .await?;
+                self.node_tree
+                    .try_set_state(&answer_node, NodeState::Running)
+                    .await
+                    .map_err(|error| DelegationError::State(error.to_string()))
+            }
+            .await;
+            if let Err(error) = dispatched {
+                // Nothing was POSTed and the node never left Waiting (a racing
+                // kill may have made it Cancelled): the question is still open.
+                let error = if killed.is_cancelled() {
+                    DelegationError::Cancelled
+                } else {
+                    error
+                };
+                let result = self
+                    .cancel_parked(
+                        &node_id,
+                        &peer,
+                        &parent_tool_call_id,
+                        transport.as_ref(),
+                        &task.id,
+                    )
+                    .await
+                    .and(Err(error));
+                let _ = reply.send(result);
+                return;
+            }
+            let next = async {
+                let value = answer_transport
+                    .message_send(message)
+                    .await
+                    .map_err(DelegationError::Transport)?;
+                TaskSnapshot::from_result(value).map_err(DelegationError::Transport)
+            }
+            .await;
+            match next {
+                Ok(snapshot) => first = snapshot,
+                Err(error) => {
+                    if killed.is_cancelled() {
+                        let result = self
+                            .cancel_parked(
+                                &node_id,
+                                &peer,
+                                &parent_tool_call_id,
+                                transport.as_ref(),
+                                &task.id,
+                            )
+                            .await
+                            .and(Err(DelegationError::Cancelled));
+                        let _ = reply.send(result);
+                        return;
+                    }
+                    let rejected = self
+                        .reject(
+                            &node_id,
+                            &peer,
+                            &parent_tool_call_id,
+                            &task.id,
+                            &error.to_string(),
+                        )
+                        .await;
+                    let _ = reply.send(Err(rejected.err().unwrap_or(error)));
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn await_parked_resume(
+        &self,
+        handle: &str,
+        node: &AgentId,
         peer: &PeerId,
         parent_tool_call_id: &str,
         transport: &dyn A2aTaskTransport,
-        first: TaskSnapshot,
-        owner_cancel: CancellationToken,
-        node_cancel: CancellationToken,
-        mut command_rx: mpsc::Receiver<Op>,
-    ) -> Result<serde_json::Value, DelegationError> {
-        let lifecycle_cancel = CancellationToken::new();
-
-        let token_signal = lifecycle_cancel.clone();
-        let token_relay = tokio::spawn(async move {
+        task_id: &str,
+        killed: &CancellationToken,
+        command_rx: &mut mpsc::Receiver<Op>,
+        commands_open: &mut bool,
+        mut request: oneshot::Receiver<ResumeRequest>,
+    ) -> Option<ResumeRequest> {
+        let claimed = loop {
             tokio::select! {
-                () = owner_cancel.cancelled() => {}
-                () = node_cancel.cancelled() => {}
-            }
-            token_signal.cancel();
-        });
-
-        let command_signal = lifecycle_cancel.clone();
-        let command_relay = tokio::spawn(async move {
-            while let Some(command) = command_rx.recv().await {
-                if matches!(command, Op::Kill) {
-                    command_signal.cancel();
-                    break;
+                result = &mut request => break result.ok(),
+                () = killed.cancelled() => {}
+                command = command_rx.recv(), if *commands_open => {
+                    match command {
+                        // Remembered: a resume that already claimed the handle
+                        // still sees this kill before it dispatches.
+                        Some(Op::Kill) => killed.cancel(),
+                        None => { *commands_open = false; continue; }
+                        _ => continue,
+                    }
                 }
             }
-        });
+            // Removal is the resume/kill linearization point. A claimed resume
+            // still delivers its request; the caller settles a remembered kill.
+            break if self.parked.lock().remove(handle).is_some() {
+                None
+            } else {
+                (&mut request).await.ok()
+            };
+        };
+        if claimed.is_none() {
+            // Killed, or the claimed sender vanished: nobody can answer anymore.
+            self.parked.lock().remove(handle);
+            if let Err(error) = self
+                .cancel_parked(node, peer, parent_tool_call_id, transport, task_id)
+                .await
+            {
+                tracing::error!(%error, %node, "settling parked A2A cancellation failed");
+            }
+        }
+        claimed
+    }
 
-        let result = self
-            .run_lifecycle(
-                node_id,
-                peer,
-                parent_tool_call_id,
-                transport,
-                first,
-                lifecycle_cancel,
-            )
-            .await;
-        token_relay.abort();
-        command_relay.abort();
-        result
+    async fn cancel_parked(
+        &self,
+        node: &AgentId,
+        peer: &PeerId,
+        parent: &str,
+        transport: &dyn A2aTaskTransport,
+        task_id: &str,
+    ) -> Result<(), DelegationError> {
+        // A cascade_kill may already have checkpointed Cancelled; never move a
+        // terminal node. A lost race must not skip the remote cancel or its row.
+        let live = self.node_tree.status_rx(node).await.is_some_and(|status| {
+            matches!(*status.borrow(), NodeState::Waiting | NodeState::Running)
+        });
+        if live
+            && let Err(error) = self
+                .node_tree
+                .try_set_state(node, NodeState::Cancelled)
+                .await
+        {
+            tracing::warn!(%error, %node, "parked A2A node did not move to Cancelled");
+        }
+        let detail = match transport
+            .tasks_cancel(task_id)
+            .await
+            .and_then(TaskSnapshot::from_result)
+        {
+            Ok(task) if task.state == A2aTaskState::Canceled => {
+                "peer reported terminal state canceled".to_owned()
+            }
+            Ok(task) => format!(
+                "remote task cancel was not confirmed: peer returned {:?}",
+                task.state
+            ),
+            Err(error) => format!("remote task cancel was not confirmed: {error}"),
+        };
+        let task_correlation = disclosable_task_id(task_id);
+        self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+            peer: peer.clone(),
+            reason: RejectReason::Policy {
+                detail: sanitize_disclosable(&detail, MAX_SUMMARY_BYTES),
+            },
+            direction: Direction::Outbound,
+            task: Some(task_correlation.clone()),
+        })
+        .await?;
+        self.emit_refused(node, parent, &task_correlation, RefuseReason::Policy);
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[must_use]
+    pub fn parked_count(&self) -> usize {
+        self.parked.lock().len()
+    }
+
+    /// Claim a same-peer handle once, before journal or transport effects.
+    pub async fn resume(
+        &self,
+        spec: &A2aPeerSpec,
+        mut input: serde_json::Value,
+        cancel: CancellationToken,
+        authorship: Authorship,
+        send_authorization: SendAuthorization,
+    ) -> Result<serde_json::Value, DelegationError> {
+        let invalid = |text: &str| DelegationError::Continuation(text.to_owned());
+        let handle = input
+            .get("continue")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| invalid("continue must be a non-empty string"))?;
+        input
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("continuing a remote task needs a message"))?;
+        input
+            .as_object_mut()
+            .expect("validated object arguments")
+            .remove("continue");
+        // Every fallible step runs before the claim: once the entry is removed,
+        // the only step left is handing the request to the parked owner.
+        let (parked, message) = {
+            let mut registry = self.parked.lock();
+            let entry = registry
+                .get(&handle)
+                .ok_or_else(|| invalid("continuation handle is unknown or already used"))?;
+            if entry.peer != spec.id {
+                return Err(invalid("continuation handle belongs to another peer"));
+            }
+            let item_key = self
+                .outbound_item_key(spec)
+                .map_err(DelegationError::Transport)?;
+            let reply_capability = entry
+                .own_task
+                .as_ref()
+                .filter(|own| own.message_id == entry.task_id)
+                .map(|own| &own.capability);
+            let (message, _) = build_message(
+                &input,
+                MessageCarriers {
+                    continuation: Some(Continuation {
+                        task_id: &entry.task_id,
+                        context_id: entry.context_id.as_deref(),
+                    }),
+                    reply_to: None,
+                    item_key: item_key.as_deref(),
+                    reply_capability,
+                    stories: None,
+                    selected_for: None,
+                    authorship,
+                    send_authorization,
+                },
+            );
+            let parked = registry.remove(&handle).expect("same-lock checked handle");
+            (parked, message)
+        };
+        let (reply, answer) = oneshot::channel();
+        parked
+            .resume
+            .send(ResumeRequest {
+                node: parked.node,
+                transport: parked.transport,
+                message,
+                cancel,
+                authorship,
+                send_authorization,
+                reply,
+            })
+            .map_err(|_| DelegationError::Driver("parked A2A owner closed".to_owned()))?;
+        answer
+            .await
+            .map_err(|error| DelegationError::Driver(error.to_string()))?
     }
 
     /// Shared drive-to-terminal loop: live `NodeState` projection + poll +
@@ -1771,7 +2252,7 @@ impl A2aDelegationRuntime {
         transport: &dyn A2aTaskTransport,
         first: TaskSnapshot,
         cancel: CancellationToken,
-    ) -> Result<serde_json::Value, DelegationError> {
+    ) -> Result<DriverOutcome, DelegationError> {
         // Live NodeState projection: the poll loop's sync callback forwards each
         // legal RAP hop; a concurrent task applies it via `try_set_state`.
         let (proj_tx, mut proj_rx) = mpsc::unbounded_channel::<RapTaskState>();
@@ -1815,7 +2296,7 @@ impl A2aDelegationRuntime {
                     })
                     .await?;
                     self.node_tree.mark_tainted(node_id).await;
-                    Ok(task.result)
+                    Ok(DriverOutcome::Finished(task.result))
                 }
                 RapTaskState::Canceled => {
                     // A cancellation is a terminal outcome: journal it like
@@ -1869,10 +2350,9 @@ impl A2aDelegationRuntime {
                     })
                 }
             },
-            Ok(LifecycleOutcome::InputRequired { task }) => {
-                // R-C: the poll loop already sent tasks/cancel to the peer. Close
-                // locally as a named `Failed`, journal taskId + contextId so
-                // re-delegation is possible, and surface the refusal to the user.
+            Ok(LifecycleOutcome::InputRequired { task }) => Ok(DriverOutcome::InputRequired(task)),
+            Ok(LifecycleOutcome::AuthRequired { task }) => {
+                // Authorization cannot be supplied in-band; lifecycle cancelled it.
                 self.node_tree
                     .try_set_state(node_id, NodeState::Failed)
                     .await
@@ -1884,7 +2364,7 @@ impl A2aDelegationRuntime {
                 // has bounded ids since 18.1b, the outbound side had nothing.
                 let task_correlation = disclosable_task_id(&task.id);
                 let detail = format!(
-                    "remote agent requested input (task {}, context {}); multi-turn not supported",
+                    "remote agent requires authorization (task {}, context {}); cancelled",
                     task_correlation,
                     task.context_id
                         .as_deref()
@@ -1904,7 +2384,7 @@ impl A2aDelegationRuntime {
                     &task_correlation,
                     RefuseReason::Policy,
                 );
-                Err(DelegationError::InputRequired {
+                Err(DelegationError::AuthRequired {
                     task_id: task.id,
                     context_id: task.context_id,
                 })
@@ -2143,10 +2623,18 @@ fn mint_message_id(now: u64, last: &AtomicU64, rng: &mut impl rand_core::RngCore
     format!("rustain-{nanos}-{:016x}", rng.next_u64())
 }
 
+/// Host-owned remote task/context addressing for an in-band answer.
+#[derive(Clone, Copy, Debug)]
+pub struct Continuation<'a> {
+    pub task_id: &'a str,
+    pub context_id: Option<&'a str>,
+}
+
 /// The carriers [`build_message`] writes from **Rust parameters only** —
 /// ⛔ never from `input`, which carries model-controlled tool arguments.
 #[derive(Clone, Copy, Debug)]
 pub struct MessageCarriers<'a> {
+    pub continuation: Option<Continuation<'a>>,
     /// Story 19.18 `AC7(b)` — the id a follow-up answers
     /// ([`super::REPLY_TO_METADATA_KEY`]); the model rail passes `None`.
     pub reply_to: Option<&'a str>,
@@ -2256,8 +2744,7 @@ pub fn build_message(
             capability,
         }
     });
-    (
-        serde_json::json!({
+    let mut message = serde_json::json!({
             "message": {
                 "kind": "message",
                 "messageId": message_id,
@@ -2265,9 +2752,14 @@ pub fn build_message(
                 "parts": [{ "kind": "text", "text": text }],
                 "metadata": metadata,
             }
-        }),
-        own_task,
-    )
+    });
+    if let Some(continuation) = carriers.continuation {
+        message["message"]["taskId"] = continuation.task_id.into();
+        if let Some(context_id) = continuation.context_id {
+            message["message"]["contextId"] = context_id.into();
+        }
+    }
+    (message, own_task)
 }
 
 #[cfg(test)]
@@ -2330,6 +2822,7 @@ mod tests {
                 "message_type": "consultation"
             }),
             MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 reply_to: None,
                 item_key: None,
@@ -2347,6 +2840,7 @@ mod tests {
         let (untyped, _) = build_message(
             &serde_json::json!({ "message": "review this" }),
             MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 reply_to: None,
                 item_key: None,
@@ -2375,6 +2869,7 @@ mod tests {
             let (message, _) = build_message(
                 &serde_json::json!({"message": "provenance"}),
                 MessageCarriers {
+                    continuation: None,
                     selected_for: None,
                     reply_to: None,
                     item_key: None,
@@ -2423,6 +2918,7 @@ mod tests {
         let (model, own) = build_message(
             &hostile,
             MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 reply_to: None,
                 item_key: None,
@@ -2440,6 +2936,7 @@ mod tests {
         let (keyed, own) = build_message(
             &hostile,
             MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 item_key: Some(&key),
                 reply_to: None,
@@ -2462,6 +2959,7 @@ mod tests {
         let (follow_up, _) = build_message(
             &serde_json::json!({ "message": "and retries?" }),
             MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 reply_to: Some("rr_1"),
                 reply_capability: Some(&reply),
@@ -2490,6 +2988,7 @@ mod tests {
         let (message, own) = build_message(
             &serde_json::json!({ "message": "q" }),
             MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 item_key: Some(&key),
                 reply_to: None,
@@ -2524,6 +3023,7 @@ mod tests {
                 "message_type": "urgent_escalation"
             }),
             MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 reply_to: None,
                 item_key: None,
@@ -2549,6 +3049,7 @@ mod tests {
                 "message_type": ""
             }),
             MessageCarriers {
+                continuation: None,
                 selected_for: None,
                 reply_to: None,
                 item_key: None,
@@ -3470,7 +3971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_required_cancels_peer_journals_and_refuses() {
+    async fn input_required_parks_without_cancelling_or_rejecting() {
         let tree = NodeTree::new();
         let dir = tempfile::tempdir().unwrap();
         let journal = Arc::new(NodeJournal::open_workspace(dir.path()).await.unwrap());
@@ -3480,7 +3981,7 @@ mod tests {
         let rt = A2aDelegationRuntime::new(tree.clone(), room, tx);
         let transport = Arc::new(Scripted::new(&["working", "input-required"]));
 
-        let error = rt
+        let result = rt
             .delegate(
                 &spec("planets", false),
                 TrustTier::Unverified,
@@ -3492,13 +3993,15 @@ mod tests {
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
-            .expect_err("input-required is a refusal, not a success");
-        assert!(matches!(error, DelegationError::InputRequired { .. }));
-        assert_eq!(
-            transport.cancels.lock().as_slice(),
-            ["task-1"],
-            "R-C: the peer's task must be cancelled"
+            .expect("input-required returns the question to the model");
+        assert_eq!(result["state"], "input-required");
+        assert!(
+            result["continue"]
+                .as_str()
+                .unwrap()
+                .starts_with("a2a-continue-")
         );
+        assert!(transport.cancels.lock().is_empty());
 
         let node = tree
             .list()
@@ -3506,21 +4009,19 @@ mod tests {
             .into_iter()
             .find(|e| e.subagent_type == "a2a-peer")
             .unwrap();
-        assert_eq!(node.current_status, NodeState::Failed);
+        assert_eq!(node.current_status, NodeState::Waiting);
 
-        // taskId/contextId journaled as a durable rejection, including the
-        // original task correlation rather than a shared placeholder.
         let records = journal.load().await.unwrap();
-        let recorded_task = records.iter().find_map(|entry| {
-            let JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected { task, .. }) = &entry.record
-            else {
-                return None;
-            };
-            task.as_deref()
-        });
-        assert_eq!(recorded_task, Some("task-1"));
+        assert!(records.iter().any(|entry| matches!(
+            entry.record,
+            JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched { .. })
+        )));
+        assert!(!records.iter().any(|entry| matches!(
+            entry.record,
+            JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected { .. })
+        )));
 
-        // A MessageRefused receipt reached the bus.
+        // A parked question never emits a MessageRefused receipt.
         let mut saw_refused = false;
         while let Ok(event) = rx.try_recv() {
             if let AppEvent::Subagent(env) = event
@@ -3529,7 +4030,223 @@ mod tests {
                 saw_refused = true;
             }
         }
-        assert!(saw_refused, "MessageRefused receipt must be emitted");
+        assert!(!saw_refused, "a parked question is not a refusal");
+    }
+
+    #[tokio::test]
+    async fn input_required_resume_is_single_use_and_peer_bound() {
+        let (rt, tree, _events) = runtime();
+        let peer = spec("clarifier", false);
+        let transport = Arc::new(Scripted::new(&[
+            "input-required",
+            "input-required",
+            "completed",
+        ]));
+        let origin = CancellationToken::new();
+        let first = rt
+            .delegate(
+                &peer,
+                TrustTier::Unverified,
+                "clarify",
+                transport.clone(),
+                serde_json::json!({}),
+                origin.clone(),
+                Authorship::AgentComposed,
+                SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap();
+        origin.cancel();
+        let handle = first["continue"].as_str().unwrap();
+        assert_eq!(rt.parked_count(), 1);
+        for (target, input, want) in [
+            (
+                spec("other", false),
+                serde_json::json!({"continue":handle,"message":"main"}),
+                "continuation handle belongs to another peer",
+            ),
+            (
+                peer.clone(),
+                serde_json::json!({"continue":handle}),
+                "continuing a remote task needs a message",
+            ),
+            (
+                peer.clone(),
+                serde_json::json!({"continue":"unknown","message":"main"}),
+                "continuation handle is unknown or already used",
+            ),
+        ] {
+            let error = rt
+                .resume(
+                    &target,
+                    input,
+                    CancellationToken::new(),
+                    Authorship::AgentComposed,
+                    SendAuthorization::Unknown,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), want);
+            assert_eq!(rt.parked_count(), 1);
+            assert_eq!(transport.script.lock().len(), 2);
+        }
+        let second = rt
+            .resume(
+                &peer,
+                serde_json::json!({"continue":handle,"message":"main"}),
+                CancellationToken::new(),
+                Authorship::AgentComposed,
+                SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap();
+        let next_handle = second["continue"].as_str().unwrap();
+        assert_ne!(handle, next_handle);
+        let result = rt
+            .resume(
+                &peer,
+                serde_json::json!({"continue":next_handle,"message":"yes"}),
+                CancellationToken::new(),
+                Authorship::AgentComposed,
+                SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"]["state"], "completed");
+        assert_eq!(rt.parked_count(), 0);
+        let error = rt
+            .resume(
+                &peer,
+                serde_json::json!({"continue":next_handle,"message":"again"}),
+                CancellationToken::new(),
+                Authorship::AgentComposed,
+                SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "continuation handle is unknown or already used"
+        );
+        assert_eq!(tree.list().await[0].current_status, NodeState::Completed);
+        assert!(transport.cancels.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cascade_kill_removes_a_parked_handle_and_cancels_without_running() {
+        let (rt, tree, _events) = runtime();
+        let peer = spec("clarifier", false);
+        let transport = Arc::new(Scripted::new(&["input-required"]));
+        let first = rt
+            .delegate(
+                &peer,
+                TrustTier::Unverified,
+                "clarify",
+                transport.clone(),
+                serde_json::json!({}),
+                CancellationToken::new(),
+                Authorship::AgentComposed,
+                SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap();
+        let node = tree.list().await[0].agent_id.clone();
+        let status = tree.status_rx(&node).await.unwrap();
+        tree.cascade_kill(&node, Duration::from_secs(1))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while transport.cancels.lock().is_empty() || rt.parked_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("parked owner observes kill");
+        assert_eq!(transport.cancels.lock().as_slice(), ["task-1"]);
+        assert_eq!(*status.borrow(), NodeState::Cancelled);
+        let error = rt
+            .resume(
+                &peer,
+                serde_json::json!({"continue":first["continue"],"message":"late"}),
+                CancellationToken::new(),
+                Authorship::AgentComposed,
+                SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "continuation handle is unknown or already used"
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_kill_op_settles_a_parked_question_without_running() {
+        let (rt, tree, _events) = runtime();
+        let peer = spec("clarifier", false);
+        let transport = Arc::new(Scripted::new(&["input-required"]));
+        let first = rt
+            .delegate(
+                &peer,
+                TrustTier::Unverified,
+                "clarify",
+                transport.clone(),
+                serde_json::json!({}),
+                CancellationToken::new(),
+                Authorship::AgentComposed,
+                SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap();
+        let node = tree.list().await[0].agent_id.clone();
+        let status = tree.status_rx(&node).await.unwrap();
+        tree.send_op(&node, Op::Kill).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while transport.cancels.lock().is_empty() || rt.parked_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("parked owner observes a bare kill");
+        assert_eq!(transport.cancels.lock().as_slice(), ["task-1"]);
+        assert_eq!(*status.borrow(), NodeState::Cancelled);
+        let error = rt
+            .resume(
+                &peer,
+                serde_json::json!({"continue":first["continue"],"message":"late"}),
+                CancellationToken::new(),
+                Authorship::AgentComposed,
+                SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "continuation handle is unknown or already used"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_cancels_a_recovered_question_and_journals_the_answer() {
+        let (rt, tree, _rx) = runtime();
+        let node_id = mint_node_id("planets", "task-1");
+        register_suspended(&tree, &node_id).await;
+        let transport = Scripted::new(&["working", "input-required"]);
+        let error = rt
+            .reconcile_suspended(
+                &spec("planets", false),
+                &node_id,
+                &transport,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("a recovered question has no live caller");
+        assert!(matches!(error, DelegationError::Refused { .. }));
+        assert_eq!(transport.cancels.lock().as_slice(), ["task-1"]);
+        assert_eq!(
+            status_of(&tree.list().await, &node_id),
+            NodeState::Cancelled
+        );
     }
 
     /// A peer whose task/context ids carry terminal escape sequences.
@@ -3555,7 +4272,7 @@ mod tests {
                 })
             };
             Self {
-                script: Mutex::new(VecDeque::from([make("working"), make("input-required")])),
+                script: Mutex::new(VecDeque::from([make("working"), make("auth-required")])),
             }
         }
     }
@@ -3602,8 +4319,8 @@ mod tests {
                 crate::domain::models::SendAuthorization::Unknown,
             )
             .await
-            .expect_err("input-required is a refusal");
-        assert!(matches!(error, DelegationError::InputRequired { .. }));
+            .expect_err("auth-required is a refusal");
+        assert!(matches!(error, DelegationError::AuthRequired { .. }));
 
         let entries = journal.load().await.unwrap();
         let rejection = entries
@@ -4065,6 +4782,7 @@ mod story_contract_tests {
                     "x-rustain-stories": { "stories": [{ "key": "FORGED" }] },
                 }),
                 MessageCarriers {
+                    continuation: None,
                     selected_for: None,
                     reply_to,
                     item_key: None,
@@ -4091,6 +4809,7 @@ mod selection_carrier_tests {
     fn story19_23_build_message_carries_selection_only_from_parameters_on_first_sends() {
         let selection = json!({"stories":["S7-06"]});
         let carriers = MessageCarriers {
+            continuation: None,
             reply_to: None,
             item_key: None,
             reply_capability: None,
@@ -4123,6 +4842,7 @@ mod selection_carrier_tests {
             let (message, _) = build_message(
                 &hostile,
                 MessageCarriers {
+                    continuation: None,
                     selected_for: Some(&selection),
                     reply_to,
                     ..carriers
