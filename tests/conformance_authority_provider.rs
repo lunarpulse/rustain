@@ -1214,6 +1214,20 @@ fn revoke_happens_before_subsequent_validates_under_concurrency() {
     }
 
     start.wait();
+    // The interleaving assertion below needs at least one pre-revoke
+    // validate. On a starved 2-core runner the workers may not be scheduled
+    // before revoke() completes (CI failed this way at 5dc2431), so wait for
+    // real interleaving before revoking instead of hoping the scheduler
+    // provides it. The workers spin until revoke returns, so this always
+    // resolves; the deadline only guards against a wedged worker.
+    let stress_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while interleavings.load(Ordering::Relaxed) == 0 {
+        assert!(
+            std::time::Instant::now() < stress_deadline,
+            "workers never validated before the deadline — test harness wedged"
+        );
+        thread::yield_now();
+    }
     ledger.revoke_scope(&scope).expect("scope revoke succeeds");
     revoke_returned.store(true, Ordering::Relaxed);
 
