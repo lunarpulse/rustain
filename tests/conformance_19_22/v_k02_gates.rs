@@ -82,6 +82,7 @@ async fn v_k02_verdict_gates_refuse_without_rows() {
             Some(SemanticMessageType::ScopeChange),
             None,
             Some(StoryManifest::parse("S7-07").unwrap()),
+            None,
         )
         .await;
     assert!(matches!(
@@ -171,6 +172,7 @@ async fn v_k02_verdict_gates_refuse_without_rows() {
             vec!["B".into()],
             "design note",
             Some(SemanticMessageType::DesignUpdate),
+            None,
             None,
             None,
         )

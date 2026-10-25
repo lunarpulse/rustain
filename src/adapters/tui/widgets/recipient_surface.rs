@@ -126,6 +126,7 @@ pub(crate) fn recipient_surface_actions(
             // Story 19.22 `AC4(c)` — an Act 6 scope change is acknowledged
             // like any received notice; a receipt, never an acceptance.
             | SemanticMessageType::ScopeChange
+            | SemanticMessageType::DesignUpdate
             | SemanticMessageType::StoryAssignment
             | SemanticMessageType::BugReport
                 if surface.item_state == Some("received") =>

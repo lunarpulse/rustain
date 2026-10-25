@@ -8,6 +8,16 @@ mod attached_harness;
 #[path = "conformance_19_21/harness.rs"]
 mod inherited;
 use inherited as harness;
+#[path = "conformance_19_23/a3_k01_select_wire.rs"]
+mod a3_k01_select_wire;
+#[path = "conformance_19_23/a3_k02_refusals.rs"]
+mod a3_k02_refusals;
+#[path = "conformance_19_23/a3_k03_ingest.rs"]
+mod a3_k03_ingest;
+#[path = "conformance_19_23/a3_k04_render.rs"]
+mod a3_k04_render;
+#[path = "conformance_19_23/a3_k05_local_consultation.rs"]
+mod a3_k05_local_consultation;
 #[path = "conformance_19_20/act5_k01_wire_carrier.rs"]
 mod act5_k01_wire_carrier;
 #[path = "conformance_19_20/act5_k02_handoff.rs"]

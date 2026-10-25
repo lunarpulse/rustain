@@ -132,9 +132,174 @@ impl StoryManifest {
     }
 }
 
+/// Operator-selected keys, revalidated after decoding an attached frame.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorySelector {
+    pub stories: Vec<StoryKey>,
+}
+
+impl StorySelector {
+    pub fn parse(token: &str) -> Result<Self, StoryRefusal> {
+        if token.is_empty() {
+            return Err(StoryRefusal::MissingSelector);
+        }
+        let selector = Self {
+            stories: token
+                .split(',')
+                .map(StoryKey::parse)
+                .collect::<Result<_, _>>()?,
+        };
+        selector.check()?;
+        Ok(selector)
+    }
+
+    pub fn check(&self) -> Result<(), StoryRefusal> {
+        if self.stories.is_empty() {
+            return Err(StoryRefusal::MissingSelector);
+        }
+        if self.stories.len() > MAX_STORIES {
+            return Err(StoryRefusal::TooMany);
+        }
+        let mut seen = HashSet::with_capacity(self.stories.len());
+        for key in &self.stories {
+            StoryKey::check_key(key.as_str())?;
+            if !seen.insert(key) {
+                return Err(StoryRefusal::DuplicateKey(key.to_string()));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A resolved send-local statement, never a holding or an execution grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorySelection {
+    pub recipients: Vec<SelectedRecipient>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedRecipient {
+    pub alias: String,
+    pub stories: Vec<StoryKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SelectionRefusal {
+    NotListed(StoryKey),
+    NoHolder(StoryKey),
+    HeldHere(StoryKey),
+    UnpinnedHolder { key: StoryKey, alias: String },
+    NoRosterMatch(StoryKey),
+    SeveralRosterMatches { key: StoryKey, aliases: Vec<String> },
+    UnreadableHolder(StoryKey),
+    ConflictingHolders(StoryKey),
+    JournalUnreadable,
+    InvalidRequest(&'static str),
+}
+
+impl fmt::Display for SelectionRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+        match self {
+            Self::NotListed(key) => write!(f, "no story list on this host names '{key}'"),
+            Self::NoHolder(key) => write!(f, "story '{key}' is assigned to no one"),
+            Self::HeldHere(key) => write!(f, "story '{key}' is assigned to you"),
+            Self::UnpinnedHolder { key, alias } => write!(
+                f,
+                "story '{key}' is assigned to '{}' without a pinned identity; address them by alias",
+                sanitize_disclosable(alias, MAX_PEER_ID_BYTES)
+            ),
+            Self::NoRosterMatch(key) => write!(
+                f,
+                "no roster entry here matches the holder of story '{key}'"
+            ),
+            Self::SeveralRosterMatches { key, aliases } => {
+                write!(
+                    f,
+                    "the holder of story '{key}' matches more than one roster entry: "
+                )?;
+                for (index, alias) in aliases.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    f.write_str(&sanitize_disclosable(alias, MAX_PEER_ID_BYTES))?;
+                }
+                Ok(())
+            }
+            Self::UnreadableHolder(key) => write!(
+                f,
+                "the holder of story '{key}' is not readable by this build"
+            ),
+            Self::ConflictingHolders(key) => write!(
+                f,
+                "story '{key}' has different holders in different senders' lists; address recipients by alias"
+            ),
+            Self::JournalUnreadable => {
+                f.write_str("story holders cannot be read from this host's journal")
+            }
+            Self::InvalidRequest(text) => f.write_str(text),
+        }
+    }
+}
+
+impl std::error::Error for SelectionRefusal {}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state")]
+pub enum ReceivedSelection {
+    Listed {
+        stories: Vec<StoryKey>,
+    },
+    Unreadable,
+    #[serde(other)]
+    Unrecognized,
+}
+
+/// Full View copy. The caller supplies the attribution line's sanitized name.
+pub fn selection_line(sender: &str, selection: &ReceivedSelection) -> String {
+    use std::fmt::Write;
+    let ReceivedSelection::Listed { stories } = selection else {
+        return "story selection not readable by this build".to_owned();
+    };
+    let noun = if stories.len() == 1 {
+        "story"
+    } else {
+        "stories"
+    };
+    let mut line = format!("{sender} selected you for {noun} ");
+    for (index, key) in stories.iter().enumerate() {
+        if index > 0 {
+            line.push_str(", ");
+        }
+        let _ = write!(line, "{key}");
+    }
+    line
+}
+
+/// One logical card line; a multi-key selection is counted, never truncated.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SelectionSummary(pub String);
+
+impl SelectionSummary {
+    pub fn new(sender: &str, selection: &ReceivedSelection) -> Self {
+        if let ReceivedSelection::Listed { stories } = selection
+            && stories.len() > 1
+        {
+            return Self(format!(
+                "{sender} selected you for {} stories",
+                stories.len()
+            ));
+        }
+        Self(selection_line(sender, selection))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoryRefusal {
     WrongType,
+    MissingSelector,
+    ConflictingSelectors,
     Missing,
     InvalidKey(String),
     DuplicateKey(String),
@@ -147,6 +312,12 @@ pub enum StoryRefusal {
 impl fmt::Display for StoryRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingSelector => {
+                f.write_str("Missing story list after '/team send --holders-of'")
+            }
+            Self::ConflictingSelectors => {
+                f.write_str("'--holders-of' cannot be combined with '--stories'")
+            }
             Self::WrongType => {
                 f.write_str("'--stories' needs '--type story_assignment' or '--type scope_change'")
             }
@@ -492,5 +663,173 @@ mod record_tests {
         );
         let event: RoomEvent = serde_json::from_str(&listed).unwrap();
         assert_eq!(serde_json::to_string(&event).unwrap(), listed);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn story19_23_selector_checks_wire_and_token_grammar() {
+        for token in ["S1", "S7-04,S7-06", "A._-9"] {
+            let selector = StorySelector::parse(token).unwrap();
+            assert_eq!(selector.check(), Ok(()));
+            assert_eq!(
+                serde_json::from_value::<StorySelector>(serde_json::to_value(&selector).unwrap())
+                    .unwrap(),
+                selector
+            );
+        }
+        for token in ["", "S1,S1", "bad!", "S1=b", "S1,", ".S1"] {
+            assert!(StorySelector::parse(token).is_err(), "{token}");
+        }
+        assert!(
+            StorySelector::parse(
+                &(0..65)
+                    .map(|n| format!("S{n}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .is_err()
+        );
+        for value in [
+            serde_json::json!({"stories":[]}),
+            serde_json::json!({"stories":["bad!"]}),
+            serde_json::json!({"stories":["S1","S1"]}),
+        ] {
+            assert!(
+                serde_json::from_value::<StorySelector>(value)
+                    .unwrap()
+                    .check()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn story19_23_selection_copy_and_future_tag() {
+        let list = ReceivedSelection::Listed {
+            stories: vec![StoryKey::parse("S1").unwrap()],
+        };
+        assert_eq!(
+            selection_line("Nina", &list),
+            "Nina selected you for story S1"
+        );
+        assert_eq!(
+            SelectionSummary::new("Nina", &list).0,
+            "Nina selected you for story S1"
+        );
+        let plural = ReceivedSelection::Listed {
+            stories: vec![
+                StoryKey::parse("S1").unwrap(),
+                StoryKey::parse("S2").unwrap(),
+            ],
+        };
+        assert_eq!(
+            selection_line("Nina", &plural),
+            "Nina selected you for stories S1, S2"
+        );
+        assert_eq!(
+            SelectionSummary::new("Nina", &plural).0,
+            "Nina selected you for 2 stories"
+        );
+        for selection in [
+            list,
+            plural,
+            ReceivedSelection::Unreadable,
+            ReceivedSelection::Unrecognized,
+        ] {
+            assert_eq!(
+                serde_json::from_value::<ReceivedSelection>(
+                    serde_json::to_value(&selection).unwrap()
+                )
+                .unwrap(),
+                selection
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<ReceivedSelection>(
+                serde_json::json!({"state":"Future","raw":"secret"})
+            )
+            .unwrap(),
+            ReceivedSelection::Unrecognized
+        );
+        for selection in [
+            ReceivedSelection::Unreadable,
+            ReceivedSelection::Unrecognized,
+        ] {
+            assert_eq!(
+                selection_line("Nina", &selection),
+                "story selection not readable by this build"
+            );
+            assert_eq!(
+                SelectionSummary::new("Nina", &selection).0,
+                selection_line("Nina", &selection)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod selection_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn story19_23_every_selection_refusal_text() {
+        let key = StoryKey::parse("S7-06").unwrap();
+        for (refusal, expected) in [
+            (
+                SelectionRefusal::NotListed(key.clone()),
+                "no story list on this host names 'S7-06'",
+            ),
+            (
+                SelectionRefusal::NoHolder(key.clone()),
+                "story 'S7-06' is assigned to no one",
+            ),
+            (
+                SelectionRefusal::HeldHere(key.clone()),
+                "story 'S7-06' is assigned to you",
+            ),
+            (
+                SelectionRefusal::UnpinnedHolder {
+                    key: key.clone(),
+                    alias: "Jun".into(),
+                },
+                "story 'S7-06' is assigned to 'Jun' without a pinned identity; address them by alias",
+            ),
+            (
+                SelectionRefusal::NoRosterMatch(key.clone()),
+                "no roster entry here matches the holder of story 'S7-06'",
+            ),
+            (
+                SelectionRefusal::SeveralRosterMatches {
+                    key: key.clone(),
+                    aliases: vec!["a".into(), "b".into()],
+                },
+                "the holder of story 'S7-06' matches more than one roster entry: a, b",
+            ),
+            (
+                SelectionRefusal::UnreadableHolder(key.clone()),
+                "the holder of story 'S7-06' is not readable by this build",
+            ),
+            (
+                SelectionRefusal::ConflictingHolders(key.clone()),
+                "story 'S7-06' has different holders in different senders' lists; address recipients by alias",
+            ),
+            (
+                SelectionRefusal::JournalUnreadable,
+                "story holders cannot be read from this host's journal",
+            ),
+        ] {
+            assert_eq!(refusal.to_string(), expected);
+        }
+        let unsafe_alias = "\u{1b}[31mJun\nforged";
+        let refusal = SelectionRefusal::UnpinnedHolder {
+            key,
+            alias: unsafe_alias.into(),
+        }
+        .to_string();
+        assert!(!refusal.contains('\n') && !refusal.contains('\u{1b}'));
     }
 }

@@ -598,10 +598,14 @@ fn test_import_site_count_pinned() {
     // `credential_tests` constructs a real `NodeTree` only under
     // `#[cfg(all(test, feature = "a2a"))]`; this preserves the real A2A
     // egress/front-door test and adds no production boundary coupling.
+    // 30 -> 31 (Story 19.23): `adapters/a2a/story_selection.rs` constructs
+    // the real delegation runtime only under `#[cfg(test)]` to prove one
+    // journal snapshot and the unreadable-journal refusal. Production receives
+    // the composed runtime; no new domain/executor concrete-tree coupling.
     //
     // Not covered by `ratchet-signoff-guard.yml`, which gates only the seven named
     // constants in `tests/conformance.rs`.
-    const EXPECTED: usize = 30;
+    const EXPECTED: usize = 31;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

@@ -4,30 +4,39 @@ use crate::adapters::daemon::response_modes::{
 };
 use crate::domain::models::{
     AgentId, Conversation, InteractionPolicySnapshot, ItemAddress, PeerId, PeerRowControl,
-    PeerRowStage, ResponseMode, StorySummary,
+    PeerRowStage, ReceivedSelection, ResponseMode, SelectionSummary, StorySummary,
 };
 #[cfg(feature = "a2a")]
 use crate::domain::models::{SemanticMessageType, carries_story_list, story_summary};
 
+/// Story 19.23 D6: the card's selection sentence names the final header label,
+/// sanitized once here at the render boundary.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn peer_row_control(
     node_id: &AgentId,
     item_address: Option<ItemAddress>,
     stories: Option<StorySummary>,
+    selected_for: Option<&ReceivedSelection>,
     provenance: &InteractionPolicySnapshot,
     fallback_label: &str,
     stage: PeerRowStage,
     node_resolvable: bool,
 ) -> PeerRowControl {
+    let sender_label = provenance.sender_label.as_deref().unwrap_or(fallback_label);
+    let sender_label = crate::domain::services::transparency::sanitize_disclosable(
+        sender_label,
+        sender_label.len(),
+    );
+    let selected_for =
+        selected_for.map(|selection| SelectionSummary::new(&sender_label, selection));
     PeerRowControl {
         node_id: node_id.as_str().to_owned(),
         item_address,
         stories,
         status: None,
+        selected_for,
         message_type: provenance.message_type,
-        sender_label: provenance
-            .sender_label
-            .clone()
-            .unwrap_or_else(|| fallback_label.to_owned()),
+        sender_label,
         stage,
         node_resolvable,
     }
@@ -38,6 +47,8 @@ pub(super) struct PeerItemContext {
     pub(super) alias: Option<String>,
     pub(super) stories: Option<StorySummary>,
     pub(super) status: Option<crate::domain::models::StatusPreview>,
+    /// Raw ingested selection; the card sentence is built from the final label.
+    pub(super) selected_for: Option<ReceivedSelection>,
 }
 
 pub(super) async fn snapshot_peer_row_controls(
@@ -108,6 +119,7 @@ impl AttachServer {
                     }),
                     address: item.address,
                     alias: item.alias,
+                    selected_for: item.selected_for,
                 }
             })
         }
@@ -184,6 +196,64 @@ mod tests {
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::{Mutex, mpsc};
     use tokio_util::sync::CancellationToken;
+    /// Story 19.23 D6: the card sentence names the final, sanitized header label.
+    #[test]
+    fn story19_23_card_selection_names_final_sanitized_label() {
+        use crate::domain::models::StoryKey;
+        use crate::domain::services::transparency::sanitize_disclosable;
+        let node = AgentId::from_validated("selection-node");
+        let one = ReceivedSelection::Listed {
+            stories: vec![StoryKey::parse("S7-06").unwrap()],
+        };
+        let alias_only = peer_row_control(
+            &node,
+            None,
+            None,
+            Some(&one),
+            &Default::default(),
+            "nina",
+            PeerRowStage::AwaitingOperator,
+            true,
+        );
+        assert_eq!(
+            alias_only.selected_for.unwrap().0,
+            "nina selected you for story S7-06"
+        );
+        let hostile = "pin\u{1b}[2Jned\nlabel";
+        let provenance = InteractionPolicySnapshot {
+            sender_label: Some(hostile.to_owned()),
+            ..Default::default()
+        };
+        let control = peer_row_control(
+            &node,
+            None,
+            None,
+            Some(&one),
+            &provenance,
+            "alias",
+            PeerRowStage::Drafting,
+            true,
+        );
+        let line = control.selected_for.unwrap().0;
+        let clean = sanitize_disclosable(hostile, hostile.len());
+        assert_eq!(control.sender_label, clean);
+        assert_eq!(line, format!("{clean} selected you for story S7-06"));
+        assert!(
+            !line.contains("alias") && !line.contains('\u{1b}') && !line.contains('\n'),
+            "{line}"
+        );
+        let absent = peer_row_control(
+            &node,
+            None,
+            None,
+            None,
+            &provenance,
+            "alias",
+            PeerRowStage::Settled,
+            false,
+        );
+        assert_eq!(absent.selected_for, None);
+    }
     /// Story 19.20 AC6: restart settles only controls without a process-owned phase.
     #[tokio::test]
     async fn story19_20_interrupted_draft_settles_on_real_run() {
@@ -219,7 +289,7 @@ mod tests {
                     ..Default::default()
                 });
                 persisted.peer_row_controls.insert(row_id.clone(), peer_row_control(
-                    &node, linked.then(|| address.clone()), None, &Default::default(),
+                    &node, linked.then(|| address.clone()), None, None, &Default::default(),
                     "remote", stage, true,
                 ));
                 storage.save_conversation(&persisted).await.unwrap();
@@ -230,6 +300,7 @@ mod tests {
                 let journal = Arc::new(RecordingJournal::default());
                 if linked {
                     journal.record_event(RoomEvent::RecipientItemReceived { stories: None, address: address.clone(),
+                    selected_for: None,
                     task: "restart-task".into(),
                     alias: None,
                     message_type: crate::domain::models::SemanticMessageType::BugReport,
@@ -383,6 +454,7 @@ mod tests {
                 row_id.clone(),
                 peer_row_control(
                     &node,
+                    None,
                     None,
                     None,
                     &Default::default(),

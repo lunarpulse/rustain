@@ -23,6 +23,7 @@ async fn peer_raw_events_omit_sender_action_facts_but_keep_sanitized_legacy_disp
             None,
             Some("sender-only-subject-7f2d".into()),
             None,
+            None,
         )
         .await;
     assert!(matches!(

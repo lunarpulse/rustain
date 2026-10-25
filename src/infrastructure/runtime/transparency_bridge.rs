@@ -568,6 +568,7 @@ pub async fn team_command(
             message_type,
             subject,
             stories,
+            holders_of,
         } => {
             start_team_send(
                 state,
@@ -578,6 +579,7 @@ pub async fn team_command(
                 None,
                 subject,
                 stories,
+                holders_of,
                 crate::domain::models::Authorship::HumanWritten,
             )
             .await;
@@ -600,6 +602,7 @@ pub async fn team_command(
                 },
                 None,
                 Some(turn_id),
+                None,
                 None,
                 None,
                 crate::domain::models::Authorship::HumanWritten,
@@ -775,6 +778,7 @@ pub(crate) async fn start_proposed_team_send(
         None,
         None,
         None,
+        None,
         crate::domain::models::Authorship::AgentComposed,
     )
     .await;
@@ -796,6 +800,7 @@ async fn start_team_send(
     reply_to: Option<String>,
     subject: Option<String>,
     stories: Option<crate::domain::models::StoryManifest>,
+    holders_of: Option<crate::domain::models::StorySelector>,
     authorship: crate::domain::models::Authorship,
 ) {
     #[cfg(not(feature = "a2a"))]
@@ -810,7 +815,6 @@ async fn start_team_send(
             SendRequest, coordinate_send, validate_send_request, validate_story_holders,
         };
         use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
-        let (recipients, text) = payload.parts();
         let Some(runtime) = app_state.a2a_send.clone() else {
             show_team_send(
                 state,
@@ -819,6 +823,31 @@ async fn start_team_send(
             );
             return;
         };
+        // Story 19.23: a holder selector resolves before validation, any row,
+        // journal write or I/O; a refusal leaves no trace.
+        let selection = match holders_of {
+            Some(selector) => {
+                match crate::adapters::a2a::story_selection::resolve(&runtime, &selector).await {
+                    Ok(selection) => Some(selection),
+                    Err(refusal) => {
+                        show_team_send(state, &block_id, refusal.to_string());
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+        let mut payload = payload;
+        if let (Some(selection), TeamSendPayload::Typed { recipients, .. }) =
+            (&selection, &mut payload)
+        {
+            *recipients = selection
+                .recipients
+                .iter()
+                .map(|recipient| recipient.alias.clone())
+                .collect();
+        }
+        let (recipients, text) = payload.parts();
         // Whole-action validation before any row is painted, journal write or
         // I/O (19.17 `G4`): a refused action leaves no trace.
         let request = SendRequest {
@@ -828,6 +857,7 @@ async fn start_team_send(
             reply_to: reply_to.as_deref(),
             subject: subject.as_deref(),
             stories: stories.as_ref(),
+            selection: selection.as_ref(),
             authorship,
             send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
         };
@@ -862,6 +892,7 @@ async fn start_team_send(
                     reply_to: reply_to.as_deref(),
                     subject: subject.as_deref(),
                     stories: stories.as_ref(),
+                    selection: selection.as_ref(),
                     authorship,
                     send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
                 },
@@ -891,6 +922,7 @@ async fn start_team_send(
             reply_to,
             subject,
             stories,
+            holders_of,
             authorship,
             conversation_id,
             app_state,
@@ -2503,6 +2535,77 @@ mod tests {
             state.feedback_blocks["team-send-1"].message,
             "story 'S7-07' was assigned to 'b' by your earlier send; address 'b' too, so the \
              change is not silent"
+        );
+        assert!(state.team_send_blocks.is_empty(), "no row was painted");
+        assert!(
+            journal.rows.lock().await.is_empty(),
+            "nothing was journaled"
+        );
+    }
+
+    /// Story 19.23 — an unresolvable `--holders-of` selector is refused
+    /// synchronously by the resolver: no row painted, nothing journaled.
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn story19_23_standalone_unresolvable_selector_paints_no_rows() {
+        use std::sync::Arc;
+
+        use crate::adapters::a2a::client::A2aClientAdapter;
+        use crate::adapters::a2a::driver::A2aDelegationRuntime;
+        use crate::domain::models::{
+            A2aPeerSource, A2aPeerSpec, JournalEntry, RedactedUrl, RoomEvent,
+        };
+        use crate::domain::ports::{RoomJournal, RoomJournalError};
+
+        struct Journal {
+            rows: tokio::sync::Mutex<Vec<RoomEvent>>,
+        }
+        #[async_trait::async_trait]
+        impl RoomJournal for Journal {
+            async fn record_event(&self, event: RoomEvent) -> Result<(), RoomJournalError> {
+                self.rows.lock().await.push(event);
+                Ok(())
+            }
+        }
+        #[async_trait::async_trait]
+        impl RoomJournalReader for Journal {
+            async fn load_entries(&self) -> Result<Vec<JournalEntry>, RoomJournalError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let b = A2aPeerSpec::new(
+            "b",
+            RedactedUrl::from("http://127.0.0.2:9"),
+            A2aPeerSource::Workspace,
+        );
+        let b_client = Arc::new(A2aClientAdapter::new(&b, None).unwrap());
+        let journal = Arc::new(Journal {
+            rows: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = A2aDelegationRuntime::new(
+            crate::infrastructure::subagent::NodeTree::new(),
+            journal.clone(),
+            event_tx,
+        )
+        .with_peer_bindings(vec![(b, b_client)].into())
+        .with_journal_reader(journal.clone());
+        let workspace = tempfile::tempdir().unwrap();
+        let (mut app_state, _domain_rx) = bridge_app_state(workspace.path());
+        app_state.a2a_send = Some(Arc::new(runtime));
+
+        let mut state = crate::adapters::tui::state::TuiState::new(120, 40);
+        super::team_command(
+            &mut state,
+            "conv",
+            Some("send --holders-of S9-99 nobody holds this"),
+            &app_state,
+        )
+        .await;
+        assert!(
+            state.feedback_blocks.contains_key("team-send-1"),
+            "the refusal is shown"
         );
         assert!(state.team_send_blocks.is_empty(), "no row was painted");
         assert!(

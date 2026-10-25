@@ -219,6 +219,7 @@ async fn k05_thread_served_at_eight_sends_retract_consumed_on_saturation() {
             None,
             None,
             None,
+            None,
         )
         .await;
     hooks.wait_for_send_action_count(1).await;
@@ -247,6 +248,7 @@ async fn k05_thread_served_at_eight_sends_retract_consumed_on_saturation() {
                 format!("held-{index}"),
                 vec!["B".into()],
                 "held",
+                None,
                 None,
                 None,
                 None,

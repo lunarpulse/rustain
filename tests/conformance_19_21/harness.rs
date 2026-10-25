@@ -780,6 +780,7 @@ pub(crate) async fn seed_recipient_item(journal: &Journal, item: &str, task: &st
             reply_capability_matched: false,
             authorship: rustain::domain::models::Authorship::Unknown,
             send_authorization: rustain::domain::models::SendAuthorization::Unknown,
+            selected_for: None,
         })
         .await
         .expect("seed recipient item");

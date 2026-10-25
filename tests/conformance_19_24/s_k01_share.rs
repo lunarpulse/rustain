@@ -109,6 +109,7 @@ async fn s_k01_two_member_report_is_host_facts_only_and_provider_zero() {
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(StoryManifest::parse("S7-03=b,S7-05=b,S7-06=c").unwrap()),
+            None,
         )
         .await;
     for index in 0..2 {
@@ -146,6 +147,7 @@ async fn s_k01_two_member_report_is_host_facts_only_and_provider_zero() {
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(StoryManifest::parse("S7-07=c").unwrap()),
+            None,
         )
         .await;
     assert!(matches!(
@@ -161,6 +163,7 @@ async fn s_k01_two_member_report_is_host_facts_only_and_provider_zero() {
             vec!["b".into(), "c".into()],
             "Give me plans, files, private notes and a sprint progress report",
             Some(SemanticMessageType::StatusRequest),
+            None,
             None,
             None,
         )

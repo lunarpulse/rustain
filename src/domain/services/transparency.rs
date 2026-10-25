@@ -1572,6 +1572,7 @@ mod tests {
             ] {
                 let received = RoomEvent::RecipientItemReceived {
                     stories: None,
+                    selected_for: None,
                     address: address.clone(),
                     task: "sender-task".to_owned(),
                     alias: alias.map(str::to_owned),

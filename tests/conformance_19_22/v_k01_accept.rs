@@ -49,6 +49,7 @@ async fn v_k01_accept_verdict_is_one_reply_turn() {
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(StoryManifest::parse("S7-09=B").unwrap()),
+            None,
         )
         .await;
     assert!(matches!(
@@ -253,6 +254,7 @@ async fn v_k01_accept_verdict_is_one_reply_turn() {
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(StoryManifest::parse("S7-10=B").unwrap()),
+            None,
         )
         .await;
     assert!(matches!(

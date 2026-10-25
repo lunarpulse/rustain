@@ -100,7 +100,7 @@ use super::jsonrpc::{
     JsonRpcResponse,
 };
 use super::projection::{RemotePeerViewer, RoomProjection};
-use super::story_carrier::parse_story_carrier;
+use super::story_carrier::{parse_selection_carrier, parse_story_carrier};
 use super::transparency::{InboundOutcome, TransparencySink};
 use crate::adapters::policy::JournalRecipientItemProjection;
 
@@ -1094,6 +1094,7 @@ async fn message_send(
                 .unwrap_or(""),
         ),
         stories: parse_story_carrier(message_type, carrier(super::STORIES_METADATA_KEY)),
+        selected_for: parse_selection_carrier(carrier(super::SELECTED_FOR_METADATA_KEY)),
         in_reply_to: reference.as_ref().map(|reference| reference.id.clone()),
         capability_hash: item_capability
             .as_ref()
@@ -1153,6 +1154,7 @@ struct IngressFacts {
     send_authorization: SendAuthorization,
     /// The bounded story statement, retained across deferred approval.
     stories: Option<ReceivedStories>,
+    selected_for: Option<crate::domain::models::ReceivedSelection>,
     /// Story 19.18 `AC5(c)` — the resolved follow-up reference, stored raw.
     in_reply_to: Option<String>,
     /// `sha256` hex of the presented item capability; `None` is legacy.
@@ -1706,6 +1708,7 @@ async fn launch(
         authorship: facts.authorship,
         send_authorization: facts.send_authorization,
         stories: facts.stories,
+        selected_for: facts.selected_for,
         task: task.id.clone(),
         // Story 19.18d `P2`/`F11` — the matched bound slot's alias (display
         // attribution only); `None` for loopback and unbound keys.

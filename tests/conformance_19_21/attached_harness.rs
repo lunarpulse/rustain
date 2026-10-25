@@ -1539,6 +1539,7 @@ impl AttachedClient {
         message_type: Option<rustain::domain::models::SemanticMessageType>,
         subject: Option<String>,
         stories: Option<rustain::domain::models::StoryManifest>,
+        holders_of: Option<rustain::domain::models::StorySelector>,
     ) {
         self.send_frame(ClientFrame::TeamSend {
             request: request.into(),
@@ -1547,6 +1548,7 @@ impl AttachedClient {
             message_type,
             subject,
             stories,
+            holders_of,
         })
         .await;
     }
@@ -1925,6 +1927,7 @@ pub async fn standalone_attached_parity(
             Some(rustain::domain::models::SemanticMessageType::StoryAssignment),
             Some(subject.to_owned()),
             None,
+            None,
         )
         .await;
     let started = client.wait_send_started(&request).await;
@@ -2016,6 +2019,7 @@ async fn attached_harness_smoke_typed_send_reaches_two_real_http_hosts() {
             Some(rustain::domain::models::SemanticMessageType::StoryAssignment),
             Some("smoke".into()),
             None,
+            None,
         )
         .await;
     assert!(matches!(
@@ -2100,6 +2104,7 @@ async fn attached_harness_smoke_boot_down_peer_keeps_card_not_cached_refusal() {
             "boot-down",
             vec!["down".into()],
             "must retain boot slot",
+            None,
             None,
             None,
             None,

@@ -22,7 +22,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team reply --accept <item-id> [<text…>] | /team reply --discuss <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team untrust <alias-or-peer-id>";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…> | /team send [--type <type>] [--subject <label>] --holders-of <key>[,<key>…] <text…> | /team reply <item-id> <text…> | /team reply --accept <item-id> [<text…>] | /team reply --discuss <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team untrust <alias-or-peer-id>";
 
 /// Named refusal for the retired listing misnomer; granting stays card-only.
 pub const TRUST_REFUSAL: &str = "'/team trust' does not exist: standing trust is granted only from a sender's consent card ([a] Always allow). See it with /team status; revoke it with /team untrust <alias-or-peer-id>.";
@@ -144,6 +144,7 @@ pub enum TeamCommandArgs {
         /// to a recipient and never derived from the body.
         subject: Option<String>,
         stories: Option<crate::domain::models::StoryManifest>,
+        holders_of: Option<crate::domain::models::StorySelector>,
     },
     Acknowledge {
         item_id: String,
@@ -340,6 +341,37 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
                 })?;
                 body_tokens += 2;
             }
+            if next == "--holders-of" {
+                use crate::domain::models::{StoryRefusal, StorySelector};
+                if stories.is_some() {
+                    return Err(format!(
+                        "{}. Use: {USAGE}",
+                        StoryRefusal::ConflictingSelectors
+                    ));
+                }
+                let token = tokens
+                    .next()
+                    .ok_or_else(|| format!("{}. Use: {USAGE}", StoryRefusal::MissingSelector))?;
+                let selector = StorySelector::parse(token)
+                    .map_err(|error| format!("{error}. Use: {USAGE}"))?;
+                if tokens.clone().next() == Some("--stories") {
+                    return Err(format!(
+                        "{}. Use: {USAGE}",
+                        StoryRefusal::ConflictingSelectors
+                    ));
+                }
+                let text = raw_remainder_after_tokens(arg, body_tokens + 1).ok_or_else(|| {
+                    format!("Missing message text after '--holders-of {token}'. Use: {USAGE}")
+                })?;
+                return Ok(TeamCommandArgs::Send {
+                    recipients: Vec::new(),
+                    text,
+                    message_type,
+                    subject,
+                    stories: None,
+                    holders_of: Some(selector),
+                });
+            }
             let recipient_token = next;
             let mut recipients = Vec::new();
             for id in recipient_token.split(',') {
@@ -364,6 +396,7 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
                 message_type,
                 subject,
                 stories,
+                holders_of: None,
             })
         }
         // Story 19.18 `AC1` — bodies are located by TOKEN POSITION, ⛔ never
@@ -1239,6 +1272,7 @@ mod tests {
                 message_type: Some(StoryAssignment),
                 subject: Some("sprint".to_owned()),
                 stories: Some(StoryManifest::parse("S1,S2=b").unwrap()),
+                holders_of: None,
             })
         );
         assert_eq!(
@@ -1368,6 +1402,7 @@ mod tests {
                 message_type: None,
                 subject: None,
                 stories: None,
+                holders_of: None,
             })
         );
         assert!(parse_team_command(Some("send")).is_err());
@@ -1387,6 +1422,7 @@ mod tests {
                 message_type: Some(crate::domain::models::SemanticMessageType::Consultation),
                 subject: None,
                 stories: None,
+                holders_of: None,
             })
         );
     }
@@ -1413,6 +1449,7 @@ mod tests {
                 message_type: Some(StoryAssignment),
                 subject: Some("sprint-7".to_owned()),
                 stories: None,
+                holders_of: None,
             })
         );
         // Untyped, and the flag spelled inside the body stays body.
@@ -1424,6 +1461,7 @@ mod tests {
                 message_type: None,
                 subject: Some("s".to_owned()),
                 stories: None,
+                holders_of: None,
             })
         );
         assert_eq!(
@@ -1434,6 +1472,7 @@ mod tests {
                 message_type: None,
                 subject: None,
                 stories: None,
+                holders_of: None,
             }),
             "no label before the aliases means no label"
         );
@@ -1523,6 +1562,7 @@ mod tests {
                 message_type: None,
                 subject: None,
                 stories: None,
+                holders_of: None,
             })
         );
         assert_eq!(
@@ -1533,6 +1573,7 @@ mod tests {
                 message_type: None,
                 subject: None,
                 stories: None,
+                holders_of: None,
             })
         );
         for input in [
@@ -2098,6 +2139,7 @@ mod tests {
                 message_type: None,
                 subject: None,
                 stories: None,
+                holders_of: None,
             })
         );
     }
@@ -2390,6 +2432,77 @@ mod tests {
         assert_eq!(
             render_team_thread("marcus", "ri_q", &ThreadRead::AccessOff, false),
             "thread access is off on marcus's host — its operator can enable it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod story19_23_tests {
+    use super::*;
+
+    #[test]
+    fn story19_23_holders_are_not_aliases() {
+        let parsed = parse_team_command(Some("send --holders-of S7-06 body")).unwrap();
+        let TeamCommandArgs::Send {
+            recipients, text, ..
+        } = &parsed
+        else {
+            panic!("expected send: {parsed:?}");
+        };
+        assert!(recipients.is_empty(), "parsed baseline: {parsed:?}");
+        assert_eq!(text, "body");
+    }
+}
+
+#[cfg(test)]
+mod selector_parser_tests {
+    use super::*;
+
+    #[test]
+    fn story19_23_selector_parser_refusals_and_positional_body() {
+        for input in [
+            "send --holders-of",
+            "send --holders-of S1",
+            "send --holders-of S1,S1 body",
+            "send --holders-of bad! body",
+        ] {
+            assert!(
+                parse_team_command(Some(input))
+                    .unwrap_err()
+                    .ends_with(&format!(". Use: {USAGE}")),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            parse_team_command(Some("send --holders-of S1,S2")).unwrap_err(),
+            format!("Missing message text after '--holders-of S1,S2'. Use: {USAGE}")
+        );
+        for input in [
+            "send --holders-of S1 --stories S1=b b body",
+            "send --type story_assignment --stories S1=b --holders-of S1 body",
+        ] {
+            assert_eq!(
+                parse_team_command(Some(input)).unwrap_err(),
+                format!("'--holders-of' cannot be combined with '--stories'. Use: {USAGE}")
+            );
+        }
+        let TeamCommandArgs::Send {
+            recipients,
+            text,
+            holders_of,
+            ..
+        } = parse_team_command(Some(
+            "send --type consultation --subject sprint --holders-of S1,S2 S1  body\nwith spacing",
+        ))
+        .unwrap()
+        else {
+            panic!("send");
+        };
+        assert!(recipients.is_empty());
+        assert_eq!(text, "S1  body\nwith spacing");
+        assert_eq!(
+            holders_of.unwrap(),
+            crate::domain::models::StorySelector::parse("S1,S2").unwrap()
         );
     }
 }

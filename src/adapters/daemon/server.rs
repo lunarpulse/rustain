@@ -2939,28 +2939,15 @@ impl AttachServer {
                             hooks.record_fifo(request, conn_id, TeamSendFifoEventKind::Dequeued);
                         }
                         match frame {
-                            ClientFrame::TeamSend {
-                                request,
-                                recipients,
-                                text,
-                                message_type,
-                                subject,
-                                stories,
-                            } => {
+                            frame @ ClientFrame::TeamSend { .. } => {
+                                let (request, payload) = team::team_send_payload(frame);
                                 server
                                     .handle_team_send(
                                         conn_id,
                                         tier,
                                         granted_mode,
                                         request,
-                                        Some(TeamSendPayload::Human {
-                                            recipients,
-                                            text,
-                                            message_type,
-                                            subject,
-                                            stories,
-                                            reply_to: None,
-                                        }),
+                                        Some(payload),
                                         Some(send_connection.clone()),
                                     )
                                     .await;
@@ -2983,7 +2970,9 @@ impl AttachServer {
                                             message_type: None,
                                             subject: None,
                                             stories: None,
+                                            holders_of: None,
                                             reply_to: Some(reply_to),
+                                            selection: None,
                                         }),
                                         Some(send_connection.clone()),
                                     )
@@ -4728,30 +4717,10 @@ impl AttachServer {
                     .await;
                 }
             }
-            ClientFrame::TeamSend {
-                request,
-                recipients,
-                text,
-                message_type,
-                subject,
-                stories,
-            } => {
-                self.handle_team_send(
-                    conn_id,
-                    tier,
-                    mode,
-                    request,
-                    Some(TeamSendPayload::Human {
-                        recipients,
-                        text,
-                        message_type,
-                        subject,
-                        stories,
-                        reply_to: None,
-                    }),
-                    None,
-                )
-                .await;
+            frame @ ClientFrame::TeamSend { .. } => {
+                let (request, payload) = team::team_send_payload(frame);
+                self.handle_team_send(conn_id, tier, mode, request, Some(payload), None)
+                    .await;
             }
             ClientFrame::TeamFollowup {
                 request,
@@ -4770,7 +4739,9 @@ impl AttachServer {
                         message_type: None,
                         subject: None,
                         stories: None,
+                        holders_of: None,
                         reply_to: Some(reply_to),
+                        selection: None,
                     }),
                     None,
                 )
@@ -6510,15 +6481,16 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 } else {
                     true
                 };
-            let (item_address, item_alias, stories, status) = self
+            let (item_address, item_alias, stories, status, selected_for) = self
                 .item_context_for_node(&task.node_id, task.response_policy.status_disclosure)
                 .await
-                .map_or((None, None, None, None), |context| {
+                .map_or((None, None, None, None, None), |context| {
                     (
                         Some(context.address),
                         context.alias,
                         context.stories,
                         context.status,
+                        context.selected_for,
                     )
                 });
             // The durable ingress alias is display-only; policy authority stays on the principal.
@@ -6531,6 +6503,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                         &task.node_id,
                         item_address.clone(),
                         stories.clone(),
+                        selected_for.as_ref(),
                         &task.response_policy.provenance,
                         sender_label,
                         PeerRowStage::AwaitingOperator,
@@ -6656,6 +6629,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                             &task.node_id,
                             item_address.clone(),
                             stories.clone(),
+                            selected_for.as_ref(),
                             &task.response_policy.provenance,
                             sender_label,
                             PeerRowStage::Settled,
@@ -6734,6 +6708,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                             &task.node_id,
                             item_address,
                             stories,
+                            selected_for.as_ref(),
                             &task.response_policy.provenance,
                             sender_label,
                             PeerRowStage::Drafting,
@@ -8009,6 +7984,7 @@ mod tests {
                     message_type: None,
                     subject: None,
                     stories: None,
+                    holders_of: None,
                 },
             )
             .await
@@ -8076,6 +8052,7 @@ mod tests {
                 message_type: None,
                 subject: None,
                 stories: None,
+                holders_of: None,
             },
         )
         .await
@@ -8251,6 +8228,7 @@ mod tests {
                     message_type: None,
                     subject: None,
                     stories: None,
+                    holders_of: None,
                 },
             )
             .await
@@ -8371,6 +8349,7 @@ mod tests {
             DaemonFrame::TeamSendStarted {
                 request: "send-1".into(),
                 action: crate::domain::models::SendActionId::from_replay("sa_test"),
+                recipients: Vec::new(),
             },
             8,
             Some(&hooks),
@@ -9224,6 +9203,7 @@ mod tests {
                     &node,
                     None,
                     None,
+                    None,
                     &policy.provenance,
                     peer.as_str(),
                     PeerRowStage::Settled,
@@ -9418,6 +9398,7 @@ mod tests {
                     row_id.clone(),
                     peer_row_control(
                         &node,
+                        None,
                         None,
                         None,
                         &Default::default(),
@@ -9797,6 +9778,7 @@ mod tests {
         journal
             .record_event(crate::domain::models::RoomEvent::RecipientItemReceived {
                 stories: None,
+                selected_for: None,
                 address: address.clone(),
                 task: "sender-task".to_owned(),
                 alias: None,
@@ -9903,6 +9885,7 @@ mod tests {
             journal
                 .record_event(crate::domain::models::RoomEvent::RecipientItemReceived {
                     stories: None,
+                    selected_for: None,
                     address: address.clone(),
                     task: format!("{item_id}-sender-task"),
                     message_type: crate::domain::models::SemanticMessageType::Unknown,
@@ -11721,6 +11704,7 @@ mod tests {
         journal
             .record_event(RoomEvent::RecipientItemReceived {
                 stories: None,
+                selected_for: None,
                 address: ItemAddress::from_a2a_ingress(
                     submitter.pseudonymous_peer_id(),
                     ItemId::from_replay("ri_reply-test"),
@@ -12064,6 +12048,7 @@ mod tests {
                 item_address: None,
                 stories: None,
                 status: None,
+                selected_for: None,
                 message_type: crate::domain::models::SemanticMessageType::Unknown,
                 sender_label: "peer".to_owned(),
                 stage: PeerRowStage::AwaitingOperator,
@@ -12701,7 +12686,7 @@ mod tests {
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: 12,
+                protocol_version: 13,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -12714,8 +12699,8 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, 12);
-                assert_eq!(daemon, 13);
+                assert_eq!(client, 13);
+                assert_eq!(daemon, 14);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }

@@ -11,7 +11,9 @@ pub(super) enum TeamSendPayload {
         message_type: Option<crate::domain::models::SemanticMessageType>,
         subject: Option<String>,
         stories: Option<crate::domain::models::StoryManifest>,
+        holders_of: Option<crate::domain::models::StorySelector>,
         reply_to: Option<String>,
+        selection: Option<crate::domain::models::StorySelection>,
     },
     #[cfg(feature = "a2a")]
     Agent(Arc<crate::domain::models::TeamProposal>),
@@ -27,7 +29,9 @@ impl TeamSendPayload {
                 message_type,
                 subject,
                 stories,
+                holders_of: _,
                 reply_to,
+                selection,
             } => crate::adapters::a2a::send::SendRequest {
                 recipients,
                 text,
@@ -36,6 +40,7 @@ impl TeamSendPayload {
                 subject: subject.as_deref(),
                 stories: stories.as_ref(),
                 authorship: crate::domain::models::Authorship::HumanWritten,
+                selection: selection.as_ref(),
                 send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             },
             Self::Agent(proposal) => crate::adapters::a2a::send::SendRequest {
@@ -46,9 +51,77 @@ impl TeamSendPayload {
                 subject: None,
                 stories: None,
                 authorship: crate::domain::models::Authorship::AgentComposed,
+                selection: None,
                 send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             },
         }
+    }
+}
+
+/// Decode both dispatch rails in one place; the journal-owning daemon
+/// revalidates the selector before reading any holder statements.
+pub(super) fn team_send_payload(frame: ClientFrame) -> (String, TeamSendPayload) {
+    let ClientFrame::TeamSend {
+        request,
+        recipients,
+        text,
+        message_type,
+        subject,
+        stories,
+        holders_of,
+    } = frame
+    else {
+        unreachable!("only TeamSend enters the frame decoder");
+    };
+    (
+        request,
+        TeamSendPayload::Human {
+            recipients,
+            text,
+            message_type,
+            subject,
+            stories,
+            holders_of,
+            reply_to: None,
+            selection: None,
+        },
+    )
+}
+
+#[cfg(feature = "a2a")]
+impl TeamSendPayload {
+    fn selector(&self) -> Result<Option<&crate::domain::models::StorySelector>, String> {
+        let Self::Human {
+            holders_of: Some(selector),
+            recipients,
+            stories,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        selector.check().map_err(|error| error.to_string())?;
+        if stories.is_some() {
+            return Err(crate::domain::models::StoryRefusal::ConflictingSelectors.to_string());
+        }
+        if !recipients.is_empty() {
+            return Err("'--holders-of' cannot be combined with explicit recipients".to_owned());
+        }
+        Ok(Some(selector))
+    }
+}
+
+/// Story 19.23 D3: a holder refusal is the client's request to fix; an
+/// unreadable journal is this daemon's own failure, as for story history.
+#[cfg(feature = "a2a")]
+fn selection_refusal_error(error: crate::adapters::a2a::send::SendError) -> ProtocolError {
+    use crate::adapters::a2a::send::SendError;
+    use crate::domain::models::SelectionRefusal;
+    match error {
+        SendError::InvalidSelection(SelectionRefusal::JournalUnreadable) => {
+            ProtocolError::Internal(error.to_string())
+        }
+        _ => ProtocolError::Malformed(error.to_string()),
     }
 }
 
@@ -643,7 +716,7 @@ impl AttachServer {
                     .await
                     .map(|(proposal, permit)| (TeamSendPayload::Agent(proposal), permit)),
             };
-            let (payload, permit) = match admitted {
+            let (mut payload, permit) = match admitted {
                 Ok(admitted) => admitted,
                 Err(ProposalTakeError::Unknown) => {
                     self.close_team_proposal(
@@ -680,6 +753,53 @@ impl AttachServer {
                     return;
                 }
             };
+            let selector = match payload.selector() {
+                Ok(selector) => selector,
+                Err(error) => {
+                    drop(permit);
+                    self.refuse_team_send(
+                        conn_id,
+                        request,
+                        ProtocolError::Malformed(error),
+                        proposed,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if let Some(selector) = selector {
+                let resolved = match crate::adapters::a2a::story_selection::resolve(
+                    &runtime, selector,
+                )
+                .await
+                {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        drop(permit);
+                        self.refuse_team_send(
+                            conn_id,
+                            request,
+                            selection_refusal_error(error),
+                            proposed,
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                if let TeamSendPayload::Human {
+                    recipients,
+                    selection,
+                    ..
+                } = &mut payload
+                {
+                    *recipients = resolved
+                        .recipients
+                        .iter()
+                        .map(|recipient| recipient.alias.clone())
+                        .collect();
+                    *selection = Some(resolved);
+                }
+            }
             let send_request = payload.request();
             if let Err(error) =
                 crate::adapters::a2a::send::validate_send_request(&runtime, &send_request)
@@ -757,9 +877,10 @@ impl AttachServer {
                 if let Some(hooks) = send_action_hooks {
                     hooks.before_send_action().await;
                 }
+                let send_request = payload.request();
                 let _ = crate::adapters::a2a::send::coordinate_send(
                     &runtime,
-                    payload.request(),
+                    send_request,
                     cancel,
                     |action| {
                         started_count.fetch_add(1, Ordering::AcqRel);
@@ -769,6 +890,11 @@ impl AttachServer {
                             DaemonFrame::TeamSendStarted {
                                 request: started_request.clone(),
                                 action: action.clone(),
+                                recipients: if send_request.selection.is_some() {
+                                    send_request.recipients.to_vec()
+                                } else {
+                                    Vec::new()
+                                },
                             },
                             started_conn_id,
                             #[cfg(any(test, feature = "test-instrumentation"))]
@@ -826,10 +952,21 @@ impl AttachServer {
                 message_type,
                 subject,
                 stories,
+                holders_of,
                 reply_to,
+                selection,
             }) = payload
             {
-                let _ = (recipients, text, message_type, subject, stories, reply_to);
+                let _ = (
+                    recipients,
+                    text,
+                    message_type,
+                    subject,
+                    stories,
+                    holders_of,
+                    reply_to,
+                    selection,
+                );
             }
         }
     }
@@ -1245,5 +1382,70 @@ impl AttachServer {
             ProtocolError::Internal("A2A is not enabled in this build".into()),
         )
         .await;
+    }
+}
+
+#[cfg(all(test, feature = "a2a"))]
+mod selector_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn story19_23_daemon_revalidates_selector_before_resolution() {
+        // Use the protocol's actual tag spelling rather than relying on this
+        // fixture to guess serde's externally tagged representation.
+        let valid = ClientFrame::TeamSend {
+            request: "r".into(),
+            recipients: vec![],
+            text: "body".into(),
+            message_type: None,
+            subject: None,
+            stories: None,
+            holders_of: Some(crate::domain::models::StorySelector::parse("S1").unwrap()),
+        };
+        let mut raw = serde_json::to_value(valid).unwrap();
+        let (_, payload) = team_send_payload(serde_json::from_value(raw.clone()).unwrap());
+        assert!(payload.selector().unwrap().is_some());
+        for selector in [
+            json!({"stories":[]}),
+            json!({"stories":["bad!"]}),
+            json!({"stories":["S1","S1"]}),
+            json!({"stories":(0..65).map(|n|format!("S{n}")).collect::<Vec<_>>()}),
+        ] {
+            raw["teamSend"]["holders_of"] = selector;
+            let (_, payload) = team_send_payload(serde_json::from_value(raw.clone()).unwrap());
+            assert!(payload.selector().is_err());
+        }
+        raw["teamSend"]["holders_of"] = json!({"stories":["S1"]});
+        raw["teamSend"]["recipients"] = json!(["jun"]);
+        let (_, payload) = team_send_payload(serde_json::from_value(raw.clone()).unwrap());
+        assert!(payload.selector().is_err());
+        raw["teamSend"]["recipients"] = json!([]);
+        raw["teamSend"]["stories"] = json!({"stories":[{"key":"S1","to":null}]});
+        let (_, payload) = team_send_payload(serde_json::from_value(raw).unwrap());
+        assert_eq!(
+            payload.selector().unwrap_err(),
+            "'--holders-of' cannot be combined with '--stories'"
+        );
+    }
+
+    #[test]
+    fn story19_23_unreadable_journal_is_a_daemon_error_not_a_malformed_frame() {
+        use crate::adapters::a2a::send::SendError;
+        use crate::domain::models::{SelectionRefusal, StoryKey};
+        let unreadable = selection_refusal_error(SendError::InvalidSelection(
+            SelectionRefusal::JournalUnreadable,
+        ));
+        assert_eq!(
+            unreadable.to_string(),
+            "daemon error: story holders cannot be read from this host's journal"
+        );
+        let refused = selection_refusal_error(SendError::InvalidSelection(
+            SelectionRefusal::NotListed(StoryKey::parse("S1").unwrap()),
+        ));
+        assert!(
+            matches!(refused, ProtocolError::Malformed(_)),
+            "{refused:?}"
+        );
     }
 }

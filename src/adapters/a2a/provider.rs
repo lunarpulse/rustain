@@ -101,6 +101,7 @@ impl A2aProvider {
         let (message, own_task) = super::driver::build_message(
             &input,
             super::driver::MessageCarriers {
+                selected_for: None,
                 item_key: item_key.as_deref(),
                 reply_to: None,
                 reply_capability: None,

@@ -1090,6 +1090,9 @@ pub enum RoomEvent {
         /// Sender-stated story relationships, fixed when this item is created.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stories: Option<super::ReceivedStories>,
+        /// The sending host's immutable selection statement, not a story list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_for: Option<super::ReceivedSelection>,
         #[serde(
             default = "Authorship::unknown",
             skip_serializing_if = "Authorship::is_unknown"

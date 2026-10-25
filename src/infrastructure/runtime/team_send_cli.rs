@@ -67,6 +67,7 @@ async fn run_team_send_over<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         message_type: args.message_type,
         subject: args.subject,
         stories: args.stories,
+        holders_of: None,
     };
     let submitted = write_frame(writer, &frame).await;
     // Reuse the recipient strings after serialization instead of copying them.
@@ -97,6 +98,7 @@ async fn run_team_send_over<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             DaemonFrame::TeamSendStarted {
                 request,
                 action: started_action,
+                ..
             } if request == REQUEST => {
                 if action.is_none() {
                     writeln!(out, "{}", copy::started(rows.len(), &started_action))?;
@@ -193,6 +195,7 @@ mod tests {
     }
     fn start() -> DaemonFrame {
         DaemonFrame::TeamSendStarted {
+            recipients: Vec::new(),
             request: REQUEST.into(),
             action: SendActionId::from_replay("sa_test"),
         }

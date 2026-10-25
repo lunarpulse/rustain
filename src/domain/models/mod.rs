@@ -271,8 +271,10 @@ pub use skill::{
 pub use skill_catalog_delta::SkillCatalogDelta;
 pub use skill_metadata::SkillMetadata;
 pub use story_manifest::{
-    ReceivedStories, ReceivedStory, RecordedStory, StoryEntry, StoryHolder, StoryKey,
-    StoryManifest, StoryRefusal, StorySummary, VerdictOffer, carries_story_list, story_summary,
+    ReceivedSelection, ReceivedStories, ReceivedStory, RecordedStory, SelectedRecipient,
+    SelectionRefusal, SelectionSummary, StoryEntry, StoryHolder, StoryKey, StoryManifest,
+    StoryRefusal, StorySelection, StorySelector, StorySummary, VerdictOffer, carries_story_list,
+    selection_line, story_summary,
 };
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
@@ -346,7 +348,7 @@ pub use semantic_message_type::{
 };
 pub use status_statement::{
     HeldStory, NOT_SHARED, NothingBecause, ReceiptState, SharedStory, StatusDisclosure,
-    StatusPreview, StatusStatement, compose, held_stories,
+    StatusPreview, StatusStatement, StoryStatement, compose, held_stories, story_statements,
 };
 #[allow(unused_imports)]
 pub use subagent_envelope::{SubagentEnvelope, SubagentEvent};

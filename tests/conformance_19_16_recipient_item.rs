@@ -24,6 +24,7 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
             in_reply_to: None,
             capability_hash: None,
             reply_capability_matched: false,
+            selected_for: None,
         },
         RoomEvent::RecipientItemAcknowledged {
             address: address.clone(),
@@ -140,6 +141,7 @@ async fn received_provenance_journal_preserves_legacy_bytes_and_tolerates_future
         reply_capability_matched: false,
         authorship: Authorship::AgentComposed,
         send_authorization: SendAuthorization::Automatic,
+        selected_for: None,
     };
     let journal = NodeJournal::open(workspace.path(), room)
         .await
@@ -191,6 +193,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         in_reply_to: Some("rr_previous".to_owned()),
         capability_hash: None,
         reply_capability_matched: false,
+        selected_for: None,
     };
     let mut legacy_received = serde_json::to_value(&received).expect("serialize received item");
     assert_eq!(legacy_received["in_reply_to"], "rr_previous");
@@ -359,6 +362,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
         in_reply_to: Some("ri_root".to_owned()),
         capability_hash: Some(hash.clone()),
         reply_capability_matched: true,
+        selected_for: None,
     };
     let encoded = serde_json::to_value(&received).expect("serialize");
     assert_eq!(encoded["capability_hash"], hash.as_str());
@@ -380,6 +384,7 @@ fn item_capability_fields_round_trip_and_absence_serializes_as_a_19_18_row() {
         in_reply_to: None,
         capability_hash: None,
         reply_capability_matched: false,
+        selected_for: None,
     };
     let row = serde_json::to_string(&legacy).expect("serialize legacy");
     let value: serde_json::Value = serde_json::from_str(&row).expect("json");
@@ -516,6 +521,7 @@ fn recipient_item_fold_replays_acknowledgement_and_is_idempotent() {
         in_reply_to: None,
         capability_hash: None,
         reply_capability_matched: false,
+        selected_for: None,
     };
     let acknowledged = RoomEvent::RecipientItemAcknowledged {
         address: address.clone(),
@@ -573,6 +579,7 @@ fn replacing_from_the_journal_discards_an_in_memory_divergence() {
         in_reply_to: None,
         capability_hash: None,
         reply_capability_matched: false,
+        selected_for: None,
     };
     let entries = vec![entry(1, received.clone())];
     let projection = JournalRecipientItemProjection::from_entries(&entries);
@@ -617,6 +624,7 @@ fn find_by_task_binds_the_newest_item_when_a_message_id_is_resent() {
         in_reply_to: None,
         capability_hash: None,
         reply_capability_matched: false,
+        selected_for: None,
     };
     let entries = vec![
         entry(1, received(first)),
@@ -706,6 +714,7 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
         in_reply_to: None,
         capability_hash: None,
         reply_capability_matched: false,
+        selected_for: None,
     };
     let raw_reply = |id: &str| {
         serde_json::to_value(RoomEvent::RecipientItemReplied {

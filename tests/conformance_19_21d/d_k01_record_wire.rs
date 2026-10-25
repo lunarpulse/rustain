@@ -43,6 +43,7 @@ async fn d_k01_frozen_record_precedes_io_and_whole_list_reaches_each_host() {
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(manifest),
+            None,
         )
         .await;
     gate.wait_for(1).await;
@@ -151,6 +152,7 @@ async fn d_k01_frozen_record_precedes_io_and_whole_list_reaches_each_host() {
             vec!["b".into(), "c".into()],
             "legacy body",
             Some(SemanticMessageType::StoryAssignment),
+            None,
             None,
             None,
         )

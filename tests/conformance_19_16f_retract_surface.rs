@@ -93,6 +93,7 @@ async fn seed_item(room: &dyn RoomJournal, item_id: &str, task: &str, state: Rec
         reply_capability_matched: false,
         authorship: rustain::domain::models::Authorship::Unknown,
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,
+        selected_for: None,
     })
     .await
     .expect("seed the recipient item");

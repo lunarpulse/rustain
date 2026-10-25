@@ -113,6 +113,9 @@ fn room_role_never_reaches_the_capability_or_authority_seams() {
             "StoryManifest",
             "ReceivedStories",
             "StoryHolder",
+            "StorySelector",
+            "StorySelection",
+            "ReceivedSelection",
         ] {
             assert!(
                 !source.contains(needle),

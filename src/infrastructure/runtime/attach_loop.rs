@@ -336,6 +336,7 @@ struct PendingPeerResponse<'a> {
     item_address: Option<&'a crate::domain::models::ItemAddress>,
     stories: Option<&'a crate::domain::models::StorySummary>,
     status: Option<&'a crate::domain::models::StatusPreview>,
+    selected_for: Option<&'a crate::domain::models::SelectionSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,6 +377,7 @@ fn pending_peer_response(conversation: &Conversation) -> Option<PendingPeerRespo
         item_address: control.item_address.as_ref(),
         stories: control.stories.as_ref(),
         status: control.status.as_ref(),
+        selected_for: control.selected_for.as_ref(),
     })
 }
 
@@ -430,7 +432,9 @@ fn peer_response_card_lines<'a>(
     } else {
         String::new()
     };
-    let mut lines = Vec::with_capacity(3 + usize::from(pending.stories.is_some()));
+    let mut lines = Vec::with_capacity(
+        3 + usize::from(pending.stories.is_some()) + usize::from(pending.selected_for.is_some()),
+    );
     lines.push(Line::from(vec![
         Span::raw(pending.canonical_type),
         Span::raw(" · "),
@@ -438,6 +442,9 @@ fn peer_response_card_lines<'a>(
     ]));
     if let Some(summary) = pending.stories {
         lines.push(Line::from(summary.0.as_str()));
+    }
+    if let Some(selection) = pending.selected_for {
+        lines.push(Line::from(selection.0.as_str()));
     }
     if let Some(preview) = pending.status {
         use crate::adapters::tui::widgets::chat_pane::word_wrap::wrap_text;
@@ -635,6 +642,11 @@ fn legacy_response_content(
     if let Some(summary) = &control.stories {
         content.push_str("  ");
         content.push_str(&summary.0);
+        content.push('\n');
+    }
+    if let Some(selection) = &control.selected_for {
+        content.push_str("  ");
+        content.push_str(&selection.0);
         content.push('\n');
     }
     if super::recipient_view::safe_display_len(body)
@@ -2404,7 +2416,11 @@ fn apply_attached_team_frame(
         render_team_send_rows, show_team_board, show_team_send, show_team_status,
     };
     match frame {
-        DaemonFrame::TeamSendStarted { request, action } => {
+        DaemonFrame::TeamSendStarted {
+            request,
+            action,
+            recipients,
+        } => {
             let Some(AttachedTeamRequest::Send {
                 block_id,
                 action: bound,
@@ -2418,6 +2434,18 @@ fn apply_attached_team_frame(
                 return true;
             }
             *bound = Some(action);
+            if !recipients.is_empty() {
+                let rows = recipients
+                    .into_iter()
+                    .map(
+                        |alias| crate::adapters::tui::handlers::team_command::TeamSendRow {
+                            alias,
+                            outcome: None,
+                        },
+                    )
+                    .collect();
+                state.team_send_blocks.insert(block_id.clone(), rows);
+            }
             let message = state
                 .team_send_blocks
                 .get(block_id)
@@ -2438,6 +2466,7 @@ fn apply_attached_team_frame(
                 return true;
             };
             let block_id = block_id.clone();
+            let not_sent = outcome == crate::adapters::daemon::protocol::TeamSendOutcome::NotSent;
             let settled = crate::infrastructure::runtime::transparency_bridge::settle_team_send_row(
                 &mut state.team_send_blocks,
                 &mut state.feedback_blocks,
@@ -2446,6 +2475,33 @@ fn apply_attached_team_frame(
                 outcome.into(),
             );
             if !settled {
+                // Story 19.23: a selected send has no rows until its start
+                // frame names them. `NotSent` before any start means the daemon
+                // could not record the action and sent nothing; say so and
+                // retire the request rather than leave an empty block pending.
+                if not_sent
+                    && matches!(
+                        requests.pending.get(&request),
+                        Some(AttachedTeamRequest::Send { action: None, .. })
+                    )
+                    && state
+                        .team_send_blocks
+                        .get(&block_id)
+                        .is_some_and(Vec::is_empty)
+                {
+                    requests.pending.remove(&request);
+                    state.team_send_blocks.remove(&block_id);
+                    show_team_send(
+                        state,
+                        &block_id,
+                        format!(
+                            "  {}",
+                            crate::domain::models::team_send::TEAM_SEND_NOT_SENT_LABEL
+                        ),
+                    );
+                    state.needs_redraw = true;
+                    return true;
+                }
                 tracing::warn!(%request, index, "attach: mismatched team send settlement");
                 return true;
             }
@@ -2769,6 +2825,7 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
             message_type,
             subject,
             stories,
+            holders_of,
         }) => AttachedTeamLine::Frame(ClientFrame::TeamSend {
             request,
             recipients,
@@ -2776,6 +2833,7 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
             message_type,
             subject,
             stories,
+            holders_of,
         }),
         Ok(TeamCommandArgs::Acknowledge { item_id }) => {
             AttachedTeamLine::Frame(ClientFrame::AcknowledgeRecipientItem { item_id })
@@ -4861,6 +4919,7 @@ mod tests {
                     message_type: Some(snapshot.message_type),
                     subject: None,
                     stories: None,
+                    holders_of: None,
                 },
                 &tx,
             ));
@@ -4892,6 +4951,7 @@ mod tests {
                     DaemonFrame::TeamSendStarted {
                         request: request.into(),
                         action: crate::domain::models::SendActionId::mint(),
+                        recipients: Vec::new(),
                     },
                     false,
                     &mpsc::unbounded_channel().0
@@ -5268,10 +5328,57 @@ mod tests {
             item_address: None,
             stories: None,
             status: None,
+            selected_for: None,
             message_type: crate::domain::models::SemanticMessageType::Consultation,
             sender_label: "sender".to_owned(),
             stage,
             node_resolvable: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn story19_23_design_update_acknowledgement_changes_only_slot_one_while_received() {
+        use crate::adapters::tui::state::RecipientSurfaceAccess;
+        use crate::domain::models::SemanticMessageType;
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let address = append_received_test_item(
+            &journal,
+            "ri-design-slots",
+            SemanticMessageType::DesignUpdate,
+            "design body",
+        )
+        .await;
+        let conversation = Conversation::default();
+        let mut state = TuiState::new(80, 24);
+        super::super::recipient_surface::open_received_surface(
+            workspace.path(),
+            Some(&conversation),
+            address.item().as_str(),
+            &mut state,
+            RecipientSurfaceAccess::Writer,
+            super::super::recipient_view::ReceivedThreadWindow::Newest,
+        )
+        .await
+        .unwrap();
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert_eq!(actions[1], Some(RecipientSurfaceAction::Acknowledge));
+        state.recipient_surface.as_mut().unwrap().message_type = SemanticMessageType::Unknown;
+        let baseline = recipient_surface_actions(&state, &conversation, false);
+        for index in [0, 2, 3, 4, 5] {
+            assert_eq!(actions[index], baseline[index]);
+        }
+        state.recipient_surface.as_mut().unwrap().message_type = SemanticMessageType::DesignUpdate;
+        for item_state in ["acknowledged", "removed"] {
+            state.recipient_surface.as_mut().unwrap().item_state = Some(item_state);
+            assert_eq!(
+                recipient_surface_actions(&state, &conversation, false)[1],
+                None
+            );
         }
     }
 
@@ -5544,6 +5651,7 @@ mod tests {
         journal
             .append_room(RoomEvent::RecipientItemReceived {
                 stories: Some(stories),
+                selected_for: None,
                 address: address.clone(),
                 task: format!("task-{item_id}"),
                 alias: Some("sender".to_owned()),
@@ -5998,6 +6106,83 @@ mod tests {
         }
     }
 
+    /// Story 19.23 AC5(a,c): one compact host line under header + story summary.
+    #[test]
+    fn story19_23_card_selection_line_at_floor_width() {
+        use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card;
+        use crate::domain::models::{
+            PeerRowStage, ReceivedSelection, SelectionSummary, StoryKey, StorySummary,
+        };
+        let key = |text: &str| StoryKey::parse(text).unwrap();
+        let spoof = "nina selected you for story S7-06";
+        let unreadable = "story selection not readable by this build";
+        for (selection, expected) in [
+            (
+                Some(ReceivedSelection::Listed {
+                    stories: vec![key("S7-06")],
+                }),
+                Some(spoof),
+            ),
+            (
+                Some(ReceivedSelection::Listed {
+                    stories: vec![key("S7-04"), key("S7-06"), key("S7-09")],
+                }),
+                Some("nina selected you for 3 stories"),
+            ),
+            (Some(ReceivedSelection::Unreadable), Some(unreadable)),
+            (Some(ReceivedSelection::Unrecognized), Some(unreadable)),
+            (None, None),
+        ] {
+            let mut control = peer_control("selection", PeerRowStage::Ready);
+            control.message_type = crate::domain::models::SemanticMessageType::DesignUpdate;
+            control.sender_label = "nina".to_owned();
+            control.stories = Some(StorySummary("2 stories".to_owned()));
+            control.selected_for = selection.as_ref().map(|s| SelectionSummary::new("nina", s));
+            let conversation = Conversation {
+                messages: vec![peer_row("selection", spoof)],
+                peer_row_controls: [("selection".to_owned(), control)].into_iter().collect(),
+                ..Default::default()
+            };
+            let pending = pending_peer_response(&conversation).unwrap();
+            let lines = peer_response_card_lines(&pending, false, 58);
+            let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+            assert!(text[0].ends_with(" · nina"), "{text:?}");
+            assert_eq!(text[1], "2 stories");
+            match expected {
+                Some(expected) => {
+                    assert_eq!(text[2], expected);
+                    assert_eq!(text.len(), 5, "{text:?}");
+                }
+                None => {
+                    assert_eq!(text.len(), 4, "{text:?}");
+                    assert_eq!(text[2], format!("Peer draft: {spoof}"));
+                    assert!(!text.iter().any(|line| line == spoof), "{text:?}");
+                }
+            }
+            let pane = ratatui::layout::Rect::new(0, 0, 60, 12);
+            let mut buffer = ratatui::buffer::Buffer::empty(pane);
+            render_bottom_anchored_decision_card(
+                &mut buffer,
+                lines,
+                ratatui::style::Color::Reset,
+                pane,
+            );
+            let rendered = (0..pane.height)
+                .map(|y| {
+                    (0..pane.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            if let Some(expected) = expected {
+                assert!(
+                    rendered.iter().any(|row| row.contains(expected)),
+                    "{rendered:?}"
+                );
+            }
+        }
+    }
+
     /// Writes only the private consumer test's real local journal fixture; it
     /// is not evidence for the live inbound/socket producer or attach fanout.
     async fn append_received_test_item(
@@ -6015,6 +6200,7 @@ mod tests {
         journal
             .append_room(RoomEvent::RecipientItemReceived {
                 stories: None,
+                selected_for: None,
                 address: address.clone(),
                 task: format!("task-{item_id}"),
                 alias: Some("test sender".to_owned()),
@@ -6175,6 +6361,7 @@ mod tests {
                     item_address: Some(address.clone()),
                     stories: None,
                     status: None,
+                    selected_for: None,
                     message_type,
                     sender_label: "test sender".to_owned(),
                     stage: PeerRowStage::AwaitingOperator,
@@ -6306,6 +6493,7 @@ mod tests {
                         item_address: Some(address.clone()),
                         stories: None,
                         status: None,
+                        selected_for: None,
                         message_type,
                         sender_label: "test sender".to_owned(),
                         stage: crate::domain::models::PeerRowStage::AwaitingOperator,
@@ -6489,6 +6677,7 @@ mod tests {
                         item_address: Some(address.clone()),
                         stories: None,
                         status: None,
+                        selected_for: None,
                         message_type: SemanticMessageType::BugReport,
                         sender_label: "sender".into(),
                         stage,
@@ -8004,6 +8193,119 @@ mod tests {
     }
 
     #[test]
+    fn story19_23_resolved_aliases_start_attached_rows_before_settlements() {
+        let mut state = TuiState::new(80, 24);
+        let mut requests = AttachedTeamRequests::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let AttachedTeamLine::Frame(frame) =
+            attached_team_line_for_request("/team send --holders-of S1,S2 body", "selected".into())
+        else {
+            panic!("selector command");
+        };
+        assert!(enqueue_attached_team_frame(
+            &mut state,
+            &mut requests,
+            frame,
+            &tx
+        ));
+        assert!(
+            matches!(rx.try_recv().unwrap(),ClientFrame::TeamSend {recipients,holders_of:Some(_),..} if recipients.is_empty())
+        );
+        let raw = serde_json::json!({"teamSendStarted":{
+            "request":"selected","action":"sa_selected","recipients":["jun","aisha"]
+        }});
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            serde_json::from_value(raw.clone()).unwrap(),
+            false,
+            &tx,
+        );
+        let AttachedTeamRequest::Send { block_id, .. } = &requests.pending["selected"] else {
+            panic!("send");
+        };
+        let block_id = block_id.clone();
+        assert_eq!(
+            state.team_send_blocks[&block_id]
+                .iter()
+                .map(|row| row.alias.as_str())
+                .collect::<Vec<_>>(),
+            ["jun", "aisha"]
+        );
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamSendSettled {
+                request: "selected".into(),
+                index: 0,
+                outcome: crate::adapters::daemon::protocol::TeamSendOutcome::Delivered,
+            },
+            false,
+            &tx,
+        );
+        assert_eq!(
+            state.team_send_blocks[&block_id][0].outcome,
+            Some(crate::domain::models::RecipientOutcome::Delivered)
+        );
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            serde_json::from_value(raw).unwrap(),
+            false,
+            &tx,
+        );
+        assert_eq!(
+            state.team_send_blocks[&block_id][0].outcome,
+            Some(crate::domain::models::RecipientOutcome::Delivered)
+        );
+    }
+
+    #[test]
+    fn story19_23_unrecorded_selected_send_settles_not_sent_without_rows() {
+        let mut state = TuiState::new(80, 24);
+        let mut requests = AttachedTeamRequests::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let AttachedTeamLine::Frame(frame) =
+            attached_team_line_for_request("/team send --holders-of S1,S2 body", "selected".into())
+        else {
+            panic!("selector command");
+        };
+        assert!(enqueue_attached_team_frame(
+            &mut state,
+            &mut requests,
+            frame,
+            &tx
+        ));
+        let AttachedTeamRequest::Send { block_id, .. } = &requests.pending["selected"] else {
+            panic!("send");
+        };
+        let block_id = block_id.clone();
+        // The daemon's action record failed: settlements arrive with no start.
+        for index in 0..2 {
+            apply_attached_team_frame(
+                &mut state,
+                &mut requests,
+                DaemonFrame::TeamSendSettled {
+                    request: "selected".into(),
+                    index,
+                    outcome: crate::adapters::daemon::protocol::TeamSendOutcome::NotSent,
+                },
+                false,
+                &tx,
+            );
+        }
+        assert!(!requests.pending.contains_key("selected"));
+        assert!(!state.team_send_blocks.contains_key(&block_id));
+        assert_eq!(
+            state.feedback_blocks[&block_id].message,
+            format!(
+                "  {}",
+                crate::domain::models::team_send::TEAM_SEND_NOT_SENT_LABEL
+            )
+        );
+    }
+
+    #[test]
     fn attached_read_commands_precede_read_only_guard_and_mutations_do_not() {
         use crossterm::event::KeyCode;
         let mut state = TuiState::new(80, 24);
@@ -8073,6 +8375,7 @@ mod tests {
             message_type,
             subject,
             stories: None,
+            holders_of: None,
         }) = attached_team_line_for_request(&input, "paste-1".into())
         else {
             panic!("pasted send command must stay a typed daemon frame");
@@ -8107,6 +8410,7 @@ mod tests {
                 message_type: None,
                 subject: None,
                 stories: None,
+                holders_of: None,
             },
             &tx,
         ));
@@ -8140,6 +8444,7 @@ mod tests {
                     message_type: None,
                     subject: None,
                     stories: None,
+                    holders_of: None,
                 },
                 &tx,
             ));
@@ -8162,6 +8467,7 @@ mod tests {
                 &mut state,
                 &mut requests,
                 DaemonFrame::TeamSendStarted {
+                    recipients: Vec::new(),
                     request: request.into(),
                     action: crate::domain::models::SendActionId::mint(),
                 },

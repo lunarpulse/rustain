@@ -226,6 +226,7 @@ async fn s_k02_status_board_keeps_empty_decline_unanswered_and_busy_distinct_onl
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(StoryManifest::parse("S7-03=b,S7-04=d,S7-05=e,S7-06=g,S7-07=h").unwrap()),
+            None,
         )
         .await;
     for index in 0..hosts.len() {
@@ -246,6 +247,7 @@ async fn s_k02_status_board_keeps_empty_decline_unanswered_and_busy_distinct_onl
                 .collect(),
             "status please",
             Some(SemanticMessageType::StatusRequest),
+            None,
             None,
             None,
         )

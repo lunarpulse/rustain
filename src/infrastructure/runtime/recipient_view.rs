@@ -6,7 +6,7 @@ use crate::adapters::policy::recipient_item::{JournalRecipientItemProjection, Th
 use crate::domain::models::provenance::provenance_tags;
 use crate::domain::models::{
     ItemScope, ReceivedStories, RecipientItemState, RecipientItemView, ReplyKind,
-    SemanticMessageType, StoryHolder, VerdictOffer, story_summary,
+    SemanticMessageType, StoryHolder, VerdictOffer, selection_line, story_summary,
 };
 use crate::domain::ports::RoomJournalReader;
 use crate::domain::services::{
@@ -50,7 +50,7 @@ pub struct ReceivedThreadPage {
 }
 
 pub(crate) fn recipient_context_available(item: &RecipientItemView) -> bool {
-    let reserve = 4096 + item_story_block(item).len();
+    let reserve = 4096 + item_story_block(item, &item_label(item)).len();
     context_available_with_cost(
         item,
         turn_cost(&ThreadTurnRef::Item(item), true)
@@ -67,15 +67,45 @@ fn context_available_with_cost(item: &RecipientItemView, cost: usize) -> bool {
     )
 }
 
-fn item_story_block(item: &RecipientItemView) -> String {
-    if !crate::domain::models::carries_story_list(item.message_type)
-        || matches!(item.state, RecipientItemState::Removed { .. })
-    {
+/// The sanitized sender name printed on the View attribution line.
+fn item_label(item: &RecipientItemView) -> String {
+    item.alias.as_deref().map_or_else(
+        || item_principal_label(item.address.principal()),
+        |alias| {
+            crate::domain::services::transparency::sanitize_disclosable(
+                alias,
+                crate::domain::services::transparency::MAX_PEER_ID_BYTES,
+            )
+        },
+    )
+}
+
+/// One item header block: the story list (story-carrying types only) and the
+/// sender's selection line (every type). `Removed` items show neither.
+fn item_story_block(item: &RecipientItemView, label: &str) -> String {
+    if matches!(item.state, RecipientItemState::Removed { .. }) {
         return String::new();
     }
-    item.stories.as_ref().map_or_else(String::new, |list| {
-        render_story_list(list, item.message_type)
-    })
+    let mut block = if crate::domain::models::carries_story_list(item.message_type) {
+        item.stories.as_ref().map_or_else(String::new, |list| {
+            render_story_list(list, item.message_type)
+        })
+    } else {
+        String::new()
+    };
+    if let Some(selection) = &item.selected_for {
+        push_wrapped(&mut block, &selection_line(label, selection));
+    }
+    block
+}
+
+/// Wrap at the 60-column floor using the native word/character-wrap policy.
+fn push_wrapped(block: &mut String, line: &str) {
+    for line in crate::adapters::tui::widgets::chat_pane::word_wrap::wrap_text(line, 58) {
+        block.push_str("  ");
+        block.push_str(&line);
+        block.push('\n');
+    }
 }
 
 fn render_story_list(list: &ReceivedStories, kind: SemanticMessageType) -> String {
@@ -148,7 +178,8 @@ pub(crate) async fn load_received_thread(
     drop(entries);
     let pinned = |index: usize| Some(index) == root_index || index == opened_index;
 
-    let story_block = item_story_block(opened);
+    let label = item_label(opened);
+    let story_block = item_story_block(opened, &label);
     let opened_reserve = 4096 + story_block.len();
     let opened_turn_cost = turn_cost(&turns[opened_index], true);
     let context_available =
@@ -253,15 +284,6 @@ pub(crate) async fn load_received_thread(
         _ => unreachable!("first and last are both derived from the same set"),
     };
 
-    let label = opened.alias.as_deref().map_or_else(
-        || item_principal_label(opened.address.principal()),
-        |alias| {
-            crate::domain::services::transparency::sanitize_disclosable(
-                alias,
-                crate::domain::services::transparency::MAX_PEER_ID_BYTES,
-            )
-        },
-    );
     let mut content = String::new();
     use std::fmt::Write as _;
     let canonical = semantic_type_token(opened.message_type);
@@ -711,6 +733,7 @@ mod tests {
             journal
                 .append_room(RoomEvent::RecipientItemReceived {
                     stories,
+                    selected_for: None,
                     address,
                     task: format!("task-{item_id}"),
                     alias: Some("sender".into()),
@@ -750,6 +773,7 @@ mod tests {
         journal
             .append_room(RoomEvent::RecipientItemReceived {
                 stories: None,
+                selected_for: None,
                 address,
                 task: "task-marks".into(),
                 alias: Some("arrival-alias".into()),
@@ -825,6 +849,7 @@ mod tests {
                     journal
                         .append_room(RoomEvent::RecipientItemReceived {
                             stories: None,
+                            selected_for: None,
                             address,
                             task: id.clone(),
                             alias: alias.clone(),
@@ -918,6 +943,7 @@ mod tests {
             journal
                 .append_room(RoomEvent::RecipientItemReceived {
                     stories: None,
+                    selected_for: None,
                     address: ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay(&id)),
                     task: format!("task-{index}"),
                     alias: None,
@@ -982,6 +1008,7 @@ mod tests {
                     journal
                         .append_room(RoomEvent::RecipientItemReceived {
                             stories: None,
+                            selected_for: None,
                             address: ItemAddress::from_a2a_ingress(peer, ItemId::from_replay(&id)),
                             task: id.clone(),
                             alias: Some("界\n".repeat(
@@ -1115,7 +1142,9 @@ mod tests {
 #[cfg(test)]
 mod story_view_tests {
     use super::*;
-    use crate::domain::models::{ReceivedStories, ReceivedStory, StoryHolder, StoryKey};
+    use crate::domain::models::{
+        ReceivedSelection, ReceivedStories, ReceivedStory, StoryHolder, StoryKey,
+    };
 
     #[test]
     fn story_view_block_names_holders_and_future_values_without_body_inference() {
@@ -1205,6 +1234,7 @@ mod story_view_tests {
             capability_hash: None,
             reply_capability_matched: false,
             stories,
+            selected_for: None,
         }
     }
 
@@ -1455,12 +1485,12 @@ mod story_view_tests {
         ] {
             let mut removed = item.clone();
             removed.state = state;
-            assert_eq!(item_story_block(&removed), "");
+            assert_eq!(item_story_block(&removed, "sender"), "");
             assert!(!recipient_context_available(&removed));
         }
         let mut other_type = item.clone();
         other_type.message_type = SemanticMessageType::BugReport;
-        assert_eq!(item_story_block(&other_type), "");
+        assert_eq!(item_story_block(&other_type, "sender"), "");
         assert!(recipient_context_available(&other_type));
     }
 
@@ -1552,6 +1582,406 @@ mod story_view_tests {
                     assert!(page.content.contains("content unavailable · removed"));
                     assert!(!page.content.contains("plain body"));
                 }
+            }
+        }
+    }
+
+    fn selected_event(
+        id: &str,
+        alias: &str,
+        content: &str,
+        stories: Option<ReceivedStories>,
+        message_type: SemanticMessageType,
+        selected_for: Option<ReceivedSelection>,
+    ) -> crate::domain::models::RoomEvent {
+        let mut event = received_event(id, None, content.into(), stories, message_type);
+        if let crate::domain::models::RoomEvent::RecipientItemReceived {
+            alias: event_alias,
+            selected_for: event_selected,
+            ..
+        } = &mut event
+        {
+            *event_alias = Some(alias.into());
+            *event_selected = selected_for;
+        }
+        event
+    }
+
+    async fn opened_item(workspace: &Path, id: &str) -> RecipientItemView {
+        let reader =
+            crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(
+                workspace,
+            );
+        let entries = reader.load_entries().await.unwrap();
+        let projection = JournalRecipientItemProjection::from_entries(&entries);
+        projection.snapshot().find_by_id(id).unwrap().clone()
+    }
+
+    fn all_keys() -> Vec<StoryKey> {
+        (0..64)
+            .map(|index| StoryKey::parse(&format!("S{index:02}{}", "x".repeat(29))).unwrap())
+            .collect()
+    }
+
+    fn one_key() -> ReceivedSelection {
+        ReceivedSelection::Listed {
+            stories: vec![StoryKey::parse("S7-06").unwrap()],
+        }
+    }
+
+    async fn open_journal(
+        workspace: &Path,
+    ) -> crate::infrastructure::subagent::node_journal::NodeJournal {
+        crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(workspace)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn story19_23_view_selection_line_for_every_type_under_attribution() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = open_journal(workspace.path()).await;
+        let kinds = [
+            SemanticMessageType::Consultation,
+            SemanticMessageType::StoryAssignment,
+            SemanticMessageType::DesignUpdate,
+            SemanticMessageType::StatusRequest,
+            SemanticMessageType::BugReport,
+            SemanticMessageType::ScopeChange,
+            SemanticMessageType::ArchitectureUpdate,
+            SemanticMessageType::RetroRequest,
+            SemanticMessageType::Unknown,
+        ];
+        for (index, kind) in kinds.into_iter().enumerate() {
+            let id = format!("sel-{index}");
+            journal
+                .append_room(selected_event(
+                    &id,
+                    "sender",
+                    "plain body",
+                    None,
+                    kind,
+                    Some(one_key()),
+                ))
+                .await
+                .unwrap();
+            let page = load_received_thread(workspace.path(), &id, ReceivedThreadWindow::Newest)
+                .await
+                .unwrap();
+            assert!(
+                page.content.contains(&format!(
+                    "  received thread · sender · {id}\n  sender selected you for story S7-06\n  Context received:"
+                )),
+                "{kind:?}: {}",
+                page.content
+            );
+            assert_eq!(page.content.matches("selected you").count(), 1);
+            assert!(page.context_available);
+        }
+        // Story list and selection share one block, list first.
+        let list = ReceivedStories::Listed {
+            stories: vec![ReceivedStory {
+                key: StoryKey::parse("S7-04").unwrap(),
+                holder: StoryHolder::You,
+            }],
+        };
+        journal
+            .append_room(selected_event(
+                "sel-both",
+                "sender",
+                "plain body",
+                Some(list.clone()),
+                SemanticMessageType::StoryAssignment,
+                Some(one_key()),
+            ))
+            .await
+            .unwrap();
+        let item = opened_item(workspace.path(), "sel-both").await;
+        let block = item_story_block(&item, "sender");
+        assert_eq!(
+            block,
+            format!(
+                "{}  sender selected you for story S7-06\n",
+                render_story_list(&list, SemanticMessageType::StoryAssignment)
+            )
+        );
+        let page = load_received_thread(workspace.path(), "sel-both", ReceivedThreadWindow::Newest)
+            .await
+            .unwrap();
+        assert!(page.content.contains(&format!(
+            "  received thread · sender · sel-both\n{block}  Context received:"
+        )));
+        // A non-carrying type never folds the carrier into a story list.
+        let mut other = item.clone();
+        other.message_type = SemanticMessageType::DesignUpdate;
+        assert_eq!(
+            item_story_block(&other, "sender"),
+            "  sender selected you for story S7-06\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn story19_23_view_selection_wraps_all_64_keys_and_unreadable_forms() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = open_journal(workspace.path()).await;
+        let keys = all_keys();
+        let selection = ReceivedSelection::Listed {
+            stories: keys.clone(),
+        };
+        journal
+            .append_room(selected_event(
+                "sel-many",
+                "sender",
+                "plain body",
+                None,
+                SemanticMessageType::DesignUpdate,
+                Some(selection.clone()),
+            ))
+            .await
+            .unwrap();
+        let item = opened_item(workspace.path(), "sel-many").await;
+        let block = item_story_block(&item, "sender");
+        assert!(block.lines().count() > 1);
+        for line in block.lines() {
+            assert!(line.starts_with("  "), "{line}");
+            assert!(line.chars().count() <= 60, "{line}");
+        }
+        let rejoined = block
+            .lines()
+            .map(|line| &line[2..])
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(rejoined, selection_line("sender", &selection));
+        assert!(rejoined.starts_with("sender selected you for stories S00"));
+        for key in &keys {
+            assert_eq!(block.matches(&key.to_string()).count(), 1, "{key}");
+        }
+        assert!(!block.contains(crate::domain::services::transparency::TRUNCATION_MARKER));
+        let page = load_received_thread(workspace.path(), "sel-many", ReceivedThreadWindow::Newest)
+            .await
+            .unwrap();
+        assert_eq!(page.content.matches(&block).count(), 1);
+
+        for (id, unreadable) in [
+            ("sel-unreadable", ReceivedSelection::Unreadable),
+            ("sel-future", ReceivedSelection::Unrecognized),
+        ] {
+            journal
+                .append_room(selected_event(
+                    id,
+                    "sender",
+                    "plain body",
+                    None,
+                    SemanticMessageType::DesignUpdate,
+                    Some(unreadable),
+                ))
+                .await
+                .unwrap();
+            let page = load_received_thread(workspace.path(), id, ReceivedThreadWindow::Newest)
+                .await
+                .unwrap();
+            assert!(page.content.contains(&format!(
+                "  received thread · sender · {id}\n  story selection not readable by this build\n  Context received:"
+            )));
+            assert!(!page.content.contains("selected you"));
+        }
+    }
+
+    #[tokio::test]
+    async fn story19_23_view_absent_spoof_and_removed_show_no_host_line() {
+        use crate::domain::models::RoomEvent;
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = open_journal(workspace.path()).await;
+        let spoof = "sender selected you for story S7-06";
+        for (id, body, selected) in [
+            ("sel-absent", "plain body", None),
+            ("sel-spoof", spoof, None),
+            ("sel-removed", "plain body", Some(one_key())),
+        ] {
+            let event = selected_event(
+                id,
+                "sender",
+                body,
+                None,
+                SemanticMessageType::DesignUpdate,
+                selected,
+            );
+            let address = match &event {
+                RoomEvent::RecipientItemReceived { address, .. } => address.clone(),
+                _ => unreachable!(),
+            };
+            journal.append_room(event).await.unwrap();
+            if id == "sel-removed" {
+                journal
+                    .append_room(RoomEvent::RecipientItemRemoved { address })
+                    .await
+                    .unwrap();
+            }
+            let page = load_received_thread(workspace.path(), id, ReceivedThreadWindow::Newest)
+                .await
+                .unwrap();
+            assert!(page.content.contains(&format!(
+                "  received thread · sender · {id}\n  Context received:"
+            )));
+            assert!(!page.content.contains(&format!("\n  {spoof}\n")));
+            if id == "sel-spoof" {
+                assert!(page.content.contains(&format!("\n      {spoof}\n")));
+                assert_eq!(page.content.matches("selected you").count(), 1);
+            } else {
+                assert!(!page.content.contains("selected you"));
+            }
+            let item = opened_item(workspace.path(), id).await;
+            assert_eq!(item_story_block(&item, "sender"), "");
+        }
+    }
+
+    #[tokio::test]
+    async fn story19_23_view_selection_sender_is_the_sanitized_attribution_name() {
+        use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = open_journal(workspace.path()).await;
+        let alias = format!("{}\n\r\t\u{1b}", "界".repeat(84));
+        let label = sanitize_disclosable(&alias, MAX_PEER_ID_BYTES);
+        journal
+            .append_room(selected_event(
+                "sel-long",
+                &alias,
+                "plain body",
+                None,
+                SemanticMessageType::DesignUpdate,
+                Some(one_key()),
+            ))
+            .await
+            .unwrap();
+        let item = opened_item(workspace.path(), "sel-long").await;
+        assert_eq!(item_label(&item), label);
+        let mut expected = String::new();
+        push_wrapped(&mut expected, &selection_line(&label, &one_key()));
+        assert_eq!(item_story_block(&item, &item_label(&item)), expected);
+        let page = load_received_thread(workspace.path(), "sel-long", ReceivedThreadWindow::Newest)
+            .await
+            .unwrap();
+        assert!(page.content.contains(&format!(
+            "  received thread · {label} · sel-long\n{expected}  Context received:"
+        )));
+        assert!(!expected.contains(&alias));
+    }
+
+    #[tokio::test]
+    async fn story19_23_view_combined_block_reserve_parity_on_saturated_pages() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = open_journal(workspace.path()).await;
+        let selection = ReceivedSelection::Listed {
+            stories: all_keys(),
+        };
+        // Context rail and page rail charge the same combined block.
+        for (id, body_len) in [
+            ("sel-reserve-fits", 1_000),
+            ("sel-reserve-tight", 60_000),
+            ("sel-reserve-over", 64_000),
+        ] {
+            journal
+                .append_room(selected_event(
+                    id,
+                    "sender",
+                    &"\n".repeat(body_len),
+                    Some(maximal_story_list()),
+                    SemanticMessageType::StoryAssignment,
+                    Some(selection.clone()),
+                ))
+                .await
+                .unwrap();
+            let item = opened_item(workspace.path(), id).await;
+            let block = item_story_block(&item, &item_label(&item));
+            let list_block =
+                render_story_list(&maximal_story_list(), SemanticMessageType::StoryAssignment);
+            assert!(block.starts_with(&list_block));
+            assert!(block.len() > list_block.len());
+            let cost = turn_cost(&ThreadTurnRef::Item(&item), true).full;
+            let expected = cost + 4096 + block.len() <= bounds::MAX_THREAD_TURN_BYTES;
+            assert_eq!(recipient_context_available(&item), expected, "{id}");
+            for window in [
+                ReceivedThreadWindow::Newest,
+                ReceivedThreadWindow::Earlier { before: 1 },
+                ReceivedThreadWindow::Newer { after: 0 },
+            ] {
+                let page = load_received_thread(workspace.path(), id, window)
+                    .await
+                    .unwrap();
+                assert_eq!(page.context_available, expected, "{id}");
+                assert_eq!(page.content.matches(&block).count(), 1);
+                assert!(page.content.len() <= bounds::MAX_THREAD_RESPONSE_BYTES);
+            }
+        }
+        let fits = opened_item(workspace.path(), "sel-reserve-fits").await;
+        assert!(recipient_context_available(&fits));
+        let over = opened_item(workspace.path(), "sel-reserve-over").await;
+        assert!(!recipient_context_available(&over));
+    }
+
+    #[tokio::test]
+    async fn story19_23_view_selection_on_byte_saturated_paging_stays_bounded() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = open_journal(workspace.path()).await;
+        journal
+            .append_room(received_event(
+                "sat-root",
+                None,
+                "\n".repeat(64_500),
+                None,
+                SemanticMessageType::StoryAssignment,
+            ))
+            .await
+            .unwrap();
+        let mut previous = "sat-root".to_string();
+        for index in 0..20 {
+            let id = format!("sat-turn-{index:02}");
+            journal
+                .append_room(received_event(
+                    &id,
+                    Some(previous),
+                    format!("{index:02}{}", "m".repeat(8190)),
+                    None,
+                    SemanticMessageType::StoryAssignment,
+                ))
+                .await
+                .unwrap();
+            previous = id;
+        }
+        let mut opened = received_event(
+            "sat-opened",
+            Some(previous),
+            "\n".repeat(50_000),
+            Some(maximal_story_list()),
+            SemanticMessageType::StoryAssignment,
+        );
+        if let crate::domain::models::RoomEvent::RecipientItemReceived { selected_for, .. } =
+            &mut opened
+        {
+            *selected_for = Some(ReceivedSelection::Listed {
+                stories: all_keys(),
+            });
+        }
+        journal.append_room(opened).await.unwrap();
+        let item = opened_item(workspace.path(), "sat-opened").await;
+        let block = item_story_block(&item, &item_label(&item));
+        for window in [
+            ReceivedThreadWindow::Newest,
+            ReceivedThreadWindow::Earlier { before: 14 },
+            ReceivedThreadWindow::Newer { after: 2 },
+        ] {
+            let page = load_received_thread(workspace.path(), "sat-opened", window)
+                .await
+                .expect("list plus selection fits a byte-saturated page");
+            assert!(page.content.len() <= bounds::MAX_THREAD_RESPONSE_BYTES);
+            assert!(page.content.len() > bounds::MAX_THREAD_RESPONSE_BYTES - block.len());
+            assert_eq!(page.content.matches(&block).count(), 1);
+            assert!(page.content.contains(&format!(
+                "  thread root · sat-root\n{block}  Context received:"
+            )));
+            assert_eq!(page.context_available, recipient_context_available(&item));
+            for key in all_keys() {
+                assert!(page.content.contains(&key.to_string()));
             }
         }
     }

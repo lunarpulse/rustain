@@ -227,6 +227,91 @@ Each recipient is journaled independently. A request that may leave the host rec
 
 `/team send` is available in both the interactive TUI and an attached trusted-local writer session. The attached client sends it through the daemon's already-composed A2A runtime; it creates no client egress. Read-only and Peer-tier attachments are refused. The headless twin is `rustain team send`, below. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
 
+### Sending to story holders (Story 19.23)
+
+For any message type, `--holders-of` replaces the alias token; the body starts
+immediately after its comma-separated key list:
+
+```text
+/team send [--type <type>] [--subject <label>] --holders-of <key>[,<key>…] <text…>
+/team send --type design_update --holders-of S7-04,S7-06 Updated payment flow: 2-step to 3-step
+```
+
+Keys use the same grammar as `--stories`: 1–64 unique keys, each 1–32 ASCII
+characters from `A–Z a–z 0–9 . _ -`, starting with a letter or digit. The two
+options cannot be combined. This is an operator-typed selector; agent proposals
+carry no selector. It is not an option on the headless `rustain team send` command.
+
+The sending host reads one journal snapshot and considers both its own latest
+story-holder statements and each sender principal's latest live, readable list
+that names the key. Removed and retracted received lists do not participate;
+an unreadable list does not supersede a readable one. Both `story_assignment`
+and `scope_change` carry story lists. An earlier list becomes eligible again
+when its newer replacement is removed.
+
+A received holder resolves only through its pinned identity to exactly one
+current roster entry, never through its alias text. This host's own earlier
+holder resolves through the recorded identity/ownership binding, including an
+alias rename. Every statement for a key must agree on the same roster alias;
+otherwise the entire send refuses before any journal write or network request.
+Recipients are deduplicated in first-key order; each receives its selected keys
+in selector order. An attached client never resolves holders locally: the daemon
+that owns the journal does so.
+For a selected send, the origin-only `TeamSendStarted.recipients` field supplies
+the resolved aliases before indexed settlements arrive, so the attached sender
+initializes the same per-recipient rows as a plain send. It is empty and omitted
+for sends without `--holders-of`, preserving their start-frame bytes.
+
+Both rails use these refusals (parser refusals also append `. Use: …`):
+
+| Case | Refusal |
+|---|---|
+| Missing key list | `Missing story list after '/team send --holders-of'` |
+| Combined options | `'--holders-of' cannot be combined with '--stories'` |
+| No statement | `no story list on this host names '<key>'` |
+| No holder | `story '<key>' is assigned to no one` |
+| This host | `story '<key>' is assigned to you` |
+| Unpinned member | `story '<key>' is assigned to '<alias>' without a pinned identity; address them by alias` |
+| No matching roster entry | `no roster entry here matches the holder of story '<key>'` |
+| Several roster entries | `the holder of story '<key>' matches more than one roster entry: <a>, <b>` |
+| Unreadable holder | `the holder of story '<key>' is not readable by this build` |
+| Disagreement | `story '<key>' has different holders in different senders' lists; address recipients by alias` |
+| Unreadable journal | `story holders cannot be read from this host's journal` |
+
+On the attached rail the unreadable-journal refusal arrives as a daemon error
+(the host's own failure); every other refusal arrives as a malformed request.
+Invalid, duplicate and excessive keys use the same grammar refusals as
+`--stories`. Decoded attached frames are revalidated too: a selector cannot
+accompany explicit recipients or a story list. Repeated aliases, including in a
+raw frame without a selector, refuse with
+`Invalid or duplicate peer id in '/team send'`.
+
+Only the keys that selected a recipient are disclosed to that recipient under
+`x-rustain-selected-for`, for example `{"stories":["S7-06"]}`. It is never sent
+on a follow-up and is separate from `x-rustain-stories`: a selection does not
+enter story-holder folds or status holdings. An absent carrier leaves old sends
+unchanged. A malformed carrier does not refuse the message; the recipient stores
+only its unreadable state, not the raw metadata.
+
+The card names the sender: `Nina selected you for story S7-06`, or the compact
+`Nina selected you for 3 stories`. View shows every key, for example
+`Nina selected you for stories S7-04, S7-06`, wrapped without truncation.
+Unreadable or future selection forms show
+`story selection not readable by this build`. The name is the same sanitized
+sender name used by that surface's header. No carrier means no host-generated
+selection line; body text cannot forge it.
+
+**The selection is the sending host's statement; it starts no work and grants
+nothing.** Arrival, View and Acknowledge do not select context or start a model
+turn. A received `design_update` offers `[a] Acknowledge`, a receipt only, not
+acceptance. To compare with the current implementation, choose `[c] Use as
+context`, then start an ordinary local turn; the peer-tainted body is treated as
+untrusted context and the answer stays in your transcript. Nothing is sent back
+silently. To ask the sender, explicitly send
+`/team send --type consultation <sender-alias> <question…>`; read the ordinary
+consultation reply through the existing reply/thread flow.
+
+
 ### `rustain team send`
 
 ```text
@@ -412,7 +497,7 @@ ratified remedies 512) are disclosure bounds, not a width rule, and keep their
 
 ## Live daemon recipient rows
 
-Daemon attachments use protocol **v13**. Continuously attached trusted-local
+Daemon attachments use protocol **v14**. Continuously attached trusted-local
 writers and read-only observers receive revisioned peer-row upserts and removals
 only after successful persistence. Snapshot and live updates use the same row
 identity; duplicate or older updates cannot restore a settled/deleted card.

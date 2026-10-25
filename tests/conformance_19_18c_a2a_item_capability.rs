@@ -2225,6 +2225,7 @@ async fn k08_legacy_items_keep_their_gate_and_a_broken_hash_fails_closed() {
                 reply_capability_matched: false,
                 authorship: rustain::domain::models::Authorship::Unknown,
                 send_authorization: rustain::domain::models::SendAuthorization::Unknown,
+                selected_for: None,
             })
             .await
             .expect("seed another build's ingress");

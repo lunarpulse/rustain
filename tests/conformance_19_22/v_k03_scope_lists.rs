@@ -225,6 +225,7 @@ async fn v_k03_scope_change_carries_story_lists() {
             Some(SemanticMessageType::ScopeChange),
             None,
             Some(StoryManifest::parse("S7-09=B,S7-07").unwrap()),
+            None,
         )
         .await;
     for index in 0..2 {
@@ -299,6 +300,7 @@ async fn v_k03_scope_change_carries_story_lists() {
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(StoryManifest::parse("S7-07").unwrap()),
+            None,
         )
         .await;
     assert!(matches!(

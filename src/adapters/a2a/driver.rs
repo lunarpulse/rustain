@@ -900,6 +900,10 @@ impl A2aDelegationRuntime {
         Some(chosen.clone())
     }
 
+    pub(crate) fn story_peer_specs(&self) -> impl Iterator<Item = &A2aPeerSpec> + Clone {
+        self.peer_bindings.iter().map(|(spec, _)| spec)
+    }
+
     /// Replace the wall clock an action board's age is measured against.
     #[must_use]
     pub(crate) fn with_clock(mut self, clock: Arc<dyn crate::domain::clock::Clock>) -> Self {
@@ -1330,15 +1334,22 @@ impl A2aDelegationRuntime {
         >,
         crate::domain::ports::RoomJournalError,
     > {
+        self.story_selection_entries()
+            .await
+            .map(|entries| crate::domain::services::send_action_ledger::story_holders(&entries))
+    }
+
+    /// A single snapshot for both received and own holder statements.
+    pub(crate) async fn story_selection_entries(
+        &self,
+    ) -> Result<Vec<crate::domain::models::JournalEntry>, crate::domain::ports::RoomJournalError>
+    {
         let reader = self.journal_reader.as_ref().ok_or_else(|| {
             crate::domain::ports::RoomJournalError::Read(
                 "room journal reader is unavailable".to_owned(),
             )
         })?;
-        let entries = reader.load_entries().await?;
-        Ok(crate::domain::services::send_action_ledger::story_holders(
-            &entries,
-        ))
+        reader.load_entries().await
     }
 
     /// Remember the board just assembled (Story 19.16f `AC10(d)`).
@@ -2147,6 +2158,8 @@ pub struct MessageCarriers<'a> {
     pub reply_capability: Option<&'a ItemCapability>,
     /// Story 19.21d `AC3` — the frozen per-recipient story list; never a follow-up.
     pub stories: Option<&'a serde_json::Value>,
+    /// Only the keys that selected this recipient; absent on follow-ups.
+    pub selected_for: Option<&'a serde_json::Value>,
     pub authorship: Authorship,
     pub send_authorization: SendAuthorization,
 }
@@ -2217,6 +2230,14 @@ pub fn build_message(
         && let Some(stories) = carriers.stories
     {
         metadata.insert(super::STORIES_METADATA_KEY.to_owned(), stories.clone());
+    }
+    if carriers.reply_to.is_none()
+        && let Some(selected_for) = carriers.selected_for
+    {
+        metadata.insert(
+            super::SELECTED_FOR_METADATA_KEY.to_owned(),
+            selected_for.clone(),
+        );
     }
     if let Some(reply_capability) = carriers.reply_capability {
         metadata.insert(
@@ -2309,6 +2330,7 @@ mod tests {
                 "message_type": "consultation"
             }),
             MessageCarriers {
+                selected_for: None,
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
@@ -2325,6 +2347,7 @@ mod tests {
         let (untyped, _) = build_message(
             &serde_json::json!({ "message": "review this" }),
             MessageCarriers {
+                selected_for: None,
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
@@ -2352,6 +2375,7 @@ mod tests {
             let (message, _) = build_message(
                 &serde_json::json!({"message": "provenance"}),
                 MessageCarriers {
+                    selected_for: None,
                     reply_to: None,
                     item_key: None,
                     reply_capability: None,
@@ -2399,6 +2423,7 @@ mod tests {
         let (model, own) = build_message(
             &hostile,
             MessageCarriers {
+                selected_for: None,
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
@@ -2415,6 +2440,7 @@ mod tests {
         let (keyed, own) = build_message(
             &hostile,
             MessageCarriers {
+                selected_for: None,
                 item_key: Some(&key),
                 reply_to: None,
                 reply_capability: None,
@@ -2436,6 +2462,7 @@ mod tests {
         let (follow_up, _) = build_message(
             &serde_json::json!({ "message": "and retries?" }),
             MessageCarriers {
+                selected_for: None,
                 reply_to: Some("rr_1"),
                 reply_capability: Some(&reply),
                 item_key: None,
@@ -2463,6 +2490,7 @@ mod tests {
         let (message, own) = build_message(
             &serde_json::json!({ "message": "q" }),
             MessageCarriers {
+                selected_for: None,
                 item_key: Some(&key),
                 reply_to: None,
                 reply_capability: None,
@@ -2496,6 +2524,7 @@ mod tests {
                 "message_type": "urgent_escalation"
             }),
             MessageCarriers {
+                selected_for: None,
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
@@ -2520,6 +2549,7 @@ mod tests {
                 "message_type": ""
             }),
             MessageCarriers {
+                selected_for: None,
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
@@ -4035,6 +4065,7 @@ mod story_contract_tests {
                     "x-rustain-stories": { "stories": [{ "key": "FORGED" }] },
                 }),
                 MessageCarriers {
+                    selected_for: None,
                     reply_to,
                     item_key: None,
                     reply_capability: None,
@@ -4046,6 +4077,64 @@ mod story_contract_tests {
             assert_eq!(
                 message["message"]["metadata"].get(super::super::STORIES_METADATA_KEY),
                 expected,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod selection_carrier_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn story19_23_build_message_carries_selection_only_from_parameters_on_first_sends() {
+        let selection = json!({"stories":["S7-06"]});
+        let carriers = MessageCarriers {
+            reply_to: None,
+            item_key: None,
+            reply_capability: None,
+            stories: None,
+            selected_for: None,
+            authorship: Authorship::HumanWritten,
+            send_authorization: SendAuthorization::HumanDecided,
+        };
+        let hostile = json!({"message":"body","x-rustain-selected-for":selection,"metadata":{"x-rustain-selected-for":selection}});
+        let (mut plain, _) = build_message(&json!({"message":"body"}), carriers);
+        let (mut supplied, _) = build_message(&hostile, carriers);
+        plain["message"]
+            .as_object_mut()
+            .unwrap()
+            .remove("messageId");
+        supplied["message"]
+            .as_object_mut()
+            .unwrap()
+            .remove("messageId");
+        assert_eq!(
+            serde_json::to_vec(&plain).unwrap(),
+            serde_json::to_vec(&supplied).unwrap()
+        );
+        assert!(
+            plain["message"]["metadata"]
+                .get(super::super::SELECTED_FOR_METADATA_KEY)
+                .is_none()
+        );
+        for reply_to in [None, Some("rr-followup")] {
+            let (message, _) = build_message(
+                &hostile,
+                MessageCarriers {
+                    selected_for: Some(&selection),
+                    reply_to,
+                    ..carriers
+                },
+            );
+            assert_eq!(
+                message["message"]["metadata"].get(super::super::SELECTED_FOR_METADATA_KEY),
+                if reply_to.is_none() {
+                    Some(&selection)
+                } else {
+                    None
+                }
             );
         }
     }

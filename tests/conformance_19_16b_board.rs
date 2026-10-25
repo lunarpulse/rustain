@@ -40,6 +40,7 @@ fn received(address: &ItemAddress, task: &str) -> RoomEvent {
         reply_capability_matched: false,
         authorship: rustain::domain::models::Authorship::Unknown,
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,
+        selected_for: None,
     }
 }
 

@@ -365,12 +365,14 @@ impl RawEvent {
                             authorship,
                             send_authorization,
                             stories,
+                            selected_for,
                             ..
                         },
                     ) => {
                         *authorship = crate::domain::models::Authorship::Unknown;
                         *send_authorization = crate::domain::models::SendAuthorization::Unknown;
                         *stories = None;
+                        *selected_for = None;
                     }
                     crate::domain::events::DomainEventPayload::Room(
                         crate::domain::models::RoomEvent::RecipientItemReplied {
@@ -764,6 +766,7 @@ mod tests {
                     holder: StoryHolder::You,
                 }],
             }),
+            selected_for: None,
             in_reply_to: None,
             capability_hash: None,
             reply_capability_matched: false,
@@ -1019,6 +1022,40 @@ mod attached_thread_privacy_tests {
             matches!(event, AppEvent::DomainEvent(DomainEventPayload::Room(RoomEvent::PeerReplyObserved {
             content: Some(body), ..
         })) if body == "distinctive private reply")
+        );
+    }
+}
+
+#[cfg(test)]
+mod selection_raw_tests {
+    use super::*;
+
+    #[test]
+    fn story19_23_raw_projection_clears_selection_but_not_original_event() {
+        use crate::domain::events::DomainEventPayload;
+        use crate::domain::models::RoomEvent;
+        let event: RoomEvent = serde_json::from_value(serde_json::json!({
+            "event":"recipient_item_received",
+            "address":{"principal":{"kind":"unknown"},"item":"ri-selection"},
+            "task":"task-selection","alias":null,"content":"body",
+            "selected_for":{"state":"Listed","stories":["S-private"]}
+        }))
+        .unwrap();
+        let original = serde_json::to_value(&event).unwrap();
+        let app = AppEvent::DomainEvent(DomainEventPayload::Room(event));
+        let raw = RawEvent::from_app_event(&app).unwrap();
+        let RawEventKind::DomainEvent(DomainEventPayload::Room(projected)) = raw.kind else {
+            panic!("room");
+        };
+        assert!(
+            serde_json::to_value(projected)
+                .unwrap()
+                .get("selected_for")
+                .is_none()
+        );
+        assert_eq!(
+            original["selected_for"]["stories"],
+            serde_json::json!(["S-private"])
         );
     }
 }

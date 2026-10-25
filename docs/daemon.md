@@ -488,7 +488,7 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v13**; a client speaking another version
+attach handshake negotiates **protocol v14**; a client speaking another version
 receives `VersionMismatch` before proof verification, registration or other
 attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
@@ -694,3 +694,22 @@ Only host act producers write send authorization. It is never imported from an
 attached client's frame or an A2A/RAP peer payload. Session and journal files
 are trusted local inputs: editing a local row can change its retract
 eligibility. Provenance is not authenticated evidence.
+
+Protocol v14 (Story 19.23): `TeamSend` carries optional `holders_of` and
+`PeerRowControl` carries the attributed selection line. With a selector the
+client sends an empty recipient list; the journal-owning daemon revalidates it,
+resolves both received and own earlier story-holder statements from one snapshot,
+and refuses the whole action on disagreement or an unresolved holder. It does
+not silently trust client-selected aliases or resolve in the attach client.
+The origin-only `TeamSendStarted.recipients` field returns the resolved aliases
+for selected sends, allowing sender rows to initialize before indexed settlements.
+It is empty and omitted without `--holders-of`; older sends keep identical bytes.
+Each recipient receives only its own keys through `x-rustain-selected-for`,
+never on a follow-up. A selection is a sending-host statement, not an assignment
+or an execution grant; arrival, View and Acknowledge start no work.
+`design_update` adds the received-only Acknowledge slot, still receipt only.
+Comparison is explicit `[c] Use as context` plus a local turn; questions are
+ordinary consultation sends. Older attach versions are refused before proof
+verification because they could silently discard the selector.
+See [Sending to story holders](a2a.md#sending-to-story-holders-story-1923).
+

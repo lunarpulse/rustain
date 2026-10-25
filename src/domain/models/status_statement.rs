@@ -74,9 +74,18 @@ pub struct StatusStatement {
     pub stories: Vec<SharedStory>,
 }
 
-/// Per-sender supersession follows Story 19.21d D6. Only readable, live
-/// story lists participate; aliases never identify a holding host.
-pub fn held_stories<'a>(views: impl IntoIterator<Item = &'a RecipientItemView>) -> Vec<HeldStory> {
+/// A latest live readable statement per sender and key. Borrowed from the
+/// folded item; no cross-sender deduplication or aggregate cap belongs here.
+#[derive(Clone, Copy, Debug)]
+pub struct StoryStatement<'a> {
+    pub item: &'a RecipientItemView,
+    pub index: usize,
+    pub story: &'a super::ReceivedStory,
+}
+
+pub fn story_statements<'a>(
+    views: impl IntoIterator<Item = &'a RecipientItemView>,
+) -> Vec<StoryStatement<'a>> {
     let mut items = views
         .into_iter()
         .filter(|item| {
@@ -88,38 +97,43 @@ pub fn held_stories<'a>(views: impl IntoIterator<Item = &'a RecipientItemView>) 
         .collect::<Vec<_>>();
     items.sort_unstable_by_key(|item| item.journal_order);
     let mut seen_sender_keys = HashSet::new();
-    let mut held_keys = HashSet::new();
-    let mut held = Vec::new();
+    let mut statements = Vec::new();
     for item in items.into_iter().rev() {
         let Some(ReceivedStories::Listed { stories }) = &item.stories else {
             continue;
         };
         for (index, story) in stories.iter().enumerate() {
-            if !seen_sender_keys.insert((item.address.principal(), &story.key))
-                || !matches!(story.holder, StoryHolder::You)
-                || !held_keys.insert(&story.key)
-            {
+            if !seen_sender_keys.insert((item.address.principal(), &story.key)) {
                 continue;
             }
-            let state = match item.state {
+            statements.push(StoryStatement { item, index, story });
+        }
+    }
+    statements
+}
+
+/// Per-sender supersession follows Story 19.21d D6, using the same walk as
+/// recipient selection. Only this status projection filters for this host.
+pub fn held_stories<'a>(views: impl IntoIterator<Item = &'a RecipientItemView>) -> Vec<HeldStory> {
+    let mut held_keys = HashSet::new();
+    let mut held = story_statements(views)
+        .into_iter()
+        .filter(|statement| {
+            matches!(statement.story.holder, StoryHolder::You)
+                && held_keys.insert(&statement.story.key)
+        })
+        .collect::<Vec<_>>();
+    held.sort_unstable_by_key(|statement| (statement.item.journal_order, statement.index));
+    held.into_iter()
+        .take(64)
+        .map(|statement| HeldStory {
+            key: statement.story.key.clone(),
+            state: match statement.item.state {
                 RecipientItemState::Acknowledged { .. } => ReceiptState::Acknowledged,
                 RecipientItemState::Received { .. } => ReceiptState::Received,
                 RecipientItemState::Removed { .. } => unreachable!("removed lists excluded"),
-            };
-            held.push((
-                item.journal_order,
-                index,
-                HeldStory {
-                    key: story.key.clone(),
-                    state,
-                },
-            ));
-        }
-    }
-    held.sort_unstable_by_key(|(order, index, _)| (*order, *index));
-    held.into_iter()
-        .take(64)
-        .map(|(_, _, story)| story)
+            },
+        })
         .collect()
 }
 
@@ -300,6 +314,7 @@ mod tests {
                     })
                     .collect(),
             }),
+            selected_for: None,
             authorship: Authorship::HumanWritten,
             send_authorization: SendAuthorization::HumanDecided,
             state: RecipientItemState::Received {

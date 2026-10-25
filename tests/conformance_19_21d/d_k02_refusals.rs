@@ -45,6 +45,7 @@ async fn d_k02_raw_frame_refusals_are_exact_keyed_and_make_no_posts() {
                 kind,
                 None,
                 Some(stories),
+                None,
             )
             .await;
         let frame = writer.wait_send_started(&request).await;
@@ -97,6 +98,7 @@ async fn d_k02_raw_frame_refusals_are_exact_keyed_and_make_no_posts() {
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(valid),
+            None,
         )
         .await;
     assert!(matches!(

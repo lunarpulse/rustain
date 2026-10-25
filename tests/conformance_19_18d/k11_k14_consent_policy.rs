@@ -564,6 +564,7 @@ async fn k11_a_typed_pinned_grant_from_a_rap_card_answer_is_reused_by_bound_a2a_
             reply_capability_matched: false,
             authorship: rustain::domain::models::Authorship::Unknown,
             send_authorization: rustain::domain::models::SendAuthorization::Unknown,
+            selected_for: None,
         })
         .await
         .expect("journal the RAP item");

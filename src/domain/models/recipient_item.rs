@@ -320,6 +320,7 @@ pub struct RecipientItemView {
     pub message_type: super::SemanticMessageType,
     /// Sender-stated story relationships from the first received record.
     pub stories: Option<super::ReceivedStories>,
+    pub selected_for: Option<super::ReceivedSelection>,
     pub authorship: super::Authorship,
     pub send_authorization: super::SendAuthorization,
     /// The content lives **inside** [`RecipientItemState`]

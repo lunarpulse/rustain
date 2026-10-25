@@ -241,6 +241,7 @@ async fn k05_every_attached_board_selector_matches_shared_standalone_renderer() 
             Some(SemanticMessageType::StoryAssignment),
             Some("board-label".into()),
             None,
+            None,
         )
         .await;
     let started = writer.wait_send_started("seed-board").await;
@@ -301,6 +302,7 @@ async fn k05_read_only_and_peer_gates_refuse_mutation_but_trusted_frames_work() 
             None,
             None,
             None,
+            None,
         )
         .await;
     let refused = read_only.wait_send_started("ro-send").await;
@@ -348,6 +350,7 @@ async fn k05_read_only_and_peer_gates_refuse_mutation_but_trusted_frames_work() 
         "peer-send",
         vec!["peer-a".into()],
         "peer is not a writer",
+        None,
         None,
         None,
         None,
@@ -399,6 +402,7 @@ async fn k05_read_only_and_peer_gates_refuse_mutation_but_trusted_frames_work() 
             None,
             None,
             None,
+            None,
         )
         .await;
     assert!(matches!(
@@ -435,6 +439,7 @@ async fn k05_peer_send_gate_refuses_while_trusted_send_succeeds() {
         None,
         None,
         None,
+        None,
     )
     .await;
     let refused = peer.wait_send_started("peer-send").await;
@@ -461,6 +466,7 @@ async fn k05_peer_send_gate_refuses_while_trusted_send_succeeds() {
             "trusted-send",
             vec!["peer-a".into()],
             "trusted positive control",
+            None,
             None,
             None,
             None,
@@ -545,6 +551,7 @@ async fn k05_interleaved_send_results_and_refusal_stay_with_their_request() {
             None,
             Some("good-label".into()),
             None,
+            None,
         )
         .await;
     let good_started = client
@@ -563,6 +570,7 @@ async fn k05_interleaved_send_results_and_refusal_stay_with_their_request() {
             "invalid body",
             None,
             Some("bad-label".into()),
+            None,
             None,
         )
         .await;
@@ -776,6 +784,7 @@ async fn k05_boot_down_egress_slot_stays_refused_after_peer_comes_up() {
             Some(SemanticMessageType::StoryAssignment),
             Some("fresh-label".into()),
             None,
+            None,
         )
         .await;
     let started = client.wait_send_started("fresh-egress").await;
@@ -853,6 +862,7 @@ async fn k05_attached_board_withholds_unnameable_row_but_keeps_six_addressed_fiv
             "six-peer payload",
             Some(SemanticMessageType::StoryAssignment),
             Some("six-label".into()),
+            None,
             None,
         )
         .await;

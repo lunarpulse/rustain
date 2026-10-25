@@ -196,6 +196,7 @@ fn parse_input(
         reply_to: None,
         subject: None,
         stories: None,
+        selection: None,
         authorship: crate::domain::models::Authorship::AgentComposed,
         send_authorization: crate::domain::models::SendAuthorization::Unknown,
     };

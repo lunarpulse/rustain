@@ -262,6 +262,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: cfg!(feature = "a2a"),
                 },
                 HelpBinding {
+                    key: "/team send [--type <type>] [--subject <label>] --holders-of <key>[,<key>…] <text…>",
+                    description: "Send to holders named by this host's received and own story lists; refuse disagreement; selection grants nothing (a2a feature)",
+                    available: cfg!(feature = "a2a"),
+                },
+                HelpBinding {
                     key: "/team view <item-id>",
                     description: "Read this host's bounded received thread without a model turn; offline/read-only is supported",
                     available: true,

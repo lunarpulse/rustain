@@ -71,6 +71,36 @@ fn parse_story_list(raw: &Value) -> Option<Vec<ReceivedStory>> {
     Some(stories)
 }
 
+/// A selection is not a story list. Every message type may carry it; malformed
+/// metadata is admitted as unreadable without retaining the raw value.
+pub(super) fn parse_selection_carrier(
+    raw: Option<&Value>,
+) -> Option<crate::domain::models::ReceivedSelection> {
+    use crate::domain::models::ReceivedSelection;
+    let raw = raw?;
+    let parse = || {
+        let entries = raw.as_object()?.get("stories")?.as_array()?;
+        if entries.is_empty() || entries.len() > MAX_STORIES {
+            return None;
+        }
+        let mut seen = HashSet::with_capacity(entries.len());
+        let mut stories = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let token = entry.as_str()?;
+            let key = StoryKey::parse(token).ok()?;
+            if !seen.insert(token) {
+                return None;
+            }
+            stories.push(key);
+        }
+        Some(stories)
+    };
+    Some(match parse() {
+        Some(stories) => ReceivedSelection::Listed { stories },
+        None => ReceivedSelection::Unreadable,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +204,54 @@ mod tests {
         assert_eq!(stories.len(), 64);
         assert_eq!(stories[0].key.as_str(), "S0");
         assert_eq!(stories[63].key.as_str(), "S63");
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::domain::models::ReceivedSelection;
+    use serde_json::json;
+
+    #[test]
+    fn story19_23_selection_ingest_table_is_tolerant_and_bounded() {
+        assert_eq!(parse_selection_carrier(None), None);
+        for raw in [
+            json!(null),
+            json!([]),
+            json!("raw-secret"),
+            json!(1),
+            json!({}),
+            json!({"stories":null}),
+            json!({"stories":"S1"}),
+            json!({"stories":[]}),
+            json!({"stories":(0..65).map(|n|format!("S{n}")).collect::<Vec<_>>()}),
+            json!({"stories":[1]}),
+            json!({"stories":[null]}),
+            json!({"stories":[{}]}),
+            json!({"stories":["bad!"]}),
+            json!({"stories":["S1","S1"]}),
+            json!({"stories":[""]}),
+            json!({"stories":["S".repeat(33)]}),
+        ] {
+            assert_eq!(
+                parse_selection_carrier(Some(&raw)),
+                Some(ReceivedSelection::Unreadable),
+                "{raw}"
+            );
+        }
+        let list = json!({"stories":["S7-06","S7-04"]});
+        assert_eq!(
+            parse_selection_carrier(Some(&list)),
+            Some(ReceivedSelection::Listed {
+                stories: vec![
+                    StoryKey::parse("S7-06").unwrap(),
+                    StoryKey::parse("S7-04").unwrap()
+                ]
+            })
+        );
+        assert!(
+            matches!(parse_selection_carrier(Some(&json!({"stories":(0..64).map(|n|format!("S{n}")).collect::<Vec<_>>()}))),Some(ReceivedSelection::Listed {stories}) if stories.len()==64)
+        );
     }
 }

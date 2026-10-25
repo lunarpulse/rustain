@@ -1539,6 +1539,7 @@ async fn seed_item(
         in_reply_to: None,
         capability_hash: None,
         reply_capability_matched: false,
+        selected_for: None,
     })
     .await
     .expect("seed the recipient item");
@@ -1664,6 +1665,7 @@ async fn ac1_the_read_verb_serves_only_the_callers_own_set_through_the_real_fron
             in_reply_to: None,
             capability_hash: None,
             reply_capability_matched: false,
+            selected_for: None,
         })
         .await
         .expect("seed received");

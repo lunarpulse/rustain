@@ -78,6 +78,7 @@ async fn v_k04_displaced_holder_is_never_silent() {
                 Some(SemanticMessageType::StoryAssignment),
                 None,
                 Some(StoryManifest::parse(manifest).unwrap()),
+                None,
             )
             .await;
         assert!(matches!(
@@ -102,6 +103,7 @@ async fn v_k04_displaced_holder_is_never_silent() {
             Some(SemanticMessageType::ScopeChange),
             None,
             Some(StoryManifest::parse("S7-07").unwrap()),
+            None,
         )
         .await;
     expect_displacement_refusal(&mut writer, "silent-release", "S7-07", "B").await;
@@ -126,6 +128,7 @@ async fn v_k04_displaced_holder_is_never_silent() {
             Some(SemanticMessageType::ScopeChange),
             None,
             Some(StoryManifest::parse("S7-07").unwrap()),
+            None,
         )
         .await;
     assert!(matches!(
@@ -152,6 +155,7 @@ async fn v_k04_displaced_holder_is_never_silent() {
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(StoryManifest::parse("S7-07=C").unwrap()),
+            None,
         )
         .await;
     assert!(matches!(
@@ -174,6 +178,7 @@ async fn v_k04_displaced_holder_is_never_silent() {
             Some(SemanticMessageType::StoryAssignment),
             None,
             Some(StoryManifest::parse("S7-09=C").unwrap()),
+            None,
         )
         .await;
     expect_displacement_refusal(&mut writer, "displace-s7-09", "S7-09", "B").await;

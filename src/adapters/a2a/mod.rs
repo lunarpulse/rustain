@@ -8,6 +8,8 @@ pub(crate) const MESSAGE_TYPE_METADATA_KEY: &str = "x-rustain-message-type";
 #[cfg(feature = "a2a")]
 pub const STORIES_METADATA_KEY: &str = "x-rustain-stories";
 #[cfg(feature = "a2a")]
+pub const SELECTED_FOR_METADATA_KEY: &str = "x-rustain-selected-for";
+#[cfg(feature = "a2a")]
 pub const RECIPIENT_ITEM_METADATA_KEY: &str = "x-rustain-item-id";
 #[cfg(feature = "a2a")]
 pub const AUTHORSHIP_METADATA_KEY: &str = "x-rustain-authorship";
@@ -95,6 +97,8 @@ pub mod send;
 pub mod server;
 #[cfg(feature = "a2a")]
 pub(crate) mod story_carrier;
+#[cfg(feature = "a2a")]
+pub mod story_selection;
 #[cfg(feature = "a2a")]
 pub mod task;
 #[cfg(feature = "a2a")]

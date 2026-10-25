@@ -49,7 +49,8 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// v11 (Story 19.21d): TeamSend carries stories; PeerRowControl carries the story summary; an undecodable client frame is answered and skipped
 /// v12 (Story 19.24): ShareRecipientStatus; PeerRowControl carries the status preview
 /// v13 (Story 19.22): ReplyToRecipientItem carries an optional Accept/Discuss verdict
-pub const PROTOCOL_VERSION: u32 = 13;
+/// v14 (Story 19.23): TeamSend carries holders_of; PeerRowControl carries the selection line
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -641,6 +642,8 @@ pub enum ClientFrame {
         subject: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stories: Option<crate::domain::models::StoryManifest>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holders_of: Option<crate::domain::models::StorySelector>,
     },
     /// Story 19.21 `AC4(b)` — one `/team board` read. TrustedLocal; a
     /// read-only attachment may ask. ⛔ Never pushed: it is an explicit read.
@@ -1010,6 +1013,9 @@ pub enum DaemonFrame {
     TeamSendStarted {
         request: String,
         action: SendActionId,
+        /// Resolved aliases only for `--holders-of`; absent on earlier sends.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        recipients: Vec<String>,
     },
     /// One recipient's durable typed settlement, to the originating connection
     /// only. A request settles each index at most once.
@@ -1413,6 +1419,7 @@ mod tests {
                 message_type: Some(SemanticMessageType::StoryAssignment),
                 subject: Some("sprint-7".into()),
                 stories: None,
+                holders_of: None,
             },
             ClientFrame::TeamBoard {
                 request: "board-inventory".into(),
@@ -1524,6 +1531,7 @@ mod tests {
                         message_type: crate::domain::models::SemanticMessageType::Consultation,
                         stories: None,
                         status: None,
+                        selected_for: None,
                         sender_label: "peer-1".into(),
                         stage: crate::domain::models::PeerRowStage::AwaitingOperator,
                         node_resolvable: true,
@@ -1648,6 +1656,7 @@ mod tests {
             DaemonFrame::TeamSendStarted {
                 request: "send-1".into(),
                 action: SendActionId::from_replay("sa_action"),
+                recipients: Vec::new(),
             },
             DaemonFrame::TeamSendSettled {
                 request: "send-1".into(),
@@ -1969,5 +1978,59 @@ mod tests {
             e
         }
         let _ = identity;
+    }
+}
+
+#[cfg(test)]
+mod selection_version_tests {
+    use super::*;
+
+    #[test]
+    fn story19_23_selection_requires_attach_protocol_fourteen() {
+        assert_eq!(PROTOCOL_VERSION, 14);
+        let frame = ClientFrame::TeamSend {
+            request: "selection".into(),
+            recipients: vec![],
+            text: "body".into(),
+            message_type: None,
+            subject: None,
+            stories: None,
+            holders_of: Some(crate::domain::models::StorySelector::parse("S1").unwrap()),
+        };
+        let mut raw = serde_json::to_value(&frame).unwrap();
+        assert_eq!(raw["teamSend"]["recipients"], serde_json::json!([]));
+        assert_eq!(
+            raw["teamSend"]["holders_of"],
+            serde_json::json!({"stories":["S1"]})
+        );
+        let decoded = serde_json::from_value::<ClientFrame>(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), raw);
+        raw["teamSend"]
+            .as_object_mut()
+            .unwrap()
+            .remove("holders_of");
+        assert!(matches!(
+            serde_json::from_value::<ClientFrame>(raw).unwrap(),
+            ClientFrame::TeamSend {
+                holders_of: None,
+                ..
+            }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod selection_started_tests {
+    use super::*;
+
+    #[test]
+    fn story19_23_plain_start_bytes_unchanged_and_selected_aliases_round_trip() {
+        let legacy = r#"{"teamSendStarted":{"request":"r","action":"sa_legacy"}}"#;
+        let frame: DaemonFrame = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&frame).unwrap(), legacy);
+        let mut raw: serde_json::Value = serde_json::from_str(legacy).unwrap();
+        raw["teamSendStarted"]["recipients"] = serde_json::json!(["jun", "aisha"]);
+        let frame: DaemonFrame = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(), raw);
     }
 }

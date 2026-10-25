@@ -34,12 +34,15 @@ pub enum SendError {
     /// or I/O.
     InvalidSubject(crate::domain::services::send_action_ledger::SubjectRefusal),
     InvalidStories(crate::domain::models::StoryRefusal),
+    InvalidSelection(crate::domain::models::SelectionRefusal),
+    InvalidRecipients,
     StoryHistory(crate::domain::ports::RoomJournalError),
 }
 
 impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidRecipients => f.write_str("Invalid or duplicate peer id in '/team send'"),
             Self::UnknownPeer { peer, known } => {
                 let known = if known.is_empty() {
                     "none".to_owned()
@@ -65,6 +68,7 @@ impl std::fmt::Display for SendError {
             }
             Self::InvalidSubject(refusal) => write!(f, "{refusal}"),
             Self::InvalidStories(refusal) => write!(f, "{refusal}"),
+            Self::InvalidSelection(refusal) => write!(f, "{refusal}"),
             Self::StoryHistory(error) => {
                 write!(f, "could not read earlier story statements: {error}")
             }
@@ -161,6 +165,36 @@ pub fn validate_send_request(
     runtime: &A2aDelegationRuntime,
     request: &SendRequest<'_>,
 ) -> Result<(), SendError> {
+    let mut seen = std::collections::HashSet::with_capacity(request.recipients.len());
+    if request
+        .recipients
+        .iter()
+        .any(|peer| peer.is_empty() || !seen.insert(peer))
+    {
+        return Err(SendError::InvalidRecipients);
+    }
+    if let Some(selection) = request.selection {
+        use crate::domain::models::SelectionRefusal;
+        if request.stories.is_some() || request.reply_to.is_some() {
+            return Err(SendError::InvalidSelection(
+                SelectionRefusal::InvalidRequest(
+                    "a story selection cannot be combined with a story list or a follow-up",
+                ),
+            ));
+        }
+        if selection
+            .recipients
+            .iter()
+            .map(|recipient| recipient.alias.as_str())
+            .ne(request.recipients.iter().map(String::as_str))
+        {
+            return Err(SendError::InvalidSelection(
+                SelectionRefusal::InvalidRequest(
+                    "story selection recipients do not match this send",
+                ),
+            ));
+        }
+    }
     let known = runtime.known_peer_ids();
     let unknown: Vec<_> = request
         .recipients
@@ -202,6 +236,7 @@ pub struct SendRequest<'a> {
     pub reply_to: Option<&'a str>,
     pub subject: Option<&'a str>,
     pub stories: Option<&'a crate::domain::models::StoryManifest>,
+    pub selection: Option<&'a crate::domain::models::StorySelection>,
     /// Provenance for this outbound dispatch; never sent to the peer.
     pub authorship: crate::domain::models::Authorship,
     pub send_authorization: crate::domain::models::SendAuthorization,
@@ -351,6 +386,7 @@ where
                 None => (None, None, None),
             };
             let mut item = None;
+            let selected_for = selection_carrier(request.selection, index);
             let outcome = deliver_one(
                 runtime,
                 peer,
@@ -359,6 +395,7 @@ where
                 request.reply_to,
                 reference.as_ref(),
                 stories.as_ref(),
+                selected_for.as_ref(),
                 request.authorship,
                 request.send_authorization,
                 &mut item,
@@ -401,6 +438,13 @@ where
         }
     }
     Ok(())
+}
+
+fn selection_carrier(
+    selection: Option<&crate::domain::models::StorySelection>,
+    index: usize,
+) -> Option<serde_json::Value> {
+    selection.map(|selection| serde_json::json!({"stories": &selection.recipients[index].stories}))
 }
 
 /// The typed, journaled form of one recipient's outcome (Story 19.21
@@ -475,6 +519,7 @@ pub async fn deliver_text(
         reply_to,
         None,
         None,
+        None,
         crate::domain::models::Authorship::HumanWritten,
         crate::domain::models::SendAuthorization::HumanDecided,
         &mut None,
@@ -495,6 +540,7 @@ async fn deliver_one(
     reply_to: Option<&str>,
     action: Option<&crate::domain::models::SendActionRef>,
     stories: Option<&serde_json::Value>,
+    selected_for: Option<&serde_json::Value>,
     authorship: crate::domain::models::Authorship,
     send_authorization: crate::domain::models::SendAuthorization,
     item_out: &mut Option<String>,
@@ -570,6 +616,7 @@ async fn deliver_one(
         text,
         message_type,
         MessageCarriers {
+            selected_for,
             reply_to,
             item_key: item_key.as_deref(),
             reply_capability: reply_capability.as_ref(),
@@ -1661,6 +1708,7 @@ mod tests {
             reply_to: None,
             subject: None,
             stories: Some(&stories),
+            selection: None,
             authorship: Authorship::HumanWritten,
             send_authorization: SendAuthorization::HumanDecided,
         };
@@ -1890,6 +1938,7 @@ mod tests {
             text,
             None,
             super::MessageCarriers {
+                selected_for: None,
                 reply_to: None,
                 item_key: None,
                 reply_capability: None,
@@ -2123,5 +2172,123 @@ mod tests {
                 ReplyKind::Defer { minutes }
             );
         }
+    }
+
+    #[test]
+    fn story19_23_validation_refuses_duplicate_aliases_and_selection_mismatch() {
+        use super::{SendRequest, validate_send_request};
+        use crate::domain::models::{
+            Authorship, SelectedRecipient, SendAuthorization, StoryKey, StoryManifest,
+            StorySelection,
+        };
+        let spec = peer("b");
+        let client = Arc::new(client::A2aClientAdapter::new(&spec, None).unwrap());
+        let rt = runtime(vec![(spec, client)]);
+        let recipients = vec!["b".into()];
+        let request = SendRequest {
+            recipients: &recipients,
+            text: "body",
+            message_type: None,
+            reply_to: None,
+            subject: None,
+            stories: None,
+            selection: None,
+            authorship: Authorship::HumanWritten,
+            send_authorization: SendAuthorization::HumanDecided,
+        };
+        assert!(validate_send_request(&rt, &request).is_ok());
+        assert_eq!(
+            validate_send_request(
+                &rt,
+                &SendRequest {
+                    recipients: &["b".into(), "b".into()],
+                    ..request
+                }
+            )
+            .unwrap_err()
+            .to_string(),
+            "Invalid or duplicate peer id in '/team send'"
+        );
+        let selection = StorySelection {
+            recipients: vec![SelectedRecipient {
+                alias: "b".into(),
+                stories: vec![StoryKey::parse("S1").unwrap()],
+            }],
+        };
+        let selected = SendRequest {
+            selection: Some(&selection),
+            ..request
+        };
+        assert!(validate_send_request(&rt, &selected).is_ok());
+        let refused = |request: &SendRequest<'_>| {
+            matches!(
+                validate_send_request(&rt, request),
+                Err(super::SendError::InvalidSelection(
+                    crate::domain::models::SelectionRefusal::InvalidRequest(_)
+                ))
+            )
+        };
+        assert!(refused(&SendRequest {
+            recipients: &[],
+            ..selected
+        }));
+        assert!(refused(&SendRequest {
+            reply_to: Some("ri-ref"),
+            ..selected
+        }));
+        let stories = StoryManifest::parse("S1=b").unwrap();
+        assert!(refused(&SendRequest {
+            message_type: Some(crate::domain::models::SemanticMessageType::StoryAssignment),
+            stories: Some(&stories),
+            ..selected
+        }));
+        let selection = StorySelection {
+            recipients: vec![
+                SelectedRecipient {
+                    alias: "c".into(),
+                    stories: vec![],
+                },
+                SelectedRecipient {
+                    alias: "b".into(),
+                    stories: vec![],
+                },
+            ],
+        };
+        assert!(refused(&SendRequest {
+            selection: Some(&selection),
+            ..request
+        }));
+    }
+}
+
+#[cfg(test)]
+mod selection_carrier_tests {
+    use super::*;
+    use crate::domain::models::{SelectedRecipient, StoryKey, StorySelection};
+
+    #[test]
+    fn story19_23_carriers_disclose_only_each_recipients_keys() {
+        let key = |value| StoryKey::parse(value).unwrap();
+        let selection = StorySelection {
+            recipients: vec![
+                SelectedRecipient {
+                    alias: "jun".into(),
+                    stories: vec![key("S7-04"), key("S7-09")],
+                },
+                SelectedRecipient {
+                    alias: "aisha".into(),
+                    stories: vec![key("S7-06")],
+                },
+            ],
+        };
+        assert_eq!(
+            selection_carrier(Some(&selection), 0),
+            Some(serde_json::json!({"stories":["S7-04","S7-09"]}))
+        );
+        assert_eq!(
+            selection_carrier(Some(&selection), 1),
+            Some(serde_json::json!({"stories":["S7-06"]}))
+        );
+        assert_eq!(selection_carrier(None, 0), None);
     }
 }
