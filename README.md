@@ -226,7 +226,7 @@ A2A and P2P are off by default for `cargo install`. **Published release assets u
 
 ### TUI peer-send quick start
 
-`rustain team send` (the CLI twin) is not in this cut — it is tracked as `18-9b-cli-team-send`; use the TUI verb below.
+For the headless twin, start a daemon in the configured workspace and run `rustain team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…>`. It needs the daemon's free writer slot; flags precede peers and everything after peers is message text. See [the CLI send guide](docs/a2a.md#rustain-team-send).
 
 1. Build the feature: `cargo build --features a2a`.
 2. Configure a roster ID and URL in `.rustain/a2a.json`, for example `"reviewer": {"url": "http://127.0.0.1:8080"}` (the recipient started in the next step).

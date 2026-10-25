@@ -17,6 +17,8 @@ mod state_extraction_tests;
 pub(crate) mod task_panel_bridge;
 #[cfg(feature = "a2a")]
 pub mod team_proposal_bridge;
+#[cfg(unix)]
+pub mod team_send_cli;
 pub mod transparency_bridge;
 pub mod turn;
 pub mod turn_driver;

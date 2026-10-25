@@ -225,10 +225,10 @@ pub enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
-    /// Inspect A2A team activity and manage standing sender consent.
-    /// `team log` reads recorded interactions, `team status` shows policy and
-    /// consent, and `team untrust` revokes a sender's standing consent.
-    /// All operate offline on this workspace's durable room journal.
+    /// Inspect A2A team activity, manage consent, or send through the daemon.
+    /// `team log`, `team status`, and `team untrust` operate offline on the
+    /// durable room journal. `team send` requires a running daemon and its
+    /// free writer slot; the daemon owns A2A egress and the send journal.
     Team {
         #[command(subcommand)]
         action: TeamAction,

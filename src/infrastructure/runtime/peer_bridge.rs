@@ -517,9 +517,9 @@ async fn run_cli_share(
     use crate::adapters::cli::peer::share::{
         ShareRefusal, share_refusal_text, share_sent_text, validate_summary,
     };
+    use crate::adapters::daemon::attach_client::{OneShotAttachError, attach_one_shot_writer};
     use crate::adapters::daemon::protocol::{
-        ClientFrame, ConnectionTier, DaemonFrame, PeerShareOutcome, answer_attach_challenge,
-        read_frame, write_frame,
+        ClientFrame, DaemonFrame, PeerShareOutcome, read_frame, write_frame,
     };
 
     let refuse = |out: &mut dyn std::io::Write, refusal: ShareRefusal| -> anyhow::Result<()> {
@@ -535,37 +535,19 @@ async fn run_cli_share(
         return refuse(out, refusal);
     }
 
-    let socket = crate::infrastructure::paths::daemon_socket_path(workspace)?;
-    let stream = match tokio::net::UnixStream::connect(&socket).await {
-        Ok(stream) => stream,
-        Err(_) => return refuse(out, ShareRefusal::DaemonUnavailable),
-    };
-    let (mut reader, mut writer) = stream.into_split();
-    let signer =
-        crate::adapters::rap::IdentityKeyStore::new(crate::infrastructure::paths::data_dir()?)
-            .load_or_generate()
-            .map_err(|error| anyhow::anyhow!("this host's identity key did not load: {error}"))?;
-    answer_attach_challenge(
-        &mut reader,
-        &mut writer,
-        false,
-        ConnectionTier::TrustedLocal,
-        &signer,
-    )
-    .await?;
-    match read_frame::<_, DaemonFrame>(&mut reader).await? {
-        Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
-            if granted_mode != crate::adapters::daemon::protocol::AttachMode::ReadWrite {
-                return refuse(
-                    out,
-                    ShareRefusal::LocalFault {
-                        reason: "another client holds this daemon's writer slot".to_owned(),
-                    },
-                );
-            }
+    let (mut reader, mut writer) = match attach_one_shot_writer(workspace).await {
+        Ok(connection) => connection,
+        Err(OneShotAttachError::NoDaemon) => return refuse(out, ShareRefusal::DaemonUnavailable),
+        Err(OneShotAttachError::WriterHeld) => {
+            return refuse(
+                out,
+                ShareRefusal::LocalFault {
+                    reason: "another client holds this daemon's writer slot".to_owned(),
+                },
+            );
         }
-        other => anyhow::bail!("the daemon did not accept the attach: {other:?}"),
-    }
+        Err(error) => anyhow::bail!("{error}"),
+    };
     write_frame(
         &mut writer,
         &ClientFrame::PeerShare {

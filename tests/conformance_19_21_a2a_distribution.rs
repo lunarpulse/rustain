@@ -20,6 +20,9 @@ mod c_k02_followup;
 mod c_k03_retract;
 #[path = "conformance_19_21c/c_k04_retract_gating.rs"]
 mod c_k04_retract_gating;
+#[cfg(all(unix, feature = "test-instrumentation"))]
+#[path = "conformance_18_9b/cli_team_send.rs"]
+mod cli_team_send;
 #[path = "conformance_19_21d/d_k01_record_wire.rs"]
 mod d_k01_record_wire;
 #[path = "conformance_19_21d/d_k02_refusals.rs"]

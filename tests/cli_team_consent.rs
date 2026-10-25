@@ -39,6 +39,7 @@ impl Fixture {
             .env("RUSTAIN_DATA_DIR", self.data.path())
             .env("RUSTAIN_CONFIG_DIR", self.config.path())
             .env("HOME", self.config.path())
+            .env("RUSTAIN_LOG_PATH", self.config.path().join("cli.log"))
             .output()
             .expect("run real rustain binary")
     }
@@ -213,7 +214,6 @@ async fn refusals_are_named_and_write_nothing() {
     assert_eq!(snapshot(fixture.ws()), before);
     for (args, expected) in [
         (vec!["team", "trust"], "unrecognized subcommand"),
-        (vec!["team", "send", "a", "b"], "unrecognized subcommand"),
         (
             vec!["team", "untrust"],
             "required arguments were not provided",
@@ -225,7 +225,7 @@ async fn refusals_are_named_and_write_nothing() {
         assert!(stderr.contains(expected), "{args:?}: {stderr}");
     }
     let help = stdout_ok(fixture.run(&["team", "--help"]));
-    for verb in ["log", "status", "untrust"] {
+    for verb in ["log", "status", "untrust", "send"] {
         assert!(
             help.lines()
                 .any(|line| line.trim_start().starts_with(&format!("{verb} "))),
@@ -312,4 +312,120 @@ pinned_key = {{ alg = "EdDSA", x = "{}" }}
         stdout_ok(fixture.run(&["team", "untrust", "prof-peer"])),
         format!("Revoked trust for prof-peer ({peer}). Future tasks require consent.\n")
     );
+}
+
+#[test]
+fn k04_send_refusals_parse_before_attach_and_share_copy_is_unchanged() {
+    use rustain::adapters::cli::peer::share::{ShareRefusal, share_refusal_text};
+    use rustain::adapters::cli::team::send::{INVALID_PEERS, NO_DAEMON};
+    let fixture = Fixture::new();
+    // Existing path lookup creates this directory; logging is isolated above.
+    // Keep the full data snapshot assertion to detect accidental identity writes.
+    std::fs::create_dir_all(fixture.data.path().join("daemons")).unwrap();
+    let before = snapshot(fixture.ws());
+    let data_before = snapshot(fixture.data.path());
+    let output = fixture.run(&["team", "send", "alice", "hello"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("{NO_DAEMON}\n")
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("rustain: team send failed: no daemon")
+    );
+    assert_eq!(snapshot(fixture.ws()), before);
+    assert_eq!(snapshot(fixture.data.path()), data_before);
+    for (args, message) in [
+        (vec!["team", "send", "alice,alice", "hello"], INVALID_PEERS),
+        (
+            vec!["team", "send", "--stories", "S1", "alice", "hello"],
+            "'--stories' needs '--type story_assignment'",
+        ),
+        (
+            vec!["team", "send", "alice"],
+            "Missing message text after peers `alice`",
+        ),
+        (
+            vec!["team", "send", "alice", "  \n "],
+            "Missing message text after peers `alice`",
+        ),
+        (
+            vec!["team", "send", "--type", "wrong", "alice", "hello"],
+            "invalid value",
+        ),
+        (
+            vec!["team", "send", "--subject", "two words", "alice", "hello"],
+            "one token",
+        ),
+    ] {
+        let output = fixture.run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(message), "{stderr}");
+        assert!(!stderr.contains(NO_DAEMON), "{stderr}");
+        assert_eq!(snapshot(fixture.ws()), before);
+        assert_eq!(snapshot(fixture.data.path()), data_before);
+    }
+    let output = fixture.run(&["peer", "share", "alice", "a1", "--topic", "t"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "{}\n",
+            share_refusal_text("alice", &ShareRefusal::DaemonUnavailable)
+        )
+    );
+    assert_eq!(snapshot(fixture.ws()), before);
+}
+
+#[cfg(all(unix, not(feature = "a2a")))]
+#[tokio::test]
+async fn k05_real_default_daemon_names_a2a_build_refusal() {
+    let fixture = Fixture::new();
+    let mut daemon = tokio::process::Command::new(assert_cmd::cargo::cargo_bin("rustain"))
+        .args(["--profile", "coding", "daemon", "start", "--foreground"])
+        .current_dir(fixture.ws())
+        .env("RUSTAIN_DATA_DIR", fixture.data.path())
+        .env("RUSTAIN_CONFIG_DIR", fixture.config.path())
+        .env("HOME", fixture.config.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let socket = fixture.data.path().join("daemons").join(format!(
+        "{}.sock",
+        rustain::infrastructure::paths::workspace_hash(fixture.ws())
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            assert!(
+                daemon.try_wait().unwrap().is_none(),
+                "daemon exited during boot"
+            );
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("real default daemon socket readiness");
+    let output = fixture.run(&["team", "send", "alice", "hi"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Nothing was sent: A2A is not enabled in this build\n"
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("rustain: team send failed: A2A is not enabled in this build")
+    );
+    daemon.kill().await.unwrap();
+    daemon.wait().await.unwrap();
 }

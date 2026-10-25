@@ -581,7 +581,7 @@ pub async fn run() -> Result<()> {
         return crate::adapters::cli::relay::run_cli(action).await;
     }
 
-    // Offline team verbs use only the durable journal, before provider construction.
+    // Team verbs run before provider construction; send delegates to the daemon.
     if let Some(Command::Team { action }) = &cli.command {
         use crate::adapters::cli::team::TeamAction;
         use crate::infrastructure::runtime::transparency_bridge::{
@@ -589,6 +589,29 @@ pub async fn run() -> Result<()> {
         };
         use std::io::Write;
         match action {
+            TeamAction::Send(args) => {
+                let request = args.parse().map_err(|error| {
+                    eprintln!("rustain: team send failed: {error}");
+                    anyhow::Error::from(SubcommandExit(2))
+                })?;
+                let workspace = paths::workspace_dir()?;
+                #[cfg(unix)]
+                let result = crate::infrastructure::runtime::team_send_cli::run_cli_team_send(
+                    &workspace,
+                    request,
+                    &mut std::io::stdout(),
+                )
+                .await;
+                #[cfg(not(unix))]
+                let result: anyhow::Result<()> = {
+                    let _ = (workspace, request);
+                    Err(anyhow::anyhow!("daemon attach is only supported on Unix"))
+                };
+                return result.map_err(|error| {
+                    eprintln!("rustain: team send failed: {error}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
+            }
             TeamAction::Log {
                 filter,
                 json,

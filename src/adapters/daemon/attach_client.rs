@@ -30,6 +30,76 @@ use super::protocol::{
 use crate::adapters::rap::IdentityKeyStore;
 use crate::adapters::tui::widgets::delimited_body::approval_body_rows;
 
+/// Why a command-only trusted-local writer could not attach.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OneShotAttachError {
+    #[error("no daemon is running for this workspace")]
+    NoDaemon,
+    #[error("another client holds this daemon's writer slot")]
+    WriterHeld,
+    #[error("attach protocol version mismatch: daemon speaks v{daemon}, client speaks v{client}")]
+    VersionMismatch { daemon: u32, client: u32 },
+    #[error("daemon rejected attach: {0}")]
+    Rejected(super::protocol::ProtocolError),
+    #[error("{0:#}")]
+    Io(#[from] anyhow::Error),
+}
+
+/// Share one challenge/ack exchange between one-shot command clients.
+async fn attach_writer_over<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    signer: &crate::adapters::rap::AgentSigner,
+) -> std::result::Result<(), OneShotAttachError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    answer_attach_challenge(reader, writer, false, ConnectionTier::TrustedLocal, signer)
+        .await
+        .context("one-shot writer attach handshake")?;
+    match read_frame::<_, DaemonFrame>(reader)
+        .await
+        .context("reading one-shot writer attach handshake acknowledgement")?
+    {
+        Some(DaemonFrame::AttachAck {
+            granted_mode: AttachMode::ReadWrite,
+            ..
+        }) => Ok(()),
+        Some(DaemonFrame::AttachAck { .. }) => Err(OneShotAttachError::WriterHeld),
+        Some(DaemonFrame::Error(super::protocol::ProtocolError::VersionMismatch {
+            daemon,
+            client,
+        })) => Err(OneShotAttachError::VersionMismatch { daemon, client }),
+        Some(DaemonFrame::Error(error)) => Err(OneShotAttachError::Rejected(error)),
+        other => Err(OneShotAttachError::Io(anyhow::anyhow!(
+            "unexpected first frame in one-shot writer attach handshake: {other:?}"
+        ))),
+    }
+}
+
+/// Connect before loading an identity, so no-daemon refusals have no key side effect.
+pub(crate) async fn attach_one_shot_writer(
+    workspace: &Path,
+) -> std::result::Result<
+    (
+        tokio::net::unix::OwnedReadHalf,
+        tokio::net::unix::OwnedWriteHalf,
+    ),
+    OneShotAttachError,
+> {
+    let socket = crate::infrastructure::paths::daemon_socket_path(workspace)?;
+    let stream = UnixStream::connect(socket)
+        .await
+        .map_err(|_| OneShotAttachError::NoDaemon)?;
+    let (mut reader, mut writer) = stream.into_split();
+    let signer = IdentityKeyStore::new(crate::infrastructure::paths::data_dir()?)
+        .load_or_generate()
+        .map_err(|error| anyhow::anyhow!("this host's identity key did not load: {error}"))?;
+    attach_writer_over(&mut reader, &mut writer, &signer).await?;
+    Ok((reader, writer))
+}
+
 struct PlainApproval {
     tool: String,
     transfer: Option<ExactInputAssembly>,
@@ -778,6 +848,101 @@ mod exact_approval_tests {
                 withheld: ToolInputWithheld::PeerTier,
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn one_shot_writer_classifies_handshake_results() {
+        use super::super::protocol::ProtocolError;
+        for (frame, expected) in [
+            (
+                Some(DaemonFrame::AttachAck {
+                    granted_mode: AttachMode::ReadWrite,
+                    snapshot: snapshot(0),
+                }),
+                "ok",
+            ),
+            (
+                Some(DaemonFrame::AttachAck {
+                    granted_mode: AttachMode::ReadOnly,
+                    snapshot: snapshot(0),
+                }),
+                "held",
+            ),
+            (
+                Some(DaemonFrame::Error(ProtocolError::VersionMismatch {
+                    daemon: 10,
+                    client: 11,
+                })),
+                "version",
+            ),
+            (
+                Some(DaemonFrame::Error(ProtocolError::ReadOnly)),
+                "rejected",
+            ),
+            (None, "io"),
+            (
+                Some(DaemonFrame::FrameTooLarge {
+                    frame: "History".into(),
+                    bytes: 10,
+                }),
+                "io",
+            ),
+        ] {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let keys = tempfile::tempdir().unwrap();
+            let signer = IdentityKeyStore::new(keys.path())
+                .load_or_generate()
+                .unwrap();
+            let task = tokio::spawn(async move {
+                write_frame(
+                    &mut server,
+                    &DaemonFrame::AttachChallenge { nonce: vec![7; 32] },
+                )
+                .await
+                .unwrap();
+                assert!(matches!(
+                    read_frame::<_, ClientFrame>(&mut server).await.unwrap(),
+                    Some(ClientFrame::Attach {
+                        read_only_ok: false,
+                        tier: ConnectionTier::TrustedLocal,
+                        ..
+                    })
+                ));
+                if let Some(frame) = frame {
+                    write_frame(&mut server, &frame).await.unwrap();
+                }
+            });
+            let (mut reader, mut writer) = client.into_split();
+            let result = attach_writer_over(&mut reader, &mut writer, &signer).await;
+            match (expected, result) {
+                ("ok", Ok(()))
+                | ("held", Err(OneShotAttachError::WriterHeld))
+                | ("rejected", Err(OneShotAttachError::Rejected(ProtocolError::ReadOnly))) => {}
+                (
+                    "version",
+                    Err(OneShotAttachError::VersionMismatch {
+                        daemon: 10,
+                        client: 11,
+                    }),
+                ) => {}
+                ("io", Err(OneShotAttachError::Io(error))) => {
+                    assert!(error.to_string().contains("handshake"), "{error}")
+                }
+                (expected, actual) => panic!("expected {expected}, got {actual:?}"),
+            }
+            task.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn one_shot_io_failure_keeps_its_root_cause() {
+        let error = OneShotAttachError::from(
+            anyhow::anyhow!("permission denied").context("one-shot writer attach handshake"),
+        );
+        assert_eq!(
+            error.to_string(),
+            "one-shot writer attach handshake: permission denied"
+        );
     }
 
     #[test]

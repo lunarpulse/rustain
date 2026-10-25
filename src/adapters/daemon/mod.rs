@@ -21,7 +21,7 @@ use crate::adapters::cli::commands::DaemonAction;
 use crate::domain::models::AppConfig;
 
 #[cfg(unix)]
-mod attach_client;
+pub(crate) mod attach_client;
 #[cfg(unix)]
 pub(crate) mod consent;
 #[cfg(unix)]

@@ -535,6 +535,7 @@ The client speaks `ClientFrame`, including `Attach`, `UserMessage`,
 `HistoryRequest`, `ApprovalResponse`, `Detach`, and the request-keyed team
 commands `TeamSend`, `TeamFollowup`, `TeamBoard`, `TeamThread`, `TeamStatus`,
 `TeamRetractPreview`, `TeamRetractDecision`, and `RevokeSenderConsent`.
+`rustain team send` is a one-shot trusted-local writer client of `TeamSend`: it requires a free writer slot and leaves A2A composition, validation and the send journal to the daemon.
 `EnableTeamProposals` is an additive v7 opt-in sent by a capable rich client after
 its authenticated writer acknowledgement. It enters the same operator FIFO and
 stale-writer fence as decisions; read-only and Peer connections cannot enable it.

@@ -22,7 +22,7 @@ use crate::domain::services::transparency::{
 };
 
 /// The valid sub-verb set, named verbatim in every parser refusal.
-pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team untrust <alias-or-peer-id>; `rustain team send` (the CLI twin) is not in this cut — `18-9b-cli-team-send`";
+pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…> | /team reply <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team untrust <alias-or-peer-id>";
 
 /// Named refusal for the retired listing misnomer; granting stays card-only.
 pub const TRUST_REFUSAL: &str = "'/team trust' does not exist: standing trust is granted only from a sender's consent card ([a] Always allow). See it with /team status; revoke it with /team untrust <alias-or-peer-id>.";

@@ -224,7 +224,37 @@ There is exactly one `message/send` attempt per recipient and no automatic retry
 
 Each recipient is journaled independently. A request that may leave the host records `dispatched` before its POST; a delivered or accepted answer adds `accepted`; a proved rejection (including JSON-RPC `-32040`), a connection that never opened, or a post-dispatch credential/trust-anchor refusal adds `refused`; and an approval-needed or no-usable-answer row (including a timeout, HTTP or other JSON-RPC error, or unreadable answer after dispatch) remains dispatch-only. A pre-I/O refusal writes one outbound `refused` row and no `dispatched` row. If durable dispatch recording fails, nothing is sent and no row is written. An accepted answer contributes a content hash, not stored reply text; a decline stores its sanitized reason. `/team send` never renders a peer reply and never materializes an `a2a-peer` node in the Agents panel. FR169 replies use `/team thread` as the later answer channel.
 
-`/team send` is available in both the interactive TUI and an attached trusted-local writer session. The attached client sends it through the daemon's already-composed A2A runtime; it creates no client egress. Read-only and Peer-tier attachments are refused. There is no headless `rustain team send` command. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
+`/team send` is available in both the interactive TUI and an attached trusted-local writer session. The attached client sends it through the daemon's already-composed A2A runtime; it creates no client egress. Read-only and Peer-tier attachments are refused. The headless twin is `rustain team send`, below. A roster entry supplies client credentials for a non-loopback peer through its `auth` and `caCert` fields — see [Reaching a credentialed peer across a network boundary](#reaching-a-credentialed-peer-across-a-network-boundary).
+
+### `rustain team send`
+
+```text
+rustain team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…>
+```
+
+Start the recipient, configure `.rustain/a2a.json`, then start `rustain daemon start`
+in the sender workspace. The CLI attaches as a one-shot trusted-local writer and
+submits the existing `TeamSend` frame. It does not compose another A2A runtime or
+open the send journal. If another client holds the writer slot, use `/team send`
+in that session or detach it before retrying; the CLI never steals the slot.
+Taking a free slot is a normal writer handoff, including notice drain and replay
+of pending cards; this one-shot client ignores unrelated frames. The CLI keeps the
+writer slot until every recipient settles, so a TUI attaching meanwhile is
+read-only; interrupt the CLI after the action ID appears to free the slot.
+
+Flags must precede the peer list. Every token after peers is body, even `--help`
+or `--type`; multiple body arguments join with one space, while a single quoted
+body preserves internal spaces, newlines and Unicode. The daemon validates the
+roster, cached cards and send policy. `--stories` requires `--type story_assignment`.
+
+Exit **0** means every recipient was delivered, accepted without an item, or is
+awaiting approval. Exit **1** means a refusal, incomplete wait, protocol fault or
+at least one other outcome; exit **2** means invalid arguments, before attach.
+Rows use the same renderer as `/team send`. On acceptance the command prints the
+action ID: interrupting stops only the CLI wait, not the daemon-owned send.
+Inspect the rest with `/team board --action <id>`. A lost connection after submission
+does not prove nothing was sent. No timeout is imposed: a settlement whose journal
+append fails is not published, so interrupt the wait and inspect the board.
 
 ### Agent-proposed messages (standalone and attached TUI)
 

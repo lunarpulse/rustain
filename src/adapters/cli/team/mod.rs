@@ -10,16 +10,22 @@
 //! `status` reads standing sender consent and `untrust` revokes it through
 //! the same durable journal and core as the TUI, without a daemon or provider.
 //! Standing trust is granted only from a sender's consent card.
+//!
+//! `send` is a one-shot trusted-local writer client of the running daemon's
+//! TeamSend frame; the daemon owns A2A egress and the send journal.
 
 use clap::Subcommand;
 
 pub mod log;
 pub mod rows;
+pub mod send;
 
 /// `team` subcommand actions. Declared beside its handlers, mirroring
 /// `cli/session/mod.rs`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum TeamAction {
+    /// Send through the running daemon's A2A runtime (requires its writer slot).
+    Send(send::SendArgs),
     /// Show the A2A transparency log for this workspace (FR95, NFR67).
     ///
     /// Read-only, offline-safe, non-billable: it folds the durable room
@@ -60,7 +66,7 @@ mod tests {
     use crate::adapters::cli::commands::{Cli, Command};
 
     #[test]
-    fn consent_verbs_parse_offline_and_grant_and_send_stay_absent() {
+    fn consent_verbs_and_send_parse_but_grant_stays_absent() {
         assert!(Cli::try_parse_from(["rustain", "team", "status"]).is_ok());
         let cli = Cli::try_parse_from(["rustain", "team", "untrust", "alice"]).unwrap();
         assert!(matches!(
@@ -69,14 +75,15 @@ mod tests {
                 if target == "alice"
         ));
         assert!(Cli::try_parse_from(["rustain", "team", "untrust"]).is_err());
-        for args in [
-            vec!["rustain", "team", "trust"],
-            vec!["rustain", "team", "send", "a", "b"],
-        ] {
-            assert_eq!(
-                Cli::try_parse_from(args).unwrap_err().kind(),
-                clap::error::ErrorKind::InvalidSubcommand
-            );
-        }
+        let cli = Cli::try_parse_from(["rustain", "team", "send", "a", "b"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Team { action: super::TeamAction::Send(args) }) if args.values == ["a", "b"])
+        );
+        assert_eq!(
+            Cli::try_parse_from(["rustain", "team", "trust"])
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::InvalidSubcommand
+        );
     }
 }
