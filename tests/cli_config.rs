@@ -264,6 +264,7 @@ async fn p0_3a_config_validate_valid_no_provider_constructed() {
 
 /// P0-3b: Type-mismatched config → non-zero exit (Err).
 #[tokio::test]
+#[serial]
 async fn p0_3b_config_validate_malformed_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
@@ -325,6 +326,7 @@ fn p0_3c_provider_ctor_count_armed() {
 
 /// P0-3d: config validate --json produces {valid, errors} shape.
 #[tokio::test]
+#[serial]
 async fn p0_3d_config_validate_json_shape() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
@@ -600,6 +602,7 @@ async fn p0_5c_config_edit_global_target_differs() {
 
 /// P0-6: `config reload` produces the exact same output as before (byte-for-byte).
 #[tokio::test]
+#[serial]
 async fn p0_6_config_reload_unchanged() {
     let result = config_cmd::run_config_reload().await;
     assert!(result.is_ok(), "config reload must succeed");
@@ -802,6 +805,7 @@ fn config_display_renders_default_config() {
 
 /// End-to-end `config show --json` invokes the handler and returns parseable JSON.
 #[tokio::test]
+#[serial]
 async fn config_show_json_end_to_end_parses() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
@@ -825,6 +829,7 @@ async fn config_show_json_end_to_end_parses() {
 }
 
 #[tokio::test]
+#[serial]
 async fn config_show_strips_mcp_server_url_userinfo() {
     use rustain::domain::models::mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport};
 
@@ -868,6 +873,7 @@ async fn config_show_strips_mcp_server_url_userinfo() {
 
 /// Config path --json rendered by the handler is a parseable array.
 #[tokio::test]
+#[serial]
 async fn config_path_json_renders_parseable_array() {
     let cli = cli_from(&["rustain"]);
     let output = config_cmd::render_config_path(true, &cli).unwrap();
