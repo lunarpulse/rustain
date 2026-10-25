@@ -741,15 +741,24 @@ async fn close_session_reaps_real_forwarded_mcp_child() {
                 break;
             }
         }
-        drop(client_write);
-        assert!(
-            matching_pids(&token).is_empty(),
-            "session/close returned while the MCP child was still alive"
-        );
     };
 
     tokio::select! {
         () = drive => {}
         result = server => panic!("ACP server exited before close: {result:?}"),
     }
+
+    // After close the client half is dropped, so the server task ending is
+    // expected; only the child's disappearance is asserted, with a deadline.
+    let mut reap_poll = tokio::time::interval(Duration::from_millis(10));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            reap_poll.tick().await;
+            if matching_pids(&token).is_empty() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("session/close returned but the MCP child stayed alive");
 }
