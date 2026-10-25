@@ -80,6 +80,7 @@ pub mod session_queue;
 mod skill;
 pub mod skill_catalog_delta;
 pub mod skill_metadata;
+pub mod status_statement;
 pub mod story_manifest;
 mod stream;
 pub mod subagent_envelope;
@@ -342,6 +343,10 @@ pub use search_hit::SearchHit;
 pub use semantic_message_type::{
     SemanticMessagePolicyCapabilities, SemanticMessageRecognition, SemanticMessageType,
     SemanticMessageTypeMetadata, semantic_message_type_metadata, semantic_message_type_tokens,
+};
+pub use status_statement::{
+    HeldStory, NOT_SHARED, NothingBecause, ReceiptState, SharedStory, StatusDisclosure,
+    StatusPreview, StatusStatement, compose, held_stories,
 };
 #[allow(unused_imports)]
 pub use subagent_envelope::{SubagentEnvelope, SubagentEvent};

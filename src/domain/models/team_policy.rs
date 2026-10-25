@@ -672,16 +672,12 @@ impl InteractionPolicySnapshot {
 }
 
 /// Sharing breadth — the quantity that **binds in neither direction**.
-///
-/// `effective` is always `individual`. The team value travels alongside as a
-/// displayed norm so the explainer can say so out loud, because "not enforced" is
-/// information the operator needs and silence would imply enforcement.
+/// The effective level is parsed from the member's value alone. The raw values
+/// remain available for the advisory explainer and unknown-token diagnostics.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharingBreadth {
-    /// Always equal to `individual`. Never merged: `max()` would force disclosure
-    /// past consent (FR96) and `min()` would cap a member who chooses to share
-    /// more (`prd.md:863`).
-    pub effective: Option<String>,
+    /// Never merged: the member's consent alone selects disclosure.
+    pub effective: super::StatusDisclosure,
     pub individual: Option<String>,
     /// The team norm, displayed and not enforced.
     pub team_norm: Option<String>,

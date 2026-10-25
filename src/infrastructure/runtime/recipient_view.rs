@@ -389,6 +389,15 @@ fn turn_cost(turn: &ThreadTurnRef<'_>, opened: bool) -> TurnCost {
                 ReplyKind::Defer { minutes } => {
                     "[defer ".len() + decimal_digits(minutes) + "m — reported expectation]".len()
                 }
+                ReplyKind::Status => reply
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.level)
+                    .map_or(" [no status shared]".len(), |level| {
+                        " [status shared under this host's policy: ".len()
+                            + level.as_str().len()
+                            + "]".len()
+                    }),
                 ReplyKind::Unknown => "[reply kind not recognised]".len(),
             };
             let metadata = 2
@@ -472,6 +481,17 @@ fn append_turn(output: &mut String, turn: &ThreadTurnRef<'_>, include_body: bool
                 ReplyKind::Defer { minutes } => {
                     let _ = write!(output, "[defer {minutes}m — reported expectation]");
                 }
+                ReplyKind::Status => {
+                    if let Some(level) = reply.status.as_ref().and_then(|status| status.level) {
+                        let _ = write!(
+                            output,
+                            " [status shared under this host's policy: {}]",
+                            level.as_str()
+                        );
+                    } else {
+                        output.push_str(" [no status shared]");
+                    }
+                }
                 ReplyKind::Unknown => output.push_str("[reply kind not recognised]"),
             }
             let _ = write!(output, " · {}", reply.answers.as_str());
@@ -536,6 +556,85 @@ pub(crate) fn append_safe_body(output: &mut String, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn story19_24_recipient_view_status_rendering_and_byte_cost_parity() {
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, PeerId, ReplyTurnId, ReplyTurnView, StatusStatement,
+            TurnAddress,
+        };
+
+        let item = ItemAddress::from_a2a_ingress(
+            PeerId::from_public_key(&[74; 32]).unwrap(),
+            ItemId::from_replay("ri_status"),
+        );
+        let minimal = StatusStatement::from_wire(&serde_json::json!({
+            "level": "minimal",
+            "stories": [{"key": "S7-03"}]
+        }))
+        .unwrap();
+        let status = StatusStatement::from_wire(&serde_json::json!({
+            "level": "status",
+            "stories": [{"key": "S7-03", "state": "acknowledged"}]
+        }))
+        .unwrap();
+        for (kind, status, label) in [
+            (ReplyKind::Answer, None, "answer"),
+            (
+                ReplyKind::Defer { minutes: 30 },
+                None,
+                "[defer 30m — reported expectation]",
+            ),
+            (
+                ReplyKind::Status,
+                Some(minimal),
+                " [status shared under this host's policy: minimal]",
+            ),
+            (
+                ReplyKind::Status,
+                Some(status),
+                " [status shared under this host's policy: status]",
+            ),
+            (
+                ReplyKind::Status,
+                Some(StatusStatement::nothing()),
+                " [no status shared]",
+            ),
+            (ReplyKind::Status, None, " [no status shared]"),
+            (ReplyKind::Unknown, None, "[reply kind not recognised]"),
+        ] {
+            let mut reply = ReplyTurnView {
+                address: TurnAddress::answering(&item, ReplyTurnId::from_replay("rr_status")),
+                answers: item.item().clone(),
+                content: String::new(),
+                authorship: Authorship::HumanWritten,
+                kind,
+                status,
+                via_node: None,
+                journal_order: 1,
+            };
+            let expected = format!(
+                "  rr_status · you · {} · {label} · ri_status",
+                reply.authorship.wire_name()
+            );
+            for body in ["", "status body\n界\t\r\u{1b}", &"x".repeat(BODY_LIMIT + 1)] {
+                reply.content = body.into();
+                let turn = ThreadTurnRef::Reply(&reply);
+                let mut metadata = String::new();
+                append_turn(&mut metadata, &turn, false);
+                assert_eq!(metadata, expected);
+                assert_eq!(metadata.len(), turn_cost(&turn, false).metadata);
+                metadata.push('\n');
+                assert_eq!(metadata.len(), turn_cost(&turn, true).full);
+
+                let mut rendered = String::new();
+                append_turn(&mut rendered, &turn, true);
+                rendered.push('\n');
+                assert!(rendered.starts_with(&format!("{expected}\n")));
+                assert_eq!(rendered.len(), turn_cost(&turn, false).full);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn story19_20_recipient_view_renders_sender_alias_and_independent_tags() {

@@ -954,6 +954,21 @@ pub fn render_team_thread(
                 crate::domain::models::ReplyKind::Defer { minutes } => {
                     let _ = write!(text, " [defer {minutes}m — reported expectation]");
                 }
+                crate::domain::models::ReplyKind::Status => {
+                    if let Some(level) = turn.status.as_ref().and_then(|status| status.level) {
+                        let _ = write!(
+                            text,
+                            " [status shared under this host's policy: {}]",
+                            level.as_str()
+                        );
+                    } else if turn
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| status.is_nothing())
+                    {
+                        text.push_str(" [no status shared]");
+                    }
+                }
                 crate::domain::models::ReplyKind::Unknown => {
                     text.push_str(" [reply kind not recognised]");
                 }
@@ -2054,7 +2069,80 @@ mod tests {
             content_hash: None,
             authorship: crate::domain::models::Authorship::HumanWritten,
             kind: crate::domain::models::ReplyKind::Answer,
+            status: None,
             retracted_at_ms: None,
+        }
+    }
+
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn thread_status_suffixes_report_only_the_shared_policy() {
+        use crate::adapters::a2a::send::ThreadRead;
+        use crate::domain::models::{Authorship, ReplyKind, StatusStatement};
+
+        for (status, suffix) in [
+            (
+                serde_json::json!({"level":"minimal","stories":[{"key":"S7-03"}]}),
+                " [status shared under this host's policy: minimal]",
+            ),
+            (
+                serde_json::json!({"level":"status","stories":[{"key":"S7-03","state":"received"}]}),
+                " [status shared under this host's policy: status]",
+            ),
+            (serde_json::json!({"stories":[]}), " [no status shared]"),
+        ] {
+            let mut turn = served_turn("rr_status", true, "body");
+            turn.kind = ReplyKind::Status;
+            turn.authorship = Authorship::AgentComposed;
+            turn.status = StatusStatement::from_wire(&status);
+            assert!(turn.status.is_some());
+            let rendered = render_team_thread(
+                "marcus",
+                "ri_q",
+                &ThreadRead::Read {
+                    thread: served_thread(vec![turn]),
+                    mine: vec![false],
+                },
+                false,
+            );
+            assert_eq!(
+                rendered,
+                format!(
+                    "thread · marcus · ri_q\n  marcus    rr_status  [agent-composed]{suffix}\n      body"
+                )
+            );
+        }
+    }
+
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn thread_legacy_reply_output_and_withheld_status_have_no_new_suffix() {
+        use crate::adapters::a2a::send::ThreadRead;
+        use crate::domain::models::ReplyKind;
+
+        for (kind, suffix) in [
+            (ReplyKind::Answer, ""),
+            (
+                ReplyKind::Defer { minutes: 30 },
+                " [defer 30m — reported expectation]",
+            ),
+            (ReplyKind::Status, ""),
+        ] {
+            let mut turn = served_turn("rr_1", true, "body");
+            turn.kind = kind;
+            let rendered = render_team_thread(
+                "marcus",
+                "ri_q",
+                &ThreadRead::Read {
+                    thread: served_thread(vec![turn]),
+                    mine: vec![false],
+                },
+                false,
+            );
+            assert_eq!(
+                rendered,
+                format!("thread · marcus · ri_q\n  marcus    rr_1{suffix}\n      body")
+            );
         }
     }
 

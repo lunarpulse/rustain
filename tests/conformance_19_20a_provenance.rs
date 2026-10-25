@@ -81,6 +81,7 @@ async fn journal_rows_keep_unknown_defaults_and_survive_future_tokens() {
                     via_node: None,
                     authorship,
                     send_authorization,
+                    status: None,
                 },
                 _ => RoomEvent::PeerDisclosure {
                     peer: Some(peer.clone()),

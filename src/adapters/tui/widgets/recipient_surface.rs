@@ -20,6 +20,8 @@ pub(crate) enum RecipientSurfaceAction {
     Edit,
     Reject,
     Decline,
+    ShareStatus,
+    DeclineStatus,
     Context,
 }
 impl RecipientSurfaceAction {
@@ -31,7 +33,8 @@ impl RecipientSurfaceAction {
             Self::Acknowledge => 'a',
             Self::Approve => 'y',
             Self::Edit => 'e',
-            Self::Reject | Self::Decline => 'n',
+            Self::Reject | Self::Decline | Self::DeclineStatus => 'n',
+            Self::ShareStatus => 's',
             Self::Context => 'c',
         }
     }
@@ -46,6 +49,8 @@ impl RecipientSurfaceAction {
             Self::Edit => "[e] Edit",
             Self::Reject => "[n] Reject",
             Self::Decline => "[n] Decline",
+            Self::ShareStatus => "[s] Share status",
+            Self::DeclineStatus => "[n] Decline",
             Self::Context => "[c] Use as context",
         }
     }
@@ -127,6 +132,17 @@ pub(crate) fn recipient_surface_actions(
             _ => {}
         }
     }
+    // Like `[r] Respond`, the status acts survive a restart: without a live
+    // card the daemon appends the stored preview directly (orphan arm).
+    if matches!(surface.target, RecipientSurfaceTarget::Item(_))
+        && surface.item_state != Some("removed")
+        && surface.message_type == SemanticMessageType::StatusRequest
+        && control.is_some_and(|c| c.stage == PeerRowStage::AwaitingOperator && c.status.is_some())
+    {
+        actions[1] = Some(RecipientSurfaceAction::Busy);
+        actions[2] = Some(RecipientSurfaceAction::ShareStatus);
+        actions[4] = Some(RecipientSurfaceAction::DeclineStatus);
+    }
     if matches!(surface.target, RecipientSurfaceTarget::Item(_))
         && (surface.context_available || surface.context_selected)
     {
@@ -143,6 +159,9 @@ pub(crate) fn recipient_surface_actions(
         let wire_action = match action {
             RecipientSurfaceAction::Busy => RecipientAction::Defer,
             RecipientSurfaceAction::Acknowledge => RecipientAction::Acknowledge,
+            RecipientSurfaceAction::ShareStatus | RecipientSurfaceAction::DeclineStatus => {
+                RecipientAction::ShareStatus
+            }
             RecipientSurfaceAction::Context if surface.context_selected => {
                 RecipientAction::ContextRemove
             }
@@ -411,5 +430,21 @@ fn paint_recipient_lines(
             line,
             ratatui::layout::Rect::new(area.x, area.y + index as u16, area.width, 1),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RecipientSurfaceAction;
+
+    #[test]
+    fn status_action_keys_and_labels_are_exact() {
+        assert_eq!(RecipientSurfaceAction::ShareStatus.key(), 's');
+        assert_eq!(
+            RecipientSurfaceAction::ShareStatus.hint(),
+            "[s] Share status"
+        );
+        assert_eq!(RecipientSurfaceAction::DeclineStatus.key(), 'n');
+        assert_eq!(RecipientSurfaceAction::DeclineStatus.hint(), "[n] Decline");
     }
 }

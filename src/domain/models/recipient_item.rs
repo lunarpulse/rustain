@@ -575,6 +575,7 @@ impl TurnAddress {
 pub enum ReplyKind {
     #[default]
     Answer,
+    Status,
     Defer {
         minutes: u16,
     },
@@ -592,6 +593,7 @@ impl ReplyKind {
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::Answer => "answer",
+            Self::Status => "status",
             Self::Defer { .. } => "defer",
             Self::Unknown => "unknown",
         }
@@ -622,6 +624,7 @@ impl Serialize for ReplyKind {
 #[derive(Clone, Copy)]
 enum Tag {
     Answer,
+    Status,
     Defer,
     Other,
 }
@@ -650,6 +653,7 @@ impl<'de> Deserialize<'de> for LooseValue {
             fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E> {
                 Ok(LooseValue::Tag(match value {
                     "answer" => Tag::Answer,
+                    "status" => Tag::Status,
                     "defer" => Tag::Defer,
                     _ => Tag::Other,
                 }))
@@ -658,6 +662,7 @@ impl<'de> Deserialize<'de> for LooseValue {
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
                 Ok(LooseValue::Tag(match value {
                     "answer" => Tag::Answer,
+                    "status" => Tag::Status,
                     "defer" => Tag::Defer,
                     _ => Tag::Other,
                 }))
@@ -766,6 +771,7 @@ impl<'de> Deserialize<'de> for ReplyKind {
                 }
                 match (tag, minutes) {
                     (Some(LooseValue::Tag(Tag::Answer)), None) => Ok(ReplyKind::Answer),
+                    (Some(LooseValue::Tag(Tag::Status)), None) => Ok(ReplyKind::Status),
                     (Some(LooseValue::Tag(Tag::Defer)), Some(LooseValue::Unsigned(value)))
                         if (1..=u64::from(u16::MAX)).contains(&value) =>
                     {
@@ -816,7 +822,7 @@ impl<'de> Deserialize<'de> for ReplyKind {
 /// One reply turn, reconstructed solely from its durable
 /// `RecipientItemReplied` record. ⛔ No act changes it after the append: the
 /// reply turn's act set is closed (`AD-1829`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyTurnView {
     pub address: TurnAddress,
     /// The item this turn answers — always an item, never another turn.
@@ -824,6 +830,8 @@ pub struct ReplyTurnView {
     pub content: String,
     pub authorship: Authorship,
     pub kind: ReplyKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<super::StatusStatement>,
     /// The peer-response node whose card this turn resolved, when it came
     /// through a draft resolution (`Q1`). At most one turn per node.
     pub via_node: Option<AgentId>,
@@ -921,5 +929,17 @@ mod tests {
             Ok(ReplyTurnId::from_replay("rr_other"))
         );
         assert!(fresh_reply_turn_candidate().starts_with("rr_"));
+    }
+
+    #[test]
+    fn status_reply_kind_is_copy_and_round_trips() {
+        let kind = serde_json::from_str::<ReplyKind>(r#"{"type":"status"}"#).unwrap();
+        assert_eq!(kind.wire_name(), "status");
+        assert_eq!(
+            serde_json::to_string(&kind).unwrap(),
+            r#"{"type":"status"}"#
+        );
+        let copied = kind;
+        assert_eq!(kind, copied);
     }
 }

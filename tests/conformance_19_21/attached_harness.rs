@@ -1027,6 +1027,25 @@ impl InboundHttpSender {
             secret,
         }
     }
+    /// Exercise a served JSON-RPC verb with this fixture's real bound key.
+    pub async fn rpc(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        tokio::time::timeout(FIXTURE_TIMEOUT, async {
+            self.client
+                .post(&self.endpoint)
+                .header(API_KEY_HEADER, &self.secret)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+                }))
+                .send()
+                .await
+                .expect("bound RPC response")
+                .json()
+                .await
+                .expect("bound RPC JSON")
+        })
+        .await
+        .expect("bound RPC structural deadline")
+    }
     pub async fn message_send(&self, task: &str, text: &str) -> InboundSendResult {
         self.message_send_with_metadata(task, text, serde_json::json!({}))
             .await
@@ -1107,6 +1126,7 @@ pub struct RecipientHost {
     pub journal: Journal,
     pub endpoint: String,
     pub registry: Arc<CapabilityRegistry>,
+    pub requests: ProviderRequestTrace,
     identity: PeerIdentity,
     /// Story 19.21c: method-level HTTP attempts, separate from journal marks.
     observation: Arc<super::observed_host::Counters>,
@@ -1124,6 +1144,17 @@ impl RecipientHost {
             .await
             .expect("bind recipient");
         Self::start_on(listener, admission, None).await
+    }
+    pub async fn start_with_effective_policy(
+        admission: A2aAdmissionPolicy,
+        policy: Arc<rustain::domain::models::EffectivePolicy>,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind policy recipient");
+        let journal = Journal::open().await;
+        Self::start_on_with_journal_and_policy(listener, admission, journal, None, Some(policy))
+            .await
     }
     pub async fn start_on(
         listener: TcpListener,
@@ -1151,6 +1182,16 @@ impl RecipientHost {
         admission: A2aAdmissionPolicy,
         journal: Journal,
         wrapped: Option<Arc<dyn RoomJournal>>,
+    ) -> Self {
+        Self::start_on_with_journal_and_policy(listener, admission, journal, wrapped, None).await
+    }
+
+    async fn start_on_with_journal_and_policy(
+        listener: TcpListener,
+        admission: A2aAdmissionPolicy,
+        journal: Journal,
+        wrapped: Option<Arc<dyn RoomJournal>>,
+        policy: Option<Arc<rustain::domain::models::EffectivePolicy>>,
     ) -> Self {
         let sink = wrapped.unwrap_or_else(|| journal.room.clone());
         let workspace = journal.workspace.path().to_path_buf();
@@ -1199,7 +1240,9 @@ impl RecipientHost {
                 ))
             }),
         ));
-        let delivery = story_assignment_delivery_policy();
+        let delivery = policy.map_or_else(story_assignment_delivery_policy, |policy| {
+            Arc::new(EffectiveDeliveryPolicy::new(policy)) as Arc<dyn DeliveryPolicy>
+        });
         let bus =
             rustain::adapters::daemon::server::peer_bus_slot_with_policy(&tree, delivery.clone());
         let attach = AttachServer::new_with_node_tree_bus_policy_and_journal(
@@ -1256,6 +1299,7 @@ impl RecipientHost {
         });
         Self {
             journal,
+            requests,
             endpoint: format!("http://{observed_authority}/"),
             registry,
             identity,

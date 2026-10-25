@@ -335,6 +335,7 @@ struct PendingPeerResponse<'a> {
     sender_label: &'a str,
     item_address: Option<&'a crate::domain::models::ItemAddress>,
     stories: Option<&'a crate::domain::models::StorySummary>,
+    status: Option<&'a crate::domain::models::StatusPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,6 +375,7 @@ fn pending_peer_response(conversation: &Conversation) -> Option<PendingPeerRespo
         sender_label: &control.sender_label,
         item_address: control.item_address.as_ref(),
         stories: control.stories.as_ref(),
+        status: control.status.as_ref(),
     })
 }
 
@@ -420,6 +422,7 @@ fn preview_line(content: &str, max_chars: usize) -> String {
 fn peer_response_card_lines<'a>(
     pending: &PendingPeerResponse<'a>,
     read_only: bool,
+    width: usize,
 ) -> Vec<ratatui::text::Line<'a>> {
     use ratatui::text::{Line, Span};
     let queued = if pending.queued > 0 {
@@ -435,6 +438,42 @@ fn peer_response_card_lines<'a>(
     ]));
     if let Some(summary) = pending.stories {
         lines.push(Line::from(summary.0.as_str()));
+    }
+    if let Some(preview) = pending.status {
+        use crate::adapters::tui::widgets::chat_pane::word_wrap::wrap_text;
+        use crate::domain::models::{NOT_SHARED, NothingBecause};
+        let shares = match preview.nothing_because {
+            Some(NothingBecause::LevelNone) => {
+                "Shares nothing: your sharing level is none".to_owned()
+            }
+            Some(NothingBecause::NoStoriesHeld) => {
+                "Shares nothing: no stories are assigned to you on this host".to_owned()
+            }
+            None => {
+                let mut text = format!(
+                    "Shares ({}): ",
+                    preview.statement.level.unwrap_or_default().as_str()
+                );
+                for (index, story) in preview.statement.stories.iter().enumerate() {
+                    if index != 0 {
+                        text.push_str(" · ");
+                    }
+                    text.push_str(story.key.as_str());
+                    if let Some(state) = story.state {
+                        text.push(' ');
+                        text.push_str(state.as_str());
+                    }
+                }
+                text
+            }
+        };
+        for text in [shares.as_str(), NOT_SHARED] {
+            lines.extend(
+                wrap_text(text, width.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|line| Line::from(format!("  {line}"))),
+            );
+        }
     }
     if pending.node_resolvable {
         match &pending.stage {
@@ -624,6 +663,7 @@ fn queue_recipient_action(
         ClientFrame::ReplyToRecipientItem { .. }
             | ClientFrame::DeferRecipientItem { .. }
             | ClientFrame::AcknowledgeRecipientItem { .. }
+            | ClientFrame::ShareRecipientStatus { .. }
             | ClientFrame::ResolvePeerDraft { .. }
             | ClientFrame::SetRecipientContext { .. }
     );
@@ -850,6 +890,16 @@ async fn recipient_surface_key(
                 ClientFrame::DeferRecipientItem { item_id }
             } else {
                 ClientFrame::AcknowledgeRecipientItem { item_id }
+            };
+            queue_recipient_action(state, input, frame, frame_tx, false);
+        }
+        RecipientSurfaceAction::ShareStatus | RecipientSurfaceAction::DeclineStatus => {
+            let RecipientSurfaceTarget::Item(address) = &surface.target else {
+                return false;
+            };
+            let frame = ClientFrame::ShareRecipientStatus {
+                item_id: address.item().as_str().to_owned(),
+                decline: action == RecipientSurfaceAction::DeclineStatus,
             };
             queue_recipient_action(state, input, frame, frame_tx, false);
         }
@@ -2901,7 +2951,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 && approvals.pending.is_empty()
             {
                 pending_peer_response(&conversation)
-                    .map(|pending| peer_response_card_lines(&pending, read_only))
+                    .map(|pending| peer_response_card_lines(&pending, read_only, usize::from(layout.chat_pane.width.saturating_sub(2))))
             } else {
                 None
             };
@@ -5185,10 +5235,318 @@ mod tests {
             node_id: node.to_owned(),
             item_address: None,
             stories: None,
+            status: None,
             message_type: crate::domain::models::SemanticMessageType::Consultation,
             sender_label: "sender".to_owned(),
             stage,
             node_resolvable: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn story19_24_status_surface_slots_and_access_boundaries() {
+        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::domain::models::{
+            PeerRowStage, SemanticMessageType, StatusDisclosure, StatusPreview,
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let address = append_received_test_item(
+            &journal,
+            "ri_status_slots",
+            SemanticMessageType::StatusRequest,
+            "status request",
+        )
+        .await;
+        let mut control = peer_control("status-node", PeerRowStage::AwaitingOperator);
+        control.item_address = Some(address.clone());
+        control.message_type = SemanticMessageType::StatusRequest;
+        let mut conversation = Conversation {
+            messages: vec![peer_row("status-row", "waiting")],
+            peer_row_controls: [("status-row".to_owned(), control)].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut state = TuiState::new(80, 24);
+        super::super::recipient_surface::open_received_surface(
+            workspace.path(),
+            Some(&conversation),
+            address.item().as_str(),
+            &mut state,
+            RecipientSurfaceAccess::Writer,
+            super::super::recipient_view::ReceivedThreadWindow::Newest,
+        )
+        .await
+        .unwrap();
+        // Compare against the unchanged no-preview surface at every other stage/type.
+        for message_type in [
+            SemanticMessageType::StatusRequest,
+            SemanticMessageType::Consultation,
+            SemanticMessageType::ArchitectureUpdate,
+            SemanticMessageType::StoryAssignment,
+            SemanticMessageType::BugReport,
+            SemanticMessageType::Unknown,
+        ] {
+            for stage in [
+                PeerRowStage::AwaitingOperator,
+                PeerRowStage::Drafting,
+                PeerRowStage::Ready,
+                PeerRowStage::Settled,
+            ] {
+                for resolvable in [false, true] {
+                    state.recipient_surface.as_mut().unwrap().message_type = message_type;
+                    let control = conversation
+                        .peer_row_controls
+                        .get_mut("status-row")
+                        .unwrap();
+                    control.message_type = message_type;
+                    control.stage = stage;
+                    control.node_resolvable = resolvable;
+                    control.status = None;
+                    let baseline = recipient_surface_actions(&state, &conversation, false);
+                    conversation
+                        .peer_row_controls
+                        .get_mut("status-row")
+                        .unwrap()
+                        .status = Some(StatusPreview::new(StatusDisclosure::None, &[]));
+                    let actions = recipient_surface_actions(&state, &conversation, false);
+                    // A restored (unresolvable) card keeps the status acts,
+                    // as it keeps `[r] Respond`; the daemon's orphan arm answers.
+                    if message_type == SemanticMessageType::StatusRequest
+                        && stage == PeerRowStage::AwaitingOperator
+                    {
+                        assert!(
+                            actions
+                                == [
+                                    Some(RecipientSurfaceAction::Respond),
+                                    Some(RecipientSurfaceAction::Busy),
+                                    Some(RecipientSurfaceAction::ShareStatus),
+                                    None,
+                                    Some(RecipientSurfaceAction::DeclineStatus),
+                                    baseline[5],
+                                ]
+                        );
+                    } else {
+                        assert!(actions == baseline);
+                    }
+                }
+            }
+        }
+        state.recipient_surface.as_mut().unwrap().message_type = SemanticMessageType::StatusRequest;
+        let control = conversation
+            .peer_row_controls
+            .get_mut("status-row")
+            .unwrap();
+        control.stage = PeerRowStage::AwaitingOperator;
+        control.node_resolvable = true;
+        for access in [
+            RecipientSurfaceAccess::ReadOnly,
+            RecipientSurfaceAccess::LocalOnly,
+        ] {
+            state.recipient_surface.as_mut().unwrap().access = access;
+            assert!(
+                recipient_surface_actions(&state, &conversation, false)
+                    .iter()
+                    .all(Option::is_none)
+            );
+        }
+        state.recipient_surface.as_mut().unwrap().access = RecipientSurfaceAccess::Writer;
+        assert!(
+            recipient_surface_actions(&state, &conversation, true)
+                .iter()
+                .all(Option::is_none)
+        );
+        state.recipient_surface.as_mut().unwrap().item_state = Some("removed");
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert!(!actions.contains(&Some(RecipientSurfaceAction::ShareStatus)));
+        assert!(!actions.contains(&Some(RecipientSurfaceAction::DeclineStatus)));
+        state.recipient_surface.as_mut().unwrap().item_state = Some("received");
+        state.recipient_surface.as_mut().unwrap().target =
+            RecipientSurfaceTarget::Node("status-node".to_owned());
+        let actions = recipient_surface_actions(&state, &conversation, false);
+        assert!(!actions.contains(&Some(RecipientSurfaceAction::ShareStatus)));
+        assert!(!actions.contains(&Some(RecipientSurfaceAction::DeclineStatus)));
+    }
+
+    #[tokio::test]
+    async fn story19_24_status_keys_correlate_suppress_duplicates_and_release_failed_enqueue() {
+        use crate::adapters::daemon::protocol::{RecipientAction, RecipientActionTarget};
+        use crate::adapters::tui::state::{RecipientActionState, RecipientSurfaceAccess};
+        use crate::domain::models::{
+            PeerRowStage, SemanticMessageType, StatusDisclosure, StatusPreview,
+        };
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let address = append_received_test_item(
+            &journal,
+            "ri_status_keys",
+            SemanticMessageType::StatusRequest,
+            "status request",
+        )
+        .await;
+        let mut control = peer_control("status-node", PeerRowStage::AwaitingOperator);
+        control.item_address = Some(address.clone());
+        control.message_type = SemanticMessageType::StatusRequest;
+        control.status = Some(StatusPreview::new(StatusDisclosure::None, &[]));
+        let conversation = Conversation {
+            messages: vec![peer_row("status-row", "waiting")],
+            peer_row_controls: [("status-row".to_owned(), control)].into_iter().collect(),
+            ..Default::default()
+        };
+        for (key, decline) in [('s', false), ('n', true)] {
+            let mut state = TuiState::new(80, 24);
+            super::super::recipient_surface::open_received_surface(
+                workspace.path(),
+                Some(&conversation),
+                address.item().as_str(),
+                &mut state,
+                RecipientSurfaceAccess::Writer,
+                super::super::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+            .unwrap();
+            let mut input = "unfinished operator text".to_owned();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            recipient_surface_key(
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                workspace.path(),
+                &conversation,
+                &mut input,
+                &mut state,
+                Some(&tx),
+            )
+            .await;
+            assert!(matches!(rx.try_recv().unwrap(),
+                ClientFrame::ShareRecipientStatus { item_id, decline: actual }
+                    if item_id == "ri_status_keys" && actual == decline));
+            let action_key = (
+                RecipientAction::ShareStatus,
+                RecipientActionTarget::Item {
+                    item_id: "ri_status_keys".to_owned(),
+                },
+            );
+            assert!(matches!(
+                state.recipient_actions.get(&action_key),
+                Some(RecipientActionState::Pending { .. })
+            ));
+            let surface = state.recipient_surface.as_ref().unwrap();
+            let notices =
+                crate::adapters::tui::handlers::recipient_actions::surface_action_notices(
+                    &state.recipient_actions,
+                    &surface.target,
+                    surface.node_id.as_deref(),
+                )
+                .map(|notice| notice.into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(notices, vec!["applying status reply for ri_status_keys…"]);
+            let actions = recipient_surface_actions(&state, &conversation, false);
+            assert!(actions[2].is_none() && actions[4].is_none());
+            for duplicate in ['s', 'n'] {
+                recipient_surface_key(
+                    KeyEvent::new(KeyCode::Char(duplicate), KeyModifiers::NONE),
+                    workspace.path(),
+                    &conversation,
+                    &mut input,
+                    &mut state,
+                    Some(&tx),
+                )
+                .await;
+            }
+            assert!(rx.try_recv().is_err());
+            assert_eq!(input, "unfinished operator text");
+            state.recipient_actions.clear();
+            drop(rx);
+            assert!(!queue_recipient_action(
+                &mut state,
+                &mut input,
+                ClientFrame::ShareRecipientStatus {
+                    item_id: "ri_status_keys".to_owned(),
+                    decline
+                },
+                &tx,
+                false,
+            ));
+            assert!(matches!(state.recipient_actions.get(&action_key),
+                Some(RecipientActionState::Completed { notice }) if !notice.is_empty()));
+            let actions = recipient_surface_actions(&state, &conversation, false);
+            assert!(actions[2] == Some(RecipientSurfaceAction::ShareStatus));
+            assert!(actions[4] == Some(RecipientSurfaceAction::DeclineStatus));
+            assert_eq!(input, "unfinished operator text");
+        }
+    }
+
+    #[test]
+    fn story19_24_status_card_preview_forms_wrap_without_truncation() {
+        use crate::domain::models::{
+            HeldStory, PeerRowStage, ReceiptState, StatusDisclosure, StatusPreview, StoryKey,
+        };
+        let held = (0..64)
+            .map(|index| HeldStory {
+                key: StoryKey::parse(&format!("S7-{index:02}")).unwrap(),
+                state: ReceiptState::Acknowledged,
+            })
+            .collect::<Vec<_>>();
+        for (level, stories, expected) in [
+            (
+                StatusDisclosure::None,
+                held.as_slice(),
+                "Shares nothing: your sharing level is none",
+            ),
+            (
+                StatusDisclosure::Minimal,
+                &[][..],
+                "Shares nothing: no stories are assigned to you on this host",
+            ),
+            (
+                StatusDisclosure::Minimal,
+                held.as_slice(),
+                "Shares (minimal): S7-00",
+            ),
+            (
+                StatusDisclosure::Status,
+                held.as_slice(),
+                "Shares (status): S7-00 acknowledged",
+            ),
+        ] {
+            let mut control = peer_control("status", PeerRowStage::AwaitingOperator);
+            control.status = Some(StatusPreview::new(level, stories));
+            let conversation = Conversation {
+                messages: vec![peer_row("status", "private request body")],
+                peer_row_controls: [("status".to_owned(), control)].into_iter().collect(),
+                ..Default::default()
+            };
+            let pending = pending_peer_response(&conversation).unwrap();
+            let lines = peer_response_card_lines(&pending, false, 60);
+            let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+            assert!(
+                text.iter()
+                    .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 60),
+                "{text:?}"
+            );
+            let joined = text
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(joined.contains(expected), "{joined}");
+            assert!(
+                joined.contains("Not shared: conversations, plans, files, activity"),
+                "{joined}"
+            );
+            if level != StatusDisclosure::None && !stories.is_empty() {
+                for story in stories {
+                    assert!(joined.contains(story.key.as_str()), "{joined}");
+                }
+            }
+            assert!(!joined.contains("private request body"));
         }
     }
 
@@ -5211,7 +5569,7 @@ mod tests {
                 ..Default::default()
             };
             let pending = pending_peer_response(&conversation).unwrap();
-            let lines = peer_response_card_lines(&pending, false);
+            let lines = peer_response_card_lines(&pending, false, 58);
             let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
             if let Some(expected) = expected {
                 assert_eq!(text[1], expected);
@@ -5418,6 +5776,7 @@ mod tests {
                     node_id: format!("node-{index}"),
                     item_address: Some(address.clone()),
                     stories: None,
+                    status: None,
                     message_type,
                     sender_label: "test sender".to_owned(),
                     stage: PeerRowStage::AwaitingOperator,
@@ -5548,6 +5907,7 @@ mod tests {
                         node_id: "story-assignment-node".to_owned(),
                         item_address: Some(address.clone()),
                         stories: None,
+                        status: None,
                         message_type,
                         sender_label: "test sender".to_owned(),
                         stage: crate::domain::models::PeerRowStage::AwaitingOperator,
@@ -5730,6 +6090,7 @@ mod tests {
                         node_id: "bug".into(),
                         item_address: Some(address.clone()),
                         stories: None,
+                        status: None,
                         message_type: SemanticMessageType::BugReport,
                         sender_label: "sender".into(),
                         stage,

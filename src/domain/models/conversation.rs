@@ -190,6 +190,8 @@ pub struct PeerRowControl {
     pub item_address: Option<super::ItemAddress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stories: Option<super::StorySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<super::StatusPreview>,
     pub message_type: super::SemanticMessageType,
     pub sender_label: String,
     pub stage: PeerRowStage,

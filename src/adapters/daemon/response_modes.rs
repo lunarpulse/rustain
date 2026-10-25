@@ -152,6 +152,7 @@ pub(crate) enum DraftState {
         content: String,
         authorship: Authorship,
         send_authorization: SendAuthorization,
+        status: Option<crate::domain::models::StatusStatement>,
     },
     Rejected,
 }
@@ -170,6 +171,7 @@ pub(crate) enum DraftResolution {
     Edit(String),
     Reject,
     WriteOwn(String),
+    ShareStatus(crate::domain::models::StatusStatement),
 }
 
 #[derive(Default)]
@@ -236,17 +238,26 @@ impl PendingDraftController {
                 content: std::mem::take(content),
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
+                status: None,
             },
             DraftResolution::Edit(edited) => DraftState::Sent {
                 content: edited,
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
+                status: None,
             },
             DraftResolution::Reject => DraftState::Rejected,
             DraftResolution::WriteOwn(human) => DraftState::Sent {
                 content: human,
                 authorship: Authorship::HumanWritten,
                 send_authorization: SendAuthorization::HumanDecided,
+                status: None,
+            },
+            DraftResolution::ShareStatus(statement) => DraftState::Sent {
+                content: statement.text(),
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
+                status: Some(statement),
             },
         };
         *state = next;
@@ -313,6 +324,7 @@ mod tests {
                 content: "edited answer".to_owned(),
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
+                status: None,
             })
         );
         assert_eq!(
@@ -321,6 +333,7 @@ mod tests {
                 content: "edited answer".to_owned(),
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
+                status: None,
             }),
             "a settled resolution is idempotent"
         );
@@ -342,6 +355,7 @@ mod tests {
                 content: "human response".to_owned(),
                 authorship: Authorship::HumanWritten,
                 send_authorization: SendAuthorization::HumanDecided,
+                status: None,
             })
         );
     }
@@ -359,6 +373,7 @@ mod tests {
                 content: "generated".to_owned(),
                 authorship: Authorship::AgentComposed,
                 send_authorization: SendAuthorization::HumanDecided,
+                status: None,
             })
         );
     }
@@ -500,6 +515,31 @@ mod tests {
         assert_eq!(
             super::pending_draft_content("[draft rejected]\nsomething"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn story19_24_share_status_is_human_decided_agent_composed_and_immutable() {
+        let controller = PendingDraftController::default();
+        let statement = crate::domain::models::StatusStatement::nothing();
+        assert!(controller.begin("status").await);
+        assert!(controller.complete("status", "").await);
+        let sent = controller
+            .resolve("status", DraftResolution::ShareStatus(statement.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            sent,
+            DraftState::Sent {
+                content: "No status shared.".to_owned(),
+                authorship: Authorship::AgentComposed,
+                send_authorization: SendAuthorization::HumanDecided,
+                status: Some(statement),
+            }
+        );
+        assert_eq!(
+            controller.resolve("status", DraftResolution::Reject).await,
+            Some(sent)
         );
     }
 }

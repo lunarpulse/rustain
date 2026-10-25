@@ -38,12 +38,9 @@ use crate::domain::models::{
     A2aPeerSpec, EffectivePolicy, INDIVIDUAL_POLICY_FILE, IndividualPolicy, InvalidMessageTypeKey,
     InvalidMessageTypeKeyReason, MessageTypeOverride, NotificationUrgency, PeerId, PolicyPrincipal,
     PolicySource, Resolved, ResponseMode, SemanticMessageType, SenderBinding, SenderIdentity,
-    SenderIdentityConflict, SenderPolicy, SharingBreadth, TEAM_POLICY_FILE, TeamPolicy,
-    TeamTypeOverride, TransparencyInvariant, semantic_message_type_metadata,
+    SenderIdentityConflict, SenderPolicy, SharingBreadth, StatusDisclosure, TEAM_POLICY_FILE,
+    TeamPolicy, TeamTypeOverride, TransparencyInvariant, semantic_message_type_metadata,
 };
-
-/// The deferral that owns sharing-breadth enforcement semantics.
-pub const SHARING_DEFERRAL: &str = "DF-18-3b-SHARING-SEMANTICS";
 
 /// The deferral that owns the consent projection this story stubs.
 pub const CONSENT_DEFERRAL: &str = "DF-18-3b-CONSENT-PROJECTION";
@@ -114,11 +111,14 @@ pub fn resolve_effective_policy(
     // Sharing breadth is NOT merged. Neither `max` (which would force disclosure
     // past consent, violating FR96) nor `min` (which would cap a member who
     // chooses to share more, violating `prd.md:863`) is correct, because the
-    // quantity binds in neither direction. The value passes through untouched and
-    // the team's is carried alongside as a displayed norm.
+    // quantity binds in neither direction. Only the member's parsed level
+    // applies; the team's raw value remains an advisory norm.
     let individual_sharing = individual.defaults.status_detail_minimum.clone();
     let sharing = SharingBreadth {
-        effective: individual_sharing.clone(),
+        effective: individual_sharing
+            .as_deref()
+            .and_then(StatusDisclosure::from_token)
+            .unwrap_or_default(),
         source: if individual_sharing.is_some() {
             PolicySource::Individual {
                 file: INDIVIDUAL_POLICY_FILE.to_owned(),
@@ -731,32 +731,62 @@ pub fn explain_effective_policy(
         }),
     }
 
-    // ── sharing breadth: neither a floor nor a ceiling. Saying "not enforced"
-    //    out loud is the point; silence would imply enforcement ──
+    // Sharing is member-owned. The team norm informs, never gates or merges.
     let sharing = &policy.sharing;
-    rows.push(match (&sharing.team_norm, &sharing.effective) {
-        (Some(norm), effective) => PolicyRow {
-            key: "sharing_breadth".to_owned(),
-            detail: format!(
-                "sharing breadth: team norm `{norm}` ({TEAM_POLICY_FILE}). Not enforced by this \
-                 version — yours applies unchanged ({}).",
-                describe_sharing(effective.as_deref())
-            ),
-            guidance: Some(format!(
-                "A team norm can never raise how much you disclose. Enforcement semantics are \
-                 deferred ({SHARING_DEFERRAL}); today the value in {INDIVIDUAL_POLICY_FILE} is \
-                 the only one that governs."
-            )),
-            notice: PolicyNotice::Warning,
-        },
-        (None, effective) => PolicyRow {
-            key: "sharing_breadth".to_owned(),
-            detail: format!(
-                "sharing breadth: {} — yours applies; no team norm is configured.",
-                describe_sharing(effective.as_deref())
-            ),
-            guidance: None,
-            notice: PolicyNotice::Info,
+    let level = sharing.effective.as_str();
+    let invalid_individual = sharing
+        .individual
+        .as_deref()
+        .filter(|raw| StatusDisclosure::from_token(raw).is_none());
+    let norm = sharing
+        .team_norm
+        .as_deref()
+        .and_then(StatusDisclosure::from_token);
+    let invalid_norm = sharing
+        .team_norm
+        .as_deref()
+        .filter(|raw| StatusDisclosure::from_token(raw).is_none());
+    let mut detail = if let Some(raw) = invalid_individual {
+        format!(
+            "sharing breadth: `{raw}` is not a sharing level (none, minimal, status); none applies."
+        )
+    } else if let Some(raw) = invalid_norm {
+        format!(
+            "sharing breadth: {level} (yours) — team norm `{raw}` is not a sharing level; it is shown, never applied."
+        )
+    } else if let Some(norm) = norm {
+        let relation = match sharing.effective.cmp(&norm) {
+            std::cmp::Ordering::Less => "narrower than",
+            std::cmp::Ordering::Greater => "broader than",
+            std::cmp::Ordering::Equal => "the same as",
+        };
+        format!(
+            "sharing breadth: {level} (yours) is {relation} the team norm {} ({TEAM_POLICY_FILE}). Yours applies; the team norm is advisory.",
+            norm.as_str()
+        )
+    } else {
+        format!("sharing breadth: {level} (yours) — no team norm is configured.")
+    };
+    if invalid_individual.is_some() {
+        if let Some(raw) = invalid_norm {
+            detail.push_str(&format!(
+                " The team norm `{raw}` is not a sharing level; it is shown, never applied."
+            ));
+        } else if let Some(norm) = norm {
+            detail.push_str(&format!(
+                " The team norm {} ({TEAM_POLICY_FILE}) is advisory; it is not applied.",
+                norm.as_str()
+            ));
+        }
+    }
+    rows.push(PolicyRow {
+        key: "sharing_breadth".to_owned(),
+        detail,
+        guidance: None,
+        notice: if invalid_individual.is_some() || invalid_norm.is_some() {
+            PolicyNotice::Warning
+        } else {
+            PolicyNotice::Info
         },
     });
 
@@ -1148,13 +1178,6 @@ fn describe_team_input<T: std::fmt::Display>(team: Option<&T>) -> String {
     }
 }
 
-fn describe_sharing(value: Option<&str>) -> String {
-    match value {
-        Some(value) => format!("yours: `{value}`"),
-        None => "you configured none".to_owned(),
-    }
-}
-
 fn source_tail(source: &PolicySource) -> String {
     match source.file() {
         Some(file) => format!("source: {} ({file})", source.label()),
@@ -1256,7 +1279,13 @@ mod tests {
     /// is where a polarity flip would actually bite.
     #[test]
     fn effective_sharing_is_never_broader_than_individual_consent() {
-        let breadths = [None, Some("story-only"), Some("story-and-blockers")];
+        let breadths = [
+            None,
+            Some("none"),
+            Some("minimal"),
+            Some("status"),
+            Some("invalid"),
+        ];
         for individual_mode in ALL_MODES {
             for individual_urgency in ALL_URGENCIES {
                 for individual_sharing in &breadths {
@@ -1274,8 +1303,12 @@ mod tests {
 
                                 assert_eq!(
                                     effective.sharing.effective,
-                                    individual_sharing.map(str::to_owned),
-                                    "sharing breadth must pass through untouched"
+                                    individual_sharing
+                                        .and_then(
+                                            crate::domain::models::StatusDisclosure::from_token
+                                        )
+                                        .unwrap_or_default(),
+                                    "only the member's parsed level applies"
                                 );
                                 assert!(
                                     effective.automation.value <= individual_mode,
@@ -2198,8 +2231,8 @@ status_request = "queue"
             "automation must not be described as a floor: {automation}"
         );
 
-        // Sharing claims no enforcement.
-        assert!(sharing.contains("Not enforced"), "{sharing}");
+        // Sharing applies the member's parsed level, never a team floor.
+        assert!(sharing.contains("none applies"), "{sharing}");
         assert!(sharing.contains("team norm"), "{sharing}");
         assert!(
             !sharing.contains("floor"),
@@ -2503,5 +2536,106 @@ status_request = "queue"
             }
             assert_eq!(row.notice, PolicyNotice::Warning);
         }
+    }
+
+    fn assert_sharing_sentence(
+        individual_level: Option<&str>,
+        norm: Option<&str>,
+        sentence: &str,
+        warning: bool,
+    ) {
+        let mut individual = IndividualPolicy::default();
+        individual.defaults.status_detail_minimum = individual_level.map(str::to_owned);
+        let mut team = TeamPolicy::default();
+        team.overrides.status_detail_minimum = norm.map(str::to_owned);
+        let effective = resolve_effective_policy(&individual, Some(&team), &[]);
+        let explanation = explain_effective_policy(&effective, &[]);
+        let row = explanation
+            .rows
+            .iter()
+            .find(|row| row.key == "sharing_breadth")
+            .unwrap();
+        assert_eq!(row.detail, sentence);
+        assert_eq!(row.notice == PolicyNotice::Warning, warning);
+    }
+
+    #[test]
+    fn sharing_no_norm_is_advisory() {
+        assert_sharing_sentence(
+            None,
+            None,
+            "sharing breadth: none (yours) — no team norm is configured.",
+            false,
+        );
+    }
+
+    #[test]
+    fn sharing_narrower_norm_is_advisory() {
+        assert_sharing_sentence(
+            Some("minimal"),
+            Some("status"),
+            "sharing breadth: minimal (yours) is narrower than the team norm status (team-policy.toml). Yours applies; the team norm is advisory.",
+            false,
+        );
+    }
+
+    #[test]
+    fn sharing_broader_norm_is_advisory() {
+        assert_sharing_sentence(
+            Some("status"),
+            Some("minimal"),
+            "sharing breadth: status (yours) is broader than the team norm minimal (team-policy.toml). Yours applies; the team norm is advisory.",
+            false,
+        );
+    }
+
+    #[test]
+    fn sharing_equal_norm_is_advisory() {
+        assert_sharing_sentence(
+            Some("minimal"),
+            Some("minimal"),
+            "sharing breadth: minimal (yours) is the same as the team norm minimal (team-policy.toml). Yours applies; the team norm is advisory.",
+            false,
+        );
+    }
+
+    #[test]
+    fn sharing_unknown_member_token_warns_and_applies_none() {
+        assert_sharing_sentence(
+            Some("story-only"),
+            None,
+            "sharing breadth: `story-only` is not a sharing level (none, minimal, status); none applies.",
+            true,
+        );
+    }
+
+    #[test]
+    fn sharing_unknown_team_token_warns_without_applying_it() {
+        assert_sharing_sentence(
+            Some("minimal"),
+            Some("everything"),
+            "sharing breadth: minimal (yours) — team norm `everything` is not a sharing level; it is shown, never applied.",
+            true,
+        );
+    }
+
+    #[test]
+    fn sharing_unknown_member_token_with_a_valid_norm_never_says_yours_applies() {
+        assert_sharing_sentence(
+            Some("story-only"),
+            Some("status"),
+            "sharing breadth: `story-only` is not a sharing level (none, minimal, status); none applies. The team norm status (team-policy.toml) is advisory; it is not applied.",
+            true,
+        );
+    }
+
+    #[test]
+    fn sharing_unknown_member_and_team_tokens_name_both_and_apply_none() {
+        assert_sharing_sentence(
+            Some("story-only"),
+            Some("everything"),
+            "sharing breadth: `story-only` is not a sharing level (none, minimal, status); none applies. The team norm `everything` is not a sharing level; it is shown, never applied.",
+            true,
+        );
     }
 }

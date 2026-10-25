@@ -10,6 +10,9 @@ pub(crate) fn action_key(frame: &ClientFrame) -> Option<(RecipientAction, Recipi
     let (action, item_id) = match frame {
         ClientFrame::ReplyToRecipientItem { item_id, .. } => (RecipientAction::Reply, item_id),
         ClientFrame::DeferRecipientItem { item_id } => (RecipientAction::Defer, item_id),
+        ClientFrame::ShareRecipientStatus { item_id, .. } => {
+            (RecipientAction::ShareStatus, item_id)
+        }
         ClientFrame::AcknowledgeRecipientItem { item_id } => {
             (RecipientAction::Acknowledge, item_id)
         }
@@ -244,6 +247,10 @@ pub(crate) fn abort_unsent_action(
             RecipientAction::Defer,
             RecipientActionTarget::Item { item_id },
         ),
+        ClientFrame::ShareRecipientStatus { item_id, .. } => (
+            RecipientAction::ShareStatus,
+            RecipientActionTarget::Item { item_id },
+        ),
         ClientFrame::AcknowledgeRecipientItem { item_id } => (
             RecipientAction::Acknowledge,
             RecipientActionTarget::Item { item_id },
@@ -288,6 +295,7 @@ fn action_notice<'a>(
             let noun = match action {
                 RecipientAction::Acknowledge => "acknowledgement",
                 RecipientAction::Defer => "defer reply",
+                RecipientAction::ShareStatus => "status reply",
                 RecipientAction::Reply | RecipientAction::Response => "response",
                 RecipientAction::ContextSelect => "context selection",
                 RecipientAction::ContextRemove => "context removal",
@@ -445,6 +453,44 @@ mod tests {
     use super::*;
     use crate::adapters::daemon::protocol::{PeerDraftAction, ProtocolError};
     use crate::adapters::tui::state::{PeerComposeAction, PinnedPeerCompose};
+
+    #[test]
+    fn status_share_and_decline_share_one_pending_key_and_notice() {
+        let mut state = TuiState::new(80, 24);
+        let share = ClientFrame::ShareRecipientStatus {
+            item_id: "ri_status".to_owned(),
+            decline: false,
+        };
+        let decline = ClientFrame::ShareRecipientStatus {
+            item_id: "ri_status".to_owned(),
+            decline: true,
+        };
+        assert_eq!(action_key(&share), action_key(&decline));
+        assert_eq!(
+            action_key(&share),
+            Some((
+                RecipientAction::ShareStatus,
+                RecipientActionTarget::Item {
+                    item_id: "ri_status".to_owned(),
+                }
+            ))
+        );
+        assert!(begin_action(&mut state, &share, None));
+        assert!(!begin_action(&mut state, &decline, None));
+        assert_eq!(state.recipient_actions.len(), 1);
+        assert_eq!(
+            state.feedback_blocks["recipient-actions"].message,
+            "applying status reply for ri_status…"
+        );
+        let mut input = "unfinished operator text".to_owned();
+        abort_unsent_action(&mut state, &mut input, share, "channel closed".to_owned());
+        assert_eq!(input, "unfinished operator text");
+        assert!(matches!(
+            state.recipient_actions.values().next(),
+            Some(RecipientActionState::Completed { notice }) if notice == "channel closed"
+        ));
+        assert!(begin_action(&mut state, &decline, None));
+    }
 
     #[test]
     fn unrelated_result_does_not_release_composition_and_refusal_restores_its_pin() {

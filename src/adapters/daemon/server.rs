@@ -57,6 +57,7 @@ mod frame_decode;
 mod peer_rows;
 use peer_rows::{peer_row_control, rap_rooted_peer, snapshot_peer_row_controls};
 mod rap_inbound;
+mod reply_acts;
 use rap_inbound::DaemonPeerConsumer;
 mod team;
 use team::TeamSendPayload;
@@ -3269,19 +3270,26 @@ impl AttachServer {
             .resolve(node_id.as_str(), resolution)
             .await
             .ok_or_else(|| "peer draft resolution was rejected".to_owned())?;
-        let (content, authorship, send_authorization, sent) = match state {
+        let (content, authorship, send_authorization, status, sent) = match state {
             super::response_modes::DraftState::Sent {
                 content,
                 authorship,
                 send_authorization,
-            } => (content, authorship, send_authorization, true),
+                status,
+            } => (content, authorship, send_authorization, status, true),
             super::response_modes::DraftState::Rejected => (
                 String::new(),
                 crate::domain::models::Authorship::HumanWritten,
                 crate::domain::models::SendAuthorization::Unknown,
+                None,
                 false,
             ),
             _ => return Err("peer draft did not reach a terminal resolution".to_owned()),
+        };
+        let kind = if status.is_some() {
+            crate::domain::models::ReplyKind::Status
+        } else {
+            crate::domain::models::ReplyKind::Answer
         };
         let journal = self
             .room_journal
@@ -3293,6 +3301,8 @@ impl AttachServer {
             .reply_turn_for_resolution(
                 node_id,
                 &content,
+                kind,
+                status.as_ref(),
                 authorship,
                 send_authorization,
                 sent,
@@ -3420,10 +3430,13 @@ impl AttachServer {
     /// remaining steps, and a different text or a reject is refused (`M37`).
     /// A reject with no turn, and a node with no item, record nothing.
     #[cfg(feature = "a2a")]
+    #[allow(clippy::too_many_arguments)]
     async fn reply_turn_for_resolution(
         &self,
         node_id: &AgentId,
         content: &str,
+        kind: crate::domain::models::ReplyKind,
+        status: Option<&crate::domain::models::StatusStatement>,
         authorship: crate::domain::models::Authorship,
         send_authorization: crate::domain::models::SendAuthorization,
         sent: bool,
@@ -3454,12 +3467,21 @@ impl AttachServer {
             &loaded
         };
         if let Some(existing) = projection.reply_for_node(node_id) {
-            if sent && existing.content == content {
+            if sent
+                && existing.content == content
+                && existing.kind == kind
+                && existing.status.as_ref() == status
+            {
                 return Ok(Some(RecipientReplyReceipt {
                     item_id: existing.answers.as_str().to_owned(),
                     turn_id: existing.address.turn().as_str().to_owned(),
                     kind: existing.kind,
                 }));
+            }
+            if kind == crate::domain::models::ReplyKind::Status
+                && existing.kind == crate::domain::models::ReplyKind::Status
+            {
+                return Err("status was already shared for this item".to_owned());
             }
             return Err(
                 "this card was already answered with a recorded reply; only that same answer can \
@@ -3481,6 +3503,22 @@ impl AttachServer {
             tracing::info!(node = %node_id, "peer response resolved for a node with no recipient item; no reply turn recorded");
             return Ok(None);
         };
+        if kind == crate::domain::models::ReplyKind::Status {
+            let snapshot = projection.snapshot();
+            if let Some(existing) = reply_acts::status_reply_for_item(&snapshot, &item) {
+                if existing.content == content
+                    && existing.kind == kind
+                    && existing.status.as_ref() == status
+                {
+                    return Ok(Some(RecipientReplyReceipt {
+                        item_id: existing.answers.as_str().to_owned(),
+                        turn_id: existing.address.turn().as_str().to_owned(),
+                        kind: existing.kind,
+                    }));
+                }
+                return Err("status was already shared for this item".to_owned());
+            }
+        }
         let turn = claim_reply_turn_id(fresh_reply_turn_candidate(), |id| {
             projection.holds_reply_turn_id(id)
         })
@@ -3490,27 +3528,31 @@ impl AttachServer {
                 address: TurnAddress::answering(&item.address, turn.clone()),
                 answers: item.address.item().clone(),
                 content: content.to_owned(),
-                kind: crate::domain::models::ReplyKind::Answer,
+                kind,
                 authorship,
                 via_node: Some(node_id.clone()),
                 send_authorization,
+                status: status.map(crate::domain::models::StatusStatement::to_wire),
             })
             .await
             .map_err(|error| error.to_string())?;
         Ok(Some(RecipientReplyReceipt {
             item_id: item.address.item().as_str().to_owned(),
             turn_id: turn.as_str().to_owned(),
-            kind: crate::domain::models::ReplyKind::Answer,
+            kind,
         }))
     }
 
     /// Without the `a2a` feature no inbound A2A node exists, so no card
     /// resolution can answer a recipient item.
     #[cfg(not(feature = "a2a"))]
+    #[allow(clippy::too_many_arguments)]
     async fn reply_turn_for_resolution(
         &self,
         _node_id: &AgentId,
         _content: &str,
+        _kind: crate::domain::models::ReplyKind,
+        _status: Option<&crate::domain::models::StatusStatement>,
         _authorship: crate::domain::models::Authorship,
         _send_authorization: crate::domain::models::SendAuthorization,
         _sent: bool,
@@ -4063,7 +4105,7 @@ impl AttachServer {
             };
             let turn_id = turn.as_str().to_owned();
             let orphan_rows = self
-                .orphan_response_mutations(&projection, &item, &text)
+                .orphan_response_mutations(&projection, &item, &text, Authorship::HumanWritten)
                 .await;
             if let Err(error) = journal
                 .record_event(RoomEvent::RecipientItemReplied {
@@ -4074,6 +4116,7 @@ impl AttachServer {
                     authorship: Authorship::HumanWritten,
                     send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
                     via_node: None,
+                    status: None,
                 })
                 .await
             {
@@ -4108,124 +4151,6 @@ impl AttachServer {
                         item_id: item_id.to_owned(),
                         turn_id,
                         kind: ReplyKind::Answer,
-                    }),
-                },
-            )
-            .await;
-        }
-    }
-
-    /// Record an independent local defer turn without touching the pending
-    /// peer-response card or its controller. The normal item gate and journal
-    /// projection remain the sole authority for addressing and state.
-    async fn defer_recipient_item(
-        &self,
-        conn_id: u64,
-        mode: AttachMode,
-        tier: ConnectionTier,
-        item_id: &str,
-    ) {
-        let target = RecipientActionTarget::Item {
-            item_id: item_id.to_owned(),
-        };
-        #[cfg(not(feature = "a2a"))]
-        {
-            let _ = (mode, tier);
-            self.send_recipient_action_result(
-                conn_id,
-                RecipientAction::Defer,
-                target,
-                RecipientActionOutcome::Refused {
-                    error: ProtocolError::Malformed(
-                        "`/team defer` needs the `a2a` feature; this build was compiled without it."
-                            .to_owned(),
-                    ),
-                },
-            )
-            .await;
-        }
-        #[cfg(feature = "a2a")]
-        {
-            use crate::domain::models::{RecipientItemState, ReplyKind};
-
-            let _reply_guard = self.peer_reply_serial.lock().await;
-            let (item, projection, journal) =
-                match self.find_recipient_item(mode, tier, "defer", item_id).await {
-                    Ok(found) => found,
-                    Err(error) => {
-                        drop(_reply_guard);
-                        self.send_recipient_action_result(
-                            conn_id,
-                            RecipientAction::Defer,
-                            target,
-                            RecipientActionOutcome::Refused { error },
-                        )
-                        .await;
-                        return;
-                    }
-                };
-            let refuse = |error| RecipientActionOutcome::Refused { error };
-            if matches!(item.state, RecipientItemState::Removed { .. }) {
-                drop(_reply_guard);
-                self.send_recipient_action_result(
-                    conn_id,
-                    RecipientAction::Defer,
-                    target,
-                    refuse(ProtocolError::Malformed(RECIPIENT_ITEM_REMOVED.to_owned())),
-                )
-                .await;
-                return;
-            }
-            let turn = match crate::domain::models::claim_reply_turn_id(
-                crate::domain::models::fresh_reply_turn_candidate(),
-                |id| projection.holds_reply_turn_id(id),
-            ) {
-                Ok(turn) => turn,
-                Err(error) => {
-                    drop(_reply_guard);
-                    self.send_recipient_action_result(
-                        conn_id,
-                        RecipientAction::Defer,
-                        target,
-                        refuse(ProtocolError::Internal(error.to_string())),
-                    )
-                    .await;
-                    return;
-                }
-            };
-            let turn_id = turn.as_str().to_owned();
-            if let Err(error) = journal
-                .record_event(crate::domain::models::RoomEvent::RecipientItemReplied {
-                    address: crate::domain::models::TurnAddress::answering(&item.address, turn),
-                    answers: item.address.item().clone(),
-                    content: "Busy — defer 30m".to_owned(),
-                    kind: ReplyKind::Defer { minutes: 30 },
-                    authorship: crate::domain::models::Authorship::HumanWritten,
-                    send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
-                    via_node: None,
-                })
-                .await
-            {
-                drop(_reply_guard);
-                self.send_recipient_action_result(
-                    conn_id,
-                    RecipientAction::Defer,
-                    target,
-                    refuse(ProtocolError::Internal(error.to_string())),
-                )
-                .await;
-                return;
-            }
-            drop(_reply_guard);
-            self.send_recipient_action_result(
-                conn_id,
-                RecipientAction::Defer,
-                target,
-                RecipientActionOutcome::Applied {
-                    reply: Some(RecipientReplyReceipt {
-                        item_id: item_id.to_owned(),
-                        turn_id,
-                        kind: ReplyKind::Defer { minutes: 30 },
                     }),
                 },
             )
@@ -4292,6 +4217,7 @@ impl AttachServer {
         projection: &crate::adapters::policy::JournalRecipientItemProjection,
         item: &crate::domain::models::RecipientItemView,
         content: &str,
+        authorship: crate::domain::models::Authorship,
     ) -> Vec<PeerRowMutation> {
         let conversation = self.conversation.lock().await;
         let mut mutations = Vec::new();
@@ -4319,7 +4245,7 @@ impl AttachServer {
             mutations.push(PeerRowMutation::ReplaceContent {
                 row_id: message.id.clone(),
                 content: content.to_owned(),
-                authorship: crate::domain::models::Authorship::HumanWritten,
+                authorship,
                 send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
                 control: Some(settled),
             });
@@ -4799,6 +4725,10 @@ impl AttachServer {
             }
             ClientFrame::DeferRecipientItem { item_id } => {
                 self.defer_recipient_item(conn_id, mode, tier, &item_id)
+                    .await;
+            }
+            ClientFrame::ShareRecipientStatus { item_id, decline } => {
+                self.share_recipient_status(conn_id, mode, tier, &item_id, decline)
                     .await;
             }
             ClientFrame::InspectRecipientContext => {
@@ -6785,11 +6715,16 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 } else {
                     true
                 };
-            let (item_address, item_alias, stories) = self
-                .item_context_for_node(&task.node_id)
+            let (item_address, item_alias, stories, status) = self
+                .item_context_for_node(&task.node_id, task.response_policy.status_disclosure)
                 .await
-                .map_or((None, None, None), |context| {
-                    (Some(context.address), context.alias, context.stories)
+                .map_or((None, None, None, None), |context| {
+                    (
+                        Some(context.address),
+                        context.alias,
+                        context.stories,
+                        context.status,
+                    )
                 });
             // The durable ingress alias is display-only; policy authority stays on the principal.
             let sender_label = item_alias
@@ -6797,6 +6732,16 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                 .unwrap_or(task.principal.peer().as_str());
             match task.response_policy.mode {
                 crate::domain::models::ResponseMode::NotifyAndWait => {
+                    let mut control = peer_row_control(
+                        &task.node_id,
+                        item_address.clone(),
+                        stories.clone(),
+                        &task.response_policy.provenance,
+                        sender_label,
+                        PeerRowStage::AwaitingOperator,
+                        true,
+                    );
+                    control.status = status;
                     let row_guard = self.peer_row_serial.lock().await;
                     if !self.pending_drafts.begin(task.node_id.as_str()).await {
                         return Err(InboundPeerError::Register(
@@ -6834,15 +6779,7 @@ impl crate::domain::ports::InboundPeerRuntime for AttachServer {
                             synthetic: true,
                             ..Default::default()
                         },
-                        control: Some(peer_row_control(
-                            &task.node_id,
-                            item_address.clone(),
-                            stories.clone(),
-                            &task.response_policy.provenance,
-                            sender_label,
-                            PeerRowStage::AwaitingOperator,
-                            true,
-                        )),
+                        control: Some(control),
                     });
                     if let Err(error) = commit_peer_rows_serialized(
                         &self.conversation,
@@ -12323,6 +12260,7 @@ mod tests {
                 node_id: wait_node.as_str().to_owned(),
                 item_address: None,
                 stories: None,
+                status: None,
                 message_type: crate::domain::models::SemanticMessageType::Unknown,
                 sender_label: "peer".to_owned(),
                 stage: PeerRowStage::AwaitingOperator,
@@ -12953,13 +12891,13 @@ mod tests {
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         // Server issues a challenge first; the version check precedes proof work,
         // so a wrong declared version is rejected before the proof is examined.
-        // Story 19.21d: a v10 client cannot decode the new story fields.
+        // Story 19.24: a v11 client cannot decode the status frame and preview.
         let signer = test_signer(1);
         let _ = read_attach_challenge(&mut stream).await;
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: 10,
+                protocol_version: 11,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -12972,8 +12910,8 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, 10);
-                assert_eq!(daemon, 11);
+                assert_eq!(client, 11);
+                assert_eq!(daemon, 12);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }

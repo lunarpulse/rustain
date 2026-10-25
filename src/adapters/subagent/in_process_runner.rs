@@ -8069,6 +8069,7 @@ mod tests {
                     send_authorization: _,
                     kind,
                     via_node,
+                    ..
                 } => {
                     lines.push(format!(
                         "journal RecipientItemReplied address={address:?} answers={answers:?} \

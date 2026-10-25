@@ -488,7 +488,7 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v11**; a client speaking another version
+attach handshake negotiates **protocol v12**; a client speaking another version
 receives `VersionMismatch` before proof verification, registration or other
 attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
@@ -649,6 +649,30 @@ An undecodable first frame receives
 and closes; the client shows its existing `daemon rejected attach: …` message.
 A request-keyed frame that cannot be decoded cannot echo its key, so that
 request gets no settle. Between same-version builds this is unreachable.
+
+Protocol v12 (Story 19.24): `ShareRecipientStatus`; `PeerRowControl` carries
+the status preview. A trusted-local writer can Share the stored arrival-time
+preview or Decline on a NotifyAndWait `status_request` card that awaits the
+operator, including one restored after a daemon restart (the turn is then
+appended directly and the card settled). Read-only and Peer-tier attachments
+cannot decide. Share and Decline append human-decided, agent-composed Status
+turns; retrying the same decision is idempotent (and settles a card whose save
+failed), and a different decision cannot replace a settled turn.
+
+The member's `status_detail_minimum` chooses `none`, `minimal` (held story keys)
+or `status` (keys plus received/acknowledged receipt state), with absent/invalid
+values applying `none`. The team norm is advisory and never changes that level.
+Decline, `none` and no held stories have the same canonical empty status and
+reply text; the local preview reason is never served. No conversation, plan,
+file, activity or other-item metadata is added. See
+[Sharing status under your policy](a2a.md#sharing-status-under-your-policy-story-1924)
+for the exhaustive field/privacy rules.
+
+The status action board pulls existing threads under their normal
+`threadReads`, bound-peer and item-capability gates; read failures do not become
+empty status. The statement is the sharing host's report, not authenticated
+evidence of progress. NotifyAndAuto remains template-only and leaves the report
+awaiting a reply; no automatic Status act or new inference path is introduced.
 
 Only host act producers write send authorization. It is never imported from an
 attached client's frame or an A2A/RAP peer payload. Session and journal files

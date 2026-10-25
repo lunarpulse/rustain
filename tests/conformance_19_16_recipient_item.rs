@@ -264,6 +264,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         send_authorization: rustain::domain::models::SendAuthorization::HumanDecided,
         kind: ReplyKind::Answer,
         via_node: Some(AgentId::parse("reply-node").expect("valid reply node")),
+        status: None,
     };
     let mut legacy_replied = serde_json::to_value(&replied).expect("serialize reply turn");
     assert_eq!(legacy_replied["via_node"], "reply-node");
@@ -715,6 +716,7 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
             send_authorization: rustain::domain::models::SendAuthorization::HumanDecided,
             kind: ReplyKind::Answer,
             via_node: None,
+            status: None,
         })
         .expect("reply serializes")
     };
@@ -814,6 +816,7 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
         send_authorization: rustain::domain::models::SendAuthorization::HumanDecided,
         kind: ReplyKind::Answer,
         via_node: None,
+        status: None,
     })
     .expect("event serializes");
     assert!(answer_event.get("kind").is_none(), "Answer remains omitted");
@@ -826,6 +829,7 @@ fn reply_kind_journal_values_are_bounded_and_bad_tags_do_not_break_the_fold() {
         send_authorization: rustain::domain::models::SendAuthorization::HumanDecided,
         kind: ReplyKind::Defer { minutes: 30 },
         via_node: None,
+        status: None,
     })
     .expect("defer event serializes");
     assert_eq!(

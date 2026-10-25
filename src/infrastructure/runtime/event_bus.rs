@@ -714,6 +714,7 @@ mod tests {
                 send_authorization: SendAuthorization::HumanDecided,
                 kind: ReplyKind::Answer,
                 via_node: None,
+                status: None,
             },
         ] {
             let is_reply = matches!(&event, RoomEvent::RecipientItemReplied { .. });

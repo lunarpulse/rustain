@@ -22,11 +22,33 @@ pub(super) struct StoryRecipient {
     pub sender: InboundHttpSender,
     pub client: AttachedClient,
     pub view: Conversation,
+    pub policy: Arc<rustain::domain::models::EffectivePolicy>,
     cursor: usize,
 }
 
 impl StoryRecipient {
     pub async fn start(mode: ResponseMode) -> Self {
+        Self::start_for_type(mode, "story_assignment", None).await
+    }
+
+    pub async fn start_status(mode: ResponseMode, level: &str) -> Self {
+        Self::start_for_type(mode, "status_request", Some(level)).await
+    }
+
+    pub async fn start_for_type(
+        mode: ResponseMode,
+        message_type: &str,
+        level: Option<&str>,
+    ) -> Self {
+        Self::start_for_type_with_norm(mode, message_type, level, None).await
+    }
+
+    pub async fn start_for_type_with_norm(
+        mode: ResponseMode,
+        message_type: &str,
+        level: Option<&str>,
+        norm: Option<&str>,
+    ) -> Self {
         let identity = InboundSenderIdentity::new("story-sender");
         let peer_id = identity.identity.peer_id.clone();
         let peers = vec![pinned_peer_for_inbound_sender(&identity)];
@@ -46,23 +68,27 @@ impl StoryRecipient {
             defaults: IndividualDefaults {
                 response_mode: Some(ResponseMode::NotifyAndAuto),
                 notification: Some(NotificationUrgency::Immediate),
+                status_detail_minimum: level.map(str::to_owned),
                 ..IndividualDefaults::default()
             },
             ..IndividualPolicy::default()
         };
         let mut team = TeamPolicy::default();
+        team.overrides.status_detail_minimum = norm.map(str::to_owned);
         team.overrides.per_type.insert(
-            "story_assignment".into(),
+            message_type.into(),
             toml::Value::try_from(TeamTypeOverride {
                 response_mode: Some(mode),
                 notification: None,
             })
             .expect("story response-mode override"),
         );
-        let policy = rustain::domain::services::team_policy::resolve_effective_policy(
-            &individual,
-            Some(&team),
-            &peers,
+        let policy = Arc::new(
+            rustain::domain::services::team_policy::resolve_effective_policy(
+                &individual,
+                Some(&team),
+                &peers,
+            ),
         );
         let room = journal.room.clone();
         let daemon = AttachedDaemon::compose_with_clock_and_test_hooks_and_policy(
@@ -73,7 +99,7 @@ impl StoryRecipient {
                 1_800_000_000_000,
             )),
             TeamSendTestHooks::new(None, None, false),
-            Some(Arc::new(policy)),
+            Some(policy.clone()),
         )
         .await;
         daemon.wait_for_pinned_sender_consent(&peer_id).await;
@@ -88,6 +114,7 @@ impl StoryRecipient {
             sender,
             client,
             view,
+            policy,
             cursor: 0,
         }
     }

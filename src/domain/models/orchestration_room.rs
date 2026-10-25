@@ -1214,6 +1214,13 @@ pub enum RoomEvent {
         /// future kind. Older journal rows default to Answer.
         #[serde(default, skip_serializing_if = "ReplyKind::is_answer")]
         kind: ReplyKind,
+        /// Raw tolerant payload: validation belongs to the recipient fold.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "super::status_statement::deserialize_raw_status"
+        )]
+        status: Option<serde_json::Value>,
         /// The peer-response node whose card this turn resolved (`Q1`): the
         /// journal — not the draft controller — enforces one turn per node.
         #[serde(default, skip_serializing_if = "Option::is_none")]

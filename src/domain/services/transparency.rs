@@ -2215,6 +2215,7 @@ mod tests {
             send_authorization: SendAuthorization::Unknown,
             kind: ReplyKind::Answer,
             via_node: None,
+            status: None,
         };
         for event in [disclosure, reply] {
             let is_reply = matches!(&event, RoomEvent::RecipientItemReplied { .. });
@@ -2284,6 +2285,7 @@ mod tests {
                         send_authorization,
                         kind: ReplyKind::Answer,
                         via_node: None,
+                        status: None,
                     },
                 ];
                 for event in events {

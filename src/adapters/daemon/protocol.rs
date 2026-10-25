@@ -47,7 +47,8 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// v10 (2026-10-24, Story 19.21c): attached thread/followup/retract parity and
 /// request-keyed shared view streams; reject older clients before proof.
 /// v11 (Story 19.21d): TeamSend carries stories; PeerRowControl carries the story summary; an undecodable client frame is answered and skipped
-pub const PROTOCOL_VERSION: u32 = 11;
+/// v12 (Story 19.24): ShareRecipientStatus; PeerRowControl carries the status preview
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -596,6 +597,9 @@ pub enum ClientFrame {
     /// Record a fixed local defer turn without resolving the pending real answer.
     /// Trusted-local + read-write + room-content role; no reverse delivery.
     DeferRecipientItem { item_id: String },
+    /// Share the prepared arrival-time status statement, or canonical nothing.
+    /// Trusted-local writer only; never accepts client-supplied status fields.
+    ShareRecipientStatus { item_id: String, decline: bool },
     /// Read cached selection/last-use diagnostics without assembly or mutation.
     InspectRecipientContext,
     /// Select/off a daemon-owned received item reference, never a client body.
@@ -806,6 +810,7 @@ pub enum PeerShareOutcome {
 pub enum RecipientAction {
     Reply,
     Defer,
+    ShareStatus,
     Acknowledge,
     Response,
     ContextSelect,
@@ -1340,6 +1345,14 @@ mod tests {
             ClientFrame::DeferRecipientItem {
                 item_id: "ri-1".into(),
             },
+            ClientFrame::ShareRecipientStatus {
+                item_id: "ri-1".into(),
+                decline: false,
+            },
+            ClientFrame::ShareRecipientStatus {
+                item_id: "ri-1".into(),
+                decline: true,
+            },
             ClientFrame::EnableTeamProposals,
             ClientFrame::TeamProposalDecision {
                 proposal: "tp_send".into(),
@@ -1466,6 +1479,7 @@ mod tests {
                         item_address: None,
                         message_type: crate::domain::models::SemanticMessageType::Consultation,
                         stories: None,
+                        status: None,
                         sender_label: "peer-1".into(),
                         stage: crate::domain::models::PeerRowStage::AwaitingOperator,
                         node_resolvable: true,
@@ -1548,6 +1562,19 @@ mod tests {
                         item_id: "ri-1".into(),
                         turn_id: "rr-defer".into(),
                         kind: crate::domain::models::ReplyKind::Defer { minutes: 30 },
+                    }),
+                },
+            },
+            DaemonFrame::RecipientActionResult {
+                action: RecipientAction::ShareStatus,
+                target: RecipientActionTarget::Item {
+                    item_id: "ri-1".into(),
+                },
+                outcome: RecipientActionOutcome::Applied {
+                    reply: Some(RecipientReplyReceipt {
+                        item_id: "ri-1".into(),
+                        turn_id: "rr-status".into(),
+                        kind: crate::domain::models::ReplyKind::Status,
                     }),
                 },
             },

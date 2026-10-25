@@ -799,9 +799,18 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
             content,
             authorship,
             kind,
+            status,
             via_node,
             ..
         } => {
+            let parsed_status = status
+                .as_ref()
+                .and_then(crate::domain::models::StatusStatement::from_wire);
+            let kind = if status.is_some() && parsed_status.is_none() {
+                ReplyKind::Unknown
+            } else {
+                *kind
+            };
             snapshot
                 .replies
                 .entry(address.clone())
@@ -810,7 +819,8 @@ fn transition_recipient_item(snapshot: &mut RecipientItemSnapshot, order: u64, e
                     answers: answers.clone(),
                     content: content.clone(),
                     authorship: *authorship,
-                    kind: *kind,
+                    kind,
+                    status: parsed_status,
                     via_node: via_node.clone(),
                     journal_order: order,
                 });
@@ -868,6 +878,57 @@ mod tests {
 
     fn entry(seq: u64, event: RoomEvent) -> JournalEntry {
         JournalEntry::new(seq, JournalRecord::Room(event), seq as i64)
+    }
+
+    #[test]
+    fn story19_24_journal_status_is_tolerant_and_legacy_bytes_stay_identical() {
+        let legacy = r#"{"event":"recipient_item_replied","address":{"principal":{"kind":"unknown"},"turn":"rr_old"},"answers":"ri_old","content":"answer","authorship":"human-written"}"#;
+        let event: RoomEvent = serde_json::from_str(legacy).expect("literal legacy reply");
+        assert_eq!(serde_json::to_string(&event).unwrap(), legacy);
+        let projection = JournalRecipientItemProjection::from_entries(&[entry(1, event)]);
+        let snapshot = projection.snapshot();
+        let old = snapshot.replies.values().next().unwrap();
+        assert_eq!(old.kind, ReplyKind::Answer);
+        assert_eq!(old.status, None);
+
+        let mut raw: serde_json::Value = serde_json::from_str(legacy).unwrap();
+        raw["kind"] = serde_json::json!({"type": "status"});
+        let payloads = [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!({"stories": "no"}),
+            serde_json::json!({"level": "status", "stories": [{"key":"S1"}]}),
+            serde_json::json!({"level": "minimal", "stories": []}),
+            serde_json::json!({"level":"minimal","stories":(0..65).map(|i| serde_json::json!({"key":format!("S{i}")})).collect::<Vec<_>>()}),
+        ];
+        for status in payloads {
+            raw["status"] = status;
+            let event: RoomEvent = serde_json::from_value(raw.clone())
+                .expect("malformed status is not a corrupt journal record");
+            let projection = JournalRecipientItemProjection::from_entries(&[entry(1, event)]);
+            let snapshot = projection.snapshot();
+            let reply = snapshot.replies.values().next().unwrap();
+            assert_eq!(reply.kind, ReplyKind::Unknown, "{}", raw["status"]);
+            assert_eq!(reply.status, None);
+        }
+        raw["status"] = serde_json::json!({"level":"minimal","stories":[{"key":"S1"}]});
+        let event = serde_json::from_value(raw.clone()).unwrap();
+        let projection = JournalRecipientItemProjection::from_entries(&[entry(1, event)]);
+        let snapshot = projection.snapshot();
+        let reply = snapshot.replies.values().next().unwrap();
+        assert_eq!(reply.kind, ReplyKind::Status);
+        assert_eq!(reply.status.as_ref().unwrap().to_wire(), raw["status"]);
+        raw.as_object_mut().unwrap().remove("status");
+        let event = serde_json::from_value(raw).unwrap();
+        let projection = JournalRecipientItemProjection::from_entries(&[entry(1, event)]);
+        let snapshot = projection.snapshot();
+        let reply = snapshot.replies.values().next().unwrap();
+        assert_eq!(
+            reply.kind,
+            ReplyKind::Status,
+            "an absent field preserves the legacy kind"
+        );
+        assert_eq!(reply.status, None);
     }
 
     fn story_event(
@@ -1054,6 +1115,7 @@ mod tests {
             authorship: crate::domain::models::Authorship::HumanWritten,
             send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             via_node: None,
+            status: None,
         };
         let mut entries = vec![entry(1, received)];
         for (seq, turn, malformed) in [(2, "rr_future", false), (3, "rr_malformed", true)] {
@@ -1296,6 +1358,7 @@ mod tests {
             send_authorization: crate::domain::models::SendAuthorization::HumanDecided,
             kind: ReplyKind::Answer,
             via_node: None,
+            status: None,
         };
         let events = vec![
             item(&asker, "ri_q", None),

@@ -360,7 +360,7 @@ ratified remedies 512) are disclosure bounds, not a width rule, and keep their
 
 ## Live daemon recipient rows
 
-Daemon attachments use protocol **v11**. Continuously attached trusted-local
+Daemon attachments use protocol **v12**. Continuously attached trusted-local
 writers and read-only observers receive revisioned peer-row upserts and removals
 only after successful persistence. Snapshot and live updates use the same row
 identity; duplicate or older updates cannot restore a settled/deleted card.
@@ -601,6 +601,76 @@ hardening row; Story 19.18d's per-peer credential binding (see
 API-key callers only: a key bound to a pinned peer reads that peer's own legacy
 items' threads with `threadReads` off (a capability-bearing item still needs its
 capability).
+
+## Sharing status under your policy (Story 19.24)
+
+For `status_request` messages handled by NotifyAndWait, the answering host
+prepares a status preview once, at arrival. The member owns
+`[interaction.defaults] status_detail_minimum` in `.rustain/a2a-interaction.toml`:
+
+| Level | Shared fields |
+|---|---|
+| `none` | Nothing. This is the default when the key is absent. |
+| `minimal` | Keys of stories this host currently holds. |
+| `status` | Those keys plus receipt state: `received` or `acknowledged`. These are receipt facts, not work progress. |
+
+An unrecognised level loads safely as `none`; the policy explainer names the raw
+token. Held stories come from the latest readable received story lists per
+sender naming the key with holder `You`; removed/retracted items are excluded.
+Keys are deduplicated, in holding-item journal order, with at most 64 entries.
+The newest holding item supplies the receipt state when senders share a key.
+
+**Never reported at any level:**
+
+- Conversation or transcript content and titles.
+- Plans, tasks and their status.
+- Files, diffs and paths.
+- Tool, model or agent activity.
+- Operator activity, idle/busy state and timestamps.
+- Any other item's body, subject, sender, alias or pin, including who assigned a story.
+- Consent, roster or policy contents beyond the member's own level name.
+
+The request's body, subject and sender cannot select more fields. The statement
+is the sharing host's report, not authenticated evidence of work or progress.
+
+On the attached, focused status-request card, `[s] Share status` sends exactly
+the stored preview; later assignments and policy changes do not expand it.
+`[n] Decline` sends no status. Both are human-decided, agent-composed Status
+reply turns, with at most one per item. `[r] Respond` still lets you write your
+own Answer, and `[b] Busy — defer 30m` remains available.
+
+Decline, sharing at `none`, and sharing when no stories are held are deliberately
+indistinguishable on the wire (apart from ids): `status: {"stories":[]}` and
+`No status shared.` No level or local reason is exposed. Non-empty replies use
+`replyKind:"status"` with `status: {"level":"minimal","stories":[{"key":"S7-03"}]}`;
+at `status`, each story also has `"state":"received"` or `"state":"acknowledged"`.
+Withheld content also withholds the status object. Thread and item views mark
+the result as status shared under the host's policy, or no status shared.
+
+The requester's `/team board --action <action-id>` (or `--last`) is the report. It pulls the
+thread of each row's latest action-correlated item through that row's bound
+peer, using the existing reader and capability derivation. It counts only
+replies to that item, not sibling or follow-up replies. The report therefore
+depends on the same `server.threadReads`, peer-credential binding and per-item
+capability rules described above/below; it does not bypass a refused or failed
+read. Rows show shared keys and their source, limited-detail disclosure for
+`minimal`, and any manually shared Answer as a quoted note. Empty status and
+send-time decline show `no status shared` / `Source: —`; unanswered or Defer-only
+rows show `awaiting reply` (with the reported defer expectation). Unknown or
+withheld status shows `status not readable by this build`, never raw content.
+A row whose send never reached an item (sending, awaiting approval, a question
+asked, accepted without an item, no usable answer, no outcome recorded, or an
+unrecognised outcome), a failed read, unreachable and not sent keep their usual
+board labels. There are no participation counts or story-progress aggregates.
+
+The team norm `[team.overrides] status_detail_minimum` in `team-policy.toml`
+is **advisory**: the explainer compares narrower/broader/the same and says yours
+applies. It never raises or caps your level, prompts for acknowledgement, or
+reveals the norm to the requester.
+
+NotifyAndAuto remains **template-only**: it adds no automatic Status reply,
+so its report row remains `awaiting reply`. This feature adds no inference
+path; NotifyAndDraft retains its existing inference/approval path.
 
 ## Per-item capabilities (Story 19.18c, 2026-09-30)
 

@@ -378,7 +378,7 @@ mod tests {
         for row in [
             "- notification urgency: `queue` (yours: `queue`, team: not configured) — source: default",
             "- response automation: `notify-and-wait` (yours: `notify-and-wait`, team: not configured) — source: default",
-            "- sharing breadth: you configured none — yours applies; no team norm is configured.",
+            "- sharing breadth: none (yours) — no team norm is configured.",
         ] {
             assert!(
                 clean_result.message.contains(row),

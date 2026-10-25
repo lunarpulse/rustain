@@ -36,6 +36,7 @@ pub struct PeerResponsePolicy {
     pub mode: ResponseMode,
     pub auto_response: Option<String>,
     pub notification: crate::domain::models::NotificationUrgency,
+    pub status_disclosure: crate::domain::models::StatusDisclosure,
     pub provenance: crate::domain::models::InteractionPolicySnapshot,
 }
 
@@ -45,6 +46,7 @@ impl Default for PeerResponsePolicy {
             mode: ResponseMode::NotifyAndWait,
             auto_response: None,
             notification: crate::domain::models::NotificationUrgency::Queue,
+            status_disclosure: crate::domain::models::StatusDisclosure::None,
             provenance: crate::domain::models::InteractionPolicySnapshot::default(),
         }
     }
@@ -134,6 +136,7 @@ impl DeliveryPolicy for EffectiveDeliveryPolicy {
                     .or_else(|| matched.auto_response.clone())
             }),
             notification: notification.value,
+            status_disclosure: self.policy.sharing.effective,
             provenance: crate::domain::models::InteractionPolicySnapshot {
                 sender_label: sender.map(|matched| matched.alias.clone()),
                 message_type,
@@ -220,6 +223,7 @@ mod tests {
                 mode: ResponseMode::NotifyAndAuto,
                 auto_response: Some("acknowledged".to_owned()),
                 notification: crate::domain::models::NotificationUrgency::Immediate,
+                status_disclosure: crate::domain::models::StatusDisclosure::None,
                 provenance: crate::domain::models::InteractionPolicySnapshot {
                     sender_label: Some("trusted-peer".to_owned()),
                     message_type: SemanticMessageType::Unknown,

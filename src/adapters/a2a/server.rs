@@ -2293,6 +2293,12 @@ fn thread_turn_json(
                     value["replyKind"] = serde_json::Value::from("defer");
                     value["deferMinutes"] = serde_json::Value::from(minutes);
                 }
+                ReplyKind::Status => {
+                    value["replyKind"] = serde_json::Value::from("status");
+                    if let Some(status) = &reply.status {
+                        value["status"] = status.to_wire();
+                    }
+                }
                 ReplyKind::Unknown => {
                     value["replyKind"] = serde_json::Value::from("unknown");
                 }
@@ -2315,6 +2321,7 @@ fn thread_turn_json(
 fn withhold_turn_content(value: &mut serde_json::Value) {
     if let Some(object) = value.as_object_mut() {
         object.remove("content");
+        object.remove("status");
         object.insert("contentWithheld".to_owned(), serde_json::Value::Bool(true));
     }
 }
@@ -3071,6 +3078,146 @@ async fn run_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn thread_status_fixture() -> (tempfile::TempDir, ServerState) {
+        let workspace = tempfile::tempdir().unwrap();
+        let signer = IdentityKeyStore::new(workspace.path())
+            .load_or_generate()
+            .unwrap();
+        let state = ServerState {
+            registry: Arc::new(CapabilityRegistry::new(None)),
+            signer: Arc::new(signer),
+            endpoint_url: Arc::from("http://localhost"),
+            security: A2aServerSecurity::default(),
+            runtime: None,
+            tasks: Arc::new(InboundTaskStore::default()),
+            cards: Arc::new(SignedCardCache::new()),
+            transparency: Arc::new(TransparencySink::inert()),
+            recipient_items: Arc::new(JournalRecipientItemProjection::default()),
+            recipient_items_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            recipient_items_fold: Arc::new(tokio::sync::Mutex::new(())),
+            item_allocator: Arc::new(RecipientItemAllocator::from_addresses(std::iter::empty())),
+            policy: A2aAdmissionPolicy::Deny,
+            workspace: Arc::new(workspace.path().to_path_buf()),
+            scrub_fragments: vec!["private-host-fragment".to_owned()],
+            pending_tasks: Arc::new(Mutex::new(())),
+            requires_credential: false,
+        };
+        (workspace, state)
+    }
+
+    fn thread_status_reply(
+        kind: crate::domain::models::ReplyKind,
+        status: Option<crate::domain::models::StatusStatement>,
+        content: &str,
+    ) -> ThreadTurn {
+        use crate::domain::models::{ItemAddress, ItemId, ReplyTurnId, ReplyTurnView, TurnAddress};
+
+        let item = ItemAddress::from_a2a_ingress(
+            PeerId::from_public_key(&[31; 32]).unwrap(),
+            ItemId::from_replay("ri_status"),
+        );
+        ThreadTurn::Reply(ReplyTurnView {
+            address: TurnAddress::answering(&item, ReplyTurnId::from_replay("rr_status")),
+            answers: item.item().clone(),
+            content: content.to_owned(),
+            authorship: Authorship::HumanWritten,
+            kind,
+            status,
+            via_node: None,
+            journal_order: 1,
+        })
+    }
+
+    #[test]
+    fn thread_status_serves_only_canonical_statement_and_nothing() {
+        use crate::domain::models::{ReplyKind, StatusStatement};
+
+        let (_workspace, state) = thread_status_fixture();
+        for wire in [
+            serde_json::json!({"level":"minimal","stories":[{"key":"S7-03"}]}),
+            serde_json::json!({
+                "level":"status",
+                "stories":[
+                    {"key":"S7-03","state":"received"},
+                    {"key":"S7-04","state":"acknowledged"}
+                ]
+            }),
+            serde_json::json!({"stories":[]}),
+        ] {
+            let statement = StatusStatement::from_wire(&wire).unwrap();
+            let turn = thread_status_reply(ReplyKind::Status, Some(statement), "Shared status");
+            let value = thread_turn_json(&state, 2, &turn);
+            assert_eq!(value["replyKind"], "status");
+            assert_eq!(value["status"], wire);
+            assert_eq!(value["content"], "Shared status");
+            let object = value.as_object().unwrap();
+            assert_eq!(object.len(), 8);
+            assert!(!object.contains_key("sendAuthorization"));
+            assert!(!object.contains_key("nothing_because"));
+        }
+    }
+
+    #[test]
+    fn thread_status_is_withheld_with_content_at_every_boundary() {
+        use crate::domain::models::{ReplyKind, StatusStatement};
+
+        let (_workspace, state) = thread_status_fixture();
+        for content in [
+            "private-host-fragment".to_owned(),
+            state.workspace.to_string_lossy().into_owned(),
+        ] {
+            let turn = thread_status_reply(
+                ReplyKind::Status,
+                Some(StatusStatement::nothing()),
+                &content,
+            );
+            let value = thread_turn_json(&state, 0, &turn);
+            assert_eq!(value["replyKind"], "status");
+            assert_eq!(value["contentWithheld"], true);
+            assert!(value.get("content").is_none());
+            assert!(value.get("status").is_none());
+            assert!(!value.to_string().contains(&content));
+        }
+        // The outer size boundary uses the same helper after projection.
+        let turn = thread_status_reply(
+            ReplyKind::Status,
+            Some(StatusStatement::nothing()),
+            "Shared status",
+        );
+        let mut value = thread_turn_json(&state, 0, &turn);
+        withhold_turn_content(&mut value);
+        assert_eq!(value["contentWithheld"], true);
+        assert!(value.get("content").is_none());
+        assert!(value.get("status").is_none());
+    }
+
+    #[test]
+    fn thread_status_preserves_legacy_answer_and_defer_fields() {
+        use crate::domain::models::ReplyKind;
+
+        let (_workspace, state) = thread_status_fixture();
+        for kind in [ReplyKind::Answer, ReplyKind::Defer { minutes: 30 }] {
+            let turn = thread_status_reply(kind, None, "Legacy reply");
+            let value = thread_turn_json(&state, 0, &turn);
+            let mut expected = serde_json::json!({
+                "turnId":"rr_status",
+                "kind":"reply",
+                "inReplyTo":"ri_status",
+                "authorship":"human-written",
+                "ordinal":0,
+                "content":"Legacy reply"
+            });
+            if let ReplyKind::Defer { minutes } = kind {
+                expected["replyKind"] = serde_json::json!("defer");
+                expected["deferMinutes"] = serde_json::json!(minutes);
+            }
+            assert_eq!(value, expected);
+        }
+        let turn = thread_status_reply(ReplyKind::Status, None, "No readable statement");
+        let value = thread_turn_json(&state, 0, &turn);
+        assert_eq!(value["replyKind"], "status");
+        assert!(value.get("status").is_none());
+    }
 
     #[test]
     fn a2a_version_resolution_obeys_source_order_and_numeric_components() {

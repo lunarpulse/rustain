@@ -386,11 +386,14 @@ fn ac6_real_doctor_binary_reports_the_policy_derivation_in_json() {
     assert_eq!(detail["sharing_breadth"]["merge"], "not-merged");
     assert_eq!(detail["sharing_breadth"]["enforced"], false);
     assert_eq!(detail["sharing_breadth"]["source_file"], INDIVIDUAL);
+    assert_eq!(detail["sharing_breadth"]["individual"], "story-only");
+    assert_eq!(detail["sharing_breadth"]["effective"], "none");
     assert_eq!(detail["consent"], serde_json::json!([]));
     assert_eq!(detail["journal_projection_empty"], true);
 
     assert_eq!(detail["digest_interval_minutes"], 15);
-    assert_eq!(detail["conflicts"], 2);
+    // Story 19.24 adds a named warning for the legacy opaque sharing token.
+    assert_eq!(detail["conflicts"], 3);
 
     // The human message carries the derivation too, with the three distinct
     // sentences.
@@ -398,7 +401,7 @@ fn ac6_real_doctor_binary_reports_the_policy_derivation_in_json() {
     assert!(message.contains("raised from"), "{message}");
     assert!(message.contains("lowered"), "{message}");
     assert!(
-        message.contains("Not enforced") || message.contains("no team norm"),
+        message.contains("`story-only` is not a sharing level") && message.contains("none applies"),
         "{message}"
     );
     // And the resolution guidance NFR66 demands.

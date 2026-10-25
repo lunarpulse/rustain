@@ -22,6 +22,7 @@ pub(super) fn peer_row_control(
         node_id: node_id.as_str().to_owned(),
         item_address,
         stories,
+        status: None,
         message_type: provenance.message_type,
         sender_label: provenance
             .sender_label
@@ -36,6 +37,7 @@ pub(super) struct PeerItemContext {
     pub(super) address: ItemAddress,
     pub(super) alias: Option<String>,
     pub(super) stories: Option<StorySummary>,
+    pub(super) status: Option<crate::domain::models::StatusPreview>,
 }
 
 pub(super) async fn snapshot_peer_row_controls(
@@ -70,7 +72,11 @@ pub(super) fn rap_rooted_peer(node: &AgentId) -> Option<PeerId> {
 }
 
 impl AttachServer {
-    pub(super) async fn item_context_for_node(&self, node_id: &AgentId) -> Option<PeerItemContext> {
+    pub(super) async fn item_context_for_node(
+        &self,
+        node_id: &AgentId,
+        level: crate::domain::models::StatusDisclosure,
+    ) -> Option<PeerItemContext> {
         #[cfg(feature = "a2a")]
         {
             let reader = self.room_journal_reader.as_ref()?;
@@ -92,6 +98,14 @@ impl AttachServer {
                                 .map(|list| StorySummary(story_summary(list)))
                         })
                         .flatten(),
+                    status: (item.message_type == SemanticMessageType::StatusRequest).then(|| {
+                        crate::domain::models::StatusPreview::new(
+                            level,
+                            &crate::domain::models::held_stories(
+                                projection.snapshot().items.values(),
+                            ),
+                        )
+                    }),
                     address: item.address,
                     alias: item.alias,
                 }
@@ -99,7 +113,7 @@ impl AttachServer {
         }
         #[cfg(not(feature = "a2a"))]
         {
-            let _ = node_id;
+            let _ = (node_id, level);
             None
         }
     }

@@ -148,6 +148,7 @@ fn replied_with_kind(address: TurnAddress, kind: ReplyKind) -> RoomEvent {
         send_authorization: rustain::domain::models::SendAuthorization::Unknown,
         kind,
         via_node: Some(AgentId::root()),
+        status: None,
     }
 }
 

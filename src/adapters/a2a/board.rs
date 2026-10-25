@@ -66,6 +66,9 @@ use crate::domain::services::transparency::{
     MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, sanitize_disclosable,
 };
 
+mod status_report;
+use status_report::{StatusReport, render_status_row, report_for_item};
+
 /// One recipient's own outcome, from `UX-DR-TM-02`'s ratified state set.
 ///
 /// ⛔ Four outcomes, four distinct marks, **no catch-all** (`:254`: *"No
@@ -821,6 +824,8 @@ pub struct ActionBoardRow {
     pub note: Option<RowNote>,
     /// The 19.16f picker rows beneath the row: **this action's** items only.
     pub items: Vec<BoardItem>,
+    /// Status-request-only view of the selected action-correlated item.
+    status_report: Option<StatusReport>,
 }
 
 /// The assembled action board.
@@ -913,6 +918,7 @@ fn build_row(
                 read_failed: failed,
                 note,
                 items,
+                status_report: None,
             })
         };
     let settled = |state: ActionRowState| BuiltRow {
@@ -1115,6 +1121,31 @@ pub async fn collect_action_board(
             None => view.unnameable += 1,
         }
     }
+    if view.message_type == crate::domain::models::SemanticMessageType::StatusRequest {
+        let collapsed = join_all(view.rows.iter_mut().map(|row| async {
+            if row.read_failed {
+                return false;
+            }
+            let Some(item) = row.items.iter().max_by_key(|item| item.ordinal) else {
+                return false;
+            };
+            let Some(alias) = row.bound_alias.as_deref() else {
+                return false;
+            };
+            match super::send::read_thread(runtime, alias, &item.item_id).await {
+                super::send::ThreadRead::Read { thread, .. } => {
+                    row.status_report = Some(report_for_item(&thread, &item.item_id));
+                    thread.principal_collapsed
+                }
+                _ => {
+                    row.read_failed = true;
+                    false
+                }
+            }
+        }))
+        .await;
+        view.principal_collapsed |= collapsed.into_iter().any(|collapsed| collapsed);
+    }
     runtime
         .remember_board(RememberedBoard::Action(view.clone()))
         .await;
@@ -1254,7 +1285,11 @@ pub fn render_action_board(view: &ActionBoardView, now_unix_secs: i64) -> String
         .max()
         .unwrap_or(0);
     for row in &view.rows {
-        render_action_row(&mut out, row, width);
+        if view.message_type == crate::domain::models::SemanticMessageType::StatusRequest {
+            render_status_row(&mut out, row, width);
+        } else {
+            render_action_row(&mut out, row, width);
+        }
     }
     if view.unnameable > 0 {
         out.push_str(&format!(
@@ -1267,6 +1302,9 @@ pub fn render_action_board(view: &ActionBoardView, now_unix_secs: i64) -> String
     if view.principal_collapsed {
         out.push_str(COLLAPSED_PRINCIPAL_DISCLOSURE);
         out.push('\n');
+    }
+    if view.message_type == crate::domain::models::SemanticMessageType::StatusRequest {
+        out.push_str("ℹ Each status is sourced per member's sharing policy. Detail level varies by member preference.\n");
     }
     out
 }
@@ -2260,6 +2298,7 @@ mod tests {
             read_failed: false,
             note: None,
             items: Vec::new(),
+            status_report: None,
         }
     }
 

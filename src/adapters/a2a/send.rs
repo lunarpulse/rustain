@@ -1106,6 +1106,7 @@ pub struct ServedTurn {
     /// Hash of the body this host received, when it received one.
     pub content_hash: Option<crate::domain::models::ContentHash>,
     pub kind: crate::domain::models::ReplyKind,
+    pub status: Option<crate::domain::models::StatusStatement>,
     pub authorship: crate::domain::models::Authorship,
     pub retracted_at_ms: Option<i64>,
 }
@@ -1146,7 +1147,7 @@ pub enum ThreadRead {
 }
 
 /// Read one thread on `peer_id`'s host and settle it against this host's
-/// ledger. The sole production caller is the rail-3 `/team thread` spawn.
+/// ledger. Shared by explicit `/team thread` and status action-board reads.
 pub async fn read_thread(
     runtime: &A2aDelegationRuntime,
     peer_id: &str,
@@ -1254,7 +1255,7 @@ fn transport_failure(error: &A2aError) -> RecipientOutcome {
 /// over `MAX_PEER_ID_BYTES`, or a kind this build cannot name — ⛔ never
 /// rendered as if it were a partial thread.
 pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
-    use crate::domain::models::{Authorship, MAX_REPLY_BYTES, ReplyKind};
+    use crate::domain::models::{Authorship, MAX_REPLY_BYTES, ReplyKind, StatusStatement};
 
     let bounded = |value: Option<&serde_json::Value>| {
         value
@@ -1280,6 +1281,9 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
         let content = served
             .filter(|content| content.len() <= MAX_REPLY_BYTES)
             .map(str::to_owned);
+        let parsed_status = turn.get("status").map(StatusStatement::from_wire);
+        let malformed_status = matches!(parsed_status, Some(None));
+        let status = parsed_status.flatten().filter(|_| content.is_some());
         turns.push(ServedTurn {
             turn_id,
             reply,
@@ -1288,25 +1292,33 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
             removed: turn.get("state").and_then(serde_json::Value::as_str) == Some("removed"),
             content,
             content_hash,
+            status,
             authorship: turn
                 .get("authorship")
                 .and_then(serde_json::Value::as_str)
                 .map_or(Authorship::Unknown, Authorship::from_wire),
-            kind: match turn.get("replyKind") {
-                None => ReplyKind::Answer,
-                Some(serde_json::Value::String(kind)) => match kind.as_str() {
-                    "answer" => ReplyKind::Answer,
-                    "defer" => match turn.get("deferMinutes").and_then(serde_json::Value::as_u64) {
-                        Some(minutes) if (1..=u64::from(u16::MAX)).contains(&minutes) => {
-                            ReplyKind::Defer {
-                                minutes: minutes as u16,
+            kind: if malformed_status {
+                ReplyKind::Unknown
+            } else {
+                match turn.get("replyKind") {
+                    None => ReplyKind::Answer,
+                    Some(serde_json::Value::String(kind)) => match kind.as_str() {
+                        "answer" => ReplyKind::Answer,
+                        "status" => ReplyKind::Status,
+                        "defer" => {
+                            match turn.get("deferMinutes").and_then(serde_json::Value::as_u64) {
+                                Some(minutes) if (1..=u64::from(u16::MAX)).contains(&minutes) => {
+                                    ReplyKind::Defer {
+                                        minutes: minutes as u16,
+                                    }
+                                }
+                                _ => ReplyKind::Unknown,
                             }
                         }
                         _ => ReplyKind::Unknown,
                     },
-                    _ => ReplyKind::Unknown,
-                },
-                Some(_) => ReplyKind::Unknown,
+                    Some(_) => ReplyKind::Unknown,
+                }
             },
             retracted_at_ms: turn
                 .get("retractedAtMs")
@@ -1348,6 +1360,130 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
 
 #[cfg(test)]
 mod tests {
+    fn parse_status_turn(
+        kind: Option<&str>,
+        status: Option<serde_json::Value>,
+        content: Option<&str>,
+    ) -> super::ServedTurn {
+        let mut turn = serde_json::json!({"turnId":"rr_status", "kind":"reply"});
+        if let Some(kind) = kind {
+            turn["replyKind"] = serde_json::json!(kind);
+        }
+        if let Some(status) = status {
+            turn["status"] = status;
+        }
+        if let Some(content) = content {
+            turn["content"] = serde_json::json!(content);
+        }
+        parse_thread(&serde_json::json!({"root":"ri_q", "turns":[turn]}))
+            .expect("additive status cannot refuse a thread")
+            .turns
+            .remove(0)
+    }
+
+    #[test]
+    fn status_validator_rejections_downgrade_without_refusing_the_thread() {
+        use crate::domain::models::ReplyKind;
+
+        let mut invalid = vec![
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!(1),
+            serde_json::json!("status"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({"stories":null}),
+            serde_json::json!({"stories":{}}),
+            serde_json::json!({"stories":"S7-03"}),
+            serde_json::json!({"level":"minimal","stories":[null]}),
+            serde_json::json!({"level":"minimal","stories":[{}]}),
+            serde_json::json!({"level":"minimal","stories":[{"key":12}]}),
+            serde_json::json!({"level":"minimal","stories":[{"key":"bad key"}]}),
+            serde_json::json!({"level":"minimal","stories":[{"key":"S7-03"},{"key":"S7-03"}]}),
+            serde_json::json!({"stories":[{"key":"S7-03"}]}),
+            serde_json::json!({"level":"none","stories":[{"key":"S7-03"}]}),
+            serde_json::json!({"level":"future","stories":[{"key":"S7-03"}]}),
+            serde_json::json!({"level":null,"stories":[{"key":"S7-03"}]}),
+            serde_json::json!({"level":"minimal","stories":[]}),
+            serde_json::json!({"level":null,"stories":[]}),
+            serde_json::json!({"level":"status","stories":[{"key":"S7-03"}]}),
+            serde_json::json!({"level":"minimal","stories":[{"key":"S7-03","state":"received"}]}),
+            serde_json::json!({"level":"minimal","stories":[{"key":"S7-03","state":null}]}),
+        ];
+        for state in [
+            serde_json::json!("future"),
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!(1),
+        ] {
+            invalid.push(serde_json::json!({
+                "level":"status","stories":[{"key":"S7-03","state":state}]
+            }));
+        }
+        let entries: Vec<_> = (0..65)
+            .map(|index| serde_json::json!({"key":format!("S7-{index:02}")}))
+            .collect();
+        invalid.push(serde_json::json!({"level":"minimal","stories":entries}));
+        for status in invalid {
+            for kind in [None, Some("answer"), Some("defer"), Some("status")] {
+                let turn = parse_status_turn(kind, Some(status.clone()), Some("body"));
+                assert_eq!(turn.kind, ReplyKind::Unknown, "{status}");
+                assert_eq!(turn.status, None, "{status}");
+                assert_eq!(turn.content.as_deref(), Some("body"));
+            }
+        }
+    }
+
+    #[test]
+    fn valid_status_is_typed_and_withheld_with_missing_or_oversized_content() {
+        use crate::domain::models::{MAX_REPLY_BYTES, ReplyKind, StatusStatement};
+
+        for status in [
+            serde_json::json!({"stories":[]}),
+            serde_json::json!({"level":"minimal","stories":[{"key":"S7-03"}]}),
+            serde_json::json!({"level":"status","stories":[
+                {"key":"S7-03","state":"received"},
+                {"key":"S7-05","state":"acknowledged"}
+            ]}),
+        ] {
+            let turn = parse_status_turn(Some("status"), Some(status.clone()), Some("body"));
+            assert_eq!(turn.kind, ReplyKind::Status);
+            assert_eq!(turn.status, StatusStatement::from_wire(&status));
+            let oversized = "x".repeat(MAX_REPLY_BYTES + 1);
+            for content in [None, Some(oversized.as_str())] {
+                let turn = parse_status_turn(Some("status"), Some(status.clone()), content);
+                assert_eq!(turn.kind, ReplyKind::Status);
+                assert_eq!(turn.content, None);
+                assert_eq!(turn.status, None);
+            }
+        }
+    }
+
+    #[test]
+    fn absent_status_preserves_legacy_and_status_reply_kinds() {
+        use crate::domain::models::ReplyKind;
+
+        for (wire, expected) in [
+            (None, ReplyKind::Answer),
+            (Some("answer"), ReplyKind::Answer),
+            (Some("status"), ReplyKind::Status),
+            (Some("future"), ReplyKind::Unknown),
+        ] {
+            let turn = parse_status_turn(wire, None, Some("legacy"));
+            assert_eq!(turn.kind, expected);
+            assert_eq!(turn.status, None);
+        }
+        let thread = parse_thread(&serde_json::json!({
+            "root":"ri_q", "turns":[{
+                "turnId":"rr_defer","kind":"reply","replyKind":"defer",
+                "deferMinutes":30,"content":"Busy — defer 30m"
+            }]
+        }))
+        .expect("legacy defer");
+        assert_eq!(thread.turns[0].kind, ReplyKind::Defer { minutes: 30 });
+        assert_eq!(thread.turns[0].status, None);
+    }
+
     use std::sync::Arc;
 
     use async_trait::async_trait;
