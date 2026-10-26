@@ -12,7 +12,8 @@
 use std::path::PathBuf;
 
 use crate::adapters::model_catalog_cache::{CachedCatalog, CachedModelEntry, CachedProviderEntry};
-use crate::domain::models::ModelDescriptor;
+use crate::domain::models::provider::ModelRecord;
+use crate::infrastructure::model_discovery::{CatalogLayers, LiveOutcome, merge_catalog};
 
 /// Known built-in provider metadata for the update-catalog CLI.
 struct BuiltinProvider {
@@ -102,6 +103,29 @@ pub async fn run_update_catalog(
                     eprintln!("  FAILED: empty model list — skipping to preserve existing catalog");
                     continue;
                 }
+                let bundled = catalog
+                    .providers
+                    .get(provider.id)
+                    .map(|entry| {
+                        entry
+                            .models
+                            .iter()
+                            .map(|model| model.descriptor.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let models = merge_catalog(
+                    CatalogLayers {
+                        provider_id: provider.id.to_string(),
+                        bundled,
+                        models_dev: vec![],
+                        cache: None,
+                        model_filter: vec!["*".to_string()],
+                        adapter: None,
+                    },
+                    LiveOutcome::Success(models),
+                )
+                .served;
                 let entries: Vec<CachedModelEntry> = models
                     .into_iter()
                     .map(|descriptor| CachedModelEntry { descriptor })
@@ -179,7 +203,7 @@ async fn fetch_models_with_retry(
     base_url: &str,
     api_key: &str,
     provider_id: &str,
-) -> Result<Vec<ModelDescriptor>, anyhow::Error> {
+) -> Result<Vec<ModelRecord>, anyhow::Error> {
     let url = format!(
         "{}/models",
         crate::infrastructure::utils::normalize_base_url(base_url)

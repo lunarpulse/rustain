@@ -143,20 +143,7 @@ pub async fn handle_apply_model_switch(
         .unwrap_or_else(|| model_id.clone());
 
     if !state.model_selector.active && model_desc.is_some() {
-        let providers = info.list_providers();
-        let columns: Vec<crate::adapters::tui::state::ProviderColumn> = providers
-            .into_iter()
-            .map(|pd| {
-                let models = info.list_models_by_provider(&pd.provider_id);
-                crate::adapters::tui::state::ProviderColumn {
-                    provider_id: pd.provider_id,
-                    display_name: pd.display_name,
-                    healthy: pd.healthy,
-                    models,
-                }
-            })
-            .filter(|c| !c.models.is_empty())
-            .collect();
+        let columns = crate::adapters::tui::state::model_selector_columns(info);
         if !columns.is_empty() {
             state
                 .model_selector
@@ -325,7 +312,11 @@ pub async fn handle_apply_startup_provider_fallback(
         HandlerOutcome::Notify(AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Warning,
-            message: "No provider is reachable. Start a provider (e.g. `ollama serve`) or open the model selector with Ctrl+X, M.".to_string(),
+            message: if info.list_locked_providers().is_empty() {
+                "No provider is reachable. Start a provider (e.g. `ollama serve`) or open the model selector with Ctrl+X, M."
+            } else {
+                "No provider is reachable. Sign in with `rustain auth login <provider>`, or open the model selector (Ctrl+X, M) to see locked providers."
+            }.to_string(),
         })
     }
 }

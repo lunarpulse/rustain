@@ -35,6 +35,7 @@ use crate::domain::ports::StreamingProvider;
 pub struct ProviderRouter {
     routes: ArcSwap<HashMap<String, Arc<dyn StreamingProvider>>>,
     active: ArcSwap<String>,
+    locked: ArcSwap<HashMap<String, String>>,
 }
 
 impl ProviderRouter {
@@ -46,6 +47,7 @@ impl ProviderRouter {
         Self {
             routes: ArcSwap::from_pointee(HashMap::new()),
             active: ArcSwap::from_pointee(initial_active),
+            locked: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
@@ -97,6 +99,22 @@ impl ProviderRouter {
     pub fn get_provider(&self, provider_id: &str) -> Option<Arc<dyn StreamingProvider>> {
         self.routes.load().get(provider_id).cloned()
     }
+
+    pub fn register_locked(&self, id: String, message: String) {
+        let mut locked = HashMap::clone(&self.locked.load());
+        locked.insert(id, message);
+        self.locked.store(Arc::new(locked));
+    }
+
+    fn missing_provider(&self, id: &str) -> ProviderError {
+        let suffix = self
+            .locked
+            .load()
+            .get(id)
+            .map(|hint| format!(" — {hint}"))
+            .unwrap_or_default();
+        ProviderError::Other(format!("router: no active provider '{id}'{suffix}"))
+    }
 }
 
 #[async_trait]
@@ -108,12 +126,10 @@ impl StreamingProvider for ProviderRouter {
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
         let routes = self.routes.load();
         let active_id = self.active.load();
-        let provider = routes.get(active_id.as_str()).cloned().ok_or_else(|| {
-            ProviderError::Other(format!(
-                "router: no active provider '{}'",
-                active_id.as_str()
-            ))
-        })?;
+        let provider = routes
+            .get(active_id.as_str())
+            .cloned()
+            .ok_or_else(|| self.missing_provider(active_id.as_str()))?;
         // Drop guards before await
         drop(routes);
         drop(active_id);
@@ -123,12 +139,10 @@ impl StreamingProvider for ProviderRouter {
     async fn abort(&self) -> Result<(), ProviderError> {
         let routes = self.routes.load();
         let active_id = self.active.load();
-        let provider = routes.get(active_id.as_str()).cloned().ok_or_else(|| {
-            ProviderError::Other(format!(
-                "router: no active provider '{}'",
-                active_id.as_str()
-            ))
-        })?;
+        let provider = routes
+            .get(active_id.as_str())
+            .cloned()
+            .ok_or_else(|| self.missing_provider(active_id.as_str()))?;
         drop(routes);
         drop(active_id);
         provider.abort().await

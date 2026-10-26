@@ -52,6 +52,23 @@ impl<'a> ProviderInfoPort for AppContext<'a> {
         self.app_state.provider_registry.list_providers()
     }
 
+    fn list_locked_providers(&self) -> Vec<crate::domain::models::provider::LockedProvider> {
+        self.app_state.provider_registry.list_locked()
+    }
+
+    fn discovery_status(
+        &self,
+        provider_id: &str,
+    ) -> Option<crate::domain::models::provider::DiscoveryStatus> {
+        self.app_state
+            .provider_registry
+            .discovery_status(provider_id)
+    }
+
+    fn sign_in_hint(&self, provider_id: &str) -> Option<String> {
+        self.app_state.provider_registry.sign_in_hint(provider_id)
+    }
+
     fn list_models_by_provider(&self, provider_id: &str) -> Vec<ModelDescriptor> {
         self.app_state
             .provider_registry

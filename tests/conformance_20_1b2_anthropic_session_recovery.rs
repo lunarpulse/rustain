@@ -684,7 +684,9 @@ fn binary(dir: &std::path::Path, server: &MockServer, now: i64) -> tokio::proces
 async fn cli_login(dir: &std::path::Path, server: &MockServer, at: i64, account: usize) {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
     server.reset().await;
-    Mock::given(method("POST")).and(path("/v1/oauth/token"))
+    // Discovery after login can refresh an older account. This response belongs
+    // only to the new authorization-code exchange, never that older refresh.
+    Mock::given(method("POST")).and(path("/v1/oauth/token")).and(body_partial_json(json!({"grant_type":"authorization_code"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"CLI-ACCESS","refresh_token":"CLI-REFRESH","expires_in":3600,"account":{"uuid":format!("account-{account}"),"email_address":format!("account{account}@example.test")},"organization":{"uuid":"org","name":"Smoke Org"}}))).mount(server).await;
     let mut child = binary(dir, server, at)
         .args(["auth", "login", "anthropic", "--method", "oauth"])

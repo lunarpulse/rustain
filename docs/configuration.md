@@ -17,6 +17,11 @@ rustain merges configuration from 8 possible layers using [figment](https://crat
 
 The *highest* layer that defines a key wins. Lower layers fill in fields not touched by higher layers.
 
+`RUSTAIN_CONFIG_DIR` replaces the user-global configuration directory for both
+application startup and `rustain config show`. Its `config.toml` is used from
+every working directory; a workspace configuration remains an explicit higher
+priority override.
+
 ## Naming conventions
 
 | Format | Canonical case | Examples |
@@ -72,6 +77,17 @@ RUSTAIN_LOG_LEVEL=debug rustain
 
 ### User-global TOML
 
+Provider availability is independent of the current directory: built-in keyed
+providers unlock from home credentials or environment variables without a
+`[provider.*]` entry. A configured entry replaces a built-in row wholesale when
+its key matches, or when an enabled entry has the same `kind`. The runtime does
+not write these catalogue defaults into files created by `rustain init`.
+
+Entries must include `provider_id`, `model_id` and `api_key_env`. To hide a
+built-in provider entirely, supply a complete entry with `enabled = false`;
+an incomplete `[provider.openai] enabled = false` is not a valid configuration.
+
+
 ```toml
 # ~/.config/rustain/config.toml
 model = "claude-sonnet-4-6"
@@ -80,6 +96,10 @@ model = "claude-sonnet-4-6"
 daily_limit_usd = 10.00
 
 [provider.openrouter]
+provider_id = "openrouter"
+kind = "openrouter"
+model_id = "anthropic/claude-sonnet-4.6"
+api_key_env = "OPENROUTER_API_KEY"
 enabled = true
 discover_models = true
 ```
@@ -91,6 +111,10 @@ discover_models = true
 log_level = "trace"
 
 [provider.openai]
+provider_id = "openai"
+kind = "openai"
+model_id = "gpt-5.5"
+api_key_env = "OPENAI_API_KEY"
 enabled = true
 ```
 
@@ -101,3 +125,40 @@ rustain --config-file /path/to/custom.toml
 ### Field-level merge
 
 Setting `[pricing."my-model"]` in user TOML *adds* to the built-in pricing catalog — it does not replace it. The same holds for `[provider.X]` and `[router.step_tiers]`.
+
+### Discovery and local endpoints
+
+Set `discover_models = true` to refresh the provider catalogue; built-in keyed
+rows enable it automatically. `model_filter` globs apply to every merged layer.
+Metadata is merged bundled → models.dev → matching cache → live, per ID and
+field; live IDs are authoritative. Empty success is not an outage, and does not
+replace the last-good disk cache. Cache writes are advisory-locked across
+processes, so a login CLI and long-lived sessions retain each other's provider
+entries. The cache is scoped to the effective endpoint and credential.
+
+The model selector retains empty providers and distinguishes **connected**,
+**sign in again** (401/403), **using cached model list**, **unavailable**, and
+**empty discovery**. Missing credentials instead show a locked public catalogue
+with an actionable sign-in hint. The locked catalogue never uses account cache.
+
+For an unauthenticated local OpenAI-compatible server:
+
+```toml
+[provider.local]
+provider_id = "local"
+kind = "openai-compatible"
+model_id = "my-local-model"
+api_key_env = "" # Explicitly keyless; a named-but-unset variable locks the provider.
+base_url = "http://127.0.0.1:8080/v1"
+discover_models = true
+```
+
+To hide a built-in without falling back to its bundled entry:
+
+```toml
+[provider.openai]
+provider_id = "openai"
+model_id = "gpt-5.5"
+api_key_env = "OPENAI_API_KEY"
+enabled = false
+```

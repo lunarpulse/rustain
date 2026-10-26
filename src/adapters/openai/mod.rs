@@ -26,6 +26,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::domain::errors::ProviderError;
+use crate::domain::models::provider::{ModelDescriptor, ModelRecord};
 use crate::domain::models::{CompletionOptions, Message, StreamChunk};
 use crate::domain::ports::StreamingProvider;
 
@@ -44,8 +45,7 @@ pub struct OpenAiAdapter {
     variant: OpenAiCompatibleVariant,
     #[allow(dead_code)] // Used by abort() method
     abort_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-    discovered_models:
-        Arc<arc_swap::ArcSwap<Option<Vec<crate::adapters::model_catalog_cache::CachedModelEntry>>>>,
+    discovered_models: Arc<arc_swap::ArcSwap<Option<Vec<ModelDescriptor>>>>,
 }
 
 impl OpenAiAdapter {
@@ -93,7 +93,7 @@ impl OpenAiAdapter {
     pub async fn fetch_remote_models(
         &self,
         model_filter: &[String],
-    ) -> Result<Vec<crate::domain::models::ModelDescriptor>, ProviderError> {
+    ) -> Result<Vec<ModelRecord>, ProviderError> {
         let url = format!("{}/models", self.base_url);
         let mut req = self
             .client
@@ -114,26 +114,18 @@ impl OpenAiAdapter {
                     model_filter,
                 )
             }
-            Ok(resp) if resp.status().as_u16() == 401 => Err(ProviderError::AuthenticationFailed),
+            Ok(resp) if matches!(resp.status().as_u16(), 401 | 403) => {
+                Err(ProviderError::AuthenticationFailed)
+            }
+            Ok(resp) if matches!(resp.status().as_u16(), 404 | 405) => {
+                Err(ProviderError::EndpointUnsupported(resp.status().as_u16()))
+            }
             Ok(resp) => Err(ProviderError::Other(format!(
                 "Models fetch failed: HTTP {}",
                 resp.status()
             ))),
             Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
         }
-    }
-
-    /// Overlay discovered models into `list_models()`.
-    pub fn set_discovered_models(
-        &self,
-        models: Vec<crate::adapters::model_catalog_cache::CachedModelEntry>,
-    ) {
-        self.discovered_models.store(Arc::new(Some(models)));
-    }
-
-    /// Clear the discovered models overlay (falls back to bundled snapshot).
-    pub fn clear_discovered_models(&self) {
-        self.discovered_models.store(Arc::new(None));
     }
 
     /// Single consolidated expose site for the `Authorization: Bearer` header.
@@ -293,14 +285,47 @@ impl StreamingProvider for OpenAiAdapter {
         self.variant.provider_id().to_string()
     }
 
-    fn list_models(&self) -> Vec<crate::domain::models::ModelDescriptor> {
-        let guard = self.discovered_models.load();
-        if let Some(ref entries) = **guard {
-            if !entries.is_empty() {
-                return entries.iter().map(|e| e.descriptor.clone()).collect();
+    fn discovery_credential_fingerprint(&self, context: &str) -> Option<String> {
+        use crate::adapters::model_catalog_cache::{ScopeCredential, credential_scope};
+        Some(credential_scope(
+            context,
+            ScopeCredential::Secret(&self.api_key),
+        ))
+    }
+
+    fn default_context_window(&self, model_id: &str) -> Option<u32> {
+        Some(
+            self.variant
+                .context_window_for(model_id)
+                .unwrap_or_else(|| allowlists::variant_default_context(&self.variant)),
+        )
+    }
+
+    async fn discover_models(
+        &self,
+        model_filter: &[String],
+        scope_context: &str,
+    ) -> Option<Result<crate::domain::models::provider::DiscoveredModels, ProviderError>> {
+        // The key is captured at construction, so the request always sends it.
+        let credential_scope = self.discovery_credential_fingerprint(scope_context)?;
+        Some(self.fetch_remote_models(model_filter).await.map(|records| {
+            crate::domain::models::provider::DiscoveredModels {
+                records,
+                credential_scope,
             }
+        }))
+    }
+
+    fn set_discovered_models(&self, models: Vec<ModelDescriptor>) {
+        self.discovered_models.store(Arc::new(Some(models)));
+    }
+
+    fn list_models(&self) -> Vec<ModelDescriptor> {
+        let guard = self.discovered_models.load();
+        match &**guard {
+            Some(models) => models.clone(),
+            None => self.variant.known_models(&self.model),
         }
-        self.variant.known_models(&self.model)
     }
 
     async fn health_check(&self) -> Result<(), ProviderError> {
@@ -315,7 +340,13 @@ impl StreamingProvider for OpenAiAdapter {
         let response = req.send().await;
         match response {
             Ok(resp) if resp.status().is_success() => Ok(()),
-            Ok(resp) if resp.status().as_u16() == 401 => Err(ProviderError::AuthenticationFailed),
+            Ok(resp) if matches!(resp.status().as_u16(), 401 | 403) => {
+                Err(ProviderError::AuthenticationFailed)
+            }
+            // A gateway without `/models` still answered: D4, not an outage.
+            Ok(resp) if matches!(resp.status().as_u16(), 404 | 405) => {
+                Err(ProviderError::EndpointUnsupported(resp.status().as_u16()))
+            }
             Ok(resp) => Err(ProviderError::Other(format!(
                 "Health check failed: HTTP {}",
                 resp.status()
@@ -492,29 +523,26 @@ mod tests {
         )
         .unwrap();
 
-        let m1 = crate::adapters::model_catalog_cache::CachedModelEntry {
-            descriptor: crate::domain::models::ModelDescriptor {
-                model_id: "m1".to_string(),
-                display_name: "M1".to_string(),
-                provider_id: "openai".to_string(),
-                context_window: 128_000,
-                capabilities: std::collections::HashSet::new(),
-                pricing_tier: None,
-                stale: false,
-            },
+        let m1 = ModelDescriptor {
+            model_id: "m1".to_string(),
+            display_name: "M1".to_string(),
+            provider_id: "openai".to_string(),
+            context_window: 128_000,
+            capabilities: std::collections::HashSet::new(),
+            pricing_tier: None,
+            stale: false,
         };
-        let m2 = crate::adapters::model_catalog_cache::CachedModelEntry {
-            descriptor: crate::domain::models::ModelDescriptor {
-                model_id: "m2".to_string(),
-                display_name: "M2".to_string(),
-                provider_id: "openai".to_string(),
-                context_window: 128_000,
-                capabilities: std::collections::HashSet::new(),
-                pricing_tier: None,
-                stale: false,
-            },
+        let m2 = ModelDescriptor {
+            model_id: "m2".to_string(),
+            display_name: "M2".to_string(),
+            provider_id: "openai".to_string(),
+            context_window: 128_000,
+            capabilities: std::collections::HashSet::new(),
+            pricing_tier: None,
+            stale: false,
         };
-        adapter.set_discovered_models(vec![m1.clone(), m2.clone()]);
+        let provider: &dyn StreamingProvider = &adapter;
+        provider.set_discovered_models(vec![m1, m2]);
         let models = adapter.list_models();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].model_id, "m1");
@@ -522,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_discovered_models_fallback() {
+    fn test_empty_discovered_models_stays_empty() {
         let adapter = OpenAiAdapter::new(
             OpenAiCompatibleVariant::OpenAI,
             "test-key".to_string(),
@@ -531,46 +559,92 @@ mod tests {
         )
         .unwrap();
 
-        let m1 = crate::adapters::model_catalog_cache::CachedModelEntry {
-            descriptor: crate::domain::models::ModelDescriptor {
-                model_id: "m1".to_string(),
-                display_name: "M1".to_string(),
-                provider_id: "openai".to_string(),
-                context_window: 128_000,
-                capabilities: std::collections::HashSet::new(),
-                pricing_tier: None,
-                stale: false,
-            },
-        };
-        adapter.set_discovered_models(vec![m1]);
-        adapter.clear_discovered_models();
-        let models = adapter.list_models();
-        // Falls back to embedded JSON seed (4 OpenAI models)
-        assert!(
-            models.len() == 4,
-            "expected 4 fallback models, got {}",
-            models.len()
-        );
+        assert!(!adapter.list_models().is_empty());
+        adapter.set_discovered_models(vec![]);
+        assert!(adapter.list_models().is_empty());
     }
 
-    #[test]
-    fn test_empty_discovered_models_fallback() {
+    #[tokio::test]
+    async fn discovery_and_health_classify_auth_and_unsupported_endpoints() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for status in [401, 403, 404, 405] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/models"))
+                .and(header("authorization", "Bearer test-key"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let adapter = OpenAiAdapter::new(
+                OpenAiCompatibleVariant::OpenAI,
+                "test-key".to_string(),
+                "gpt-4o".to_string(),
+                Some(format!("{}/v1", server.uri())),
+            )
+            .unwrap();
+            let provider: &dyn StreamingProvider = &adapter;
+            let error = provider
+                .discover_models(&[], "scope")
+                .await
+                .unwrap()
+                .unwrap_err();
+            match status {
+                401 | 403 => {
+                    assert!(matches!(error, ProviderError::AuthenticationFailed));
+                    assert!(matches!(
+                        provider.health_check().await,
+                        Err(ProviderError::AuthenticationFailed)
+                    ));
+                }
+                _ => {
+                    assert!(
+                        matches!(error, ProviderError::EndpointUnsupported(code) if code == status)
+                    );
+                    assert!(matches!(
+                        provider.health_check().await,
+                        Err(ProviderError::EndpointUnsupported(code)) if code == status
+                    ));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_returns_sparse_records_over_provider_port() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"data": [{"id": "gpt-sparse", "object": "model"}]}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
         let adapter = OpenAiAdapter::new(
             OpenAiCompatibleVariant::OpenAI,
             "test-key".to_string(),
             "gpt-4o".to_string(),
-            None,
+            Some(format!("{}/v1", server.uri())),
         )
         .unwrap();
-
-        adapter.set_discovered_models(vec![]);
-        let models = adapter.list_models();
-        // Empty discovered list falls back to embedded JSON seed
-        assert!(
-            models.len() == 4,
-            "expected 4 fallback models, got {}",
-            models.len()
-        );
+        let provider: &dyn StreamingProvider = &adapter;
+        let models = provider
+            .discover_models(&["*".to_string()], "scope")
+            .await
+            .unwrap()
+            .unwrap()
+            .records;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "gpt-sparse");
+        assert!(models[0].display_name.is_none());
+        assert!(models[0].context_window.is_none());
+        assert!(models[0].capabilities.is_none());
+        assert!(models[0].pricing_tier.is_none());
     }
 
     mod tool_call_ordering {

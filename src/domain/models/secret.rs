@@ -41,6 +41,31 @@ impl SecretString {
     pub fn expose_secret(&self) -> &str {
         self.0.as_str()
     }
+
+    /// Opaque, domain-separated cache identity; never exposes credential material.
+    pub fn fingerprint(&self, context: &str) -> String {
+        scope_digest(&[context.as_bytes(), self.0.as_bytes()])
+    }
+}
+
+/// First 16 hex chars of SHA-256 over `parts` joined by NUL: the one opaque
+/// cache-scope primitive, for secret and non-secret identity material alike.
+pub fn scope_digest(parts: &[&[u8]]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let mut hash = Sha256::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            hash.update([0]);
+        }
+        hash.update(part);
+    }
+    let digest = hash.finalize();
+    let mut out = String::with_capacity(16);
+    for byte in &digest[..8] {
+        write!(out, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    out
 }
 
 impl From<String> for SecretString {
@@ -88,6 +113,25 @@ pub(crate) fn expose_secret_string<S: Serializer>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_is_fixed_domain_separated_and_secret_free() {
+        let secret = SecretString::from("discovery-secret-canary");
+        let digest = secret.fingerprint("provider-a");
+        assert_eq!(digest.len(), 16);
+        assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(!digest.contains("discovery-secret-canary"));
+        assert_eq!(digest, secret.fingerprint("provider-a"));
+        assert_ne!(digest, secret.fingerprint("provider-b"));
+        assert_ne!(
+            digest,
+            SecretString::from("another-key").fingerprint("provider-a")
+        );
+        assert_ne!(
+            SecretString::from("bc").fingerprint("a"),
+            SecretString::from("c").fingerprint("ab")
+        );
+    }
 
     #[test]
     fn secretstring_debug_never_exposes_secret() {

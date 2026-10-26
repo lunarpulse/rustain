@@ -70,16 +70,26 @@ struct StatusRow {
 ///
 /// # Errors
 ///
-/// Returns `Err` only for auth-store read errors or JSON serialization failures.
+/// Returns `Err` only for JSON serialization failures; store errors are warnings.
 /// It never builds a provider and never performs network validation.
-pub async fn run_auth_status(json: bool, store: &Arc<dyn AuthStorePort>) -> Result<()> {
-    let entries = store.snapshot().await?;
-    let rows = build_status_rows(providers::all_providers(), &entries, |key| {
-        crate::infrastructure::utils::env_var_trimmed(key)
-    });
+pub async fn run_auth_status(
+    json: bool,
+    store: &Arc<dyn AuthStorePort>,
+    config: &crate::domain::models::AppConfig,
+) -> Result<()> {
+    let (entries, store_error) = super::snapshot_or_warn(store).await;
+    if let Some(error) = &store_error {
+        eprintln!("warning: auth.json unreadable; stored credentials ignored: {error}");
+    }
+    let rows = build_status_rows(
+        providers::all_providers(),
+        &entries,
+        &config.provider,
+        |key| crate::infrastructure::utils::env_var_trimmed(key),
+    );
 
     if json {
-        println!("{}", render_json(&rows)?);
+        println!("{}", render_json(&rows, store_error.as_deref())?);
     } else if rows.is_empty() {
         println!("{NO_PROVIDERS_MESSAGE}");
     } else {
@@ -94,12 +104,14 @@ pub async fn run_auth_status(json: bool, store: &Arc<dyn AuthStorePort>) -> Resu
 fn build_status_rows(
     providers: &[providers::ProviderMeta],
     snapshot: &AuthSnapshot,
+    configured: &std::collections::BTreeMap<String, crate::domain::models::ProviderConfig>,
     env_lookup: impl Fn(&str) -> Option<String>,
 ) -> Vec<StatusRow> {
     let known_ids: HashSet<&str> = providers.iter().map(|p| p.id).collect();
     let mut rows = Vec::new();
-    let mut append = |id: &str, display: &str, env_vars: &[&str]| {
-        let selected = super::source_for(id, env_vars, snapshot, &env_lookup, true);
+    let mut append = |id: &str, display: &str, default_env: &str| {
+        let selected =
+            super::source_for_configured(id, default_env, configured, snapshot, &env_lookup);
         let (source, status, last_validated, disabled_cause) = if let Some(selection) = selected {
             let stale = matches!(selection.material, SelectionMaterial::NeedsRefresh { .. });
             (
@@ -123,6 +135,14 @@ fn build_status_rows(
                 row.last_validated,
                 row.disabled_cause.clone(),
             )
+        } else if id == "anthropic"
+            && snapshot.rows(id).iter().any(|row| {
+                row.disabled_cause.is_none()
+                    && matches!(row.credential, crate::domain::models::Credential::OAuth(_))
+            })
+        {
+            // Grant lifetime reporting is independent of endpoint permission.
+            (None, AuthStatus::Unknown, None, None)
         } else {
             return;
         };
@@ -161,18 +181,16 @@ fn build_status_rows(
         });
     };
     for meta in providers.iter().filter(|meta| meta.requires_key) {
-        append(
-            meta.id,
-            meta.display_name,
-            &super::env_vars_for(meta.id, meta.api_key_env),
-        );
+        append(meta.id, meta.display_name, meta.api_key_env);
     }
     for id in snapshot
         .providers
         .keys()
+        .chain(configured.keys())
         .filter(|id| !known_ids.contains(id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
     {
-        append(id, id, &[]);
+        append(id, id, "");
     }
     rows
 }
@@ -185,7 +203,7 @@ pub fn build_status_rows_for_test(
     auth_json: &AuthSnapshot,
     env_lookup: impl Fn(&str) -> Option<String>,
 ) -> Vec<(String, bool)> {
-    build_status_rows(providers, auth_json, env_lookup)
+    build_status_rows(providers, auth_json, &Default::default(), env_lookup)
         .into_iter()
         .map(|r| (r.provider, r.requires_key))
         .collect()
@@ -266,10 +284,11 @@ fn format_duration(ms: i64) -> String {
     }
 }
 
-fn render_json(rows: &[StatusRow]) -> Result<String> {
+fn render_json(rows: &[StatusRow], store_error: Option<&str>) -> Result<String> {
     let output = StatusJson {
         schema_version: AUTH_STATUS_SCHEMA_VERSION,
         providers: rows.iter().map(StatusProviderJson::from).collect(),
+        store_error,
     };
     Ok(serde_json::to_string_pretty(&output)?)
 }
@@ -278,6 +297,8 @@ fn render_json(rows: &[StatusRow]) -> Result<String> {
 struct StatusJson<'a> {
     schema_version: &'a str,
     providers: Vec<StatusProviderJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_error: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -393,7 +414,7 @@ mod tests {
                 .or_default()
                 .push(row.clone());
         }
-        super::build_status_rows(providers, &snapshot, env_lookup)
+        super::build_status_rows(providers, &snapshot, &Default::default(), env_lookup)
     }
 
     #[test]
@@ -413,7 +434,7 @@ mod tests {
         });
         let rows = build_status_rows(providers::all_providers(), &[disabled, stale], |_| None);
         let human = render_human(&rows);
-        let json = render_json(&rows).unwrap();
+        let json = render_json(&rows, None).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["schema_version"], "2.0");
         assert_eq!(value["providers"][0]["source"], "oauth");
@@ -483,7 +504,7 @@ mod tests {
         assert!(rows.is_empty());
         assert!(NO_PROVIDERS_MESSAGE.contains("auth login"));
 
-        let json = render_json(&rows).unwrap();
+        let json = render_json(&rows, None).unwrap();
         assert!(json.contains("\"schema_version\": \"2.0\""));
         assert!(json.contains("\"providers\": []"));
     }
@@ -534,7 +555,7 @@ mod tests {
             &[status("anthropic", Some(fixed_time()))],
             |_| None,
         );
-        let json = render_json(&rows).unwrap();
+        let json = render_json(&rows, None).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["schema_version"], "2.0");
         assert_eq!(value["providers"][0]["provider"], "anthropic");
@@ -552,7 +573,7 @@ mod tests {
             (name == "ANTHROPIC_API_KEY").then(|| SECRET.to_string())
         });
         let human = render_human(&rows);
-        let json = render_json(&rows).unwrap();
+        let json = render_json(&rows, None).unwrap();
 
         assert!(human.contains("Anthropic"));
         assert!(human.contains("env"));

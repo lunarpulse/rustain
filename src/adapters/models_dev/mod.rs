@@ -1,4 +1,4 @@
-//! models.dev live pricing catalog adapter.
+//! models.dev live pricing and provider-aware model metadata adapter.
 //!
 //! Fetches `https://models.dev/api.json` (a single JSON blob: provider → model →
 //! cost), reduces it to a **canonical-upstream, bare-keyed** `HashMap<String,
@@ -6,6 +6,8 @@
 //! `pricing_resolver` then merges this cache under `config.pricing` so the usage
 //! & cost dashboard shows real USD instead of `n/a` for models the bundled
 //! catalog doesn't cover.
+//! The same download also supplies sparse model metadata, keyed by rustain
+//! provider id, for discovery merges. Pricing retains its canonical bare-id rules.
 //!
 //! # Canonical-upstream selection
 //!
@@ -22,14 +24,16 @@
 //! to the bundled `default_pricing_catalog()`, then to `n/a` (AC6). Nothing here
 //! panics or blocks startup.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::adapters::model_filter::is_noise_model_id;
 use crate::domain::models::AppConfig;
 use crate::domain::models::pricing::PricingConfig;
+use crate::domain::models::provider::{ModelCapability, ModelRecord};
 use crate::domain::services::pricing_resolver::bare_model_id;
 use crate::domain::services::pricing_resolver::resolve_effective_pricing;
 use crate::infrastructure::paths;
@@ -51,6 +55,8 @@ pub struct PricingCache {
     pub version: u32,
     pub fetched_at_unix: i64,
     pub pricing: HashMap<String, PricingConfig>,
+    #[serde(default)]
+    pub catalog: BTreeMap<String, Vec<ModelRecord>>,
 }
 
 impl PricingCache {
@@ -127,6 +133,10 @@ impl From<Cost> for PricingConfig {
 /// bare-keyed pricing map. Pure + testable (no network, no disk).
 pub fn reduce_catalog(raw_json: &str) -> Result<HashMap<String, PricingConfig>> {
     let catalog: Catalog = serde_json::from_str(raw_json).context("parse models.dev api.json")?;
+    reduce_pricing(&catalog)
+}
+
+fn reduce_pricing(catalog: &Catalog) -> Result<HashMap<String, PricingConfig>> {
     // Iterate providers in SORTED key order so a bare-id collision between two
     // canonical providers resolves deterministically across runs (HashMap
     // iteration order is randomized). Alphabetically-first provider wins.
@@ -158,6 +168,88 @@ pub fn reduce_catalog(raw_json: &str) -> Result<HashMap<String, PricingConfig>> 
         }
     }
     Ok(out)
+}
+
+/// Supported rustain provider ids and their models.dev source keys.
+pub const MODELS_DEV_PROVIDERS: &[(&str, &str)] = &[
+    ("anthropic", "anthropic"),
+    ("openai", "openai"),
+    ("google", "google"),
+    ("deepseek", "deepseek"),
+    ("moonshot", "moonshotai"),
+    ("openrouter", "openrouter"),
+];
+
+/// Reduce model metadata without stripping provider prefixes from model ids.
+pub fn reduce_models(raw_json: &str) -> Result<BTreeMap<String, Vec<ModelRecord>>> {
+    let catalog: Catalog = serde_json::from_str(raw_json).context("parse models.dev api.json")?;
+    Ok(reduce_model_metadata(&catalog))
+}
+
+fn reduce_model_metadata(catalog: &Catalog) -> BTreeMap<String, Vec<ModelRecord>> {
+    let mut out = BTreeMap::new();
+    for &(provider_id, source_key) in MODELS_DEV_PROVIDERS {
+        let Some(models) = catalog
+            .0
+            .get(source_key)
+            .and_then(|provider| provider.get("models"))
+            .and_then(serde_json::Value::as_object)
+        else {
+            continue;
+        };
+        let mut records = Vec::new();
+        for (model_id, model) in models {
+            if !model.is_object()
+                || model.get("status").and_then(serde_json::Value::as_str) == Some("deprecated")
+                || is_noise_model_id(model_id)
+            {
+                continue;
+            }
+            let mut capabilities = HashSet::new();
+            let tool_call = model.get("tool_call").and_then(serde_json::Value::as_bool);
+            let reasoning = model.get("reasoning").and_then(serde_json::Value::as_bool);
+            let input = model
+                .get("modalities")
+                .and_then(|m| m.get("input"))
+                .and_then(serde_json::Value::as_array);
+            if tool_call == Some(true) {
+                capabilities.insert(ModelCapability::ToolUse);
+            }
+            if reasoning == Some(true) {
+                capabilities.insert(ModelCapability::Thinking);
+            }
+            if input
+                .is_some_and(|modalities| modalities.iter().any(|m| m.as_str() == Some("image")))
+            {
+                capabilities.insert(ModelCapability::Vision);
+            }
+            records.push(ModelRecord {
+                model_id: model_id.clone(),
+                display_name: model
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                context_window: model
+                    .get("limit")
+                    .and_then(|limit| limit.get("context"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok()),
+                capabilities: (tool_call.is_some() || reasoning.is_some() || input.is_some())
+                    .then_some(capabilities),
+                pricing_tier: None,
+            });
+        }
+        records.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+        out.insert(provider_id.to_owned(), records);
+    }
+    out
+}
+
+/// Read a provider's metadata from the existing pricing cache without network I/O.
+pub fn catalog_for(provider_id: &str) -> Vec<ModelRecord> {
+    load_cache()
+        .and_then(|mut cache| cache.catalog.remove(provider_id))
+        .unwrap_or_default()
 }
 
 /// Load the on-disk cache. Returns `None` if missing, unreadable, or the wrong
@@ -217,13 +309,15 @@ pub async fn refresh() -> Result<PricingCache> {
                 // A 200 with an unparseable body (CDN error page, schema drift)
                 // must consume the retry budget, not bypass it — so parse + save
                 // failures set `last_err` and continue, not `?`-propagate.
-                let outcome: anyhow::Result<HashMap<String, PricingConfig>> = async {
+                let outcome: anyhow::Result<_> = async {
                     let text = resp.text().await.context("read models.dev response")?;
-                    reduce_catalog(&text)
+                    let payload: Catalog =
+                        serde_json::from_str(&text).context("parse models.dev api.json")?;
+                    Ok((reduce_pricing(&payload)?, reduce_model_metadata(&payload)))
                 }
                 .await;
                 match outcome {
-                    Ok(pricing) => {
+                    Ok((pricing, catalog)) => {
                         // Build the cache ONCE so the persisted and returned
                         // snapshots share a single timestamp.
                         let cache = PricingCache {
@@ -233,6 +327,7 @@ pub async fn refresh() -> Result<PricingCache> {
                                 .map(|d| d.as_secs() as i64)
                                 .unwrap_or(0),
                             pricing,
+                            catalog,
                         };
                         match save_cache(&cache) {
                             Ok(()) => return Ok(cache),
@@ -260,6 +355,100 @@ pub async fn refresh() -> Result<PricingCache> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_keeps_provider_association_and_prefixed_ids() {
+        let raw = r#"{
+            "openai":{"models":{"shared":{"name":"Direct"}}},
+            "openrouter":{"models":{"shared":{"name":"Gateway"},"openai/gpt-chat":{}}},
+            "moonshotai":{"models":{"kimi-chat":{}}},
+            "anthropic":{"models":{"claude-chat":{}}},
+            "google":{"models":{"gemini-chat":{}}},
+            "deepseek":{"models":{"deepseek-chat":{}}},
+            "unmapped":{"models":{"ignored":{}}}
+        }"#;
+        let models = reduce_models(raw).unwrap();
+        assert_eq!(models.len(), 6);
+        assert_eq!(models["openai"][0].display_name.as_deref(), Some("Direct"));
+        assert_eq!(
+            models["openrouter"][1].display_name.as_deref(),
+            Some("Gateway")
+        );
+        assert_eq!(models["openrouter"][0].model_id, "openai/gpt-chat");
+        assert_eq!(models["moonshot"][0].model_id, "kimi-chat");
+        assert_eq!(models["anthropic"][0].model_id, "claude-chat");
+        assert_eq!(models["google"][0].model_id, "gemini-chat");
+        assert_eq!(models["deepseek"][0].model_id, "deepseek-chat");
+    }
+
+    #[test]
+    fn metadata_preserves_sparse_fields_and_reports_capabilities() {
+        let raw = r#"{"openai":{"models":{
+            "rich":{"name":"Rich","limit":{"context":32000},"tool_call":true,
+                "reasoning":true,"modalities":{"input":["text","image"]}},
+            "sparse":{},
+            "explicit":{"name":"explicit","limit":{"context":0},"tool_call":false},
+            "too-large":{"limit":{"context":4294967296}}
+        }}}"#;
+        let models = reduce_models(raw).unwrap();
+        let rows = &models["openai"];
+        let rich = rows.iter().find(|row| row.model_id == "rich").unwrap();
+        assert_eq!(rich.context_window, Some(32000));
+        assert_eq!(
+            rich.capabilities,
+            Some(HashSet::from([
+                ModelCapability::ToolUse,
+                ModelCapability::Thinking,
+                ModelCapability::Vision,
+            ]))
+        );
+        let sparse = rows.iter().find(|row| row.model_id == "sparse").unwrap();
+        assert_eq!(sparse.display_name, None);
+        assert_eq!(sparse.context_window, None);
+        assert_eq!(sparse.capabilities, None);
+        assert_eq!(sparse.pricing_tier, None);
+        let explicit = rows.iter().find(|row| row.model_id == "explicit").unwrap();
+        assert_eq!(explicit.display_name.as_deref(), Some("explicit"));
+        assert_eq!(explicit.context_window, Some(0));
+        assert_eq!(explicit.capabilities, Some(HashSet::new()));
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.model_id == "too-large")
+                .unwrap()
+                .context_window,
+            None
+        );
+    }
+
+    #[test]
+    fn metadata_skips_deprecated_noise_and_malformed_rows() {
+        let raw = r#"{"_metadata":2,"openai":{"models":{
+            "chat":{"status":"active"},
+            "old-chat":{"status":"deprecated"},
+            "text-embedding-3":{},
+            "voice-tts":{},
+            "generate-image":{},
+            "malformed":false
+        }}}"#;
+        let models = reduce_models(raw).unwrap();
+        assert_eq!(models["openai"].len(), 1);
+        assert_eq!(models["openai"][0].model_id, "chat");
+        assert!(reduce_models("{bad").is_err());
+    }
+
+    #[test]
+    fn old_pricing_cache_has_empty_metadata_and_roundtrips_additive_catalog() {
+        let raw = r#"{"version":1,"fetched_at_unix":10,"pricing":{"chat":{"input_per_million":1.0,"output_per_million":2.0}}}"#;
+        let mut cache: PricingCache = serde_json::from_str(raw).unwrap();
+        assert!(cache.catalog.is_empty());
+        assert_eq!(cache.pricing["chat"].input_per_million, 1.0);
+        cache.catalog = reduce_models(r#"{"openai":{"models":{"chat":{}}}}"#).unwrap();
+        let roundtrip: PricingCache =
+            serde_json::from_str(&serde_json::to_string(&cache).unwrap()).unwrap();
+        assert_eq!(roundtrip.version, 1);
+        assert_eq!(roundtrip.catalog["openai"][0].model_id, "chat");
+        assert_eq!(roundtrip.pricing["chat"].output_per_million, 2.0);
+    }
 
     #[test]
     fn reduce_keeps_canonical_bare_entry() {
@@ -360,6 +549,7 @@ mod tests {
             version: CACHE_VERSION,
             fetched_at_unix: i64::MIN,
             pricing: HashMap::new(),
+            catalog: Default::default(),
         };
         assert_eq!(corrupt.age(), Duration::MAX);
         assert!(corrupt.is_stale(CACHE_TTL));
@@ -371,6 +561,7 @@ mod tests {
             version: CACHE_VERSION,
             fetched_at_unix: 0, // epoch → very old
             pricing: HashMap::new(),
+            catalog: Default::default(),
         };
         assert!(old.is_stale(CACHE_TTL));
     }
@@ -384,6 +575,7 @@ mod tests {
                 .unwrap()
                 .as_secs() as i64,
             pricing: HashMap::new(),
+            catalog: Default::default(),
         };
         assert!(wrong.is_stale(CACHE_TTL));
     }

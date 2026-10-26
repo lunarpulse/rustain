@@ -55,6 +55,23 @@ pub struct Resolved {
     pub source: AuthSource,
     pub auth: ResolvedAuth,
     pub row: Option<(CredentialId, u64)>,
+    /// Account/org/project identity key of the stored OAuth row that produced
+    /// `auth` (the policy's scoping); row ids alone are reissued after a store
+    /// is recreated, identities are not.
+    pub identity: Option<String>,
+}
+
+fn oauth_identity(provider: &str, row: &StoredCredential) -> Option<String> {
+    match &row.credential {
+        Credential::OAuth(oauth) => {
+            oauth
+                .identity
+                .key(crate::adapters::auth::policies::org_scoped_identity(
+                    provider,
+                ))
+        }
+        _ => None,
+    }
 }
 
 /// One refresh exchange (omp `refresh.ts:43-44`).
@@ -163,14 +180,21 @@ impl KeyResolver {
                     now_ms: (self.clock)(),
                     oauth_allowed,
                 };
-                key_cascade::select(&inputs, &skip)
-                    .map(|s| (s.source, s.material, s.row.map(|r| (r.id, r.rev))))
+                key_cascade::select(&inputs, &skip).map(|s| {
+                    let identity = s.row.and_then(|row| oauth_identity(provider, row));
+                    (s.source, s.material, s.row.map(|r| (r.id, r.rev)), identity)
+                })
             };
             match selected {
-                Some((source, SelectionMaterial::Ready(auth), row)) => {
-                    return Ok(Some(Resolved { source, auth, row }));
+                Some((source, SelectionMaterial::Ready(auth), row, identity)) => {
+                    return Ok(Some(Resolved {
+                        source,
+                        auth,
+                        row,
+                        identity,
+                    }));
                 }
-                Some((_, SelectionMaterial::NeedsRefresh { id, .. }, _)) => {
+                Some((_, SelectionMaterial::NeedsRefresh { id, .. }, _, identity)) => {
                     // Row-scoped, including CAS loss and transient errors. This bounds
                     // each call even when the disk changes while refreshing.
                     skip.insert(id);
@@ -186,6 +210,9 @@ impl KeyResolver {
                                 source: AuthSource::StoredOAuth,
                                 auth,
                                 row: Some((id, rev)),
+                                // The refreshed row is the selected row (same id,
+                                // updated in place only for the same identity).
+                                identity,
                             }));
                         }
                         Attempt::Skip => {}

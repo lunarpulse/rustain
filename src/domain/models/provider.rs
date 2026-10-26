@@ -48,7 +48,7 @@ pub struct ModelDescriptor {
     pub capabilities: std::collections::HashSet<ModelCapability>,
     /// Optional pricing tier for UI grouping (`"cheap"`, `"flagship"`, `None`).
     pub pricing_tier: Option<String>,
-    /// Ghost marker — true when this model was absent from the latest live fetch (Story 7.6 AC9).
+    /// The credential was rejected; requests require signing in again.
     #[serde(default)]
     pub stale: bool,
 }
@@ -67,4 +67,54 @@ pub struct ProviderDescriptor {
     pub model_count: usize,
     /// Human-readable display name (e.g., `"Anthropic"`).
     pub display_name: String,
+}
+
+/// Sparse catalogue metadata. Missing fields must not overwrite earlier layers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRecord {
+    pub model_id: String,
+    pub display_name: Option<String>,
+    pub context_window: Option<u32>,
+    pub capabilities: Option<std::collections::HashSet<ModelCapability>>,
+    pub pricing_tier: Option<String>,
+}
+
+/// Live discovery bound to the cache scope of the credential its request sent.
+#[derive(Debug, Clone)]
+pub struct DiscoveredModels {
+    pub records: Vec<ModelRecord>,
+    pub credential_scope: String,
+}
+
+impl From<&ModelDescriptor> for ModelRecord {
+    fn from(model: &ModelDescriptor) -> Self {
+        Self {
+            model_id: model.model_id.clone(),
+            display_name: Some(model.display_name.clone()),
+            context_window: Some(model.context_window),
+            capabilities: Some(model.capabilities.clone()),
+            pricing_tier: model.pricing_tier.clone(),
+        }
+    }
+}
+
+/// Latest discovery outcome, independent from transport reachability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryStatus {
+    Idle,
+    Ok,
+    Empty,
+    Cached,
+    Unavailable,
+    Unauthenticated,
+}
+
+/// A visible catalogue that cannot be selected until authentication is configured.
+#[derive(Debug, Clone)]
+pub struct LockedProvider {
+    pub provider_id: String,
+    pub display_name: String,
+    pub sign_in_hint: String,
+    pub models: Vec<ModelDescriptor>,
 }

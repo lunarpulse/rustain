@@ -1,14 +1,11 @@
-//! E2E tests for Story 7.6: Dynamic Model Catalog Discovery
-//!
-//! Integration tests that exercise the ModelCatalogCache, discovery pipeline,
-//! and provider factory wiring without the full TUI harness.
+//! Integration coverage for discovery-cache persistence and model-picker state.
 
 use std::collections::HashSet;
 
 use rustain::adapters::model_catalog_cache::{
-    CachedCatalog, CachedModelEntry, CachedProviderEntry, ModelCatalogCache,
+    CachedDiscoveryEntry, DiscoveryCacheFile, ModelCatalogCache,
 };
-use rustain::domain::models::provider::ModelDescriptor;
+use rustain::domain::models::provider::{ModelDescriptor, ModelRecord};
 
 fn model(id: &str, provider: &str, ctx: u32) -> ModelDescriptor {
     ModelDescriptor {
@@ -22,13 +19,12 @@ fn model(id: &str, provider: &str, ctx: u32) -> ModelDescriptor {
     }
 }
 
-fn entry(models: Vec<ModelDescriptor>) -> CachedProviderEntry {
-    CachedProviderEntry {
+fn entry(models: Vec<ModelDescriptor>) -> CachedDiscoveryEntry {
+    CachedDiscoveryEntry {
         fetched_at_unix: 1000,
-        models: models
-            .into_iter()
-            .map(|m| CachedModelEntry { descriptor: m })
-            .collect(),
+        credential_fingerprint: "0123456789abcdef".to_string(),
+        authoritative: true,
+        models: models.iter().map(ModelRecord::from).collect(),
     }
 }
 
@@ -49,14 +45,14 @@ async fn discover_models_off_no_disk_write() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn discover_models_on_writes_cache_and_seeds_adapter() {
+async fn discovery_cache_roundtrip_preserves_raw_models() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("RUSTAIN_DATA_DIR", dir.path().as_os_str());
     }
     let cache = ModelCatalogCache::new();
 
-    let mut catalog = CachedCatalog::default();
+    let mut catalog = DiscoveryCacheFile::default();
     catalog.providers.insert(
         "openrouter".to_string(),
         entry(vec![model("m1", "openrouter", 128_000)]),
@@ -66,25 +62,28 @@ async fn discover_models_on_writes_cache_and_seeds_adapter() {
     let loaded = cache.load().await;
     assert_eq!(loaded.providers.len(), 1);
     assert_eq!(loaded.providers["openrouter"].models.len(), 1);
+    let cached = &loaded.providers["openrouter"];
+    assert_eq!(cached.credential_fingerprint, "0123456789abcdef");
+    assert!(cached.authoritative);
+    assert_eq!(cached.models[0].model_id, "m1");
+    assert_eq!(cached.models[0].context_window, Some(128_000));
 }
 
 #[tokio::test]
 #[serial_test::serial]
-async fn discover_models_skips_fetch_when_cache_fresh() {
+async fn discovery_cache_ttl_marks_recent_entry_fresh() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("RUSTAIN_DATA_DIR", dir.path().as_os_str());
     }
     let cache = ModelCatalogCache::new();
 
-    let mut catalog = CachedCatalog::default();
+    let mut catalog = DiscoveryCacheFile::default();
     catalog.providers.insert(
         "openrouter".to_string(),
-        CachedProviderEntry {
+        CachedDiscoveryEntry {
             fetched_at_unix: rustain::infrastructure::clock_util::now_unix(),
-            models: vec![CachedModelEntry {
-                descriptor: model("m1", "openrouter", 128_000),
-            }],
+            ..entry(vec![model("m1", "openrouter", 128_000)])
         },
     );
     cache.save(&catalog).await.unwrap();
@@ -98,10 +97,7 @@ async fn discover_models_skips_fetch_when_cache_fresh() {
 }
 
 #[test]
-fn discover_models_fetch_timeout_falls_back_to_bundled() {
-    // The fallback is architectural: OpenAiAdapter::list_models returns
-    // variant.known_models() when discovered_models is empty/missing.
-    // We verify this by checking that a fresh adapter returns the bundled list.
+fn fresh_adapter_uses_bundled_models_before_discovery() {
     #[cfg(feature = "openai")]
     {
         use rustain::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
@@ -122,34 +118,6 @@ fn discover_models_fetch_timeout_falls_back_to_bundled() {
 }
 
 #[test]
-fn anthropic_discover_models_is_no_op() {
-    // Anthropic is not an OpenAI-compatible provider; build_openai_for_discovery
-    // returns None for non-openai kinds.
-    #[cfg(feature = "openai")]
-    {
-        use rustain::domain::models::ProviderConfig;
-        use rustain::infrastructure::provider_factory::build_openai_for_discovery;
-        let cfg = ProviderConfig {
-            auth_header: None,
-            provider_id: "anthropic".to_string(),
-            enabled: true,
-            model_id: "claude-sonnet-4".to_string(),
-            api_key_env: String::new(),
-            base_url: None,
-            kind: Some("anthropic".to_string()),
-            context_window: None,
-            supports_tools: None,
-            discover_models: true,
-            model_filter: vec!["*".to_string()],
-            cache_ttl_seconds: 3600,
-        };
-        let result = build_openai_for_discovery("anthropic", &cfg);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-    }
-}
-
-#[test]
 fn keyword_search_filters_and_dismisses() {
     use rustain::adapters::tui::state::ModelSelectorState;
 
@@ -158,6 +126,9 @@ fn keyword_search_filters_and_dismisses() {
         provider_id: "openrouter".to_string(),
         display_name: "OpenRouter".to_string(),
         healthy: true,
+        locked_hint: None,
+        sign_in_hint: None,
+        discovery: None,
         models: vec![
             model("anthropic/claude-3.5-sonnet", "openrouter", 200_000),
             model("openai/gpt-4o", "openrouter", 128_000),
@@ -184,6 +155,9 @@ fn keyword_search_accepts_unicode() {
         provider_id: "openrouter".to_string(),
         display_name: "OpenRouter".to_string(),
         healthy: true,
+        locked_hint: None,
+        sign_in_hint: None,
+        discovery: None,
         models: vec![ModelDescriptor {
             model_id: "google/gemini-flash".to_string(),
             display_name: "Gemini Flash ★".to_string(),
@@ -211,14 +185,17 @@ fn empty_catalog_renders_hint() {
         provider_id: "openrouter".to_string(),
         display_name: "OpenRouter".to_string(),
         healthy: true,
+        locked_hint: None,
+        sign_in_hint: None,
+        discovery: None,
         models: vec![],
     }];
     assert!(ms.columns[0].models.is_empty());
 }
 
 #[test]
-fn ghost_model_strikethrough_render() {
-    // Covered by inline test in model_selector.rs; this is a smoke test.
+fn rejected_credential_stale_render_smoke() {
+    // The stale marker denotes a rejected credential, not an absent live id.
     use rustain::adapters::tui::state::{ModelSelectorState, ProviderColumn};
 
     let mut ms = ModelSelectorState::new();
@@ -227,11 +204,14 @@ fn ghost_model_strikethrough_render() {
         provider_id: "openrouter".to_string(),
         display_name: "OpenRouter".to_string(),
         healthy: true,
+        locked_hint: None,
+        sign_in_hint: None,
+        discovery: None,
         models: vec![
-            model("live", "openrouter", 128_000),
+            model("accepted", "openrouter", 128_000),
             ModelDescriptor {
                 stale: true,
-                ..model("ghost", "openrouter", 128_000)
+                ..model("credential-rejected", "openrouter", 128_000)
             },
         ],
     }];

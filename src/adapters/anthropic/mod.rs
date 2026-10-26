@@ -28,6 +28,7 @@
 //! SOFTWARE.
 
 pub mod claude_code;
+mod discovery;
 pub mod sse;
 pub mod stream;
 pub mod types;
@@ -76,6 +77,7 @@ pub struct AnthropicAdapter {
     base_url: String,
     #[allow(dead_code)] // Used by abort() method
     abort_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    discovered_models: arc_swap::ArcSwap<Option<Vec<crate::domain::models::ModelDescriptor>>>,
 }
 
 impl AnthropicAdapter {
@@ -114,6 +116,7 @@ impl AnthropicAdapter {
                 &base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string()),
             ),
             abort_handle: Arc::new(Mutex::new(None)),
+            discovered_models: arc_swap::ArcSwap::from_pointee(None),
         })
     }
 
@@ -131,6 +134,7 @@ impl AnthropicAdapter {
                         source: AuthSource::Runtime,
                         auth: ResolvedAuth::ApiKey(secret.clone()),
                         row: None,
+                        identity: None,
                     },
                     Some(scheme),
                 )
@@ -374,6 +378,9 @@ impl StreamingProvider for AnthropicAdapter {
     }
 
     fn list_models(&self) -> Vec<crate::domain::models::ModelDescriptor> {
+        if let Some(models) = &**self.discovered_models.load() {
+            return models.clone();
+        }
         if let Some(catalog) = crate::adapters::model_catalog_cache::load_embedded_seed() {
             if let Some(entry) = catalog.providers.get("anthropic") {
                 return entry.models.iter().map(|m| m.descriptor.clone()).collect();
@@ -382,6 +389,24 @@ impl StreamingProvider for AnthropicAdapter {
         // Fallback: empty catalog (should never happen with a valid JSON seed)
         tracing::warn!("No embedded catalog entry for 'anthropic'; returning empty");
         Vec::new()
+    }
+
+    async fn discover_models(
+        &self,
+        model_filter: &[String],
+        scope_context: &str,
+    ) -> Option<Result<crate::domain::models::provider::DiscoveredModels, ProviderError>> {
+        Some(self.fetch_remote_models(model_filter, scope_context).await)
+    }
+
+    /// Credentials resolve per request, so the scope is read through that same path.
+    async fn discovery_scope(&self, scope_context: &str) -> Option<String> {
+        let (resolved, _) = self.current_auth().await.ok()?;
+        Some(discovery::request_scope(scope_context, &resolved))
+    }
+
+    fn set_discovered_models(&self, models: Vec<crate::domain::models::ModelDescriptor>) {
+        self.discovered_models.store(Arc::new(Some(models)));
     }
 
     async fn health_check(&self) -> Result<(), ProviderError> {
@@ -441,7 +466,8 @@ impl StreamingProvider for AnthropicAdapter {
             }
             return match response {
                 Ok(resp) if resp.status().is_success() => Ok(()),
-                Ok(resp) if resp.status().as_u16() == 401 => {
+                // D4: 403 is a rejected credential too; only 401 is recoverable.
+                Ok(resp) if matches!(resp.status().as_u16(), 401 | 403) => {
                     Err(ProviderError::AuthenticationFailed)
                 }
                 Ok(resp) => Err(ProviderError::Other(format!(

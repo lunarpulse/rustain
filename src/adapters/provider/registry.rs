@@ -29,6 +29,10 @@ pub struct ProviderRegistry {
     /// expect a stable order across processes.
     providers: RwLock<BTreeMap<String, Arc<dyn StreamingProvider>>>,
     health_status: RwLock<HashMap<String, bool>>,
+    locked: RwLock<BTreeMap<String, crate::domain::models::provider::LockedProvider>>,
+    discovery: RwLock<HashMap<String, crate::domain::models::provider::DiscoveryStatus>>,
+    sign_in_hints: RwLock<HashMap<String, String>>,
+    catalog_update: RwLock<()>,
 }
 
 impl ProviderRegistry {
@@ -36,6 +40,10 @@ impl ProviderRegistry {
         Self {
             providers: RwLock::new(BTreeMap::new()),
             health_status: RwLock::new(HashMap::new()),
+            locked: RwLock::new(BTreeMap::new()),
+            discovery: RwLock::new(HashMap::new()),
+            sign_in_hints: RwLock::new(HashMap::new()),
+            catalog_update: RwLock::new(()),
         }
     }
 
@@ -65,6 +73,71 @@ impl ProviderRegistry {
             .write()
             .expect("ProviderRegistry health lock poisoned")
             .insert(id, true);
+    }
+
+    pub fn register_locked(&self, provider: crate::domain::models::provider::LockedProvider) {
+        self.locked
+            .write()
+            .expect("ProviderRegistry lock poisoned")
+            .insert(provider.provider_id.clone(), provider);
+    }
+
+    pub fn list_locked(&self) -> Vec<crate::domain::models::provider::LockedProvider> {
+        self.locked
+            .read()
+            .expect("ProviderRegistry lock poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn set_discovery_status(
+        &self,
+        id: &str,
+        status: crate::domain::models::provider::DiscoveryStatus,
+    ) {
+        self.discovery
+            .write()
+            .expect("ProviderRegistry lock poisoned")
+            .insert(id.into(), status);
+    }
+
+    pub fn discovery_status(
+        &self,
+        id: &str,
+    ) -> Option<crate::domain::models::provider::DiscoveryStatus> {
+        self.discovery
+            .read()
+            .expect("ProviderRegistry lock poisoned")
+            .get(id)
+            .copied()
+    }
+
+    /// The actionable sign-in hint for an available provider whose credential
+    /// may be rejected later (locked providers carry theirs in `LockedProvider`).
+    pub fn set_sign_in_hint(&self, id: &str, hint: String) {
+        self.sign_in_hints
+            .write()
+            .expect("ProviderRegistry lock poisoned")
+            .insert(id.into(), hint);
+    }
+
+    pub fn sign_in_hint(&self, id: &str) -> Option<String> {
+        self.sign_in_hints
+            .read()
+            .expect("ProviderRegistry lock poisoned")
+            .get(id)
+            .cloned()
+    }
+
+    /// Serialize synchronous cache-read/overlay-publication against live publication.
+    /// This guard never crosses an await; disk persistence completes beforehand.
+    pub fn with_catalog_update<R>(&self, update: impl FnOnce() -> R) -> R {
+        let _guard = self
+            .catalog_update
+            .write()
+            .expect("ProviderRegistry lock poisoned");
+        update()
     }
 
     /// Record the health-check result for a provider.
@@ -163,7 +236,9 @@ impl ProviderRegistry {
                     provider_id: pid.clone(),
                     healthy: *health.get(&pid).unwrap_or(&true),
                     model_count: models.len(),
-                    display_name: pid,
+                    display_name: crate::adapters::cli::auth::providers::lookup(&pid)
+                        .map(|meta| meta.display_name.to_owned())
+                        .unwrap_or(pid),
                 }
             })
             .collect()

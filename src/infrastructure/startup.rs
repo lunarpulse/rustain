@@ -446,28 +446,56 @@ pub async fn run() -> Result<()> {
             } => {
                 let store: Arc<dyn crate::domain::ports::AuthStorePort> =
                     Arc::new(crate::adapters::auth_store::FileAuthStore::new());
-                return crate::adapters::cli::auth::login::run_auth_login(
+                let before = crate::adapters::auth_store::FileAuthStore::try_snapshot_sync()
+                    .unwrap_or_default();
+                let result = crate::adapters::cli::auth::login::run_auth_login(
                     provider.clone(),
                     *method,
                     *json,
                     &store,
                     &app_config,
                 )
-                .await
-                .map_err(|e| {
-                    tracing::error!("Auth login subcommand failed: {e}");
+                .await;
+                if result.is_ok()
+                    && let Some(report) =
+                        crate::infrastructure::model_discovery::rediscover_after_login(
+                            provider,
+                            &app_config,
+                            &before,
+                        )
+                        .await
+                {
+                    let display = crate::adapters::cli::auth::providers::lookup(provider)
+                        .map(|meta| meta.display_name)
+                        .unwrap_or(provider);
+                    if let Some(notice) = report.notice {
+                        eprintln!("{notice}");
+                    } else if report.status
+                        == crate::domain::models::provider::DiscoveryStatus::Unavailable
+                    {
+                        eprintln!("Provider {display} unavailable — showing bundled models.");
+                    } else {
+                        eprintln!("Discovered {} models for {display}.", report.model_count);
+                    }
+                }
+                return result.map_err(|error| {
+                    tracing::error!("Auth login subcommand failed: {error}");
                     SubcommandExit(SubcommandExit::GENERIC).into()
                 });
             }
             AuthAction::Status { json } => {
                 let store: Arc<dyn crate::domain::ports::AuthStorePort> =
                     Arc::new(crate::adapters::auth_store::FileAuthStore::new());
-                return crate::adapters::cli::auth::status::run_auth_status(*json, &store)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Auth status subcommand failed: {e}");
-                        SubcommandExit(SubcommandExit::GENERIC).into()
-                    });
+                return crate::adapters::cli::auth::status::run_auth_status(
+                    *json,
+                    &store,
+                    &app_config,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Auth status subcommand failed: {e}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
             }
             AuthAction::List { json } => {
                 let store: Arc<dyn crate::domain::ports::AuthStorePort> =
@@ -1265,13 +1293,11 @@ pub async fn run() -> Result<()> {
         router,
         registry: provider_registry,
         deferred_notices,
+        store_warning,
         active_id: _active_id,
         unsupported_discovery,
         discovery_targets,
     } = init_provider_layer(&app_config);
-    #[cfg(not(feature = "openai"))]
-    let _ = &discovery_targets; // suppress unused-variable warning on non-openai builds
-
     // ArcSwap hot-swap holder wraps the router (not a bare adapter)
     let provider_swap = Arc::new(arc_swap::ArcSwap::from_pointee(
         router.clone() as Arc<dyn StreamingProvider>
@@ -1344,6 +1370,13 @@ pub async fn run() -> Result<()> {
             message: msg.clone(),
         });
     }
+    if let Some(error) = store_warning {
+        let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Warning,
+            message: format!("auth.json unreadable; stored credentials ignored: {error}"),
+        });
+    }
 
     // Story 7.6 AC7 — emit startup toast for providers that don't support discovery
     for (id, kind) in &unsupported_discovery {
@@ -1362,67 +1395,57 @@ pub async fn run() -> Result<()> {
         );
     }
 
-    #[cfg(feature = "openai")]
-    {
-        // Story 7.7 AC1/AC6 — Tier-0 JSON seed from embedded models_variants.json (zero I/O)
-        if let Some(seed_catalog) = crate::adapters::model_catalog_cache::load_embedded_seed() {
-            for target in &discovery_targets {
-                if let Some(entry) = seed_catalog.providers.get(&target.provider_id) {
-                    target.adapter.set_discovered_models(entry.models.clone());
-                    tracing::info!(
-                        "Tier-0 seed: JSON catalog for '{}' ({} models)",
-                        target.provider_id,
-                        entry.models.len()
-                    );
-                }
+    // Health checks are independent: six configured accounts still cost one timeout.
+    let health = futures::future::join_all(
+        provider_registry
+            .iter_provider_arcs()
+            .into_iter()
+            .map(|(id, provider)| async move { (id, provider.health_check().await) }),
+    )
+    .await;
+    for (id, result) in health {
+        // D4: a gateway without `/models` answered; it is reachable and posts no notice.
+        let result = match result {
+            Err(ProviderError::EndpointUnsupported(code)) => {
+                tracing::info!(provider = %id, code, "health endpoint unsupported");
+                Ok(())
             }
-        } else {
-            tracing::error!(
-                "Failed to parse embedded models_variants.json — catalog seed unavailable"
-            );
-        }
-
-        // Story 7.6 AC4/AC5 — Tier-1 disk cache seed BEFORE health check (synchronous, ≤10ms)
-        let cache = crate::adapters::model_catalog_cache::ModelCatalogCache::new();
-        let cached = cache.load().await;
-
-        for target in &discovery_targets {
-            if let Some(entry) = cached.providers.get(&target.provider_id) {
-                target.adapter.set_discovered_models(entry.models.clone());
-                tracing::info!("Tier-1 seed: cached catalog for '{}'", target.provider_id);
-            }
-        }
-    }
-
-    // D2: Health check — emit TUI warning notice on failure and update registry (AC4)
-    // Health-check ALL registered providers and emit notices for failures.
-    let all_provider_ids: Vec<String> = provider_registry.provider_ids().into_iter().collect();
-    for id in &all_provider_ids {
-        if let Some(adapter) = router.get_provider(id) {
-            match adapter.health_check().await {
-                Ok(()) => {
-                    tracing::info!("Provider '{}' health check passed", id);
-                    provider_registry.update_health(id, true);
+            other => other,
+        };
+        provider_registry.update_health(&id, result.is_ok());
+        if let Err(error) = result {
+            let (level, message) = if matches!(error, ProviderError::AuthenticationFailed) {
+                provider_registry.set_discovery_status(
+                    &id,
+                    crate::domain::models::provider::DiscoveryStatus::Unauthenticated,
+                );
+                if let Some(provider) = router.get_provider(&id) {
+                    let mut models = provider.list_models();
+                    for model in &mut models {
+                        model.stale = true;
+                    }
+                    provider.set_discovered_models(models);
                 }
-                Err(e) => {
-                    tracing::warn!("Provider '{}' health check failed: {}", id, e);
-                    provider_registry.update_health(id, false);
-                    let (level, message) = match e {
-                        ProviderError::ConnectionFailed(ref msg) => {
-                            (NoticeLevel::Error, msg.clone())
-                        }
-                        _ => (
-                            NoticeLevel::Warning,
-                            format!("Provider '{}' unavailable: {}", id, e),
-                        ),
-                    };
-                    let _ = domain_tx.send(AppEvent::SystemNotice {
-                        conversation_id: None,
-                        level,
-                        message,
-                    });
+                let message = discovery_targets.iter().find(|target| target.provider_id == id)
+                    .map(crate::infrastructure::model_discovery::rejected_notice)
+                    .unwrap_or_else(|| format!("Provider '{id}' rejected its credential (HTTP 401/403) — run `rustain auth login {id}`"));
+                (NoticeLevel::Warning, message)
+            } else {
+                match &error {
+                    ProviderError::ConnectionFailed(message) => {
+                        (NoticeLevel::Error, message.clone())
+                    }
+                    _ => (
+                        NoticeLevel::Warning,
+                        format!("Provider '{id}' unavailable: {error}"),
+                    ),
                 }
-            }
+            };
+            let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+                conversation_id: None,
+                level,
+                message,
+            });
         }
     }
 
@@ -1435,101 +1458,27 @@ pub async fn run() -> Result<()> {
         });
     }
 
-    #[cfg(feature = "openai")]
-    {
-        // Story 7.6 AC4/AC5 — Tier-2 background refresh AFTER health check (non-blocking)
-        let cache = crate::adapters::model_catalog_cache::ModelCatalogCache::new();
-        let cached = cache.load().await;
-
-        // Clone before the for-loop consumes it (used by periodic timer below)
-        let discovery_targets_periodic = discovery_targets.clone();
-        let refresh_tracker_clone = refresh_tracker.clone();
-        for target in discovery_targets {
-            let cache = cache.clone();
-            let tracker = refresh_tracker_clone.clone();
-            let domain_tx = domain_tx.clone();
-            let provider_id = target.provider_id.clone();
-            let adapter = target.adapter.clone();
-            let model_filter = target.model_filter.clone();
-            let ttl = target.cache_ttl_seconds;
-
-            // Check freshness before spawning
-            let is_fresh = cached.providers.get(&provider_id).is_some_and(|entry| {
-                cache.is_fresh(entry, ttl, crate::infrastructure::clock_util::now_unix())
-            });
-
-            if is_fresh {
-                tracing::debug!(
-                    "catalog cache fresh for '{}'; skipping refresh",
-                    provider_id
-                );
-                continue;
-            }
-
-            tokio::spawn(async move {
-                let _guard = tracker.insert(provider_id.clone());
-                match adapter.fetch_remote_models(&model_filter).await {
-                    Ok(models) => {
-                        if models.is_empty() {
-                            tracing::warn!("Empty catalog from '{}'; not caching", provider_id);
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
-                                conversation_id: None,
-                                level: NoticeLevel::Warning,
-                                message: format!(
-                                    "Model catalog for '{}' returned empty — showing bundled models",
-                                    provider_id
-                                ),
-                            });
-                            return;
-                        }
-                        // Serialize cache writes so concurrent providers don't overwrite each other.
-                        let _lock = cache.lock().await;
-                        let mut catalog = cache.load().await;
-                        let models_with_stale =
-                            crate::adapters::model_catalog_cache::merge_with_live(
-                                catalog.providers.get(&provider_id),
-                                &models,
-                            );
-                        adapter.set_discovered_models(models_with_stale.clone());
-                        catalog.providers.insert(
-                            provider_id.clone(),
-                            crate::adapters::model_catalog_cache::CachedProviderEntry {
-                                fetched_at_unix: crate::infrastructure::clock_util::now_unix(),
-                                models: models_with_stale,
-                            },
-                        );
-                        if let Err(e) = cache.save(&catalog).await {
-                            tracing::warn!("models_cache.json save failed: {}", e);
-                        }
-                        let _ = domain_tx.send(AppEvent::ProviderCatalogRefreshed { provider_id }); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: Story 7.6 AC8 — live refresh redraw signal
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "model discovery for '{}' failed: {}; using cached/bundled catalog",
-                            provider_id,
-                            e
-                        );
-                        let _ = domain_tx.send(AppEvent::SystemNotice {
-                            conversation_id: None,
-                            level: NoticeLevel::Warning,
-                            message: format!(
-                                "Model catalog refresh for '{}' failed: {} — showing bundled/cached models",
-                                provider_id, e
-                            ),
-                        });
-                    }
-                }
-            });
-        }
-
-        // Story 7.7 AC3 — periodic auto-refresh timer (4h intervals, UTC-aligned)
-        spawn_periodic_catalog_refresh(
-            cache.clone(),
-            discovery_targets_periodic,
-            refresh_tracker.clone(),
-            domain_tx.clone(),
-        );
+    let cache = crate::adapters::model_catalog_cache::ModelCatalogCache::new();
+    for target in &discovery_targets {
+        let target = target.clone();
+        let cache = cache.clone();
+        let tracker = refresh_tracker.clone();
+        let registry = provider_registry.clone();
+        let events = event_bus.clone();
+        tokio::spawn(async move {
+            crate::infrastructure::model_discovery::refresh_and_announce(
+                &target, &cache, &registry, false, &events, &tracker,
+            )
+            .await;
+        });
     }
+    spawn_periodic_catalog_refresh(
+        cache,
+        discovery_targets.clone(),
+        refresh_tracker.clone(),
+        event_bus.clone(),
+        provider_registry.clone(),
+    );
 
     let security_adapter = SecurityAdapter::new(workspace_path.clone());
     security_adapter.set_mode(initial_mode);
@@ -2109,6 +2058,20 @@ pub async fn run() -> Result<()> {
                 ) -> Vec<crate::domain::models::provider::ModelDescriptor> {
                     self.registry.list_models_by_provider(provider_id)
                 }
+                fn list_locked_providers(
+                    &self,
+                ) -> Vec<crate::domain::models::provider::LockedProvider> {
+                    self.registry.list_locked()
+                }
+                fn discovery_status(
+                    &self,
+                    provider_id: &str,
+                ) -> Option<crate::domain::models::provider::DiscoveryStatus> {
+                    self.registry.discovery_status(provider_id)
+                }
+                fn sign_in_hint(&self, provider_id: &str) -> Option<String> {
+                    self.registry.sign_in_hint(provider_id)
+                }
                 fn get_provider(
                     &self,
                     provider_id: &str,
@@ -2625,7 +2588,11 @@ pub async fn run() -> Result<()> {
     // Mirrors opencode's spaced-refresh posture.
     #[cfg(feature = "models-dev")]
     {
-        tokio::spawn(async {
+        let registry = provider_registry.clone();
+        let targets = discovery_targets.clone();
+        let events = app_state.event_bus.clone();
+        let config = app_config.clone();
+        tokio::spawn(async move {
             use crate::adapters::models_dev::{CACHE_TTL, load_cache, refresh};
             loop {
                 // Skip the network fetch when the on-disk cache is still fresh —
@@ -2634,8 +2601,16 @@ pub async fn run() -> Result<()> {
                     .map(|c| !c.is_stale(CACHE_TTL))
                     .unwrap_or(false);
                 if !fresh {
-                    if let Err(e) = refresh().await {
-                        tracing::warn!(error = %e, "models.dev pricing refresh failed; will retry");
+                    match refresh().await {
+                        Ok(_) => {
+                            crate::infrastructure::model_discovery::remerge_all(
+                                &registry, &targets, &events, &config,
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "models.dev refresh failed; will retry")
+                        }
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
@@ -2682,158 +2657,132 @@ pub struct ProviderLayer {
     pub router: Arc<crate::adapters::provider::ProviderRouter>,
     pub registry: Arc<crate::adapters::provider::ProviderRegistry>,
     pub deferred_notices: Vec<(String, ProviderError)>,
+    pub store_warning: Option<String>,
     pub active_id: String,
     /// Providers where `discover_models = true` but the kind doesn't support it (Story 7.6 AC7).
     pub unsupported_discovery: Vec<(String, String)>, // (provider_id, kind)
-    #[cfg(feature = "openai")]
     pub discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget>,
-    #[cfg(not(feature = "openai"))]
-    pub discovery_targets: Vec<()>,
 }
 
 pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> ProviderLayer {
-    // Clear the openai adapter cache so stale references from previous sessions
-    // (e.g., hot-reload in tests) don't leak into the new ProviderLayer.
-    #[cfg(feature = "openai")]
-    crate::infrastructure::provider_factory::clear_openai_adapters();
-
+    use crate::domain::models::provider::LockedProvider;
+    use crate::infrastructure::provider_availability::{
+        Availability, ProviderOrigin, availability, effective_providers,
+    };
     let provider_registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
     let router = Arc::new(crate::adapters::provider::ProviderRouter::new(
-        "anthropic".to_string(),
+        "anthropic".into(),
     ));
-    let mut deferred_notices: Vec<(String, ProviderError)> = Vec::new();
-    let mut unsupported_discovery: Vec<(String, String)> = Vec::new();
-
-    #[cfg(feature = "openai")]
-    let mut discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget> =
-        Vec::new();
-
-    let enabled_configs: Vec<(&String, &ProviderConfig)> = app_config
-        .provider
-        .iter()
-        .filter(|(_id, cfg)| cfg.enabled)
-        .collect();
-
-    let use_config_path = !app_config.provider.is_empty() && !enabled_configs.is_empty();
-
-    let active_id = if use_config_path {
-        let mut first_enabled_id: Option<String> = None;
-        for (id, cfg) in enabled_configs {
-            if id != &cfg.provider_id {
-                tracing::warn!(
-                    "Provider config key '{}' does not match provider_id '{}'; using key",
-                    id,
-                    cfg.provider_id
-                );
+    let (snapshot, store_warning) =
+        match crate::adapters::auth_store::FileAuthStore::try_snapshot_sync() {
+            Ok(snapshot) => (snapshot, None),
+            Err(error) => (Default::default(), Some(error.to_string())),
+        };
+    let mut deferred_notices = Vec::new();
+    let mut unsupported_discovery = Vec::new();
+    let mut discovery_targets = Vec::new();
+    let mut first_config = None;
+    for entry in effective_providers(app_config)
+        .into_iter()
+        .filter(|entry| entry.cfg.enabled)
+    {
+        let id = &entry.id;
+        let cfg = &entry.cfg;
+        if let Availability::Locked { hint } = availability(
+            &entry,
+            &snapshot,
+            &crate::infrastructure::utils::env_var_trimmed,
+        ) {
+            let display_name = entry.display_name();
+            let message = format!("{display_name} has no credentials configured. {hint}");
+            // An available Anthropic-kind entry routes as `anthropic`; keep the
+            // headless default's "no active provider" error actionable for aliases.
+            if entry.kind() == "anthropic" && id != "anthropic" {
+                router.register_locked("anthropic".into(), message.clone());
             }
-
-            // Build provider FIRST; only add discovery target if construction succeeds (Story 7.6 AC5).
-            let _provider_built =
-                match crate::infrastructure::provider_factory::build_provider_for_config(id, cfg) {
-                    Ok(adapter) => {
-                        let adapter_arc = Arc::clone(&adapter);
-                        router.register(adapter);
-                        provider_registry.register_arc(adapter_arc);
-                        if first_enabled_id.is_none() {
-                            first_enabled_id = Some(id.clone());
-                        }
-                        tracing::info!("Provider '{}' registered from config", id);
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to construct provider '{}': {}", id, e);
-                        deferred_notices.push((id.clone(), e));
-                        false
-                    }
+            router.register_locked(id.clone(), message);
+            let models = crate::infrastructure::model_discovery::public_catalog(
+                id,
+                entry.kind(),
+                &cfg.model_filter,
+            );
+            provider_registry.register_locked(LockedProvider {
+                provider_id: id.clone(),
+                display_name,
+                sign_in_hint: hint,
+                models,
+            });
+            continue;
+        }
+        let built = if entry.origin == ProviderOrigin::Bundled && entry.kind() == "anthropic" {
+            build_anthropic_provider_from_env(app_config)
+                .map_err(|error| ProviderError::Other(error.to_string()))
+        } else {
+            crate::infrastructure::provider_factory::build_provider_for_config(id, cfg)
+        };
+        match built {
+            Ok(provider) => {
+                if entry.origin == ProviderOrigin::Config && first_config.is_none() {
+                    first_config = Some(provider.provider_id());
+                }
+                let target = crate::adapters::model_catalog_cache::DiscoveryTarget {
+                    provider_id: provider.provider_id(),
+                    bundled: provider.list_models(),
+                    credential_fingerprint:
+                        crate::infrastructure::provider_factory::discovery_fingerprint(
+                            entry.rows_key(),
+                            &entry.env_vars(),
+                            cfg,
+                            provider.as_ref(),
+                        ),
+                    scope_context: crate::infrastructure::provider_factory::discovery_scope_context(
+                        entry.rows_key(),
+                        cfg,
+                        provider.as_ref(),
+                    ),
+                    last_live: Default::default(),
+                    provider: provider.clone(),
+                    cache_ttl_seconds: cfg.cache_ttl_seconds,
+                    model_filter: cfg.model_filter.clone(),
+                    display_name: entry.display_name(),
+                    sign_in_hint: entry.sign_in_hint(),
                 };
-
-            #[cfg(feature = "openai")]
-            // Build typed OpenAI adapter for discovery (Story 7.6 AC5)
-            if _provider_built && cfg.discover_models {
-                match crate::infrastructure::provider_factory::build_openai_for_discovery(id, cfg) {
-                    Ok(Some(adapter)) => {
-                        discovery_targets.push(
-                            crate::adapters::model_catalog_cache::DiscoveryTarget {
-                                provider_id: id.clone(),
-                                adapter,
-                                cache_ttl_seconds: cfg.cache_ttl_seconds,
-                                model_filter: cfg.model_filter.clone(),
-                            },
-                        );
-                    }
-                    Ok(None) => {
-                        // Anthropic or Ollama — warn that discovery is not supported
-                        tracing::warn!(
-                            "Provider '{}' (kind={}) uses a static catalog — dynamic discovery is not yet supported. \
-                             Edit [providers.{}] in config.toml to remove discover_models, or accept the static list.",
-                            id,
-                            cfg.kind.as_deref().unwrap_or(id),
-                            id
-                        );
-                        unsupported_discovery
-                            .push((id.clone(), cfg.kind.as_deref().unwrap_or(id).to_string()));
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to build discovery adapter for '{}': {}", id, e);
+                crate::infrastructure::model_discovery::seed_target(
+                    &target,
+                    &crate::adapters::model_catalog_cache::ModelCatalogCache::new(),
+                );
+                provider_registry.set_discovery_status(
+                    &target.provider_id,
+                    crate::domain::models::provider::DiscoveryStatus::Idle,
+                );
+                // The rejected-credential pane offers the same actionable hint.
+                provider_registry
+                    .set_sign_in_hint(&target.provider_id, target.sign_in_hint.clone());
+                router.register(provider.clone());
+                provider_registry.register_arc(provider);
+                if cfg.discover_models {
+                    if entry.kind() == "ollama" {
+                        unsupported_discovery.push((id.clone(), entry.kind().to_owned()));
+                    } else {
+                        discovery_targets.push(target);
                     }
                 }
             }
-        }
-        first_enabled_id.unwrap_or_else(|| "anthropic".to_string())
-    } else {
-        if !app_config.provider.is_empty() {
-            tracing::info!(
-                "No enabled providers in [provider] config; using legacy ANTHROPIC env-var path"
-            );
-        }
-        match build_anthropic_provider_from_env(app_config) {
-            Ok(adapter) => {
-                let adapter_arc = Arc::clone(&adapter);
-                router.register(adapter);
-                provider_registry.register_arc(adapter_arc);
-                "anthropic".to_string()
-            }
-            Err(e) => {
-                tracing::warn!("Legacy Anthropic fallback failed: {}", e);
-                deferred_notices
-                    .push(("anthropic".to_string(), ProviderError::Other(e.to_string())));
-                "anthropic".to_string()
-            }
-        }
-    };
-
-    if let Err(e) = router.set_active(&active_id) {
-        tracing::warn!("Failed to set active provider '{}': {}", active_id, e);
-    }
-
-    if provider_registry.provider_ids().is_empty() {
-        tracing::warn!(
-            "No providers registered — rustain will launch but all completion requests will fail. \
-             Configure providers via `rustain init` or add [provider.*] sections to config."
-        );
-    }
-
-    #[cfg(feature = "openai")]
-    {
-        ProviderLayer {
-            router,
-            registry: provider_registry,
-            deferred_notices,
-            active_id,
-            unsupported_discovery,
-            discovery_targets,
+            Err(error) => deferred_notices.push((id.clone(), error)),
         }
     }
-    #[cfg(not(feature = "openai"))]
-    {
-        ProviderLayer {
-            router,
-            registry: provider_registry,
-            deferred_notices,
-            active_id,
-            unsupported_discovery,
-            discovery_targets: Vec::new(),
-        }
+    let active_id = first_config.unwrap_or_else(|| "anthropic".into());
+    if let Err(error) = router.set_active(&active_id) {
+        tracing::debug!("Default provider is not available: {error}");
+    }
+    ProviderLayer {
+        router,
+        registry: provider_registry,
+        deferred_notices,
+        store_warning,
+        active_id,
+        unsupported_discovery,
+        discovery_targets,
     }
 }
 
@@ -2848,9 +2797,7 @@ fn build_anthropic_provider_from_env(
     #[cfg(feature = "anthropic")]
     {
         let lookup = crate::infrastructure::utils::env_var_trimmed;
-        let base_url = lookup("ANTHROPIC_BASE_URL").unwrap_or_else(|| {
-            crate::adapters::auth::policies::endpoint("https://api.anthropic.com")
-        });
+        let base_url = crate::infrastructure::provider_factory::anthropic_base_url(None, &lookup);
         let handle = match crate::infrastructure::provider_factory::anthropic_handle(
             "anthropic",
             vec!["ANTHROPIC_AUTH_TOKEN".into(), "ANTHROPIC_API_KEY".into()],
@@ -2914,12 +2861,12 @@ fn build_anthropic_provider_from_env(
 /// Fires every 4 hours aligned to UTC hour boundaries (00:00, 04:00, 08:00, ...).
 /// On each tick, re-fetches `/v1/models` for every provider with `discover_models = true`.
 /// Emits `ProviderCatalogRefreshed` on success, `SystemNotice` on failure.
-#[cfg(feature = "openai")]
 fn spawn_periodic_catalog_refresh(
     cache: crate::adapters::model_catalog_cache::ModelCatalogCache,
     discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget>,
     refresh_tracker: std::sync::Arc<crate::adapters::tui::refresh_tracker::RefreshTracker>,
-    domain_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
+    events: Arc<crate::infrastructure::runtime::event_bus::EventBus>,
+    registry: Arc<crate::adapters::provider::ProviderRegistry>,
 ) {
     if discovery_targets.is_empty() {
         return;
@@ -2959,91 +2906,22 @@ fn spawn_periodic_catalog_refresh(
         tokio::time::sleep(until_first).await;
 
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600 * 4));
-        // First tick fires immediately after sleep
-        interval.tick().await;
 
         loop {
             interval.tick().await;
             tracing::info!("Periodic catalog refresh tick");
 
             for target in &discovery_targets {
-                let provider_id = target.provider_id.clone();
-                let adapter = target.adapter.clone();
-                let model_filter = target.model_filter.clone();
+                let target = target.clone();
                 let cache = cache.clone();
-                let domain_tx = domain_tx.clone();
+                let events = events.clone();
+                let registry = registry.clone();
                 let tracker = refresh_tracker.clone();
-
                 tokio::spawn(async move {
-                    let _guard = tracker.insert(provider_id.clone());
-                    match adapter.fetch_remote_models(&model_filter).await {
-                        Ok(models) => {
-                            if models.is_empty() {
-                                tracing::warn!(
-                                    "Periodic refresh: empty catalog from '{}'",
-                                    provider_id
-                                );
-                                let _ = domain_tx.send(AppEvent::SystemNotice {
-                                    conversation_id: None,
-                                    level: NoticeLevel::Warning,
-                                    message: format!(
-                                        "Model catalog for '{}' returned empty — keeping current models",
-                                        provider_id
-                                    ),
-                                });
-                                return;
-                            }
-                            let _lock = cache.lock().await;
-                            let mut catalog = cache.load().await;
-                            let models_with_stale =
-                                crate::adapters::model_catalog_cache::merge_with_live(
-                                    catalog.providers.get(&provider_id),
-                                    &models,
-                                );
-                            adapter.set_discovered_models(models_with_stale.clone());
-                            catalog.providers.insert(
-                                provider_id.clone(),
-                                crate::adapters::model_catalog_cache::CachedProviderEntry {
-                                    fetched_at_unix: crate::infrastructure::clock_util::now_unix(),
-                                    models: models_with_stale,
-                                },
-                            );
-                            if let Err(e) = cache.save(&catalog).await {
-                                tracing::warn!("Periodic refresh save failed: {}", e);
-                            }
-                            let _ =
-                                domain_tx.send(AppEvent::ProviderCatalogRefreshed { provider_id }); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: Story 7.7 AC3 — periodic refresh redraw signal
-                        }
-                        Err(e) => {
-                            tracing::warn!("Periodic refresh for '{}' failed: {}", provider_id, e);
-
-                            // AC3: mark existing models as stale on refresh failure
-                            let current = adapter.list_models();
-                            let stale_entries: Vec<
-                                crate::adapters::model_catalog_cache::CachedModelEntry,
-                            > = current
-                                .into_iter()
-                                .map(|mut m| {
-                                    m.stale = true;
-                                    crate::adapters::model_catalog_cache::CachedModelEntry {
-                                        descriptor: m,
-                                    }
-                                })
-                                .collect();
-                            if !stale_entries.is_empty() {
-                                adapter.set_discovered_models(stale_entries);
-                            }
-
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
-                                conversation_id: None,
-                                level: NoticeLevel::Warning,
-                                message: format!(
-                                    "Model catalog refresh for '{}' failed: {} — showing current models",
-                                    provider_id, e
-                                ),
-                            });
-                        }
-                    }
+                    crate::infrastructure::model_discovery::refresh_and_announce(
+                        &target, &cache, &registry, true, &events, &tracker,
+                    )
+                    .await;
                 });
             }
         }

@@ -1397,6 +1397,10 @@ pub fn build_daemon_core(
                 // Live, connection-holding parts — first activity only.
                 let provider: Arc<dyn StreamingProvider> = {
                     let layer = crate::infrastructure::startup::init_provider_layer(&config.load());
+                    crate::infrastructure::model_discovery::spawn_headless(
+                        layer.discovery_targets,
+                        layer.registry.clone(),
+                    );
                     layer.router as Arc<dyn StreamingProvider>
                 };
                 let tools = build_tools(&tools_name, None, &ctx)?;
@@ -1711,6 +1715,10 @@ pub fn build_acp_core(
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let provider_layer = crate::infrastructure::startup::init_provider_layer(app_config);
+    crate::infrastructure::model_discovery::spawn_headless(
+        provider_layer.discovery_targets,
+        provider_layer.registry.clone(),
+    );
     let router = provider_layer.router;
     let registry = provider_layer.registry;
     let provider: Arc<dyn StreamingProvider> = router.clone() as Arc<dyn StreamingProvider>;

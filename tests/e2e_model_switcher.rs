@@ -41,6 +41,9 @@ fn two_provider_columns() -> Vec<ProviderColumn> {
             provider_id: "anthropic".to_string(),
             display_name: "Anthropic".to_string(),
             healthy: true,
+            locked_hint: None,
+            sign_in_hint: None,
+            discovery: None,
             models: vec![
                 model("claude-opus-4", "Claude Opus 4", "anthropic", 200_000),
                 model("claude-sonnet-4", "Claude Sonnet 4", "anthropic", 200_000),
@@ -51,6 +54,9 @@ fn two_provider_columns() -> Vec<ProviderColumn> {
             provider_id: "openai".to_string(),
             display_name: "OpenAI".to_string(),
             healthy: true,
+            locked_hint: None,
+            sign_in_hint: None,
+            discovery: None,
             models: vec![
                 model("gpt-4o", "GPT-4o", "openai", 128_000),
                 model("gpt-4o-mini", "GPT-4o Mini", "openai", 128_000),
@@ -64,6 +70,9 @@ fn single_provider_columns() -> Vec<ProviderColumn> {
         provider_id: "anthropic".to_string(),
         display_name: "Anthropic".to_string(),
         healthy: true,
+        locked_hint: None,
+        sign_in_hint: None,
+        discovery: None,
         models: vec![
             model("claude-opus-4", "Claude Opus 4", "anthropic", 200_000),
             model("claude-sonnet-4", "Claude Sonnet 4", "anthropic", 200_000),

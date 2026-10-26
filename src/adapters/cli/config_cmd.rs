@@ -72,8 +72,7 @@ pub fn config_layer_paths(cli: &Cli) -> Result<Vec<LayerDescriptor>> {
     let local_override_path = cwd.join(".claude").join("rustain-settings.json");
 
     // Layer 5: user-global config
-    let user_global_path =
-        dirs::home_dir().map(|h| h.join(".config").join("rustain").join("config.toml"));
+    let user_global_path = crate::infrastructure::paths::config_file_path().ok();
 
     let mut layers = Vec::with_capacity(8);
     if !cli.config_override.is_empty() {

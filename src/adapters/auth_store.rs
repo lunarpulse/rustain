@@ -175,14 +175,19 @@ impl FileAuthStore {
     /// Read-only startup bridge. Failures warn, never look like valid credentials.
     /// Secret wrappers remain intact through the synchronous selection path.
     pub fn snapshot_sync() -> AuthSnapshot {
-        let result = Self::auth_file_path().and_then(|path| Self::read_auth_file(&path));
-        match result {
-            Ok(data) => data.snapshot(),
+        match Self::try_snapshot_sync() {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 tracing::warn!("auth.json unreadable; ignoring stored credentials: {error}");
                 AuthSnapshot::default()
             }
         }
+    }
+
+    pub fn try_snapshot_sync() -> Result<AuthSnapshot, AuthError> {
+        Self::auth_file_path()
+            .and_then(|path| Self::read_auth_file(&path))
+            .map(|data| data.snapshot())
     }
 
     fn path(&self) -> Result<PathBuf, AuthError> {

@@ -235,8 +235,8 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         "expose_url() count is 0 — the matcher is broken"
     );
     assert_eq!(
-        count, 8,
-        "expose_url() pinned count changed: got {count}, expected 8. \
+        count, 6,
+        "expose_url() pinned count changed: got {count}, expected 6. \
          If you added a legitimate call site, update the allowlist AND this count."
     );
 }

@@ -3645,6 +3645,7 @@ fn handle_model_selector_key(state: &mut TuiState, key: DomainKey) -> InputActio
                     model_id: model.model_id.clone(),
                 };
             }
+            // Locked catalogues stay open; a later sign-in flow can consume this seam.
             InputAction::Consumed
         }
         DomainKey::Esc => {
@@ -3729,8 +3730,14 @@ fn handle_model_selector_char(state: &mut TuiState, c: char) -> InputAction {
         };
     }
 
-    // '/' activates search mode unconditionally (Preflight Consensus #7)
-    if c == '/' && !state.model_selector.search_active {
+    // A locked catalogue advertises only ←→ and Esc: typing starts no hidden search.
+    let locked = state
+        .model_selector
+        .columns
+        .get(state.model_selector.selected_provider)
+        .is_some_and(|column| column.locked_hint.is_some());
+    // '/' activates search mode on sendable catalogues (Preflight Consensus #7)
+    if c == '/' && !locked && !state.model_selector.search_active {
         state.model_selector.search_active = true;
         state.model_selector.search_query.clear();
         state.model_selector.recompute_filter();
@@ -4256,6 +4263,175 @@ mod tests {
 
     fn make_state() -> TuiState {
         TuiState::new(80, 24)
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn k07_model_selector_enter_keeps_locked_provider_open() {
+        use crate::adapters::anthropic::{AnthropicAdapter, AuthMode};
+        use crate::adapters::provider::ProviderRegistry;
+        use crate::adapters::tui::state::model_selector_columns;
+        use crate::domain::models::provider::{
+            DiscoveryStatus, LockedProvider, ModelDescriptor, ProviderDescriptor,
+        };
+        use crate::domain::ports::{ProviderInfoPort, StreamingProvider};
+        use std::sync::Arc;
+
+        struct Info(ProviderRegistry);
+        impl ProviderInfoPort for Info {
+            fn active_delegate_id(&self) -> String {
+                "anthropic".into()
+            }
+            fn get_model(&self, p: &str, m: &str) -> Option<ModelDescriptor> {
+                self.0.get_model(p, m)
+            }
+            fn get_model_provider(&self, m: &str, p: Option<&str>) -> Option<String> {
+                self.0.get_model_provider(m, p)
+            }
+            fn list_providers(&self) -> Vec<ProviderDescriptor> {
+                self.0.list_providers()
+            }
+            fn list_models_by_provider(&self, p: &str) -> Vec<ModelDescriptor> {
+                self.0.list_models_by_provider(p)
+            }
+            fn list_locked_providers(&self) -> Vec<LockedProvider> {
+                self.0.list_locked()
+            }
+            fn discovery_status(&self, p: &str) -> Option<DiscoveryStatus> {
+                self.0.discovery_status(p)
+            }
+            fn get_provider(&self, p: &str) -> Option<Arc<dyn StreamingProvider>> {
+                self.0
+                    .iter_provider_arcs()
+                    .into_iter()
+                    .find(|(id, _)| id == p)
+                    .map(|(_, provider)| provider)
+            }
+            fn set_active_provider(
+                &self,
+                _: &str,
+            ) -> Result<(), crate::domain::errors::ProviderError> {
+                Ok(())
+            }
+            fn now_unix(&self) -> i64 {
+                0
+            }
+            fn today_start_unix_ms(&self) -> i64 {
+                0
+            }
+        }
+
+        let info = Info(ProviderRegistry::new());
+        info.0.register(Box::new(
+            AnthropicAdapter::new(
+                AuthMode::ApiKey("picker-test-key".into()),
+                "claude-test".into(),
+                None,
+            )
+            .unwrap(),
+        ));
+        let available = info.0.list_models_by_provider("anthropic")[0].clone();
+        let mut public_model = available.clone();
+        public_model.provider_id = "locked".into();
+        public_model.model_id = "public-catalog-model".into();
+        info.0.register_locked(LockedProvider {
+            provider_id: "locked".into(),
+            display_name: "A Locked Provider".into(),
+            sign_in_hint: "Run `rustain auth login locked`".into(),
+            models: vec![public_model],
+        });
+        info.0
+            .set_discovery_status("anthropic", DiscoveryStatus::Ok);
+        let columns = model_selector_columns(&info);
+        assert_eq!(
+            columns
+                .iter()
+                .map(|c| c.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            ["anthropic", "locked"]
+        );
+        assert!(columns[0].locked_hint.is_none());
+        assert_eq!(columns[0].discovery, Some(DiscoveryStatus::Ok));
+        assert!(
+            columns[1]
+                .locked_hint
+                .as_deref()
+                .unwrap()
+                .contains("rustain auth login locked")
+        );
+
+        let mut state = make_state();
+        state
+            .model_selector
+            .open(FocusState::Input, columns, "locked", "public-catalog-model");
+        state.focus = FocusState::Overlay(OverlayType::ModelSelector);
+        assert!(state.model_selector.selected().is_none());
+        assert_eq!(
+            handle_model_selector_key(&mut state, DomainKey::Enter),
+            InputAction::Consumed
+        );
+        assert!(state.model_selector.active);
+        assert_eq!(state.focus, FocusState::Overlay(OverlayType::ModelSelector));
+
+        state.model_selector.navigate_provider(Direction::Left);
+        assert_eq!(
+            handle_model_selector_key(&mut state, DomainKey::Enter),
+            InputAction::SwitchModelProvider {
+                provider_id: Some("anthropic".into()),
+                model_id: available.model_id,
+            }
+        );
+
+        info.get_provider("anthropic")
+            .unwrap()
+            .set_discovered_models(Vec::new());
+        info.0
+            .set_discovery_status("anthropic", DiscoveryStatus::Empty);
+        info.0.register_locked(LockedProvider {
+            provider_id: "a-locked".into(),
+            display_name: "Z Locked Provider".into(),
+            sign_in_hint: "Run `rustain auth login a-locked`".into(),
+            models: Vec::new(),
+        });
+        let refreshed = model_selector_columns(&info);
+        assert_eq!(
+            refreshed
+                .iter()
+                .map(|c| c.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            ["anthropic", "locked", "a-locked"]
+        );
+        assert!(refreshed[0].models.is_empty());
+        assert_eq!(refreshed[0].discovery, Some(DiscoveryStatus::Empty));
+        state.model_selector.refresh_columns(refreshed);
+        assert_eq!(
+            state.model_selector.columns[state.model_selector.selected_provider].provider_id,
+            "anthropic"
+        );
+        assert!(state.model_selector.selected().is_none());
+        assert_eq!(
+            handle_model_selector_key(&mut state, DomainKey::Enter),
+            InputAction::Consumed
+        );
+        assert!(state.model_selector.active);
+
+        // A locked column advertises only ←→ and Esc: '/' starts no hidden
+        // search, so Esc closes the selector instead of clearing invisible input.
+        state.model_selector.navigate_provider(Direction::Right);
+        assert!(
+            state.model_selector.columns[state.model_selector.selected_provider]
+                .locked_hint
+                .is_some()
+        );
+        for c in ['/', 'x'] {
+            assert_eq!(
+                handle_model_selector_char(&mut state, c),
+                InputAction::Consumed
+            );
+        }
+        assert!(!state.model_selector.search_active);
+        let _ = handle_model_selector_key(&mut state, DomainKey::Esc);
+        assert!(!state.model_selector.active);
     }
 
     #[derive(Debug)]

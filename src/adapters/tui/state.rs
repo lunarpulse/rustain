@@ -1082,6 +1082,46 @@ pub struct ProviderColumn {
     pub display_name: String,
     pub healthy: bool,
     pub models: Vec<crate::domain::models::provider::ModelDescriptor>,
+    pub locked_hint: Option<String>,
+    pub discovery: Option<crate::domain::models::provider::DiscoveryStatus>,
+    /// Sign-in hint for an available provider whose credential is rejected.
+    pub sign_in_hint: Option<String>,
+}
+
+/// Available providers retain registry order, including empty catalogues; public
+/// catalogues without credentials follow in display-name order.
+pub fn model_selector_columns(
+    info: &dyn crate::domain::ports::ProviderInfoPort,
+) -> Vec<ProviderColumn> {
+    let mut columns: Vec<_> = info
+        .list_providers()
+        .into_iter()
+        .map(|provider| ProviderColumn {
+            models: info.list_models_by_provider(&provider.provider_id),
+            discovery: info.discovery_status(&provider.provider_id),
+            sign_in_hint: info.sign_in_hint(&provider.provider_id),
+            provider_id: provider.provider_id,
+            display_name: provider.display_name,
+            healthy: provider.healthy,
+            locked_hint: None,
+        })
+        .collect();
+    let mut locked = info.list_locked_providers();
+    locked.sort_by(|a, b| {
+        a.display_name
+            .cmp(&b.display_name)
+            .then(a.provider_id.cmp(&b.provider_id))
+    });
+    columns.extend(locked.into_iter().map(|provider| ProviderColumn {
+        discovery: info.discovery_status(&provider.provider_id),
+        provider_id: provider.provider_id,
+        display_name: provider.display_name,
+        healthy: false,
+        models: provider.models,
+        locked_hint: Some(provider.sign_in_hint),
+        sign_in_hint: None,
+    }));
+    columns
 }
 
 /// Pending context-window warning state (Story 7.2 AC5).
@@ -1159,6 +1199,37 @@ impl ModelSelectorState {
                     .position(|m| m.model_id == active_model_id)
             })
             .unwrap_or(0);
+    }
+
+    /// Refresh an open snapshot without changing focus, search, or selection IDs.
+    pub fn refresh_columns(&mut self, columns: Vec<ProviderColumn>) {
+        let provider_id = self
+            .columns
+            .get(self.selected_provider)
+            .map(|c| c.provider_id.clone());
+        let model_id = self
+            .columns
+            .get(self.selected_provider)
+            .and_then(|c| self.selected_model_index().and_then(|i| c.models.get(i)))
+            .map(|m| m.model_id.clone());
+        self.columns = columns;
+        self.selected_provider = provider_id
+            .as_ref()
+            .and_then(|id| self.columns.iter().position(|c| &c.provider_id == id))
+            .unwrap_or(0);
+        self.recompute_filter();
+        let col = self.columns.get(self.selected_provider);
+        let model_index = col.and_then(|c| {
+            model_id
+                .as_ref()
+                .and_then(|id| c.models.iter().position(|m| &m.model_id == id))
+        });
+        self.selected_model = if self.search_active && !self.search_query.is_empty() {
+            model_index.and_then(|i| self.filtered_indices.iter().position(|&index| index == i))
+        } else {
+            model_index
+        }
+        .unwrap_or(0);
     }
 
     /// Dismiss the selector, returning the previous focus to restore.
@@ -1262,6 +1333,9 @@ impl ModelSelectorState {
     /// Get the currently selected (provider_id, model).
     pub fn selected(&self) -> Option<(&str, &crate::domain::models::provider::ModelDescriptor)> {
         let col = self.columns.get(self.selected_provider)?;
+        if col.locked_hint.is_some() {
+            return None;
+        }
         let idx = self.selected_model_index()?;
         let model = col.models.get(idx)?;
         Some((&col.provider_id, model))
@@ -3758,6 +3832,9 @@ mod tests {
                 provider_id: "a".to_string(),
                 display_name: "A".to_string(),
                 healthy: true,
+                locked_hint: None,
+                sign_in_hint: None,
+                discovery: None,
                 models: vec![ModelDescriptor {
                     model_id: "m1".to_string(),
                     display_name: "M1".to_string(),
@@ -3772,6 +3849,9 @@ mod tests {
                 provider_id: "b".to_string(),
                 display_name: "B".to_string(),
                 healthy: true,
+                locked_hint: None,
+                sign_in_hint: None,
+                discovery: None,
                 models: vec![ModelDescriptor {
                     model_id: "m2".to_string(),
                     display_name: "M2".to_string(),
@@ -3798,6 +3878,9 @@ mod tests {
             provider_id: "a".to_string(),
             display_name: "A".to_string(),
             healthy: true,
+            locked_hint: None,
+            sign_in_hint: None,
+            discovery: None,
             models: vec![
                 ModelDescriptor {
                     model_id: "m1".to_string(),
@@ -3834,6 +3917,9 @@ mod tests {
             provider_id: "a".to_string(),
             display_name: "A".to_string(),
             healthy: true,
+            locked_hint: None,
+            sign_in_hint: None,
+            discovery: None,
             models: vec![],
         }];
         ms.selected_provider = 0;
@@ -3851,6 +3937,9 @@ mod tests {
             provider_id: "a".to_string(),
             display_name: "A".to_string(),
             healthy: true,
+            locked_hint: None,
+            sign_in_hint: None,
+            discovery: None,
             models: vec![ModelDescriptor {
                 model_id: "m1".to_string(),
                 display_name: "M1".to_string(),
@@ -3876,6 +3965,9 @@ mod tests {
             provider_id: "anthropic".to_string(),
             display_name: "Anthropic".to_string(),
             healthy: true,
+            locked_hint: None,
+            sign_in_hint: None,
+            discovery: None,
             models: vec![
                 ModelDescriptor {
                     model_id: "claude-opus".to_string(),
@@ -3923,6 +4015,9 @@ mod tests {
             provider_id: "openrouter".to_string(),
             display_name: "OpenRouter".to_string(),
             healthy: true,
+            locked_hint: None,
+            sign_in_hint: None,
+            discovery: None,
             models: vec![
                 ModelDescriptor {
                     model_id: "anthropic/claude-3.5-sonnet".to_string(),
@@ -3954,6 +4049,56 @@ mod tests {
             ],
         }];
         ms
+    }
+
+    #[test]
+    fn catalog_refresh_preserves_provider_and_model_ids_after_reordering() {
+        let mut state = make_test_selector();
+        state.active = true;
+        state.selected_model = 1;
+        state.previous_focus = Some(FocusState::Input);
+        let mut updated = state.columns[0].clone();
+        updated.models.swap(0, 1);
+        updated.discovery = Some(crate::domain::models::provider::DiscoveryStatus::Cached);
+        let mut inserted = updated.clone();
+        inserted.provider_id = "inserted".into();
+        state.refresh_columns(vec![inserted, updated]);
+        assert!(state.active);
+        assert_eq!(state.selected_provider, 1);
+        assert_eq!(state.selected_model, 0);
+        assert_eq!(state.selected().unwrap().1.model_id, "openai/gpt-4o");
+        assert_eq!(state.previous_focus, Some(FocusState::Input));
+        assert_eq!(
+            state.columns[1].discovery,
+            Some(crate::domain::models::provider::DiscoveryStatus::Cached)
+        );
+
+        let mut empty = state.columns[1].clone();
+        empty.models.clear();
+        state.refresh_columns(vec![empty]);
+        assert_eq!(state.selected_provider, 0);
+        assert_eq!(state.selected_model, 0);
+        assert!(state.selected().is_none());
+        state.refresh_columns(Vec::new());
+        assert!(state.active);
+        assert!(state.columns.is_empty());
+        assert!(state.selected().is_none());
+    }
+
+    #[test]
+    fn catalog_refresh_recomputes_search_and_retains_matching_model_id() {
+        let mut state = make_test_selector();
+        state.active = true;
+        state.search_active = true;
+        state.search_query = "gpt".into();
+        state.recompute_filter();
+        let mut updated = state.columns[0].clone();
+        updated.models.swap(0, 1);
+        state.refresh_columns(vec![updated]);
+        assert_eq!(state.search_query, "gpt");
+        assert!(state.search_active);
+        assert_eq!(state.filtered_indices, [0]);
+        assert_eq!(state.selected().unwrap().1.model_id, "openai/gpt-4o");
     }
 
     #[test]
@@ -4017,6 +4162,9 @@ mod tests {
             provider_id: "anthropic".to_string(),
             display_name: "Anthropic".to_string(),
             healthy: true,
+            locked_hint: None,
+            sign_in_hint: None,
+            discovery: None,
             models: vec![ModelDescriptor {
                 model_id: "claude-sonnet".to_string(),
                 display_name: "Claude Sonnet".to_string(),

@@ -19,10 +19,16 @@ struct AuthEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl AuthEnvironment {
     fn empty(data_dir: &std::path::Path) -> Self {
-        let saved = [
+        let saved: Vec<(&'static str, Option<std::ffi::OsString>)> = [
             "RUSTAIN_DATA_DIR",
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GOOGLE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "MOONSHOT_API_KEY",
+            "ANTHROPIC_BASE_URL",
         ]
         .into_iter()
         .map(|name| (name, std::env::var_os(name)))
@@ -30,8 +36,11 @@ impl AuthEnvironment {
         // SAFETY: both callers hold the auth fixtures' unkeyed serial lock.
         unsafe {
             std::env::set_var("RUSTAIN_DATA_DIR", data_dir);
-            std::env::remove_var("ANTHROPIC_API_KEY");
-            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+            for (name, _) in &saved {
+                if *name != "RUSTAIN_DATA_DIR" {
+                    std::env::remove_var(name);
+                }
+            }
         }
         Self(saved)
     }
@@ -131,22 +140,25 @@ fn test_startup_registers_configured_providers() {
         "deepseek is disabled and should NOT be registered"
     );
 
-    // No credentials: defer Anthropic's failure and use the keyless provider.
+    // Missing credentials stay visible and locked; only keyless providers construct.
     assert!(
         !ids.contains("anthropic"),
         "anthropic should NOT be registered without credentials"
     );
     assert_eq!(active_id, "ollama");
     assert_eq!(router.active_delegate_id(), "ollama");
+    assert!(deferred.is_empty());
     assert!(
-        deferred.iter().any(|(id, _)| id == "anthropic"),
-        "anthropic construction failure should be deferred"
+        registry
+            .list_locked()
+            .iter()
+            .any(|provider| provider.provider_id == "anthropic")
     );
 }
 
 #[test]
 #[serial_test::serial]
-fn test_startup_legacy_fallback_when_provider_map_empty() {
+fn test_startup_empty_config_exposes_locked_builtins() {
     let data_dir = tempfile::tempdir().unwrap();
     let _environment = AuthEnvironment::empty(data_dir.path());
     let config = AppConfig::default();
@@ -158,15 +170,20 @@ fn test_startup_legacy_fallback_when_provider_map_empty() {
         ..
     } = init_provider_layer(&config);
 
-    // Should fall back to legacy Anthropic path
+    // The default catalogue exists without constructing unauthenticated adapters.
     let ids = registry.provider_ids();
 
     assert!(
         !ids.contains("anthropic"),
         "legacy startup must not register a provider without credentials"
     );
-    assert!(!deferred.is_empty(), "missing credentials must be reported");
-    assert_eq!(deferred[0].0, "anthropic");
+    assert!(deferred.is_empty());
+    assert!(
+        registry
+            .list_locked()
+            .iter()
+            .any(|provider| provider.provider_id == "anthropic")
+    );
 }
 
 struct FailingHealthCheckProvider {

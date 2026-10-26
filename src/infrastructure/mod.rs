@@ -6,11 +6,13 @@ pub mod config;
 pub mod context;
 pub mod key_resolver;
 pub mod logging;
+pub mod model_discovery;
 pub mod orchestrator;
 pub mod paths;
 pub mod permission_rules;
 pub mod profile_install;
 pub mod profile_resolution;
+pub mod provider_availability;
 pub mod provider_factory;
 pub mod runtime;
 #[cfg(feature = "meta-search")]

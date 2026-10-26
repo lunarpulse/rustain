@@ -54,12 +54,12 @@ fn build_list_rows(
         .map(|meta| {
             let configured = if meta.requires_key {
                 Some(
-                    super::source_for(
+                    super::source_for_configured(
                         meta.id,
-                        &super::env_vars_for(meta.id, meta.api_key_env),
+                        meta.api_key_env,
+                        configured_providers,
                         auth_json,
                         &env_lookup,
-                        true,
                     )
                     .is_some(),
                 )
@@ -94,12 +94,12 @@ fn build_list_rows(
             continue;
         }
         let configured = Some(
-            super::source_for(
+            super::source_for_configured(
                 id,
-                &super::env_vars_for(id, &cfg.api_key_env),
+                &cfg.api_key_env,
+                configured_providers,
                 auth_json,
                 &env_lookup,
-                true,
             )
             .is_some(),
         );
@@ -167,14 +167,17 @@ fn active_default_provider_id(cfg: &crate::domain::models::AppConfig) -> String 
 ///
 /// # Errors
 ///
-/// Returns `Err` only for auth-store read errors or JSON serialization failures.
+/// Returns `Err` only for JSON serialization failures; store errors are warnings.
 /// It never builds a provider and never performs network validation (AC5).
 pub async fn run_auth_list(
     json: bool,
     app_config: &crate::domain::models::AppConfig,
     store: &Arc<dyn AuthStorePort>,
 ) -> Result<()> {
-    let entries = store.snapshot().await?;
+    let (entries, store_error) = super::snapshot_or_warn(store).await;
+    if let Some(error) = &store_error {
+        eprintln!("warning: auth.json unreadable; stored credentials ignored: {error}");
+    }
     let default_id = active_default_provider_id(app_config);
     let rows = build_list_rows(
         providers::all_providers(),
@@ -185,7 +188,7 @@ pub async fn run_auth_list(
     );
 
     if json {
-        println!("{}", render_json(&rows)?);
+        println!("{}", render_json(&rows, store_error.as_deref())?);
     } else {
         println!("{}", render_human(&rows));
     }
@@ -289,10 +292,11 @@ fn human_methods(row: &ListRow) -> String {
 // JSON rendering
 // ---------------------------------------------------------------------------
 
-fn render_json(rows: &[ListRow]) -> Result<String> {
+fn render_json(rows: &[ListRow], store_error: Option<&str>) -> Result<String> {
     let output = ListJson {
         schema_version: AUTH_LIST_SCHEMA_VERSION,
         providers: rows.iter().map(ListProviderJson::from).collect(),
+        store_error,
     };
     Ok(serde_json::to_string_pretty(&output)?)
 }
@@ -301,6 +305,8 @@ fn render_json(rows: &[ListRow]) -> Result<String> {
 struct ListJson<'a> {
     schema_version: &'a str,
     providers: Vec<ListProviderJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_error: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -360,7 +366,8 @@ mod tests {
         );
         let anthropic = rows.iter().find(|row| row.provider == "anthropic").unwrap();
         assert_eq!(human_methods(anthropic), "oauth, api-key");
-        let value: serde_json::Value = serde_json::from_str(&render_json(&rows).unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, None).unwrap()).unwrap();
         assert_eq!(
             value["providers"][0]["auth_methods"],
             serde_json::json!(["oauth", "api_key"])
@@ -434,7 +441,7 @@ mod tests {
             Some(false)
         );
         let human = render_human(&rows);
-        let json = render_json(&rows).unwrap();
+        let json = render_json(&rows, None).unwrap();
         for secret in ["stored-test-key", "list-stale-access", "list-stale-refresh"] {
             assert!(!human.contains(secret));
             assert!(!json.contains(secret));
@@ -485,7 +492,7 @@ mod tests {
             "anthropic",
         );
         let human = render_human(&rows);
-        let json = render_json(&rows).unwrap();
+        let json = render_json(&rows, None).unwrap();
 
         // Positive control: provider id, ✓, signup URL, auth method present.
         assert!(human.contains("Anthropic"), "human missing provider name");
@@ -739,7 +746,7 @@ api_key_env = "DEEPSEEK_API_KEY"
             |_| None,
             "anthropic",
         );
-        let json_str = render_json(&rows).unwrap();
+        let json_str = render_json(&rows, None).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(value["schema_version"], "1.0");
@@ -815,7 +822,7 @@ api_key_env = "DEEPSEEK_API_KEY"
         assert!(human.contains("n/a"), "human: 'n/a' for keyless configured");
 
         // JSON render.
-        let json_str = render_json(&rows).unwrap();
+        let json_str = render_json(&rows, None).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let ollama_json = value["providers"]
             .as_array()

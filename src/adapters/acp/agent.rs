@@ -438,17 +438,13 @@ impl RustainAcpAgent {
         &self,
         provider: &crate::adapters::cli::auth::providers::ProviderMeta,
     ) -> acp::Result<bool> {
-        let snapshot = self
-            .auth_store
-            .snapshot()
-            .await
-            .map_err(|err| acp::Error::internal_error().data(err.to_string()))?;
-        Ok(crate::adapters::cli::auth::source_for(
+        let (snapshot, _) = crate::adapters::cli::auth::snapshot_or_warn(&self.auth_store).await;
+        Ok(crate::adapters::cli::auth::source_for_configured(
             provider.id,
-            &crate::adapters::cli::auth::env_vars_for(provider.id, provider.api_key_env),
+            provider.api_key_env,
+            &self.app_config.provider,
             &snapshot,
             &crate::infrastructure::utils::env_var_trimmed,
-            true,
         )
         .is_some())
     }

@@ -3,6 +3,57 @@
 Manage provider credentials with browser-based subscription login, masked API-key
 entry, logout, and offline status inspection.
 
+## Provider availability
+
+The built-in Anthropic, OpenAI, OpenRouter, Google AI, DeepSeek and Moonshot
+catalogues are visible without adding provider configuration. A home
+`auth.json` credential or a non-empty provider environment variable unlocks its
+provider from any working directory. Workspace configuration remains an explicit
+override; credentials are not tied to the current project.
+
+Providers without usable credentials appear **not signed in** in the model
+selector. Their public catalogue and sign-in hint remain visible, but Enter
+does not select a locked model or close the selector. For example:
+``Set OPENAI_API_KEY or run `rustain auth login openai` ``.
+Stored Anthropic OAuth counts only when the effective endpoint has the official
+API origin, just as it does for request construction. A gateway uses its
+configured key environment name, not an unrelated Anthropic environment key.
+
+Ollama remains explicitly configured and keyless. An `openai-compatible` local
+server is keyless **only** when `api_key_env = ""`; naming an unset variable
+locks it instead of silently sending unauthenticated requests.
+
+Discovery distinguishes a rejected credential (HTTP 401/403, **sign in again**)
+from an unavailable endpoint or network failure; health checks classify 401/403
+the same way, and a gateway without `/models` (404/405) posts no notice. A
+matching cached catalogue survives fetch failures; rejected credentials mark
+served models as stale. Successful live discovery prunes models the account no
+longer exposes, and stays in effect for the session even if the cache write
+fails. A successful empty list stays empty for that cycle and does not
+overwrite the last-good cache.
+
+The metadata order is bundled → provider-aware models.dev → credential-matching
+cache → live, merged per model and field. Sparse live records keep useful names,
+context limits and capabilities from earlier layers. Cache identities are
+opaque credential/endpoint-scoped hashes stamped with the credential a
+discovery request actually sent (a stored OAuth login by its account identity,
+a key by its value), and re-checked against the credential requests would use now; replacing
+a credential refetches without waiting for the TTL, and removing it never
+exposes an old account's private roster in a locked pane. Discovery cache v2 is
+rebuilt once as v3;
+bundled seed and existing pricing-cache compatibility are unchanged.
+
+After login actually changes stored rows, rustain immediately discovers that
+provider again and reports its result on stderr. Login stdout and success exit
+status are unchanged even if discovery fails.
+
+An unreadable or future-version `auth.json` produces a warning and falls back to
+environment credentials in startup, `auth status`, `auth list`, and ACP.
+Both CLI commands still exit successfully; their JSON adds top-level
+`store_error` only when the read failed. Parse warnings never include credential
+file contents. ACP returns the normal authentication-required error when
+neither stored nor environment credentials can serve.
+
 ## `rustain auth login <provider>`
 
 Anthropic supports Claude Pro/Max browser subscription login and API keys. Other
@@ -65,8 +116,8 @@ The shared cascade resolves credentials in this order (highest wins):
 Both OAuth login and API-key login now write `origin: "login"`: a new login key
 beats environment variables. Migrated v1 keys and older paste logins retain
 `stored` origin below env. Config stores env-var names, never plaintext secrets.
-Anthropic status/list and legacy startup check `ANTHROPIC_AUTH_TOKEN` before
-`ANTHROPIC_API_KEY`; config-driven construction uses the configured env name.
+Bundled Anthropic status/list and startup check `ANTHROPIC_AUTH_TOKEN` before
+`ANTHROPIC_API_KEY`; config-driven availability and construction use the configured env name.
 
 Every Anthropic request resolves its current credential through one shared
 resolver per process. A stale-only subscription builds successfully and refreshes
@@ -150,7 +201,7 @@ origin; a redirect fails the login or leaves the refresh transient.
 
 For stored OAuth subscriptions only, an HTTP 401 before streaming content can
 force a refresh of the **same row** and retry once with a different bearer.
-Streaming completions, health checks and connectivity probes share this policy.
+Streaming completions, health checks, connectivity probes and discovery share this policy.
 A second 401 ends the request; HTTP 403 never triggers refresh or account
 rotation. Runtime/login/env/stored API keys (including pasted/env `sk-ant-oat`
 tokens) do not receive this auth retry. A removed/disabled row, unchanged bearer,

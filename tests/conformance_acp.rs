@@ -770,6 +770,83 @@ async fn acp_authenticate_checks_credential_presence() {
     }
 }
 
+/// A corrupt home store must degrade to env-only auth, never an ACP internal error.
+#[tokio::test]
+async fn acp_authenticate_unreadable_store_uses_environment_and_auth_required() {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"providers":"ACP-CORRUPT-SECRET-CANARY""#,
+    )
+    .unwrap();
+    for has_env in [true, false] {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_rustain"));
+        command
+            .arg("acp")
+            .current_dir(home.path())
+            .env("RUSTAIN_DATA_DIR", home.path())
+            .env("RUSTAIN_CONFIG_DIR", home.path())
+            .env("RUSTAIN_MODELS_DEV_URL", "http://127.0.0.1:1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        for name in [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GOOGLE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "MOONSHOT_API_KEY",
+            "ANTHROPIC_BASE_URL",
+        ] {
+            command.env_remove(name);
+        }
+        if has_env {
+            command.env("OPENAI_API_KEY", "acp-env-key");
+        }
+        let mut child = command.spawn().unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        input
+            .write_all(line(ACP_INITIALIZE_REQ.to_owned()).as_bytes())
+            .await
+            .unwrap();
+        input.write_all(line(serde_json::json!({"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"openai"}}).to_string()).as_bytes()).await.unwrap();
+        input.flush().await.unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let raw = lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("ACP response before EOF");
+                let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if response["id"] == 2 {
+                    break response;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        if has_env {
+            assert!(response.get("result").is_some(), "{response}");
+        } else {
+            let required =
+                serde_json::to_value(agent_client_protocol::Error::auth_required()).unwrap();
+            assert_eq!(response["error"]["code"], required["code"]);
+            assert_ne!(response["error"]["code"], -32603);
+        }
+        assert!(!response.to_string().contains("ACP-CORRUPT-SECRET-CANARY"));
+        assert!(!response.to_string().contains("acp-env-key"));
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn acp_initialize_then_prompt_matches_golden_transcript() {
     use std::rc::Rc;

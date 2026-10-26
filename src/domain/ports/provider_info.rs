@@ -44,6 +44,22 @@ pub trait ProviderInfoPort: Send + Sync {
     /// List models served by a specific provider.
     fn list_models_by_provider(&self, provider_id: &str) -> Vec<ModelDescriptor>;
 
+    fn list_locked_providers(&self) -> Vec<crate::domain::models::provider::LockedProvider> {
+        vec![]
+    }
+
+    fn discovery_status(
+        &self,
+        _provider_id: &str,
+    ) -> Option<crate::domain::models::provider::DiscoveryStatus> {
+        None
+    }
+
+    /// Actionable sign-in hint for an available provider (rejected-credential pane).
+    fn sign_in_hint(&self, _provider_id: &str) -> Option<String> {
+        None
+    }
+
     /// Get a clone-able handle to a specific provider's `StreamingProvider`
     /// impl. Used for spawn-bearing handlers (health-check, compaction) that
     /// pass the provider into a spawned task at the dispatch site.

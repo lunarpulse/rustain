@@ -5003,22 +5003,9 @@ pub async fn run(
                                 InputAction::OpenModelSelector => {
                                     let active_pid = router.active_delegate_id();
                                     let effective_mid = effective_model(&state, config).to_string();
-                                    let providers = app_state.provider_registry.list_providers();
-                                    let columns: Vec<crate::adapters::tui::state::ProviderColumn> = providers
-                                        .into_iter()
-                                        .map(|pd| {
-                                            let models = app_state
-                                                .provider_registry
-                                                .list_models_by_provider(&pd.provider_id);
-                                            crate::adapters::tui::state::ProviderColumn {
-                                                provider_id: pd.provider_id,
-                                                display_name: pd.display_name,
-                                                healthy: pd.healthy,
-                                                models,
-                                            }
-                                        })
-                                        .filter(|c| !c.models.is_empty())
-                                        .collect();
+                                    let columns = crate::adapters::tui::state::model_selector_columns(
+                                        &AppContext::new(&app_state, &router),
+                                    );
                                     if columns.is_empty() {
                                         let fb = crate::domain::models::FeedbackBlock {
                                             id: "model-selector-empty".to_string(),
@@ -5104,22 +5091,9 @@ pub async fn run(
                                     handlers::budget::handle_clear_daily_budget_warning(&mut state);
                                     let active_pid = router.active_delegate_id();
                                     let effective_mid = effective_model(&state, config).to_string();
-                                    let providers = app_state.provider_registry.list_providers();
-                                    let columns: Vec<crate::adapters::tui::state::ProviderColumn> = providers
-                                        .into_iter()
-                                        .map(|pd| {
-                                            let models = app_state
-                                                .provider_registry
-                                                .list_models_by_provider(&pd.provider_id);
-                                            crate::adapters::tui::state::ProviderColumn {
-                                                provider_id: pd.provider_id,
-                                                display_name: pd.display_name,
-                                                healthy: pd.healthy,
-                                                models,
-                                            }
-                                        })
-                                        .filter(|c| !c.models.is_empty())
-                                        .collect();
+                                    let columns = crate::adapters::tui::state::model_selector_columns(
+                                        &AppContext::new(&app_state, &router),
+                                    );
                                     if !columns.is_empty() {
                                         state.model_selector.open(
                                             state.focus.clone(),
@@ -7559,6 +7533,13 @@ pub async fn run(
                     }
                     AppEvent::ProviderCatalogRefreshed { provider_id } => {
                         state.model_selector.refreshing.remove(&provider_id);
+                        if state.model_selector.active {
+                            state.model_selector.refresh_columns(
+                                crate::adapters::tui::state::model_selector_columns(
+                                    &AppContext::new(&app_state, &router),
+                                ),
+                            );
+                        }
                         state.needs_redraw = true;
                     }
                     // Story 8.1 AC-10, Story 8.2 AC-15.2 — Config reload via handler.

@@ -41,6 +41,18 @@ pub enum OpenAiCompatibleVariant {
 }
 
 impl OpenAiCompatibleVariant {
+    /// The built-in variant a provider kind names; `None` for custom endpoints.
+    pub fn builtin(kind: &str) -> Option<Self> {
+        match kind {
+            "openai" => Some(Self::OpenAI),
+            "openrouter" => Some(Self::OpenRouter),
+            "google" => Some(Self::Google),
+            "deepseek" => Some(Self::DeepSeek),
+            "moonshot" => Some(Self::Moonshot),
+            _ => None,
+        }
+    }
+
     /// Provider identifier used for registry keys and UI display.
     pub fn provider_id(&self) -> &str {
         match self {

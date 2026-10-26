@@ -8,6 +8,60 @@ fn peer(seed: u8) -> PeerId {
     PeerId::from_public_key(&[seed; 32]).expect("fixed key")
 }
 
+/// Story 19.16 AC5(a): a durable recipient-item record must not claim
+/// authentication, signatures, proof, attestation, audit, evidence or
+/// tamper-evidence the unsigned room journal does not provide. This inspects
+/// what journal readers actually consume — every serialized key and every
+/// host-written string — instead of counting source identifiers.
+fn assert_persisted_record_claims_nothing(record: &serde_json::Value) {
+    let mut found = Vec::new();
+    claim_words(record, "$", &mut found);
+    assert!(
+        found.is_empty(),
+        "persisted claim vocabulary {found:?} in {record}"
+    );
+}
+
+fn claim_words(value: &serde_json::Value, path: &str, found: &mut Vec<String>) {
+    const CLAIMS: [&str; 8] = [
+        "verified",
+        "attested",
+        "proof",
+        "audit",
+        "signed",
+        "authenticated",
+        "tamper",
+        "evidence",
+    ];
+    let claims = |text: &str| {
+        let lower = text.to_ascii_lowercase();
+        CLAIMS.iter().any(|claim| lower.contains(claim))
+    };
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let at = format!("{path}.{key}");
+                if claims(key.as_str()) {
+                    found.push(at.clone());
+                }
+                // Sender-authored bodies are data: a sender may write any word.
+                if key != "content" {
+                    claim_words(child, &at, found);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                claim_words(child, &format!("{path}[{index}]"), found);
+            }
+        }
+        serde_json::Value::String(text) if claims(text.as_str()) => {
+            found.push(format!("{path} = {text}"));
+        }
+        _ => {}
+    }
+}
+
 #[test]
 fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
     let address = ItemAddress::from_a2a_ingress(peer(7), ItemId::from_replay("item-1"));
@@ -43,6 +97,7 @@ fn recipient_item_events_round_trip_without_falling_into_unrecognized() {
 
     for event in events {
         let encoded = serde_json::to_value(&event).expect("event serializes");
+        assert_persisted_record_claims_nothing(&encoded);
         if matches!(event, RoomEvent::RecipientItemRetracted { .. }) {
             // The durable tag other builds and the pinned transparency fixture
             // name. ⛔ A respelling would round-trip in THIS build and fall
@@ -164,6 +219,16 @@ async fn received_provenance_journal_preserves_legacy_bytes_and_tolerates_future
             .starts_with(original_bytes.as_bytes()),
         "appending valid facts leaves historical lines byte-identical"
     );
+    // Check what the real unsigned journal persisted, not source identifiers:
+    // sender content remains data, while the host must not invent a claim.
+    let disk = std::fs::read_to_string(&path).expect("read real appended journal");
+    let record: serde_json::Value = serde_json::from_str(disk.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        record["record"]["payload"]["event"],
+        "recipient_item_received"
+    );
+    assert_eq!(record["record"]["payload"]["content"], "valid body");
+    assert_persisted_record_claims_nothing(&record);
 
     let projection = JournalRecipientItemProjection::from_entries(&replayed);
     for address in [&legacy_address, &future_address] {
@@ -271,6 +336,7 @@ fn reply_thread_journal_fields_round_trip_and_legacy_omissions_default_to_none()
         status: None,
     };
     let mut legacy_replied = serde_json::to_value(&replied).expect("serialize reply turn");
+    assert_persisted_record_claims_nothing(&legacy_replied);
     assert_eq!(legacy_replied["via_node"], "reply-node");
     legacy_replied
         .as_object_mut()

@@ -5,13 +5,11 @@
 
 use std::collections::HashSet;
 
-use crate::adapters::openai::allowlists::{
-    compile_filter_patterns, is_noise_model_id, matches_any, variant_default_context,
-};
-use crate::adapters::openai::types::{ModelsListItem, ModelsListResponse};
+use crate::adapters::model_filter::{compile_filter_patterns, is_noise_model_id, matches_any};
+use crate::adapters::openai::types::ModelsListResponse;
 use crate::adapters::openai::variant::OpenAiCompatibleVariant;
 use crate::domain::errors::ProviderError;
-use crate::domain::models::provider::{ModelCapability, ModelDescriptor};
+use crate::domain::models::provider::{ModelCapability, ModelRecord};
 
 /// Parse a JSON payload and filter it through the noise regex and user `model_filter` globs.
 ///
@@ -22,7 +20,7 @@ pub fn parse_and_filter_models(
     payload: &str,
     variant: &OpenAiCompatibleVariant,
     model_filter: &[String],
-) -> Result<Vec<ModelDescriptor>, ProviderError> {
+) -> Result<Vec<ModelRecord>, ProviderError> {
     let response: ModelsListResponse = serde_json::from_str(payload)
         .map_err(|e| ProviderError::Other(format!("Failed to parse models response: {}", e)))?;
 
@@ -44,29 +42,21 @@ pub fn parse_and_filter_models(
             continue;
         }
 
-        // 3. Map to ModelDescriptor
-        let capabilities = match &item.supported_parameters {
-            None => HashSet::from([ModelCapability::ToolUse]),
-            Some(params) => {
-                if params.iter().any(|p| p == "tools") {
-                    HashSet::from([ModelCapability::ToolUse])
-                } else {
-                    HashSet::new()
-                }
+        // Preserve absent metadata so lower catalog layers can fill it.
+        let capabilities = item.supported_parameters.as_ref().map(|params| {
+            if params.iter().any(|p| p == "tools") {
+                HashSet::from([ModelCapability::ToolUse])
+            } else {
+                HashSet::new()
             }
-        };
+        });
 
-        result.push(ModelDescriptor {
+        result.push(ModelRecord {
             model_id: item.id.clone(),
-            display_name: item.name.clone().unwrap_or_else(|| item.id.clone()),
-            provider_id: variant.provider_id().to_string(),
-            context_window: item
-                .context_length
-                .or_else(|| variant.context_window_for(&item.id))
-                .unwrap_or_else(|| variant_default_context(variant)),
+            display_name: item.name.clone(),
+            context_window: item.context_length,
             capabilities,
             pricing_tier: None,
-            stale: false,
         });
     }
 
@@ -85,26 +75,7 @@ pub fn parse_and_filter_models(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn mk_item(id: &str) -> ModelsListItem {
-        ModelsListItem {
-            id: id.to_string(),
-            name: None,
-            context_length: None,
-            supported_parameters: None,
-            object: None,
-        }
-    }
-
-    fn mk_item_with_tools(id: &str) -> ModelsListItem {
-        ModelsListItem {
-            id: id.to_string(),
-            name: None,
-            context_length: None,
-            supported_parameters: Some(vec!["tools".to_string()]),
-            object: None,
-        }
-    }
+    use crate::adapters::openai::types::ModelsListItem;
 
     #[test]
     fn parse_minimal_openai_shape() {
@@ -117,6 +88,9 @@ mod tests {
         .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].model_id, "gpt-4o");
+        assert_eq!(result[0].display_name, None);
+        assert_eq!(result[0].context_window, None);
+        assert_eq!(result[0].capabilities, None);
     }
 
     #[test]
@@ -135,9 +109,15 @@ mod tests {
         // claude-3-haiku does NOT have tools => empty capabilities but still kept
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].model_id, "anthropic/claude-3.5-sonnet");
-        assert!(result[0].capabilities.contains(&ModelCapability::ToolUse));
+        assert!(
+            result[0]
+                .capabilities
+                .as_ref()
+                .unwrap()
+                .contains(&ModelCapability::ToolUse)
+        );
         assert_eq!(result[1].model_id, "anthropic/claude-3-haiku");
-        assert!(result[1].capabilities.is_empty());
+        assert!(result[1].capabilities.as_ref().unwrap().is_empty());
     }
 
     #[test]
@@ -149,11 +129,11 @@ mod tests {
             &["*".to_string()],
         )
         .unwrap();
-        assert_eq!(result[0].display_name, "GPT-4 Omni");
+        assert_eq!(result[0].display_name.as_deref(), Some("GPT-4 Omni"));
     }
 
     #[test]
-    fn parse_fallback_display_name() {
+    fn parse_preserves_absent_display_name() {
         let payload = r#"{"data":[{"id":"gpt-4o"}]}"#;
         let result = parse_and_filter_models(
             payload,
@@ -161,7 +141,20 @@ mod tests {
             &["*".to_string()],
         )
         .unwrap();
-        assert_eq!(result[0].display_name, "gpt-4o");
+        assert_eq!(result[0].display_name, None);
+    }
+
+    #[test]
+    fn parse_preserves_explicit_zero_and_id_name_for_merge() {
+        let result = parse_and_filter_models(
+            r#"{"data":[{"id":"gpt-chat","name":"gpt-chat","context_length":0,"supported_parameters":[]}]}"#,
+            &OpenAiCompatibleVariant::OpenAI,
+            &["*".to_string()],
+        ).unwrap();
+        assert_eq!(result[0].display_name.as_deref(), Some("gpt-chat"));
+        assert_eq!(result[0].context_window, Some(0));
+        assert_eq!(result[0].capabilities, Some(HashSet::new()));
+        assert_eq!(result[0].pricing_tier, None);
     }
 
     #[test]
@@ -263,13 +256,15 @@ mod tests {
                 .iter()
                 .map(|m| ModelsListItem {
                     id: m.model_id.clone(),
-                    name: Some(m.display_name.clone()),
-                    context_length: Some(m.context_window),
-                    supported_parameters: if m.capabilities.contains(&ModelCapability::ToolUse) {
-                        Some(vec!["tools".to_string()])
-                    } else {
-                        Some(vec![])
-                    },
+                    name: m.display_name.clone(),
+                    context_length: m.context_window,
+                    supported_parameters: m.capabilities.as_ref().map(|capabilities| {
+                        if capabilities.contains(&ModelCapability::ToolUse) {
+                            vec!["tools".to_string()]
+                        } else {
+                            vec![]
+                        }
+                    }),
                     object: None,
                 })
                 .collect(),

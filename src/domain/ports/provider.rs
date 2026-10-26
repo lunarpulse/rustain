@@ -51,6 +51,36 @@ pub trait StreamingProvider: Send + Sync {
     /// Return the metadata of all models available through this provider.
     fn list_models(&self) -> Vec<ModelDescriptor>;
 
+    /// Discover sparse metadata: 401/403 means rejected auth, 404/405 unsupported.
+    /// The result carries the cache scope (within `scope_context`) of the
+    /// credential the completed request actually sent.
+    async fn discover_models(
+        &self,
+        _model_filter: &[String],
+        _scope_context: &str,
+    ) -> Option<Result<crate::domain::models::provider::DiscoveredModels, ProviderError>> {
+        None
+    }
+
+    /// Publish a merged catalogue. `[]` is authoritative, not a missing overlay.
+    fn set_discovered_models(&self, _models: Vec<ModelDescriptor>) {}
+
+    /// Bind discovery to a static adapter's captured credential, not a later store read.
+    fn discovery_credential_fingerprint(&self, _context: &str) -> Option<String> {
+        None
+    }
+
+    /// Scope of the credential a discovery request would send now, read through
+    /// the adapter's own request path; `None` means no usable credential.
+    async fn discovery_scope(&self, scope_context: &str) -> Option<String> {
+        self.discovery_credential_fingerprint(scope_context)
+    }
+
+    /// Canonical context window for a model id every catalogue layer omits.
+    fn default_context_window(&self, _model_id: &str) -> Option<u32> {
+        None
+    }
+
     /// Lightweight health check. Returns `Ok(())` if the provider API is
     /// reachable, `Err(ProviderError)` on timeout or auth failure.
     /// Must not block for more than 5 seconds.

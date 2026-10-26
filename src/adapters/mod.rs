@@ -28,6 +28,7 @@ pub mod long_term_memory;
 pub mod memory_context;
 pub mod merge_back;
 pub mod model_catalog_cache;
+pub mod model_filter;
 #[cfg(feature = "models-dev")]
 pub mod models_dev;
 pub mod noop;

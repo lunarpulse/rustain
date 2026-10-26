@@ -380,7 +380,9 @@ fn test_no_new_eventbus_bypass() {
     // directly. All 3 were pre-existing at `prd` HEAD `6bbedde` (the count did not
     // grow from the propose_plan event_tx fix). Reduce this number if those sites
     // are later migrated to `event_bus.emit_domain(...)`.
-    const MAX_KNOWN_BYPASSES: usize = 51;
+    // Credential-gated discovery routes health and both refresh paths through
+    // EventBus; five untagged direct-send sites were removed (51 → 46).
+    const MAX_KNOWN_BYPASSES: usize = 46;
 
     let src_dir = Path::new("src");
     let files = collect_rs_files(src_dir);
@@ -890,62 +892,6 @@ fn test_event_loop_complexity_floor() {
         EVENT_LOOP_RUN_BASELINE_CCN,
         COMPLEXITY_MULTIPLIER_PCT,
     );
-}
-
-/// Story 19.16 AC5 — durable recipient-item names must not imply cryptographic
-/// properties the unsigned room journal does not provide.
-///
-/// The needles are AC5(a)'s merged ban list as identifier substrings:
-/// `verified|attested|proof|audit|signed` plus `authenticated|tamper|evidence`
-/// (identifiers cannot carry the prose forms `tamper-evident`/`audit trail`).
-/// Genuine mechanism names (`authenticate_request`) do not match: the ban is on
-/// the claim word `authenticated`, not on functions that actually authenticate.
-#[test]
-fn recipient_item_claim_identifier_ratchet_does_not_grow() {
-    const MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS: usize = 84;
-
-    let declaration = regex::Regex::new(
-        r"(?i)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:struct|enum|trait|type|fn|const|static)\s+([A-Za-z_][A-Za-z0-9_]*)",
-    )
-    .unwrap();
-    let enum_variant = regex::Regex::new(r"^\s*([A-Z][A-Za-z0-9_]*)\s*(?:\{|\(|,)\s*$").unwrap();
-    let banned = regex::Regex::new(
-        r"(?i)(verified|attested|proof|audit|signed|authenticated|tamper|evidence)",
-    )
-    .unwrap();
-    let mut sites = Vec::new();
-    for file in collect_rs_files(Path::new("src")) {
-        let source = fs::read_to_string(&file).expect("read Rust source");
-        for (line, text) in source.lines().enumerate() {
-            let captures = declaration
-                .captures(text)
-                .or_else(|| enum_variant.captures(text));
-            let Some(captures) = captures else {
-                continue;
-            };
-            let identifier = captures.get(1).unwrap().as_str();
-            if banned.is_match(identifier) {
-                sites.push(format!("{}:{} {identifier}", file.display(), line + 1));
-            }
-        }
-    }
-
-    let actual = sites.len();
-    assert!(
-        actual <= MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS,
-        "durable-item claim identifier count grew from \
-         {MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS} to {actual}. New recipient-item \
-         symbols must not claim authentication, tamper-evidence, signatures, proof, \
-         attestation, audit, or evidence properties the room journal does not \
-         provide.\n{}",
-        sites.join("\n")
-    );
-    if actual < MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS {
-        eprintln!(
-            "durable-item claim identifier ratchet dropped from \
-             {MAX_KNOWN_DURABLE_ITEM_CLAIM_IDENTIFIERS} to {actual}; lower the baseline"
-        );
-    }
 }
 
 /// Story 19.16c AC5(c) — the removal kind's **glyph** collides with nothing.
