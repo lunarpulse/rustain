@@ -63,7 +63,7 @@ fn build_status_rows(
     let known_ids: HashSet<&str> = providers.iter().map(|p| p.id).collect();
     let mut rows = Vec::new();
     let mut append = |id: &str, display: &str, env_vars: &[&str]| {
-        let selected = super::source_for(id, env_vars, snapshot, &env_lookup);
+        let selected = super::source_for(id, env_vars, snapshot, &env_lookup, true);
         let (source, status, last_validated, disabled_cause) = if let Some(selection) = selected {
             let stale = matches!(selection.material, SelectionMaterial::NeedsRefresh { .. });
             (
@@ -291,6 +291,7 @@ mod tests {
             refresh: SecretString::new("status-stale-refresh".to_owned()),
             expires_at_ms: 0,
             identity: CredentialIdentity::default(),
+            authorized_at_ms: None,
         });
         let rows = build_status_rows(providers::all_providers(), &[disabled, stale], |_| None);
         let human = render_human(&rows);

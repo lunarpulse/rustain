@@ -1,7 +1,9 @@
 pub mod list;
 pub mod login;
+pub mod logout;
 pub mod providers;
 pub mod status;
+pub mod terminal_ui;
 
 use crate::domain::models::{AuthSnapshot, AuthSource};
 use crate::domain::services::key_cascade::{CascadeInputs, SelectionMaterial, select};
@@ -21,12 +23,13 @@ pub(crate) struct SourceSelection {
     pub last_validated: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Availability includes stale OAuth credentials; construction uses select_ready.
+/// Availability and request construction share this provenance reading.
 pub(crate) fn source_for(
     provider_id: &str,
     env_vars: &[&str],
     snapshot: &AuthSnapshot,
     env_lookup: &dyn Fn(&str) -> Option<String>,
+    oauth_allowed: bool,
 ) -> Option<SourceSelection> {
     let selection = select(
         &CascadeInputs {
@@ -34,6 +37,7 @@ pub(crate) fn source_for(
             rows: snapshot.rows(provider_id),
             env_vars,
             env_lookup,
+            oauth_allowed,
             now_ms: chrono::Utc::now().timestamp_millis(),
         },
         &Default::default(),

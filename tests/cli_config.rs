@@ -300,6 +300,7 @@ fn p0_3c_provider_ctor_count_armed() {
         provider_id: "test".to_string(),
         model_id: "test-model".to_string(),
         api_key_env: "NONEXISTENT_API_KEY_FOR_TEST".to_string(),
+        auth_header: None,
         enabled: true,
         kind: Some("anthropic".to_string()),
         base_url: None,

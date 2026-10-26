@@ -31,6 +31,7 @@ pub struct StreamTransformer {
     cache_read_input_tokens: Option<u32>,
     /// Stop reason extracted from message_delta (used at message_stop).
     pending_stop_reason: Option<StopReason>,
+    claude_code: bool,
 }
 
 impl Default for StreamTransformer {
@@ -48,6 +49,14 @@ impl StreamTransformer {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             pending_stop_reason: None,
+            claude_code: false,
+        }
+    }
+
+    pub fn with_profile(claude_code: bool) -> Self {
+        Self {
+            claude_code,
+            ..Self::new()
         }
     }
 
@@ -56,13 +65,8 @@ impl StreamTransformer {
         // Parse the SSE data as an Anthropic event
         let event: AnthropicEvent = match serde_json::from_str(&frame.data) {
             Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to parse SSE event data: {} — event: {}, raw: {}",
-                    e,
-                    frame.event,
-                    frame.data
-                );
+            Err(_) => {
+                tracing::warn!("Failed to parse Anthropic SSE event data");
                 return vec![];
             }
         };
@@ -93,6 +97,11 @@ impl StreamTransformer {
             } => match content_block {
                 ContentBlockInfo::Text { .. } => vec![],
                 ContentBlockInfo::ToolUse { id, name } => {
+                    let name = if self.claude_code {
+                        name.strip_prefix('_').unwrap_or(&name).to_owned()
+                    } else {
+                        name
+                    };
                     self.active_tools.insert(
                         index,
                         ToolAccumulator {

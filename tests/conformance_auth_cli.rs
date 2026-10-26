@@ -3,11 +3,10 @@
 
 use clap::CommandFactory;
 
-/// Ratchet: EXPECTED_AUTH_SUBCOMMANDS = 3 (login + status + list).
-/// All three auth subcommands now exist — this is the final Epic 13 auth count.
+/// Ratchet: login, status, list and logout are the public auth commands.
 #[test]
-fn test_auth_subcommand_count_is_three() {
-    const EXPECTED_AUTH_SUBCOMMANDS: usize = 3;
+fn test_auth_subcommand_count_is_four() {
+    const EXPECTED_AUTH_SUBCOMMANDS: usize = 4;
     let cmd = rustain::adapters::cli::commands::Cli::command();
     let auth_cmd = cmd
         .find_subcommand("auth")
@@ -15,7 +14,7 @@ fn test_auth_subcommand_count_is_three() {
     let subcommand_count = auth_cmd.get_subcommands().count();
     assert_eq!(
         subcommand_count, EXPECTED_AUTH_SUBCOMMANDS,
-        "Expected {EXPECTED_AUTH_SUBCOMMANDS} auth subcommand(s) (login + status + list), \
+        "Expected {EXPECTED_AUTH_SUBCOMMANDS} auth subcommand(s) (login + status + list + logout), \
          found {subcommand_count}."
     );
 }

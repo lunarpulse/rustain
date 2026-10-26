@@ -5,6 +5,7 @@ pub mod agent_registry;
 pub mod apply_patch;
 pub mod approval_persistence_toml;
 pub mod artifact;
+pub mod auth;
 pub mod auth_store;
 pub mod authority;
 pub mod budget;

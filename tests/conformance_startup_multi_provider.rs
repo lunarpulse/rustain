@@ -62,6 +62,7 @@ fn test_startup_registers_configured_providers() {
         (
             "anthropic".to_string(),
             ProviderConfig {
+                auth_header: None,
                 provider_id: "anthropic".to_string(),
                 model_id: "claude-sonnet-4-20250514".to_string(),
                 api_key_env: "ANTHROPIC_API_KEY".to_string(),
@@ -78,6 +79,7 @@ fn test_startup_registers_configured_providers() {
         (
             "ollama".to_string(),
             ProviderConfig {
+                auth_header: None,
                 provider_id: "ollama".to_string(),
                 model_id: "llama3.3:70b".to_string(),
                 api_key_env: "".to_string(),
@@ -94,6 +96,7 @@ fn test_startup_registers_configured_providers() {
         (
             "deepseek".to_string(),
             ProviderConfig {
+                auth_header: None,
                 provider_id: "deepseek".to_string(),
                 model_id: "deepseek-chat".to_string(),
                 api_key_env: "DEEPSEEK_API_KEY".to_string(),
@@ -225,6 +228,7 @@ fn test_factory_routes_kind_openai_compatible() {
     use rustain::infrastructure::provider_factory::build_provider_for_config;
 
     let cfg = ProviderConfig {
+        auth_header: None,
         provider_id: "my-llamacpp".to_string(),
         model_id: "qwen2.5-coder".to_string(),
         api_key_env: "".to_string(),
@@ -253,6 +257,7 @@ fn test_factory_openai_compatible_requires_base_url() {
     use rustain::infrastructure::provider_factory::build_provider_for_config;
 
     let cfg = ProviderConfig {
+        auth_header: None,
         provider_id: "my-llamacpp".to_string(),
         model_id: "qwen2.5-coder".to_string(),
         api_key_env: "".to_string(),
@@ -286,6 +291,7 @@ fn test_factory_kind_absent_uses_provider_id() {
     use rustain::infrastructure::provider_factory::build_provider_for_config;
 
     let cfg = ProviderConfig {
+        auth_header: None,
         provider_id: "ollama".to_string(),
         model_id: "llama3.3:70b".to_string(),
         api_key_env: "".to_string(),

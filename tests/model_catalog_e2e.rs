@@ -130,6 +130,7 @@ fn anthropic_discover_models_is_no_op() {
         use rustain::domain::models::ProviderConfig;
         use rustain::infrastructure::provider_factory::build_openai_for_discovery;
         let cfg = ProviderConfig {
+            auth_header: None,
             provider_id: "anthropic".to_string(),
             enabled: true,
             model_id: "claude-sonnet-4".to_string(),

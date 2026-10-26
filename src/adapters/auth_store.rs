@@ -48,6 +48,8 @@ enum DiskCredential<'a> {
         #[serde(serialize_with = "expose_secret_string")]
         refresh: &'a SecretString,
         expires_at: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        authorized_at: Option<i64>,
         identity: &'a CredentialIdentity,
     },
 }
@@ -78,6 +80,7 @@ impl Serialize for AuthRow {
                         access: &oauth.access,
                         refresh: &oauth.refresh,
                         expires_at: oauth.expires_at_ms,
+                        authorized_at: oauth.authorized_at_ms,
                         identity: &oauth.identity,
                     },
                 },
@@ -402,6 +405,16 @@ impl FileAuthStore {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(AuthError::Io(format!("rename: {e}")));
         }
+        #[cfg(unix)]
+        {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| AuthError::Io(format!("fsync auth directory: {error}")))?;
+        }
 
         Ok(())
     }
@@ -429,13 +442,23 @@ impl AuthStorePort for FileAuthStore {
         let mut result = CredentialId(0);
         Self::modify_locked(&path, |data| {
             let identity = match &cred {
-                Credential::OAuth(oauth) => oauth.identity.key(),
+                Credential::OAuth(oauth) => {
+                    oauth
+                        .identity
+                        .key(crate::adapters::auth::policies::org_scoped_identity(
+                            provider,
+                        ))
+                }
                 Credential::ApiKey(_) => None,
             };
             let matches = |row: &StoredCredential| match (&cred, &row.credential) {
                 (Credential::ApiKey(_), Credential::ApiKey(_)) => true,
                 (Credential::OAuth(_), Credential::OAuth(old)) => {
-                    identity.is_some() && identity == old.identity.key()
+                    identity.is_some()
+                        && identity
+                            == old.identity.key(
+                                crate::adapters::auth::policies::org_scoped_identity(provider),
+                            )
                 }
                 _ => false,
             };

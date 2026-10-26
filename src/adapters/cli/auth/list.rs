@@ -11,7 +11,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::adapters::cli::auth::providers;
-use crate::domain::models::{AuthSnapshot, credential::AuthMethod};
+use crate::domain::models::{AuthMethod, AuthSnapshot};
 use crate::domain::ports::AuthStorePort;
 
 pub const AUTH_LIST_SCHEMA_VERSION: &str = "1.0";
@@ -59,6 +59,7 @@ fn build_list_rows(
                         &super::env_vars_for(meta.id, meta.api_key_env),
                         auth_json,
                         &env_lookup,
+                        true,
                     )
                     .is_some(),
                 )
@@ -98,13 +99,14 @@ fn build_list_rows(
                 &super::env_vars_for(id, &cfg.api_key_env),
                 auth_json,
                 &env_lookup,
+                true,
             )
             .is_some(),
         );
         rows.push(ListRow {
             provider: id.clone(),
             display_name: id.clone(),
-            auth_methods: vec![crate::domain::models::credential::AuthMethod::ApiKey],
+            auth_methods: vec![crate::domain::models::AuthMethod::ApiKey],
             signup_url: String::new(),
             requires_key: true,
             configured,
@@ -116,22 +118,23 @@ fn build_list_rows(
 }
 
 /// Map `AuthMethod` variants to human-readable tokens.
-/// `#[non_exhaustive]` catch-all keeps forward-compat for Epic 20 (OAuth; numbered 19 until 2026-08-23).
-fn auth_method_token(m: &crate::domain::models::credential::AuthMethod) -> &'static str {
-    use crate::domain::models::credential::AuthMethod;
+/// OAuth and API-key labels are the operator-facing method names.
+fn auth_method_token(m: &crate::domain::models::AuthMethod) -> &'static str {
+    use crate::domain::models::AuthMethod;
     match m {
         AuthMethod::ApiKey => "api-key",
-        // Forward-compat catch-all for Epic 20 additions.
+        AuthMethod::OAuthCode(_) => "oauth",
         #[allow(unreachable_patterns)]
         _ => "unknown",
     }
 }
 
 /// Map `AuthMethod` variants to snake_case JSON tokens.
-fn auth_method_json_token(m: &crate::domain::models::credential::AuthMethod) -> &'static str {
-    use crate::domain::models::credential::AuthMethod;
+fn auth_method_json_token(m: &crate::domain::models::AuthMethod) -> &'static str {
+    use crate::domain::models::AuthMethod;
     match m {
         AuthMethod::ApiKey => "api_key",
+        AuthMethod::OAuthCode(_) => "oauth",
         #[allow(unreachable_patterns)]
         _ => "unknown",
     }
@@ -346,6 +349,24 @@ mod tests {
     };
     use chrono::{DateTime, Utc};
 
+    #[test]
+    fn subscription_login_is_advertised_in_human_and_json_list() {
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &Default::default(),
+            &[],
+            |_| None,
+            "anthropic",
+        );
+        let anthropic = rows.iter().find(|row| row.provider == "anthropic").unwrap();
+        assert_eq!(human_methods(anthropic), "oauth, api-key");
+        let value: serde_json::Value = serde_json::from_str(&render_json(&rows).unwrap()).unwrap();
+        assert_eq!(
+            value["providers"][0]["auth_methods"],
+            serde_json::json!(["oauth", "api_key"])
+        );
+    }
+
     fn status(provider: &str, last_validated: Option<DateTime<Utc>>) -> (String, StoredCredential) {
         (
             provider.to_owned(),
@@ -389,6 +410,7 @@ mod tests {
             refresh: SecretString::new("list-stale-refresh".to_owned()),
             expires_at_ms: 0,
             identity: CredentialIdentity::default(),
+            authorized_at_ms: None,
         });
         let rows = build_list_rows(
             providers::all_providers(),
@@ -427,6 +449,7 @@ mod tests {
 
     fn make_provider_config(id: &str, enabled: bool) -> ProviderConfig {
         ProviderConfig {
+            auth_header: None,
             provider_id: id.to_string(),
             model_id: String::new(),
             api_key_env: String::new(),
@@ -726,7 +749,10 @@ api_key_env = "DEEPSEEK_API_KEY"
         let anthropic = &providers_arr[0];
         assert_eq!(anthropic["provider"], "anthropic");
         assert_eq!(anthropic["display_name"], "Anthropic");
-        assert_eq!(anthropic["auth_methods"], serde_json::json!(["api_key"]));
+        assert_eq!(
+            anthropic["auth_methods"],
+            serde_json::json!(["oauth", "api_key"])
+        );
         assert_eq!(anthropic["signup_url"], "https://console.anthropic.com/");
         assert_eq!(anthropic["requires_key"], true);
         assert_eq!(anthropic["configured"], true);
@@ -876,6 +902,7 @@ api_key_env = "DEEPSEEK_API_KEY"
                 provider_id: "zai".to_string(),
                 model_id: "glm-5.2".to_string(),
                 api_key_env: "ZAI_API_KEY".to_string(),
+                auth_header: None,
                 enabled: true,
                 kind: Some("openai-compatible".to_string()),
                 base_url: Some("https://api.z.ai/v1".to_string().into()),

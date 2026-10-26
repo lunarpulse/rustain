@@ -12,15 +12,39 @@ pub struct AnthropicRequest {
     pub model: String,
     pub max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<AnthropicSystem>,
     pub messages: Vec<AnthropicMessage>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<AnthropicToolDef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<AnthropicToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<AnthropicMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum AnthropicSystem {
+    Text(String),
+    Blocks(Vec<SystemBlock>),
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemBlock {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -28,6 +52,8 @@ pub struct AnthropicToolDef {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 impl From<&ToolDefinition> for AnthropicToolDef {
@@ -36,6 +62,7 @@ impl From<&ToolDefinition> for AnthropicToolDef {
             name: td.name.clone(),
             description: td.description.clone(),
             input_schema: td.input_schema.clone(),
+            cache_control: None,
         }
     }
 }
@@ -89,7 +116,7 @@ impl From<(&[Message], &CompletionOptions)> for AnthropicRequest {
         let system = if options.system_prompt.is_empty() {
             None
         } else {
-            Some(options.system_prompt.clone())
+            Some(AnthropicSystem::Text(options.system_prompt.clone()))
         };
 
         let anthropic_messages: Vec<AnthropicMessage> = messages
@@ -174,7 +201,7 @@ impl From<(&[Message], &CompletionOptions)> for AnthropicRequest {
             messages: anthropic_messages,
             stream: true,
             temperature: options.temperature,
-            tools,
+            tools: (!tools.is_empty()).then_some(tools),
             metadata: None,
         }
     }
@@ -297,7 +324,9 @@ mod tests {
 
         assert_eq!(req.model, "claude-sonnet-4-6");
         assert_eq!(req.max_tokens, 8192);
-        assert_eq!(req.system.as_deref(), Some("You are helpful."));
+        assert!(
+            matches!(&req.system, Some(AnthropicSystem::Text(text)) if text == "You are helpful.")
+        );
         assert!(req.stream);
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, "user");

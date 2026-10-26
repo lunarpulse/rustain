@@ -120,6 +120,14 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
         // reported as "no usable credential", ⛔ never as the rejected bytes.
         "adapters/a2a/client.rs",
         "adapters/anthropic/mod.rs",
+        // Subscription detection reads only token shape; request headers stay sensitive.
+        "adapters/anthropic/claude_code.rs",
+        // Candidate keys go directly to the fixed validation adapter, never env.
+        "adapters/auth/flows/api_key.rs",
+        // Bootstrap bearer is exposed only at the outbound HTTP boundary.
+        "adapters/auth/flows/identity.rs",
+        // Refresh bearer is exposed only into the token grant body.
+        "adapters/auth/flows/token.rs",
         "adapters/openai/mod.rs",
         "domain/models/credential.rs",
         "domain/models/secret.rs",
@@ -141,10 +149,10 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 14,
-        "expose_secret() pinned count changed: got {count}, expected 14. \
-         Story 20.1a removed the FileAuthStore raw-string lookup; disk serialization \
-         uses expose_secret_string instead of adding direct exposure."
+        count, 18,
+        "expose_secret() pinned count changed: got {count}, expected 18. \
+         Subscription engines add four consolidated token-shape/HTTP boundaries; \
+         stored credentials otherwise retain their secret wrappers."
     );
 }
 

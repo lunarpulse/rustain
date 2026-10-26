@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 use crate::domain::models::budget::BudgetConfig;
 use crate::domain::models::pricing::PricingConfig;
 
+/// Header scheme for ordinary Anthropic-compatible API keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthHeaderScheme {
+    #[serde(rename = "x-api-key")]
+    ApiKey,
+    #[serde(rename = "bearer")]
+    Bearer,
+}
+
 /// Configuration for a single LLM provider.
 ///
 /// `api_key_env` names an environment variable — the adapter reads
@@ -15,6 +24,9 @@ pub struct ProviderConfig {
     pub model_id: String,
     /// Environment variable name that holds the API key or bearer token.
     pub api_key_env: String,
+    /// Explicit ordinary-key header; subscription credentials always use Bearer.
+    #[serde(default)]
+    pub auth_header: Option<AuthHeaderScheme>,
     /// Whether this provider is enabled.
     #[serde(default = "ProviderConfig::default_enabled")]
     pub enabled: bool,
@@ -44,6 +56,19 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
+    /// Migration guidance for configs that previously inferred Bearer from env names.
+    pub fn auth_header_migration_warning(&self) -> Option<String> {
+        (self.kind.as_deref().unwrap_or(&self.provider_id) == "anthropic"
+            && self.auth_header.is_none()
+            && !self.api_key_env.is_empty()
+            && !self.api_key_env.contains("API_KEY")
+            && self.api_key_env != "ANTHROPIC_AUTH_TOKEN")
+            .then(|| format!(
+                "provider.{}: auth_header is unset; ordinary keys now use x-api-key. Set auth_header = \"bearer\" explicitly if your gateway requires it.",
+                self.provider_id
+            ))
+    }
+
     fn default_enabled() -> bool {
         true
     }

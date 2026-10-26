@@ -215,6 +215,7 @@ struct ProviderDisplay {
     model_id: String,
     /// Env var NAME (safe — never the resolved value).
     api_key_env: String,
+    auth_header: Option<crate::domain::models::AuthHeaderScheme>,
     enabled: bool,
     kind: Option<String>,
     /// URL with userinfo stripped.
@@ -326,6 +327,7 @@ impl ConfigDisplay {
                         provider_id: p.provider_id.clone(),
                         model_id: p.model_id.clone(),
                         api_key_env: p.api_key_env.clone(),
+                        auth_header: p.auth_header,
                         enabled: p.enabled,
                         kind: p.kind.clone(),
                         base_url: p.base_url.as_ref().map(|u| u.to_string()),
@@ -739,13 +741,22 @@ pub async fn run_config_validate_with_overrides(
         profile_resolver.as_ref(),
         cli_config_overrides,
     ) {
-        Ok(_config) => {
+        Ok(config) => {
+            let warnings: Vec<String> = config
+                .provider
+                .values()
+                .filter_map(|cfg| cfg.auth_header_migration_warning())
+                .collect();
+            for warning in &warnings {
+                eprintln!("Warning: {warning}");
+            }
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "valid": true,
-                        "errors": []
+                        "errors": [],
+                        "warnings": warnings
                     }))?
                 );
             } else {

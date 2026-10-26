@@ -13,6 +13,7 @@ pub struct CascadeInputs<'a> {
     pub rows: &'a [StoredCredential],
     pub env_vars: &'a [&'a str],
     pub env_lookup: &'a dyn Fn(&str) -> Option<String>,
+    pub oauth_allowed: bool,
     pub now_ms: i64,
 }
 
@@ -49,12 +50,15 @@ pub fn select<'a>(
     let eligible =
         |row: &&StoredCredential| row.disabled_cause.is_none() && !skip.contains(&row.id);
     for row in inputs.rows.iter().filter(eligible) {
-        if let Credential::OAuth(oauth) = &row.credential {
+        if inputs.oauth_allowed
+            && let Credential::OAuth(oauth) = &row.credential
+        {
             return Some(Selection {
                 source: AuthSource::StoredOAuth,
                 material: if oauth_is_fresh(oauth.expires_at_ms, inputs.now_ms) {
                     SelectionMaterial::Ready(ResolvedAuth::OAuth {
                         access: oauth.access.clone(),
+                        account_id: oauth.identity.account_id.clone(),
                     })
                 } else {
                     SelectionMaterial::NeedsRefresh {
@@ -134,6 +138,7 @@ mod tests {
                 refresh: "refresh".into(),
                 expires_at_ms,
                 identity: CredentialIdentity::default(),
+                authorized_at_ms: None,
             }),
             last_validated: None,
             disabled_cause: None,
@@ -148,6 +153,7 @@ mod tests {
             rows: &rows,
             env_vars: &["KEY"],
             env_lookup: &|_| Some("env-key".into()),
+            oauth_allowed: true,
             now_ms: 1_000,
         };
         assert!(matches!(
@@ -175,6 +181,7 @@ mod tests {
             rows: &[row],
             env_vars: &["KEY"],
             env_lookup: &|_| Some("  \n".into()),
+            oauth_allowed: true,
             now_ms: 0,
         };
         assert!(select(&inputs, &BTreeSet::new()).is_none());

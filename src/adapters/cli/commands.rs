@@ -265,6 +265,13 @@ pub enum AcpClientProfile {
     Zed,
 }
 
+/// Explicit login engine; omitted values use the provider's interactive picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AuthLoginMethod {
+    Oauth,
+    ApiKey,
+}
+
 /// Auth subcommand actions (Story 13.4a login; 13.4b status; 13.4c adds list).
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuthAction {
@@ -273,6 +280,9 @@ pub enum AuthAction {
     Login {
         /// Provider id (e.g. "anthropic", "openai", "ollama").
         provider: String,
+        /// Select a login engine without an interactive picker.
+        #[arg(long, value_enum)]
+        method: Option<AuthLoginMethod>,
         /// Machine-readable JSON output instead of human text.
         #[arg(long)]
         json: bool,
@@ -288,6 +298,12 @@ pub enum AuthAction {
     /// and signup URLs (Story 13.4c, FR123).
     List {
         /// Machine-readable JSON output instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove all persisted credentials for a provider, leaving environment intact.
+    Logout {
+        provider: String,
         #[arg(long)]
         json: bool,
     },

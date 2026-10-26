@@ -10,6 +10,7 @@ pub mod agent_node;
 pub mod approval;
 pub mod artifact;
 pub mod assembled_context;
+pub mod auth_policy;
 pub mod autocomplete;
 pub mod budget;
 pub mod capability;
@@ -139,6 +140,7 @@ pub use artifact::{
     ArtifactId, ArtifactKind, ArtifactRef, ContentHash, ContentHashError, EvidenceArtifact,
     EvidenceArtifactDraft, ReviewStatus,
 };
+pub use auth_policy::AuthMethod;
 #[allow(unused_imports)]
 pub use capability_token::{
     Budget, CapabilityFlag, CapabilitySet, CapabilityToken, CapabilityTokenId, DelegateConstraint,
@@ -154,8 +156,8 @@ pub use config::AppConfig;
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
 pub use config::{
-    AutoApprovePolicy, AutoPanelsConfig, DaemonConfig, LayoutConfig, MouseConfig, ProviderConfig,
-    SearchConfig, SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
+    AuthHeaderScheme, AutoApprovePolicy, AutoPanelsConfig, DaemonConfig, LayoutConfig, MouseConfig,
+    ProviderConfig, SearchConfig, SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
 };
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
@@ -165,8 +167,8 @@ pub use conversation::{
 };
 #[allow(unused_imports)]
 pub use credential::{
-    AuthMethod, AuthSnapshot, AuthSource, AuthStatus, CasOutcome, Credential, CredentialId,
-    CredentialIdentity, CredentialOrigin, OAuthCredential, ResolvedAuth, StoredCredential,
+    AuthSnapshot, AuthSource, AuthStatus, CasOutcome, Credential, CredentialId, CredentialIdentity,
+    CredentialOrigin, OAuthCredential, ResolvedAuth, StoredCredential,
 };
 pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]

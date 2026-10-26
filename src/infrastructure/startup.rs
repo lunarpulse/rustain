@@ -439,11 +439,16 @@ pub async fn run() -> Result<()> {
     // except `auth login` which validates via an ad hoc candidate adapter.
     if let Some(Command::Auth { action }) = &cli.command {
         match action {
-            AuthAction::Login { provider, json } => {
+            AuthAction::Login {
+                provider,
+                method,
+                json,
+            } => {
                 let store: Arc<dyn crate::domain::ports::AuthStorePort> =
                     Arc::new(crate::adapters::auth_store::FileAuthStore::new());
                 return crate::adapters::cli::auth::login::run_auth_login(
                     provider.clone(),
+                    *method,
                     *json,
                     &store,
                     &app_config,
@@ -473,6 +478,18 @@ pub async fn run() -> Result<()> {
                         tracing::error!("Auth list subcommand failed: {e}");
                         SubcommandExit(SubcommandExit::GENERIC).into()
                     });
+            }
+            AuthAction::Logout { provider, json } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                return crate::adapters::cli::auth::logout::run_auth_logout(
+                    provider, *json, &store,
+                )
+                .await
+                .map_err(|e| {
+                    eprintln!("Auth logout failed: {e}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
             }
         }
     }
@@ -2830,43 +2847,18 @@ fn build_anthropic_provider_from_env(
 ) -> Result<Arc<dyn StreamingProvider>> {
     #[cfg(feature = "anthropic")]
     {
-        use crate::adapters::anthropic::AuthMode;
-
-        use crate::domain::models::{AuthSource, ResolvedAuth};
-        use crate::domain::services::key_cascade::{
-            CascadeInputs, SelectionMaterial, select_ready,
-        };
-
-        let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
-        let lookup = |name: &str| crate::infrastructure::utils::env_var_trimmed(name);
-        let selection = select_ready(&CascadeInputs {
-            runtime: None,
-            rows: snapshot.rows("anthropic"),
-            env_vars: &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
-            env_lookup: &lookup,
-            now_ms: chrono::Utc::now().timestamp_millis(),
+        let lookup = crate::infrastructure::utils::env_var_trimmed;
+        let base_url = lookup("ANTHROPIC_BASE_URL").unwrap_or_else(|| {
+            crate::adapters::auth::policies::endpoint("https://api.anthropic.com")
         });
-        let auth_mode = match selection {
-            Some(selection) => match selection.material {
-                SelectionMaterial::Ready(ResolvedAuth::OAuth { access }) => {
-                    AuthMode::BearerToken(access)
-                }
-                SelectionMaterial::Ready(ResolvedAuth::ApiKey(key)) => match selection.source {
-                    AuthSource::Env { var } if var == "ANTHROPIC_AUTH_TOKEN" => {
-                        if lookup("ANTHROPIC_API_KEY").is_some() {
-                            tracing::warn!(
-                                "Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set; using ANTHROPIC_AUTH_TOKEN (Bearer auth)"
-                            );
-                        }
-                        AuthMode::BearerToken(key)
-                    }
-                    _ => AuthMode::ApiKey(key),
-                },
-                SelectionMaterial::NeedsRefresh { .. } => {
-                    unreachable!("select_ready skips stale rows")
-                }
-            },
-            None => anyhow::bail!(
+        let handle = match crate::infrastructure::provider_factory::anthropic_handle(
+            "anthropic",
+            vec!["ANTHROPIC_AUTH_TOKEN".into(), "ANTHROPIC_API_KEY".into()],
+            &base_url,
+            None,
+        ) {
+            Ok(handle) => handle,
+            Err(crate::domain::errors::ProviderError::AuthenticationFailed) => anyhow::bail!(
                 "No API key found.\n\n\
                  Set one of:\n\
                  \n\
@@ -2876,18 +2868,33 @@ fn build_anthropic_provider_from_env(
                  \n\
                  Get your API key at: https://console.anthropic.com/"
             ),
+            Err(error) => return Err(error.into()),
         };
-
-        // 2. Resolve base URL (filter empty to preserve default)
-        let base_url = crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_BASE_URL");
-        if let Some(ref url) = base_url {
-            tracing::info!("Custom base URL: {}", url);
+        // Stored subscriptions and login keys outrank env; warn only when env Bearer wins.
+        if lookup("ANTHROPIC_AUTH_TOKEN").is_some()
+            && lookup("ANTHROPIC_API_KEY").is_some()
+            && crate::adapters::cli::auth::source_for(
+                "anthropic",
+                &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+                &crate::adapters::auth_store::FileAuthStore::snapshot_sync(),
+                &lookup,
+                crate::infrastructure::provider_factory::anthropic_oauth_allowed(&base_url),
+            )
+            .is_some_and(|selected| {
+                matches!(
+                    &selected.source,
+                    crate::domain::models::AuthSource::Env { var } if var == "ANTHROPIC_AUTH_TOKEN"
+                )
+            })
+        {
+            tracing::warn!(
+                "Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set; using ANTHROPIC_AUTH_TOKEN (Bearer auth)"
+            );
         }
-
-        let adapter = crate::adapters::anthropic::AnthropicAdapter::new(
-            auth_mode,
+        let adapter = crate::adapters::anthropic::AnthropicAdapter::with_credential(
+            crate::adapters::anthropic::AnthropicCredential::Resolved(handle),
             config.model.clone(),
-            base_url,
+            Some(base_url),
         )
         .map_err(|e| anyhow::anyhow!("Failed to create Anthropic adapter: {}", e))?;
         tracing::info!("Anthropic provider initialized (model: {})", config.model);

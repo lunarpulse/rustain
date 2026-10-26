@@ -92,6 +92,8 @@ fn identity(
         account_id: account.map(str::to_owned),
         email: email.map(str::to_owned),
         project_id: project.map(str::to_owned),
+        org_id: None,
+        org_name: None,
     }
 }
 
@@ -101,6 +103,7 @@ fn oauth(token: &str, expires_at_ms: i64, account: Option<&str>) -> Credential {
         refresh: "STORED-REFRESH-CANARY".into(),
         expires_at_ms,
         identity: identity(account, None, None),
+        authorized_at_ms: None,
     })
 }
 
@@ -369,6 +372,7 @@ async fn k05_m04_oauth_models_mask_both_tokens_but_disk_retains_them() {
     let row = &snapshot.rows("masked")[0];
     let resolved = ResolvedAuth::OAuth {
         access: "MASKING-ACCESS-CANARY".into(),
+        account_id: None,
     };
     for output in [
         format!("{credential:?}"),
@@ -909,16 +913,20 @@ async fn k12_m12_binary_status_list_and_construction_share_six_fixture_cascade()
 
 #[tokio::test]
 #[serial]
-async fn k12_stale_only_divergence_is_pinned_at_binary_front_doors() {
+async fn k12_stale_only_status_and_anthropic_construction_are_available() {
     let tmp = tempfile::tempdir().unwrap();
     let env = EnvRestore::capture(&[
         "RUSTAIN_DATA_DIR",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "RUSTAIN_TEST_AUTH_ORIGIN",
     ]);
     env.set("RUSTAIN_DATA_DIR", tmp.path());
     env.remove("ANTHROPIC_API_KEY");
     env.remove("ANTHROPIC_AUTH_TOKEN");
+    env.remove("ANTHROPIC_BASE_URL");
+    env.remove("RUSTAIN_TEST_AUTH_ORIGIN");
     let path = tmp.path().join("auth.json");
     fixture(
         &path,
@@ -927,7 +935,15 @@ async fn k12_stale_only_divergence_is_pinned_at_binary_front_doors() {
     );
     let store = FileAuthStore::at(&path);
     assert_eq!(store.snapshot().await.unwrap().rows("anthropic").len(), 1);
-    assert!(resolve_api_key("ANTHROPIC_API_KEY", "anthropic").is_none());
+    let config = serde_json::from_value(serde_json::json!({
+        "provider_id":"anthropic", "kind":"anthropic", "api_key_env":"ANTHROPIC_API_KEY",
+        "model_id":"claude-test"
+    }))
+    .unwrap();
+    assert!(
+        rustain::infrastructure::provider_factory::build_provider_for_config("anthropic", &config)
+            .is_ok()
+    );
     let status = binary_json(auth_command(tmp.path(), "status"));
     let row = provider_row(&status, "anthropic").unwrap();
     assert_eq!(row["source"], "oauth");
@@ -968,6 +984,7 @@ async fn k13_m11_missing_refresh_is_retained_and_identity_merges_per_field() {
         refresh: "MERGE-OLD-REFRESH".into(),
         expires_at_ms: NOW,
         identity: identity(Some("old-account"), Some("old@email"), Some("old-project")),
+        authorized_at_ms: None,
     });
     let id = store
         .upsert("merge", credential, CredentialOrigin::Login, false)
@@ -1129,18 +1146,20 @@ async fn oauth_upsert_matches_first_present_identity_and_never_matches_none() {
     let tmp = tempfile::tempdir().unwrap();
     let store = FileAuthStore::at(tmp.path().join("auth.json"));
     assert_eq!(
-        identity(Some("a"), Some("e"), Some("p")).key().as_deref(),
+        identity(Some("a"), Some("e"), Some("p"))
+            .key(false)
+            .as_deref(),
         Some("account:a")
     );
     assert_eq!(
-        identity(None, Some("e"), Some("p")).key().as_deref(),
+        identity(None, Some("e"), Some("p")).key(false).as_deref(),
         Some("email:e")
     );
     assert_eq!(
-        identity(None, None, Some("p")).key().as_deref(),
+        identity(None, None, Some("p")).key(false).as_deref(),
         Some("project:p")
     );
-    assert_eq!(CredentialIdentity::default().key(), None);
+    assert_eq!(CredentialIdentity::default().key(false), None);
     let first = store
         .upsert(
             "identity",
@@ -1217,6 +1236,7 @@ async fn oauth_upsert_matches_first_present_identity_and_never_matches_none() {
                 refresh: "IDENTITY-REFRESH".into(),
                 expires_at_ms: FRESH,
                 identity: ident.clone(),
+                authorized_at_ms: None,
             })
         };
         let id = store
@@ -1250,6 +1270,7 @@ async fn oauth_upsert_matches_first_present_identity_and_never_matches_none() {
             refresh: "PRIORITY-REFRESH".into(),
             expires_at_ms: FRESH,
             identity: identity(Some(account), Some("shared@email"), None),
+            authorized_at_ms: None,
         })
     };
     let a = store
@@ -1749,6 +1770,7 @@ async fn refresh_loop_waiter_refreshes_peer_still_stale_revision_once() {
         refresh: "STALE-PEER-UPDATED-REFRESH".into(),
         expires_at_ms: NOW,
         identity: identity(Some("stale-peer"), None, None),
+        authorized_at_ms: None,
     });
     assert_eq!(
         FileAuthStore::at(&path)

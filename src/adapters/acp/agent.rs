@@ -448,6 +448,7 @@ impl RustainAcpAgent {
             &crate::adapters::cli::auth::env_vars_for(provider.id, provider.api_key_env),
             &snapshot,
             &crate::infrastructure::utils::env_var_trimmed,
+            true,
         )
         .is_some())
     }

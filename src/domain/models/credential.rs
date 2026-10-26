@@ -19,6 +19,8 @@ pub struct OAuthCredential {
     pub refresh: SecretString,
     #[serde(rename = "expires_at")]
     pub expires_at_ms: i64,
+    #[serde(default, rename = "authorized_at")]
+    pub authorized_at_ms: Option<i64>,
     pub identity: CredentialIdentity,
 }
 
@@ -27,11 +29,29 @@ pub struct CredentialIdentity {
     pub account_id: Option<String>,
     pub email: Option<String>,
     pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
 }
 
 impl CredentialIdentity {
-    /// Stable upsert identity; missing identities never match each other.
-    pub fn key(&self) -> Option<String> {
+    /// Stable provider-scoped upsert identity; unidentified logins never match.
+    pub fn key(&self, org_scoped: bool) -> Option<String> {
+        if org_scoped {
+            let base = self
+                .email
+                .as_ref()
+                .map(|email| format!("email:{}", email.trim().to_lowercase()))
+                .or_else(|| self.account_id.as_ref().map(|id| format!("account:{id}")))
+                .or_else(|| self.project_id.as_ref().map(|id| format!("project:{id}")));
+            return match (base, &self.org_id) {
+                (Some(base), Some(org)) => Some(format!("{base}|org:{org}")),
+                (Some(base), None) => Some(base),
+                (None, Some(org)) => Some(format!("org:{org}")),
+                (None, None) => None,
+            };
+        }
         self.account_id
             .as_ref()
             .map(|id| format!("account:{id}"))
@@ -126,6 +146,9 @@ impl Serialize for Credential {
                 map.serialize_entry("refresh", "***")?;
                 map.serialize_entry("expires_at", &oauth.expires_at_ms)?;
                 map.serialize_entry("identity", &oauth.identity)?;
+                if let Some(authorized_at) = oauth.authorized_at_ms {
+                    map.serialize_entry("authorized_at", &authorized_at)?;
+                }
             }
         }
         map.end()
@@ -144,6 +167,8 @@ impl<'de> Deserialize<'de> for Credential {
                 access: SecretString,
                 refresh: SecretString,
                 expires_at: i64,
+                #[serde(default)]
+                authorized_at: Option<i64>,
                 identity: CredentialIdentity,
             },
         }
@@ -153,11 +178,13 @@ impl<'de> Deserialize<'de> for Credential {
                 access,
                 refresh,
                 expires_at,
+                authorized_at,
                 identity,
             } => Self::OAuth(OAuthCredential {
                 access,
                 refresh,
                 expires_at_ms: expires_at,
+                authorized_at_ms: authorized_at,
                 identity,
             }),
         })
@@ -182,20 +209,15 @@ pub enum AuthSource {
     StoredKey,
 }
 
-/// Supported authentication mechanisms for a provider.
-#[non_exhaustive]
-#[derive(Debug, Clone)]
-pub enum AuthMethod {
-    ApiKey,
-    // Epic 20 will add: OAuth { ... }
-}
-
 /// A fully-resolved credential; refresh tokens never leave the store/resolver.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ResolvedAuth {
     ApiKey(SecretString),
-    OAuth { access: SecretString },
+    OAuth {
+        access: SecretString,
+        account_id: Option<String>,
+    },
 }
 
 impl ResolvedAuth {
@@ -208,7 +230,7 @@ impl ResolvedAuth {
 
     pub fn bearer_secret(&self) -> &SecretString {
         match self {
-            Self::ApiKey(s) | Self::OAuth { access: s } => s,
+            Self::ApiKey(s) | Self::OAuth { access: s, .. } => s,
         }
     }
 }
@@ -241,17 +263,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn org_scope_normalizes_email_and_qualifies_each_fallback() {
+        let mut identity = CredentialIdentity {
+            account_id: Some("account".into()),
+            email: Some(" Me@Example.COM ".into()),
+            org_id: Some("one".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            identity.key(true).as_deref(),
+            Some("email:me@example.com|org:one")
+        );
+        assert_eq!(identity.key(false).as_deref(), Some("account:account"));
+        identity.org_id = None;
+        assert_eq!(identity.key(true).as_deref(), Some("email:me@example.com"));
+        identity.email = None;
+        identity.org_id = Some("two".into());
+        assert_eq!(
+            identity.key(true).as_deref(),
+            Some("account:account|org:two")
+        );
+        identity.account_id = None;
+        identity.project_id = Some("project".into());
+        assert_eq!(
+            identity.key(true).as_deref(),
+            Some("project:project|org:two")
+        );
+        identity.project_id = None;
+        assert_eq!(identity.key(true).as_deref(), Some("org:two"));
+        identity.org_id = None;
+        assert_eq!(identity.key(true), None);
+    }
+
+    #[test]
+    fn oauth_projection_retains_grant_and_org_without_exposing_tokens() {
+        let credential: Credential = serde_json::from_value(serde_json::json!({
+            "type": "oauth", "access": "MODEL-ACCESS-CANARY",
+            "refresh": "MODEL-REFRESH-CANARY", "expires_at": 123,
+            "authorized_at": 42,
+            "identity": {"account_id": "account", "email": " Me@Example.COM ",
+                         "org_id": "org-a", "org_name": "Organization A"}
+        }))
+        .unwrap();
+        let value = serde_json::to_value(&credential).unwrap();
+        assert_eq!(value["authorized_at"], 42);
+        assert_eq!(value["identity"]["org_id"], "org-a");
+        assert_eq!(value["identity"]["org_name"], "Organization A");
+        assert_eq!(value["access"], "***");
+        assert_eq!(value["refresh"], "***");
+        let old: Credential = serde_json::from_value(serde_json::json!({
+            "type": "oauth", "access": "old", "refresh": "old-refresh",
+            "expires_at": 123, "identity": {}
+        }))
+        .unwrap();
+        let old = serde_json::to_value(old).unwrap();
+        assert!(old.get("authorized_at").is_none());
+        assert!(old["identity"].get("org_id").is_none());
+        assert!(old["identity"].get("org_name").is_none());
+    }
+
+    #[test]
     fn oauth_model_masks_both_tokens_and_preserves_identity_priority() {
         let identity = CredentialIdentity {
             account_id: Some("account".into()),
             email: Some("mail".into()),
             project_id: Some("project".into()),
+            org_id: None,
+            org_name: None,
         };
-        assert_eq!(identity.key().as_deref(), Some("account:account"));
+        assert_eq!(identity.key(false).as_deref(), Some("account:account"));
         let credential = Credential::OAuth(OAuthCredential {
             access: "ACCESS-CANARY".into(),
             refresh: "REFRESH-CANARY".into(),
             expires_at_ms: 123,
+            authorized_at_ms: None,
             identity,
         });
         assert!(credential.expose_api_key().is_none());
@@ -265,6 +350,7 @@ mod tests {
         };
         let resolved = ResolvedAuth::OAuth {
             access: "ACCESS-CANARY".into(),
+            account_id: None,
         };
         for output in [
             format!("{row:?} {row}"),

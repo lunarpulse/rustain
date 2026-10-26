@@ -11,7 +11,6 @@ use crate::domain::ports::StreamingProvider;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Resolve ready material through the shared credential cascade.
-/// Epic 20 (OAuth; numbered 19 until 2026-08-23) adds provider betas later.
 pub fn resolve_auth(
     api_key_env: &str,
     provider_id: &str,
@@ -47,6 +46,7 @@ fn resolve_auth_with_runtime(
         env_vars,
         env_lookup: &crate::infrastructure::utils::env_var_trimmed,
         now_ms: chrono::Utc::now().timestamp_millis(),
+        oauth_allowed: true,
     })?;
     match selection.material {
         SelectionMaterial::Ready(auth) => Some(auth),
@@ -96,9 +96,7 @@ pub fn build_provider_for_config(
     PROVIDER_CTOR_COUNT.fetch_add(1, Ordering::Relaxed);
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
     match kind {
-        "anthropic" => {
-            build_anthropic_from_config(cfg, resolve_auth(&cfg.api_key_env, &cfg.provider_id))
-        }
+        "anthropic" => build_anthropic_from_config(cfg, None),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
@@ -172,7 +170,7 @@ pub fn build_provider_for_config_with_key(
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
     let runtime = crate::domain::models::SecretString::new(key.to_owned());
-    let auth = resolve_auth_with_runtime(&cfg.api_key_env, provider_id, Some(&runtime));
+    let auth = Some(crate::domain::models::ResolvedAuth::ApiKey(runtime));
     match kind {
         "anthropic" => build_anthropic_from_config(cfg, auth),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
@@ -234,45 +232,45 @@ fn build_anthropic_from_config(
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     #[cfg(feature = "anthropic")]
     {
-        use crate::adapters::anthropic::{AnthropicAdapter, AuthMode};
-
-        let auth_mode = match auth {
-            Some(crate::domain::models::ResolvedAuth::OAuth { access }) => {
-                AuthMode::BearerToken(access)
-            }
-            // Without an env-var name only stored/runtime keys can serve, and those
-            // are x-api-key keys, as on the legacy startup path.
-            Some(crate::domain::models::ResolvedAuth::ApiKey(key))
-                if cfg.api_key_env.is_empty() || cfg.api_key_env.contains("API_KEY") =>
-            {
-                AuthMode::ApiKey(key)
-            }
-            Some(crate::domain::models::ResolvedAuth::ApiKey(token)) => {
-                AuthMode::BearerToken(token)
-            }
-            None => {
-                return Err(ProviderError::AuthenticationFailed);
-            }
-        };
-
-        // Resolve base_url precedence: explicit config field > ANTHROPIC_BASE_URL
-        // env var. The env var is the Claude-Code-compatible mechanism for
-        // pointing at gateways/proxies (z.ai, LiteLLM, Helicone, etc.);
-        // without this fallback, `[provider.anthropic]` config silently hits
-        // the default api.anthropic.com endpoint and auth fails for gateway
-        // tokens. The legacy env-var-only construction path
-        // (`build_anthropic_provider_from_env`) does this correctly; this
-        // brings the config-driven path to parity.
+        use crate::adapters::anthropic::{AnthropicAdapter, AnthropicCredential, AuthMode};
         let base_url = cfg
             .base_url
             .as_ref()
             .map(|u| u.expose_url().to_owned())
-            .or_else(|| crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_BASE_URL"));
-
+            .or_else(|| crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_BASE_URL"))
+            .unwrap_or_else(|| {
+                crate::adapters::auth::policies::endpoint("https://api.anthropic.com")
+            });
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if let Some(warning) = cfg.auth_header_migration_warning()
+            && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!("{warning}");
+        }
+        let credential = if let Some(auth) = auth {
+            let scheme = cfg
+                .auth_header
+                .unwrap_or(crate::domain::models::AuthHeaderScheme::ApiKey);
+            let key = auth.bearer_secret().clone();
+            AnthropicCredential::Fixed(match scheme {
+                crate::domain::models::AuthHeaderScheme::ApiKey => AuthMode::ApiKey(key),
+                crate::domain::models::AuthHeaderScheme::Bearer => AuthMode::BearerToken(key),
+            })
+        } else {
+            let env_vars = if cfg.api_key_env.is_empty() {
+                vec![]
+            } else {
+                vec![cfg.api_key_env.clone()]
+            };
+            AnthropicCredential::Resolved(anthropic_handle(
+                &cfg.provider_id,
+                env_vars,
+                &base_url,
+                cfg.auth_header,
+            )?)
+        };
         let adapter =
-            AnthropicAdapter::new(auth_mode, cfg.model_id.clone(), base_url).map_err(|e| {
-                ProviderError::Other(format!("Failed to create Anthropic adapter: {}", e))
-            })?;
+            AnthropicAdapter::with_credential(credential, cfg.model_id.clone(), Some(base_url))?;
         Ok(Arc::new(adapter))
     }
     #[cfg(not(feature = "anthropic"))]
@@ -281,6 +279,48 @@ fn build_anthropic_from_config(
             "anthropic feature not enabled".to_string(),
         ))
     }
+}
+
+/// Stored subscription credentials may only leave for their policy origin.
+pub fn anthropic_oauth_allowed(base_url: &str) -> bool {
+    let Some(policy) = crate::adapters::auth::policies::oauth_api("anthropic") else {
+        return false;
+    };
+    let official = crate::adapters::auth::policies::endpoint(policy.api_origin);
+    match (url::Url::parse(base_url), url::Url::parse(&official)) {
+        (Ok(base), Ok(official)) => base.origin() == official.origin(),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "anthropic")]
+pub(crate) fn anthropic_handle(
+    provider: &str,
+    env_vars: Vec<String>,
+    base_url: &str,
+    auth_header: Option<crate::domain::models::AuthHeaderScheme>,
+) -> Result<crate::infrastructure::key_resolver::CredentialHandle, ProviderError> {
+    let oauth_allowed = anthropic_oauth_allowed(base_url);
+    let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
+    let names: Vec<&str> = env_vars.iter().map(String::as_str).collect();
+    if crate::adapters::cli::auth::source_for(
+        provider,
+        &names,
+        &snapshot,
+        &crate::infrastructure::utils::env_var_trimmed,
+        oauth_allowed,
+    )
+    .is_none()
+    {
+        return Err(ProviderError::AuthenticationFailed);
+    }
+    Ok(crate::infrastructure::key_resolver::CredentialHandle::new(
+        crate::infrastructure::key_resolver::shared(),
+        provider.to_owned(),
+        env_vars,
+        oauth_allowed,
+        auth_header,
+    ))
 }
 
 #[cfg(feature = "openai")]
@@ -452,6 +492,7 @@ mod tests {
         ];
         for kind in known_kinds {
             let cfg = ProviderConfig {
+                auth_header: None,
                 provider_id: kind.to_string(),
                 enabled: true,
                 model_id: "test".to_string(),
@@ -476,6 +517,7 @@ mod tests {
         let unknown_kinds = ["anthropic", "ollama", "foo-bar"];
         for kind in unknown_kinds {
             let cfg = ProviderConfig {
+                auth_header: None,
                 provider_id: kind.to_string(),
                 enabled: true,
                 model_id: "test".to_string(),

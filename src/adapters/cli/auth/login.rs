@@ -1,659 +1,305 @@
-//! `auth login <provider>` handler (Story 13.4a).
+//! CLI method selection and rendering; protocol and persistence live in flows.
 //!
-//! Interactive masked key entry → validate via connectivity_probe → store via
-//! `AuthStorePort`.  The handler NEVER touches the file directly — all
-//! persistence goes through the port.
+//! MIT License
+//!
+//! Copyright (c) 2025 Mario Zechner
+//! Copyright (c) 2025-2026 Can Bölük
+//! Copyright (c) 2026 Stencil Labs, Inc.
+//!
+//! Permission is hereby granted, free of charge, to any person obtaining a copy
+//! of this software and associated documentation files (the "Software"), to deal
+//! in the Software without restriction, including without limitation the rights
+//! to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//! copies of the Software, and to permit persons to whom the Software is
+//! furnished to do so, subject to the following conditions:
+//!
+//! The above copyright notice and this permission notice shall be included in all
+//! copies or substantial portions of the Software.
+//!
+//! THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//! IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//! FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//! AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//! SOFTWARE.
 
-use std::sync::Arc;
+use crate::{
+    adapters::{
+        auth::flows::{self, FlowCtx, FlowError, LoginResult, LoginUi},
+        cli::{
+            auth::{providers, terminal_ui::TerminalUi},
+            commands::AuthLoginMethod,
+        },
+    },
+    domain::{
+        models::{AppConfig, AuthMethod, CredentialIdentity, ProviderConfig},
+        ports::AuthStorePort,
+    },
+};
+use anyhow::{Result, bail};
+use std::{
+    io::{IsTerminal, Write},
+    sync::Arc,
+};
 
-use anyhow::Result;
-
-use crate::adapters::cli::auth::providers;
-use crate::domain::errors::ProviderError;
-use crate::domain::models::ProviderConfig;
-use crate::domain::models::credential::Credential;
-use crate::domain::ports::{AuthStorePort, StreamingProvider};
-use crate::infrastructure::provider_factory;
-/// Provider metadata needed by the login flow.
-///
-/// Separated from the static [`providers::ProviderMeta`] so `auth login` can
-/// handle providers that are configured in `config.toml` but not in the
-/// built-in static table (e.g. an `openai-compatible` provider like `zai`).
-#[derive(Debug, Clone)]
-struct LoginProviderMeta {
-    id: String,
-    display_name: String,
-    signup_url: String,
-    requires_key: bool,
-    api_key_env: String,
-}
-
-impl LoginProviderMeta {
-    fn from_static(meta: &'static providers::ProviderMeta) -> Self {
-        Self {
-            id: meta.id.to_string(),
-            display_name: meta.display_name.to_string(),
-            signup_url: meta.signup_url.to_string(),
-            requires_key: meta.requires_key,
-            api_key_env: meta.api_key_env.to_string(),
-        }
-    }
-}
-
-/// Run the `auth login` flow.
-///
-/// # Errors
-///
-/// Returns `Err` for I/O failures, validation failures, and unknown providers.
-/// The error message is already printed to stderr — the caller maps it to
-/// `SubcommandExit` so `main.rs` does not double-print.
 pub async fn run_auth_login(
     provider_id: String,
+    method: Option<AuthLoginMethod>,
     json: bool,
     store: &Arc<dyn AuthStorePort>,
-    app_config: &crate::domain::models::AppConfig,
+    app_config: &AppConfig,
 ) -> Result<()> {
-    // 1. Resolve provider from the static table or config.toml.
-    let (meta, validation_cfg) = resolve_provider(&provider_id, app_config)?;
-
-    // AC8 — keyless provider (e.g. ollama): no key required.
-    if !meta.requires_key {
-        let msg = format!(
-            "{} does not require an API key — no credentials to store.",
-            meta.display_name
-        );
+    let result = run(&provider_id, method, json, store, app_config).await;
+    if let Err(error) = &result {
+        eprintln!("{error}");
+    }
+    result
+}
+async fn run(
+    provider_id: &str,
+    requested: Option<AuthLoginMethod>,
+    json: bool,
+    store: &Arc<dyn AuthStorePort>,
+    app_config: &AppConfig,
+) -> Result<()> {
+    let (display, requires_key, config) = resolve_provider(provider_id, app_config)?;
+    if !requires_key {
         if json {
-            let j = serde_json::json!({
-                "provider": meta.id,
-                "status": "keyless",
-                "message": msg,
-            });
-            println!("{}", serde_json::to_string_pretty(&j)?);
+            println!(
+                "{}",
+                serde_json::json!({"provider":provider_id,"status":"keyless","message":format!("{display} does not require an API key — no credentials to store.")})
+            );
         } else {
-            println!("{msg}");
+            println!("{display} does not require an API key — no credentials to store.");
         }
         return Ok(());
     }
-
-    // AC1/P-4 — refuse non-TTY BEFORE any interactive read (overwrite confirm + key
-    // entry). Previously the overwrite-confirm read stdin before this guard ran.
-    if !atty_stdin() {
-        eprintln!(
-            "Error: auth login requires an interactive terminal (stdin is not a TTY).\n\
-             Set {} instead, or pipe through a TTY.",
-            meta.api_key_env
+    let fallback = [AuthMethod::ApiKey];
+    let methods = providers::lookup(provider_id).map_or(&fallback[..], |m| m.auth_methods);
+    let method = select_method(methods, requested, std::io::stdin().is_terminal())?;
+    if matches!(method, AuthMethod::ApiKey) && !std::io::stdin().is_terminal() {
+        bail!(
+            "auth login requires an interactive terminal (stdin is not a TTY). Set {} instead, or pipe through a TTY.",
+            config.api_key_env
         );
-        anyhow::bail!("auth login requires a TTY");
     }
-
-    // AC5 — overwrite warning: confirm when the upsert would replace an enabled
-    // API key. OAuth rows and disabled tombstones are not overwritten by a paste.
-    let existing = store.snapshot().await?;
-    let replaces_key = existing.rows(&provider_id).iter().any(|row| {
-        row.disabled_cause.is_none()
-            && matches!(row.credential, crate::domain::models::Credential::ApiKey(_))
-    });
-    let proceed = if replaces_key {
-        eprintln!(
-            "⚠  A credential for {} already exists. Overwrite?",
-            meta.display_name
-        );
-        // Reuse yes/no prompting pattern from profile/prompt.rs.
-        print!("[y/n] ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        let mut input = String::new();
-        std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
-        input.trim().starts_with(['y', 'Y'])
-    } else {
-        true
+    let ui = TerminalUi::shared();
+    let clock = Arc::new(|| chrono::Utc::now().timestamp_millis());
+    let context = FlowCtx::new(ui.clone(), clock).with_validation_config(config);
+    let login = flows::login(provider_id, method, &context, store);
+    tokio::pin!(login);
+    let result = tokio::select! {
+        biased;
+        _=tokio::signal::ctrl_c()=>{ui.cancel_token().cancel();login.await},
+        result=&mut login=>result,
     };
-
-    // Read the key + validate ONLY when proceeding (skip the prompt on decline).
-    // `execute_login` owns every outcome → store → output-string decision so the
-    // validate-before-store / signup-URL / offline / redaction / decline gates are
-    // unit-testable without a TTY or network (P-10..P-14).
-    let (key, outcome) = if proceed {
-        // AC1 — masked interactive key entry.
-        let key = rpassword::prompt_password(format!("Enter {} API key: ", meta.display_name))
-            .map_err(|e| anyhow::anyhow!("failed to read API key: {e}"))?;
-        if key.trim().is_empty() {
-            anyhow::bail!("API key cannot be empty.");
-        }
-        let key = key.trim().to_owned();
-
-        // AC2 — validate before store.
-        eprintln!("Validating key against {}…", meta.display_name);
-        let outcome = validate_key(&provider_id, &validation_cfg, &key).await;
-        (key, outcome)
-    } else {
-        (String::new(), Ok(())) // unused on the decline path
-    };
-
-    match execute_login(&meta, store, json, proceed, key, outcome).await {
-        LoginOutcome::Stored { output, .. } => {
-            println!("{output}");
-            Ok(())
-        }
-        LoginOutcome::Rejected { message } => {
-            eprintln!("{message}");
-            anyhow::bail!("login rejected")
-        }
-        LoginOutcome::Declined { message } => {
-            eprintln!("{message}");
-            Ok(())
-        }
-    }
-}
-/// Resolve a provider for login.
-///
-/// First checks the static built-in table. If the id is not built-in, falls back
-/// to any `[provider.<id>]` section in `config.toml`. This keeps `auth login` in
-/// sync with `rustain doctor`, which probes every configured provider.
-fn resolve_provider(
-    provider_id: &str,
-    app_config: &crate::domain::models::AppConfig,
-) -> Result<(LoginProviderMeta, ProviderConfig)> {
-    if let Some(meta) = providers::lookup(provider_id) {
-        let cfg = ProviderConfig {
-            provider_id: provider_id.to_owned(),
-            model_id: String::new(),
-            api_key_env: meta.api_key_env.to_owned(),
-            enabled: true,
-            kind: Some(provider_id.to_owned()),
-            base_url: None,
-            context_window: None,
-            supports_tools: None,
-            discover_models: false,
-            model_filter: vec![],
-            cache_ttl_seconds: 0,
-        };
-        return Ok((LoginProviderMeta::from_static(meta), cfg));
-    }
-
-    if let Some(cfg) = app_config.provider.get(provider_id) {
-        let meta = LoginProviderMeta {
-            id: provider_id.to_owned(),
-            display_name: provider_id.to_owned(),
-            signup_url: String::new(),
-            requires_key: true,
-            api_key_env: cfg.api_key_env.clone(),
-        };
-        return Ok((meta, cfg.clone()));
-    }
-
-    let mut valid: Vec<String> = providers::all_provider_ids()
-        .map(|s| s.to_string())
-        .collect();
-    for id in app_config.provider.keys() {
-        if !valid.contains(id) {
-            valid.push(id.clone());
-        }
-    }
-    eprintln!(
-        "Error: unknown provider '{provider_id}'.\n\nValid providers: {}",
-        valid.join(", ")
-    );
-    anyhow::bail!("unknown provider");
-}
-
-// ---------------------------------------------------------------------------
-// Decision core (testable without a TTY / network / rpassword — P-10..P-14)
-// ---------------------------------------------------------------------------
-
-/// Outcome of the login decision core. Owns all store + output-string logic so the
-/// validate/signup-URL/offline/redaction/decline gates are asserted against a mock
-/// store, independent of the interactive I/O in [`run_auth_login`].
-enum LoginOutcome {
-    /// Credential stored. `output` is the success line (json or human) — never the key.
-    Stored { validated: bool, output: String },
-    /// Validation rejected the key (invalid / offline / error). `message` carries the
-    /// actionable text — including the provider's signup URL for an invalid key (P-12).
-    Rejected { message: String },
-    /// User declined to overwrite an existing credential — nothing was stored (P-14).
-    Declined { message: String },
-}
-
-/// Pure decision core: given the validation outcome (and whether the user chose to
-/// proceed past the overwrite prompt), store the credential or produce a rejection.
-///
-/// `proceed == false` short-circuits to [`LoginOutcome::Declined`] WITHOUT touching
-/// the store (`key` / `outcome` are ignored on that path). This is the single place
-/// that calls `AuthStorePort::set_validated`, which is what lets the
-/// validate-before-store / signup-URL / offline / redaction / decline gates assert
-/// store behaviour against a mock.
-async fn execute_login(
-    meta: &LoginProviderMeta,
-    store: &Arc<dyn AuthStorePort>,
-    json: bool,
-    proceed: bool,
-    key: String,
-    outcome: Result<(), ValidationOutcome>,
-) -> LoginOutcome {
-    if !proceed {
-        return LoginOutcome::Declined {
-            message: "Aborted — existing credential unchanged.".to_string(),
-        };
-    }
-
-    let validated = match outcome {
-        Ok(()) => true,
-        Err(ValidationOutcome::Inconclusive) => {
-            // Q1: endpoint unsupported → store unvalidated (last_validated = None, P-3).
-            false
-        }
-        Err(ValidationOutcome::Invalid) => {
-            return LoginOutcome::Rejected {
-                message: format!(
-                    "✗ Invalid API key for {}.\n  Get one at: {}",
-                    meta.display_name, meta.signup_url
-                ),
-            };
-        }
-        Err(ValidationOutcome::Offline(detail)) => {
-            return LoginOutcome::Rejected {
-                message: format!("✗ Cannot validate — offline: {detail}\n  Key was NOT stored."),
-            };
-        }
-        Err(ValidationOutcome::Error(e)) => {
-            return LoginOutcome::Rejected {
-                message: format!("✗ Validation error: {e}"),
-            };
-        }
-    };
-
-    // AC3 — store via port (P-3: record the validation outcome for last_validated).
-    let cred = Credential::new_api_key(key);
-    match store
-        .upsert(
-            &meta.id,
-            cred,
-            crate::domain::models::CredentialOrigin::Stored,
-            validated,
-        )
-        .await
-    {
-        Ok(_) => {
-            // AC6 — success output never echoes the key.
-            let output = if json {
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "provider": meta.id,
-                    "status": "authenticated",
-                    "validated": validated,
-                }))
-                .unwrap_or_default()
-            } else if validated {
-                format!("✓ {} credentials stored successfully.", meta.display_name)
+    match result {
+        Ok(result) => {
+            if json {
+                println!("{}", result_json(&result));
+            } else if result.method == "oauth" {
+                println!("{}", oauth_success(&display, &result.identity));
+            } else if result.validated {
+                println!("✓ {display} credentials stored successfully.");
             } else {
-                format!(
-                    "⚠  Could not confirm key via /models endpoint — {} credentials stored unvalidated.",
-                    meta.display_name
-                )
-            };
-            LoginOutcome::Stored { validated, output }
-        }
-        Err(e) => LoginOutcome::Rejected {
-            message: format!("✗ Failed to store credential: {e}"),
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Validation helpers
-// ---------------------------------------------------------------------------
-
-enum ValidationOutcome {
-    Invalid,
-    Offline(String),
-    /// Endpoint unsupported (404/405) — key might be fine.
-    Inconclusive,
-    Error(String),
-}
-
-/// Build a temporary provider and call `connectivity_probe` with the candidate key.
-///
-/// Uses [`provider_factory::build_provider_for_config_with_key`] so the candidate
-/// key is passed straight to the adapter — never injected into the process
-/// environment (DN-1: the old `std::env::set_var` path leaked the key via
-/// `/proc/self/environ` and was unsafe under the multi-threaded tokio runtime).
-async fn validate_key(
-    provider_id: &str,
-    cfg: &ProviderConfig,
-    key: &str,
-) -> Result<(), ValidationOutcome> {
-    let provider: Arc<dyn StreamingProvider> =
-        match provider_factory::build_provider_for_config_with_key(provider_id, cfg, key) {
-            Ok(p) => p,
-            Err(ProviderError::Other(msg)) if msg.contains("feature not enabled") => {
-                // Provider feature not compiled in — can't validate, treat as inconclusive.
-                return Err(ValidationOutcome::Inconclusive);
+                println!(
+                    "⚠  Could not confirm key via /models endpoint — {display} credentials stored unvalidated."
+                );
             }
-            Err(e) => {
-                return Err(ValidationOutcome::Error(format!(
-                    "provider build failed: {e}"
-                )));
-            }
-        };
-
-    match provider.connectivity_probe().await {
-        Ok(_outcome) => Ok(()),
-        Err(ProviderError::AuthenticationFailed) => Err(ValidationOutcome::Invalid),
-        Err(ProviderError::Offline(detail)) => Err(ValidationOutcome::Offline(detail)),
-        Err(ProviderError::EndpointUnsupported(_)) => Err(ValidationOutcome::Inconclusive),
-        Err(e) => Err(ValidationOutcome::Error(e.to_string())),
-    }
-}
-
-/// Check if stdin is a TTY.
-fn atty_stdin() -> bool {
-    // Cross-platform via std (Rust 1.70+). The old hand-rolled `libc::isatty`
-    // returned `true` on non-unix, letting Windows piped stdin through (P-6).
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::errors::AuthError;
-    use crate::domain::models::{AuthSnapshot, CasOutcome, CredentialId, CredentialOrigin};
-    use async_trait::async_trait;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    /// Shared observation handles for [`CountingStore`] — live outside the erased
-    /// trait object so tests can read them after driving `execute_login`.
-    #[derive(Default)]
-    struct Counts {
-        set_calls: AtomicUsize,
-        last_validated: AtomicBool,
-    }
-
-    /// Counts upserts and records validation, preserving the validation-before-write seam.
-    struct CountingStore {
-        counts: Arc<Counts>,
-    }
-    impl CountingStore {
-        /// Returns the observation handle + the store as a trait object.
-        fn double() -> (Arc<Counts>, Arc<dyn AuthStorePort>) {
-            let counts = Arc::new(Counts::default());
-            let store: Arc<dyn AuthStorePort> = Arc::new(CountingStore {
-                counts: Arc::clone(&counts),
-            });
-            (counts, store)
-        }
-    }
-    #[async_trait]
-    impl AuthStorePort for CountingStore {
-        async fn snapshot(&self) -> Result<AuthSnapshot, AuthError> {
-            Ok(AuthSnapshot::default())
-        }
-        async fn upsert(
-            &self,
-            _provider: &str,
-            _cred: Credential,
-            origin: CredentialOrigin,
-            validated: bool,
-        ) -> Result<CredentialId, AuthError> {
-            assert_eq!(origin, CredentialOrigin::Stored);
-            self.counts.set_calls.fetch_add(1, Ordering::SeqCst);
-            self.counts
-                .last_validated
-                .store(validated, Ordering::SeqCst);
-            Ok(CredentialId(1))
-        }
-        async fn remove(&self, _provider: &str) -> Result<(), AuthError> {
+            eprintln!(
+                "Credentials saved to {}",
+                crate::infrastructure::paths::data_dir()?
+                    .join("auth.json")
+                    .display()
+            );
             Ok(())
         }
-        async fn replace_if_matches(
-            &self,
-            _provider: &str,
-            _id: CredentialId,
-            _rev: u64,
-            _cred: Credential,
-        ) -> Result<CasOutcome, AuthError> {
-            Ok(CasOutcome::Stale)
+        Err(FlowError::Declined) => {
+            eprintln!("Aborted — existing credential unchanged.");
+            Ok(())
         }
-        async fn disable_if_matches(
-            &self,
-            _provider: &str,
-            _id: CredentialId,
-            _rev: u64,
-            _cause: &str,
-        ) -> Result<CasOutcome, AuthError> {
-            Ok(CasOutcome::Stale)
-        }
+        Err(error) => Err(error.into()),
     }
-
-    fn anthropic_meta() -> LoginProviderMeta {
-        LoginProviderMeta::from_static(
-            providers::lookup("anthropic").expect("anthropic is in the provider table"),
-        )
+}
+fn select_method(
+    methods: &[AuthMethod],
+    requested: Option<AuthLoginMethod>,
+    tty: bool,
+) -> Result<&AuthMethod> {
+    select_method_with_input(methods, requested, tty, || {
+        let mut value = String::new();
+        std::io::stdin().read_line(&mut value)?;
+        Ok(value)
+    })
+}
+fn select_method_with_input(
+    methods: &[AuthMethod],
+    requested: Option<AuthLoginMethod>,
+    tty: bool,
+    read: impl FnOnce() -> std::io::Result<String>,
+) -> Result<&AuthMethod> {
+    if let Some(requested) = requested {
+        return methods
+            .iter()
+            .find(|method| {
+                matches!(
+                    (requested, *method),
+                    (AuthLoginMethod::ApiKey, AuthMethod::ApiKey)
+                        | (AuthLoginMethod::Oauth, AuthMethod::OAuthCode(_))
+                )
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("Requested --method is not available for this provider")
+            });
     }
-
-    // P-10: validate-before-store — a valid key is stored; an invalid key is NOT.
-    #[tokio::test]
-    async fn p10_valid_key_stored_invalid_key_not() {
-        let (store, port) = CountingStore::double();
-        let meta = anthropic_meta();
-
-        // Valid (Ok) → stored, validated=true.
-        let out = execute_login(&meta, &port, false, true, "sk-good".to_string(), Ok(())).await;
-        assert!(
-            matches!(
-                out,
-                LoginOutcome::Stored {
-                    validated: true,
-                    ..
-                }
-            ),
-            "valid key should be stored"
-        );
-        assert_eq!(store.set_calls.load(Ordering::SeqCst), 1);
-        assert!(
-            store.last_validated.load(Ordering::SeqCst),
-            "validated must be recorded as true"
-        );
-
-        // Invalid → Rejected, store untouched (still 1 call from the valid case).
-        let out = execute_login(
-            &meta,
-            &port,
-            false,
-            true,
-            "sk-bad".to_string(),
-            Err(ValidationOutcome::Invalid),
-        )
-        .await;
-        assert!(
-            matches!(out, LoginOutcome::Rejected { .. }),
-            "invalid → Rejected"
-        );
-        assert_eq!(
-            store.set_calls.load(Ordering::SeqCst),
-            1,
-            "an invalid key must NEVER be written"
-        );
+    if methods.len() == 1 {
+        return Ok(&methods[0]);
     }
-
-    // P-12: invalid-key rejection includes the provider's signup URL.
-    #[tokio::test]
-    async fn p12_invalid_rejection_includes_signup_url() {
-        let (_counts, port) = CountingStore::double();
-        let meta = anthropic_meta();
-        let out = execute_login(
-            &meta,
-            &port,
-            false,
-            true,
-            "sk-bad".to_string(),
-            Err(ValidationOutcome::Invalid),
-        )
-        .await;
-        match out {
-            LoginOutcome::Rejected { message } => {
-                assert!(
-                    message.contains(&meta.signup_url),
-                    "rejection must include the signup URL; got: {message}"
-                );
+    if !tty {
+        bail!("Multiple login methods are available; choose --method oauth or --method api-key.");
+    }
+    eprintln!("Choose a login method:");
+    for (index, method) in methods.iter().enumerate() {
+        eprintln!(
+            "  {}. {}",
+            index + 1,
+            match method {
+                AuthMethod::ApiKey => "API key",
+                AuthMethod::OAuthCode(policy) => policy.label,
             }
-            _ => panic!("expected Rejected for an invalid key"),
+        );
+    }
+    eprint!("Method [1-{}]: ", methods.len());
+    std::io::stderr().flush()?;
+    let value = read()?;
+    let index = value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .and_then(|v| v.checked_sub(1))
+        .filter(|i| *i < methods.len())
+        .ok_or_else(|| anyhow::anyhow!("Invalid login method selection"))?;
+    Ok(&methods[index])
+}
+fn result_json(result: &LoginResult) -> serde_json::Value {
+    let mut identity = serde_json::Map::new();
+    for (name, value) in [
+        ("account_id", &result.identity.account_id),
+        ("email", &result.identity.email),
+        ("project_id", &result.identity.project_id),
+        ("org_id", &result.identity.org_id),
+        ("org_name", &result.identity.org_name),
+    ] {
+        if let Some(value) = value {
+            identity.insert(name.into(), value.clone().into());
         }
     }
-
-    // P-13: offline during validation → nothing stored.
-    #[tokio::test]
-    async fn p13_offline_stores_nothing() {
-        let (store, port) = CountingStore::double();
-        let meta = anthropic_meta();
-        let out = execute_login(
-            &meta,
-            &port,
-            false,
-            true,
-            "sk-x".to_string(),
-            Err(ValidationOutcome::Offline("no route to host".to_string())),
-        )
-        .await;
-        assert!(
-            matches!(out, LoginOutcome::Rejected { .. }),
-            "offline → Rejected"
-        );
-        assert_eq!(
-            store.set_calls.load(Ordering::SeqCst),
-            0,
-            "offline must NOT store"
-        );
-    }
-
-    // P-3: inconclusive validation → stored with validated=false (last_validated null).
-    #[tokio::test]
-    async fn p3_inconclusive_stored_unvalidated() {
-        let (store, port) = CountingStore::double();
-        let meta = anthropic_meta();
-        let out = execute_login(
-            &meta,
-            &port,
-            false,
-            true,
-            "sk-maybe".to_string(),
-            Err(ValidationOutcome::Inconclusive),
-        )
-        .await;
-        match out {
-            LoginOutcome::Stored { validated, output } => {
-                assert!(!validated, "inconclusive must record validated=false");
-                assert!(
-                    output.contains("unvalidated"),
-                    "human output should warn the key is unvalidated: {output}"
-                );
-            }
-            _ => panic!("inconclusive → Stored"),
-        }
-        assert!(
-            !store.last_validated.load(Ordering::SeqCst),
-            "validated must be recorded as false"
-        );
-    }
-
-    // P-14: overwrite decline → nothing stored; accept → stored (replace).
-    #[tokio::test]
-    async fn p14_decline_stores_nothing_accept_stores() {
-        let (store, port) = CountingStore::double();
-        let meta = anthropic_meta();
-
-        // Decline (proceed=false) → Declined, store untouched.
-        let out = execute_login(&meta, &port, false, false, String::new(), Ok(())).await;
-        assert!(
-            matches!(out, LoginOutcome::Declined { .. }),
-            "decline → Declined"
-        );
-        assert_eq!(
-            store.set_calls.load(Ordering::SeqCst),
-            0,
-            "decline must NOT store"
-        );
-
-        // Accept (proceed=true) → stored.
-        let out = execute_login(&meta, &port, false, true, "sk-new".to_string(), Ok(())).await;
-        assert!(
-            matches!(out, LoginOutcome::Stored { .. }),
-            "accept → Stored"
-        );
-        assert_eq!(store.set_calls.load(Ordering::SeqCst), 1);
-    }
-
-    // P-11: success output (human + json) never echoes the key (redaction canary).
-    #[tokio::test]
-    async fn p11_success_output_never_echoes_key() {
-        let (_counts, port) = CountingStore::double();
-        let meta = anthropic_meta();
-        const SENTINEL: &str = "SECRET-CANARY-DEADBEEF";
-
-        match execute_login(&meta, &port, false, true, SENTINEL.to_string(), Ok(())).await {
-            LoginOutcome::Stored { output, .. } => assert!(
-                !output.contains(SENTINEL),
-                "human success output leaked the key: {output}"
-            ),
-            _ => panic!("expected Stored"),
-        }
-        match execute_login(&meta, &port, true, true, SENTINEL.to_string(), Ok(())).await {
-            LoginOutcome::Stored { output, .. } => {
-                assert!(
-                    !output.contains(SENTINEL),
-                    "json output leaked the key: {output}"
-                );
-                assert!(
-                    output.contains("validated"),
-                    "json output should carry the validated field: {output}"
-                );
-            }
-            _ => panic!("expected Stored"),
-        }
-    }
-    // -----------------------------------------------------------------------
-    // Provider resolution
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn resolve_provider_static_table() {
-        let cfg = crate::domain::models::AppConfig::default();
-        let (meta, validation_cfg) = resolve_provider("anthropic", &cfg).unwrap();
-        assert_eq!(meta.id, "anthropic");
-        assert_eq!(validation_cfg.kind, Some("anthropic".to_string()));
-    }
-
-    #[test]
-    fn resolve_provider_config_fallback() {
-        let mut cfg = crate::domain::models::AppConfig::default();
-        cfg.provider.insert(
-            "zai".to_string(),
-            crate::domain::models::ProviderConfig {
-                provider_id: "zai".to_string(),
-                model_id: "zai-model".to_string(),
-                api_key_env: "ZAI_API_KEY".to_string(),
+    serde_json::json!({"provider":result.provider,"status":"authenticated","method":result.method,"validated":result.validated,"identity":identity})
+}
+fn oauth_success(display: &str, identity: &CredentialIdentity) -> String {
+    let base = identity.email.as_ref().or(identity.account_id.as_ref());
+    let org = identity.org_name.as_ref().or(identity.org_id.as_ref());
+    let who = match (base, org) {
+        (Some(base), Some(org)) => Some(format!("{base} ({org})")),
+        (Some(base), None) => Some(base.clone()),
+        (None, Some(org)) => Some(org.clone()),
+        _ => None,
+    };
+    let prefix = format!("Logged in to {display} (Claude Pro/Max)");
+    who.map_or_else(|| prefix.clone(), |who| format!("{prefix} as {who}"))
+}
+fn resolve_provider(provider: &str, app: &AppConfig) -> Result<(String, bool, ProviderConfig)> {
+    if let Some(meta) = providers::lookup(provider) {
+        // A configured built-in still keeps its custom origin and header policy.
+        let config = app
+            .provider
+            .get(provider)
+            .cloned()
+            .unwrap_or_else(|| ProviderConfig {
+                provider_id: provider.into(),
+                model_id: String::new(),
+                api_key_env: meta.api_key_env.into(),
                 enabled: true,
-                kind: Some("openai-compatible".to_string()),
-                base_url: Some("https://api.z.ai/v1".to_string().into()),
+                kind: Some(provider.into()),
+                base_url: None,
+                auth_header: None,
                 context_window: None,
                 supports_tools: None,
                 discover_models: false,
                 model_filter: vec![],
-                cache_ttl_seconds: 3600,
-            },
-        );
-        let (meta, validation_cfg) = resolve_provider("zai", &cfg).unwrap();
-        assert_eq!(meta.id, "zai");
-        assert_eq!(meta.api_key_env, "ZAI_API_KEY");
-        assert!(meta.requires_key);
-        assert_eq!(validation_cfg.kind, Some("openai-compatible".to_string()));
-        assert_eq!(
-            validation_cfg.base_url.as_ref().map(|u| u.expose_url()),
-            Some("https://api.z.ai/v1")
-        );
+                cache_ttl_seconds: 0,
+            });
+        return Ok((meta.display_name.into(), meta.requires_key, config));
     }
-
+    if let Some(config) = app.provider.get(provider) {
+        return Ok((provider.into(), true, config.clone()));
+    }
+    let mut valid: Vec<_> = providers::all_provider_ids().map(str::to_owned).collect();
+    for id in app.provider.keys() {
+        if !valid.contains(id) {
+            valid.push(id.clone());
+        }
+    }
+    bail!(
+        "unknown provider '{provider}'. Valid providers: {}",
+        valid.join(", ")
+    )
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
     #[test]
-    fn resolve_provider_unknown_errors() {
-        let cfg = crate::domain::models::AppConfig::default();
-        assert!(resolve_provider("not-a-provider", &cfg).is_err());
+    fn method_override_and_non_tty_picker_boundary() {
+        let methods = providers::lookup("anthropic").unwrap().auth_methods;
+        assert!(
+            select_method(methods, None, false)
+                .unwrap_err()
+                .to_string()
+                .contains("--method")
+        );
+        assert!(matches!(
+            select_method(methods, Some(AuthLoginMethod::Oauth), false).unwrap(),
+            AuthMethod::OAuthCode(_)
+        ));
+        assert!(matches!(
+            select_method(methods, Some(AuthLoginMethod::ApiKey), false).unwrap(),
+            AuthMethod::ApiKey
+        ));
+        assert!(matches!(
+            select_method_with_input(methods, None, true, || Ok("1\n".into())).unwrap(),
+            AuthMethod::OAuthCode(_)
+        ));
+        assert!(matches!(
+            select_method_with_input(methods, None, true, || Ok("2\n".into())).unwrap(),
+            AuthMethod::ApiKey
+        ));
+        assert!(select_method_with_input(methods, None, true, || Ok("0\n".into())).is_err());
+    }
+    #[test]
+    fn success_identity_and_json_never_contain_credentials() {
+        let identity = CredentialIdentity {
+            email: Some("me@example.com".into()),
+            org_name: Some("My Org".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            oauth_success("Anthropic", &identity),
+            "Logged in to Anthropic (Claude Pro/Max) as me@example.com (My Org)"
+        );
+        let json = result_json(&LoginResult {
+            provider: "anthropic".into(),
+            method: "oauth",
+            validated: true,
+            identity,
+        });
+        assert_eq!(json["method"], "oauth");
+        assert!(json["identity"].get("account_id").is_none());
+    }
+    #[test]
+    fn custom_provider_configuration_is_preserved() {
+        let app = AppConfig::default();
+        assert!(resolve_provider("not-a-provider", &app).is_err());
+        assert_eq!(resolve_provider("anthropic", &app).unwrap().0, "Anthropic");
     }
 }

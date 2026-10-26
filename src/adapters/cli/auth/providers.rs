@@ -1,10 +1,10 @@
 //! Static provider metadata table (Story 13.4a Task 4).
 //!
-//! Canonical source of: display names, signup URLs, key requirements,
-//! and auth methods for each supported provider. Reused by 13.4b/13.4c
-//! and the login UX of Epic 20 (OAuth; numbered 19 until 2026-08-23).
+//! Canonical source of display names, signup URLs, key requirements and login methods.
 
-use crate::domain::models::credential::AuthMethod;
+use crate::adapters::auth::policies;
+use crate::domain::models::AuthMethod;
+use crate::domain::models::auth_policy::OAuthApiPolicy;
 
 /// Metadata for a supported AI provider.
 #[derive(Debug, Clone)]
@@ -19,8 +19,10 @@ pub struct ProviderMeta {
     pub requires_key: bool,
     /// Name of the env var checked for this provider's API key.
     pub api_key_env: &'static str,
-    /// Supported authentication methods (forward-compat scaffold for Epic 20).
+    /// Supported authentication methods, in picker order.
     pub auth_methods: &'static [AuthMethod],
+    pub oauth_api: Option<&'static OAuthApiPolicy>,
+    pub org_scoped_identity: bool,
 }
 
 /// All known providers. Order is display order for `auth list`.
@@ -31,7 +33,12 @@ static PROVIDERS: &[ProviderMeta] = &[
         signup_url: "https://console.anthropic.com/",
         requires_key: true,
         api_key_env: "ANTHROPIC_API_KEY",
-        auth_methods: &[AuthMethod::ApiKey],
+        auth_methods: &[
+            AuthMethod::OAuthCode(&policies::ANTHROPIC_OAUTH),
+            AuthMethod::ApiKey,
+        ],
+        oauth_api: Some(&policies::ANTHROPIC_API),
+        org_scoped_identity: policies::org_scoped_identity("anthropic"),
     },
     ProviderMeta {
         id: "openai",
@@ -40,6 +47,8 @@ static PROVIDERS: &[ProviderMeta] = &[
         requires_key: true,
         api_key_env: "OPENAI_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
+        oauth_api: None,
+        org_scoped_identity: policies::org_scoped_identity("openai"),
     },
     ProviderMeta {
         id: "openrouter",
@@ -48,6 +57,8 @@ static PROVIDERS: &[ProviderMeta] = &[
         requires_key: true,
         api_key_env: "OPENROUTER_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
+        oauth_api: None,
+        org_scoped_identity: policies::org_scoped_identity("openrouter"),
     },
     ProviderMeta {
         id: "google",
@@ -56,6 +67,8 @@ static PROVIDERS: &[ProviderMeta] = &[
         requires_key: true,
         api_key_env: "GOOGLE_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
+        oauth_api: None,
+        org_scoped_identity: policies::org_scoped_identity("google"),
     },
     ProviderMeta {
         id: "deepseek",
@@ -64,6 +77,8 @@ static PROVIDERS: &[ProviderMeta] = &[
         requires_key: true,
         api_key_env: "DEEPSEEK_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
+        oauth_api: None,
+        org_scoped_identity: policies::org_scoped_identity("deepseek"),
     },
     ProviderMeta {
         id: "moonshot",
@@ -72,6 +87,8 @@ static PROVIDERS: &[ProviderMeta] = &[
         requires_key: true,
         api_key_env: "MOONSHOT_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
+        oauth_api: None,
+        org_scoped_identity: policies::org_scoped_identity("moonshot"),
     },
     ProviderMeta {
         id: "ollama",
@@ -80,6 +97,8 @@ static PROVIDERS: &[ProviderMeta] = &[
         requires_key: false,
         api_key_env: "",
         auth_methods: &[AuthMethod::ApiKey], // placeholder — ollama has no auth but ApiKey is the shape
+        oauth_api: None,
+        org_scoped_identity: policies::org_scoped_identity("ollama"),
     },
 ];
 
