@@ -34,6 +34,15 @@ pub fn env_var_trimmed(name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// OAuth clocks share the instrumented override; production always uses wall time.
+pub fn auth_now_ms() -> i64 {
+    #[cfg(feature = "test-instrumentation")]
+    if let Some(now) = env_var_trimmed("RUSTAIN_TEST_NOW_MS").and_then(|value| value.parse().ok()) {
+        return now;
+    }
+    chrono::Utc::now().timestamp_millis()
+}
+
 /// Check if an environment variable is set to a non-empty value.
 ///
 /// Equivalent to `env_var_trimmed(name).is_some()` but reads more clearly
@@ -146,6 +155,34 @@ pub fn strip_url_userinfo(raw: &str) -> std::borrow::Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "test-instrumentation"))]
+    #[test]
+    #[serial_test::serial]
+    fn shipped_oauth_clock_ignores_test_override() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: the enclosing unkeyed serial lock spans restoration.
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("RUSTAIN_TEST_NOW_MS", value),
+                        None => std::env::remove_var("RUSTAIN_TEST_NOW_MS"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("RUSTAIN_TEST_NOW_MS"));
+        // SAFETY: all environment mutations hold the unkeyed serial lock.
+        unsafe {
+            std::env::set_var("RUSTAIN_TEST_NOW_MS", "0");
+        }
+        let before = chrono::Utc::now().timestamp_millis();
+        let now = auth_now_ms();
+        let after = chrono::Utc::now().timestamp_millis();
+        assert!(now >= before && now <= after);
+        assert_ne!(now, 0);
+    }
 
     /// Helper: safely set env var (unsafe in Rust 2024 edition).
     unsafe fn set_env(key: &str, val: &str) {

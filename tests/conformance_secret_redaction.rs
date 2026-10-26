@@ -131,6 +131,8 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
         "adapters/openai/mod.rs",
         "domain/models/credential.rs",
         "domain/models/secret.rs",
+        // Recovery compares the rejected bearer once to refuse same-token replay.
+        "infrastructure/key_resolver.rs",
         "infrastructure/provider_factory.rs",
     ]
     .iter()
@@ -149,9 +151,9 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 18,
-        "expose_secret() pinned count changed: got {count}, expected 18. \
-         Subscription engines add four consolidated token-shape/HTTP boundaries; \
+        count, 19,
+        "expose_secret() pinned count changed: got {count}, expected 19. \
+         Recovery adds one consolidated same-bearer comparison; \
          stored credentials otherwise retain their secret wrappers."
     );
 }

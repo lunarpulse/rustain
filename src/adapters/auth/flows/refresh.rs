@@ -71,7 +71,7 @@ impl OAuthRefreshPort for HttpOAuthRefresher {
         let mut projected = token::project(
             &value,
             policy.projection,
-            chrono::Utc::now().timestamp_millis(),
+            crate::infrastructure::utils::auth_now_ms(),
         )
         .map_err(|_| RefreshFailure::Transient("oauth refresh response invalid".into()))?;
         super::identity::fill(

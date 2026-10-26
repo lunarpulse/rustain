@@ -33,6 +33,9 @@ mod conformance_20_1a_auth_store_v2;
 #[path = "../conformance_20_1b_anthropic_subscription.rs"]
 mod conformance_20_1b_anthropic_subscription;
 
+#[path = "../conformance_20_1b2_anthropic_session_recovery.rs"]
+mod conformance_20_1b2_anthropic_session_recovery;
+
 #[path = "../conformance_auth_cli.rs"]
 mod conformance_auth_cli;
 

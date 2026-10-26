@@ -1,5 +1,31 @@
 //! Anthropic API adapter implementing the `StreamingProvider` trait.
 //! All Anthropic-specific types and SSE parsing live in this module.
+//!
+//! Auth recovery and version replay adapted from oh-my-pi.
+//!
+//! MIT License
+//!
+//! Copyright (c) 2025 Mario Zechner
+//! Copyright (c) 2025-2026 Can Bölük
+//! Copyright (c) 2026 Stencil Labs, Inc.
+//!
+//! Permission is hereby granted, free of charge, to any person obtaining a copy
+//! of this software and associated documentation files (the "Software"), to deal
+//! in the Software without restriction, including without limitation the rights
+//! to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//! copies of the Software, and to permit persons to whom the Software is
+//! furnished to do so, subject to the following conditions:
+//!
+//! The above copyright notice and this permission notice shall be included in all
+//! copies or substantial portions of the Software.
+//!
+//! THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//! IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//! FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//! AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//! SOFTWARE.
 
 pub mod claude_code;
 pub mod sse;
@@ -17,6 +43,7 @@ use tokio::task::JoinHandle;
 use crate::domain::errors::ProviderError;
 use crate::domain::models::{CompletionOptions, Message, StreamChunk};
 use crate::domain::ports::StreamingProvider;
+use crate::infrastructure::key_resolver::Resolved;
 
 use self::sse::SseLineBuffer;
 use self::stream::StreamTransformer;
@@ -90,32 +117,48 @@ impl AnthropicAdapter {
         })
     }
 
-    /// Resolve exactly once per request, then retain the resulting profile and bytes.
-    async fn current_auth(
-        &self,
-    ) -> Result<(crate::domain::models::ResolvedAuth, claude_code::AuthPlan), ProviderError> {
+    /// Resolve once per logical request; only a rejected stored row can be recovered.
+    async fn current_auth(&self) -> Result<(Resolved, claude_code::AuthPlan), ProviderError> {
         use crate::domain::models::{AuthHeaderScheme, AuthSource, ResolvedAuth};
-        let (source, auth, header) = match &self.credential {
-            AnthropicCredential::Fixed(mode) => match mode {
-                AuthMode::ApiKey(s) => (
-                    AuthSource::Runtime,
-                    ResolvedAuth::ApiKey(s.clone()),
-                    Some(AuthHeaderScheme::ApiKey),
-                ),
-                AuthMode::BearerToken(s) => (
-                    AuthSource::Runtime,
-                    ResolvedAuth::ApiKey(s.clone()),
-                    Some(AuthHeaderScheme::Bearer),
-                ),
-            },
-            AnthropicCredential::Resolved(handle) => {
-                let (source, auth) = handle.current().await?;
-                (source, auth, handle.auth_header)
+        let (resolved, header) = match &self.credential {
+            AnthropicCredential::Fixed(mode) => {
+                let (secret, scheme) = match mode {
+                    AuthMode::ApiKey(s) => (s, AuthHeaderScheme::ApiKey),
+                    AuthMode::BearerToken(s) => (s, AuthHeaderScheme::Bearer),
+                };
+                (
+                    Resolved {
+                        source: AuthSource::Runtime,
+                        auth: ResolvedAuth::ApiKey(secret.clone()),
+                        row: None,
+                    },
+                    Some(scheme),
+                )
             }
+            AnthropicCredential::Resolved(handle) => (handle.current().await?, handle.auth_header),
         };
-        validate_credential(auth.bearer_secret().expose_secret())?;
-        let plan = claude_code::anthropic_auth(&source, &auth, header);
-        Ok((auth, plan))
+        validate_auth(&resolved.auth)?;
+        let plan = claude_code::anthropic_auth(&resolved.source, &resolved.auth, header);
+        Ok((resolved, plan))
+    }
+
+    async fn recover_auth(
+        &self,
+        resolved: &mut Resolved,
+        used: &mut bool,
+    ) -> Result<bool, ProviderError> {
+        if *used {
+            return Ok(false);
+        }
+        *used = true;
+        if let AnthropicCredential::Resolved(handle) = &self.credential
+            && let Some(auth) = handle.recover(resolved).await?
+        {
+            validate_auth(&auth)?;
+            resolved.auth = auth;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn request_auth(
@@ -157,6 +200,10 @@ fn account(auth: &crate::domain::models::ResolvedAuth) -> Option<&str> {
     }
 }
 
+fn validate_auth(auth: &crate::domain::models::ResolvedAuth) -> Result<(), ProviderError> {
+    validate_credential(auth.bearer_secret().expose_secret())
+}
+
 fn validate_credential(value: &str) -> Result<(), ProviderError> {
     if value.trim().is_empty() {
         return Err(ProviderError::AuthenticationFailed);
@@ -195,48 +242,63 @@ impl StreamingProvider for AnthropicAdapter {
             ));
         }
 
-        let (auth, plan) = self.current_auth().await?;
-        let profile = self.profile(&auth, &plan)?;
-        let mut request_body = AnthropicRequest::from((messages.as_slice(), &options));
-        if let Some(profile) = &profile {
-            profile.apply(&mut request_body, account(&auth), self.official())?;
-        }
-        let url = format!(
-            "{}/v1/messages{}",
-            self.base_url,
-            if plan.profile { "?beta=true" } else { "" }
-        );
-        let request = self.request_auth(self.client.post(&url), &auth, &plan);
-        // reqwest appends headers; the profile owns content-type when it applies.
-        let request = match &profile {
-            Some(profile) => profile.headers(request, !options.tools.is_empty()),
-            None => request.header("content-type", "application/json"),
-        };
-        let mut bytes = serde_json::to_vec(&request_body)
-            .map_err(|_| ProviderError::Other("Could not serialize Anthropic request".into()))?;
-        if plan.profile {
-            claude_code::attest(&mut bytes);
-        }
-        let response = request
-            .body(bytes)
-            .send()
-            .await
-            .map_err(|e| crate::adapters::provider::classify_reqwest_error(&e))?;
-
-        tracing::debug!(
-            status = %response.status(),
-            "Response received from {}",
-            self.base_url
-        );
-
-        let status = response.status();
-        if !status.is_success() {
+        let (mut resolved, plan) = self.current_auth().await?;
+        let mut auth_retried = false;
+        let response = loop {
+            let auth = &resolved.auth;
+            let profile = self.profile(auth, &plan)?;
+            let mut request_body = AnthropicRequest::from((messages.as_slice(), &options));
+            if let Some(profile) = &profile {
+                profile.apply(&mut request_body, account(auth), self.official())?;
+            }
+            let url = format!(
+                "{}/v1/messages{}",
+                self.base_url,
+                if plan.profile { "?beta=true" } else { "" }
+            );
+            let request = self.request_auth(self.client.post(&url), auth, &plan);
+            // reqwest appends headers; the profile owns content-type when it applies.
+            let request = match &profile {
+                Some(profile) => profile.headers(request, !options.tools.is_empty()),
+                None => request.header("content-type", "application/json"),
+            };
+            let mut bytes = serde_json::to_vec(&request_body).map_err(|_| {
+                ProviderError::Other("Could not serialize Anthropic request".into())
+            })?;
+            if plan.profile {
+                claude_code::attest(&mut bytes);
+            }
+            let response = request
+                .body(bytes)
+                .send()
+                .await
+                .map_err(|e| crate::adapters::provider::classify_reqwest_error(&e))?;
+            let status = response.status();
+            tracing::debug!(status = %status, "Response received from {}", self.base_url);
+            if status.is_success() {
+                break response;
+            }
+            if status.as_u16() == 401 && self.recover_auth(&mut resolved, &mut auth_retried).await?
+            {
+                continue;
+            }
             let retry_after = response
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
-
+            // Only a profile rejection can name a version to adopt; other 401/429
+            // responses keep their immediate mapping without reading the body.
+            let body = if profile.is_some() || !matches!(status.as_u16(), 401 | 429) {
+                response.text().await.unwrap_or_else(|_| "unknown".into())
+            } else {
+                String::new()
+            };
+            if let Some(profile) = &profile
+                && claude_code::adopt_required(&body, &profile.version)
+            {
+                continue;
+            }
             return match status.as_u16() {
                 401 => Err(ProviderError::AuthenticationFailed),
                 429 => {
@@ -247,25 +309,13 @@ impl StreamingProvider for AnthropicAdapter {
                         retry_after_ms: retry_after.map(|s| s * 1000),
                     })
                 }
-                status_code if status_code >= 500 => {
-                    let body = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "unknown".to_string());
-                    Err(ProviderError::ConnectionFailed(format!(
-                        "Server error {}: {}",
-                        status_code, body
-                    )))
-                }
-                _ => {
-                    let body = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "unknown".to_string());
-                    Err(ProviderError::Other(format!("HTTP {}: {}", status, body)))
-                }
+                code if code >= 500 => Err(ProviderError::ConnectionFailed(format!(
+                    "Server error {}: {}",
+                    code, body
+                ))),
+                _ => Err(ProviderError::Other(format!("HTTP {}: {}", status, body))),
             };
-        }
+        };
 
         // Stream the response bytes through SseLineBuffer -> StreamTransformer
         let byte_stream = response.bytes_stream();
@@ -335,59 +385,71 @@ impl StreamingProvider for AnthropicAdapter {
     }
 
     async fn health_check(&self) -> Result<(), ProviderError> {
-        let (auth, plan) = self.current_auth().await?;
-        let profile = self.profile(&auth, &plan)?;
-        let url = format!(
-            "{}/v1/messages{}",
-            self.base_url,
-            if plan.profile { "?beta=true" } else { "" }
-        );
-        let mut request = self
-            .request_auth(self.client.post(&url), &auth, &plan)
-            .timeout(std::time::Duration::from_secs(5));
-        let bytes = if let Some(profile) = &profile {
-            let options = CompletionOptions {
-                model: self.model.clone(),
-                max_tokens: 1,
-                system_prompt: String::new(),
-                temperature: None,
-                tools: vec![],
+        let (mut resolved, plan) = self.current_auth().await?;
+        let mut auth_retried = false;
+        loop {
+            let auth = &resolved.auth;
+            let profile = self.profile(auth, &plan)?;
+            let url = format!(
+                "{}/v1/messages{}",
+                self.base_url,
+                if plan.profile { "?beta=true" } else { "" }
+            );
+            let mut request = self
+                .request_auth(self.client.post(&url), auth, &plan)
+                .timeout(std::time::Duration::from_secs(5));
+            let bytes = if let Some(profile) = &profile {
+                let options = CompletionOptions {
+                    model: self.model.clone(),
+                    max_tokens: 1,
+                    system_prompt: String::new(),
+                    temperature: None,
+                    tools: vec![],
+                };
+                let messages = [Message {
+                    role: crate::domain::models::MessageRole::User,
+                    content: "hi".into(),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: vec![],
+                    context_prefix: None,
+                    reasoning_content: None,
+                }];
+                let mut body = AnthropicRequest::from((messages.as_slice(), &options));
+                body.stream = false;
+                profile.apply(&mut body, account(auth), self.official())?;
+                request = profile.headers(request, false);
+                let mut bytes = serde_json::to_vec(&body).map_err(|_| {
+                    ProviderError::Other("Could not serialize Anthropic request".into())
+                })?;
+                claude_code::attest(&mut bytes);
+                bytes
+            } else {
+                request = request.header("content-type", "application/json");
+                serde_json::to_vec(&serde_json::json!({
+                    "model": self.model, "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .map_err(|_| ProviderError::Other("Could not serialize Anthropic request".into()))?
             };
-            let messages = [Message {
-                role: crate::domain::models::MessageRole::User,
-                content: "hi".into(),
-                images: vec![],
-                tool_results: vec![],
-                tool_uses: vec![],
-                context_prefix: None,
-                reasoning_content: None,
-            }];
-            let mut body = AnthropicRequest::from((messages.as_slice(), &options));
-            body.stream = false;
-            profile.apply(&mut body, account(&auth), self.official())?;
-            request = profile.headers(request, false);
-            let mut bytes = serde_json::to_vec(&body).map_err(|_| {
-                ProviderError::Other("Could not serialize Anthropic request".into())
-            })?;
-            claude_code::attest(&mut bytes);
-            bytes
-        } else {
-            request = request.header("content-type", "application/json");
-            serde_json::to_vec(&serde_json::json!({
-                "model": self.model, "max_tokens": 1,
-                "messages": [{"role": "user", "content": "hi"}]
-            }))
-            .map_err(|_| ProviderError::Other("Could not serialize Anthropic request".into()))?
-        };
-        let response = request.body(bytes).send().await;
-        match response {
-            Ok(resp) if resp.status().is_success() => Ok(()),
-            Ok(resp) if resp.status().as_u16() == 401 => Err(ProviderError::AuthenticationFailed),
-            Ok(resp) => Err(ProviderError::Other(format!(
-                "Health check failed: HTTP {}",
-                resp.status()
-            ))),
-            Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
+            let response = request.body(bytes).send().await;
+            if let Ok(resp) = &response
+                && resp.status().as_u16() == 401
+                && self.recover_auth(&mut resolved, &mut auth_retried).await?
+            {
+                continue;
+            }
+            return match response {
+                Ok(resp) if resp.status().is_success() => Ok(()),
+                Ok(resp) if resp.status().as_u16() == 401 => {
+                    Err(ProviderError::AuthenticationFailed)
+                }
+                Ok(resp) => Err(ProviderError::Other(format!(
+                    "Health check failed: HTTP {}",
+                    resp.status()
+                ))),
+                Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
+            };
         }
     }
 
@@ -403,29 +465,39 @@ impl StreamingProvider for AnthropicAdapter {
         } else {
             format!("{}/v1/models", self.base_url)
         };
-        let (auth, plan) = self.current_auth().await?;
-        let mut req = self
-            .request_auth(self.client.get(&url), &auth, &plan)
-            .timeout(std::time::Duration::from_secs(5));
-        if let Some(profile) = self.profile(&auth, &plan)? {
-            req = profile.headers(req, false);
-        }
-        let response = req.send().await;
-        let latency = start.elapsed();
-        match response {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                match status {
-                    200..=299 => Ok(crate::domain::ports::ProbeOutcome { latency }),
-                    401 | 403 => Err(ProviderError::AuthenticationFailed),
-                    404 | 405 => Err(ProviderError::EndpointUnsupported(status)),
-                    _ => Err(ProviderError::Other(format!(
-                        "Probe failed: HTTP {}",
-                        status
-                    ))),
-                }
+        let (mut resolved, plan) = self.current_auth().await?;
+        let mut auth_retried = false;
+        loop {
+            let auth = &resolved.auth;
+            let mut req = self
+                .request_auth(self.client.get(&url), auth, &plan)
+                .timeout(std::time::Duration::from_secs(5));
+            if let Some(profile) = self.profile(auth, &plan)? {
+                req = profile.headers(req, false);
             }
-            Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
+            let response = req.send().await;
+            let latency = start.elapsed();
+            if let Ok(resp) = &response
+                && resp.status().as_u16() == 401
+                && self.recover_auth(&mut resolved, &mut auth_retried).await?
+            {
+                continue;
+            }
+            return match response {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    match status {
+                        200..=299 => Ok(crate::domain::ports::ProbeOutcome { latency }),
+                        401 | 403 => Err(ProviderError::AuthenticationFailed),
+                        404 | 405 => Err(ProviderError::EndpointUnsupported(status)),
+                        _ => Err(ProviderError::Other(format!(
+                            "Probe failed: HTTP {}",
+                            status
+                        ))),
+                    }
+                }
+                Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
+            };
         }
     }
 }

@@ -104,8 +104,16 @@ The env-name `contains("API_KEY")` heuristic is gone. Config validation and the
 factory warn about older Anthropic configs with non-`API_KEY` env names and no
 explicit scheme (`ANTHROPIC_AUTH_TOKEN` keeps Bearer, so it is not warned about).
 `auth_header` cannot override a subscription Bearer profile.
-`RUSTAIN_CLAUDE_CODE_VERSION` pins the compatibility version; otherwise it is
-`2.1.280`. This is a request fingerprint, not rustain's own version.
+`RUSTAIN_CLAUDE_CODE_VERSION` pins the compatibility version; otherwise rustain
+uses the version adopted from a provider rejection, falling back to `2.1.280`.
+Before streaming content, a subscription-profile request rejected with
+`claude_code_version_too_old` can adopt a strictly newer `major.minor.patch`
+version named by the server and rebuild its headers, billing block and checksum.
+Later requests in the process use that version. Each strictly newer version
+earns another attempt; a repeated/older/malformed version stops the retry.
+The env pin disables adoption, and plain API keys never adopt. Health checks
+and connectivity probes do not perform version adoption. This is a request
+fingerprint, not rustain's own version.
 
 ### Store migration and downgrade safety
 
@@ -139,6 +147,18 @@ exchange: it still completes and persists the rotated token for the next request
 Token exchange, refresh and identity-bootstrap requests never follow HTTP
 redirects, so a code, verifier or refresh token is only ever sent to its policy
 origin; a redirect fails the login or leaves the refresh transient.
+
+For stored OAuth subscriptions only, an HTTP 401 before streaming content can
+force a refresh of the **same row** and retry once with a different bearer.
+Streaming completions, health checks and connectivity probes share this policy.
+A second 401 ends the request; HTTP 403 never triggers refresh or account
+rotation. Runtime/login/env/stored API keys (including pasted/env `sk-ant-oat`
+tokens) do not receive this auth retry. A removed/disabled row, unchanged bearer,
+or fresh token this process minted within five minutes is not retried. A peer's
+newer fresh revision is adopted under the store lease rather than minted again.
+Transient refresh failure surfaces as a connection failure without disabling
+the row. Cancellation still lets an in-flight forced refresh persist its rotated
+token. Auth recovery and strictly-newer version retries have independent budgets.
 
 ### Supported providers
 
@@ -213,6 +233,25 @@ Status markers:
 Human sources are `oauth`, `login`, `env`, and `stored`. JSON schema 2.0 uses
 `oauth`, `login_key`, `env`, and `stored_key`; disabled rows use `disabled`
 and add `disabled_cause`. Tokens are never included.
+
+Enabled Anthropic OAuth rows with a recorded login instant also carry a
+grant-lifetime reminder. Anthropic grants last approximately 30 days after login,
+regardless of access-token refresh. During the final seven days, human status
+adds one indented line per account after the table, for example:
+
+```text
+  ⚠ you@example.com (Organization) — re-login within 5d12h (Anthropic expires OAuth grants ~30d after login)
+  ⚠ old@example.com — grant is past Anthropic's ~30d lifetime; re-login now
+```
+
+These lines have no ANSI colour. Account labels follow the login success line
+(email, else account ID; organization name, else organization ID), with terminal
+escape sequences and control characters removed; a row with no identity uses the
+provider display name. The reminder is a display heuristic:
+it never disables a credential. JSON schema remains `2.0`; the Anthropic provider
+adds `oauth_grants`, containing `who` and RFC 3339 `grant_expires_at` for **every**
+enabled OAuth row with a login instant, even outside the warning window. The
+field is omitted when empty. Other providers and API-key rows are unchanged.
 
 Use `--json` for scripts:
 

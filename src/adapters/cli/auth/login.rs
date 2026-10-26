@@ -85,7 +85,7 @@ async fn run(
         );
     }
     let ui = TerminalUi::shared();
-    let clock = Arc::new(|| chrono::Utc::now().timestamp_millis());
+    let clock = Arc::new(crate::infrastructure::utils::auth_now_ms);
     let context = FlowCtx::new(ui.clone(), clock).with_validation_config(config);
     let login = flows::login(provider_id, method, &context, store);
     tokio::pin!(login);
@@ -197,17 +197,21 @@ fn result_json(result: &LoginResult) -> serde_json::Value {
     }
     serde_json::json!({"provider":result.provider,"status":"authenticated","method":result.method,"validated":result.validated,"identity":identity})
 }
-fn oauth_success(display: &str, identity: &CredentialIdentity) -> String {
+pub(super) fn oauth_who(identity: &CredentialIdentity) -> Option<String> {
     let base = identity.email.as_ref().or(identity.account_id.as_ref());
     let org = identity.org_name.as_ref().or(identity.org_id.as_ref());
     let who = match (base, org) {
-        (Some(base), Some(org)) => Some(format!("{base} ({org})")),
-        (Some(base), None) => Some(base.clone()),
-        (None, Some(org)) => Some(org.clone()),
-        _ => None,
+        (Some(base), Some(org)) => format!("{base} ({org})"),
+        (Some(base), None) => base.clone(),
+        (None, Some(org)) => org.clone(),
+        _ => return None,
     };
+    // Provider-supplied identity reaches the terminal; strip controls as other CLI labels do.
+    Some(crate::adapters::cli::session::list::sanitize_title(&who))
+}
+fn oauth_success(display: &str, identity: &CredentialIdentity) -> String {
     let prefix = format!("Logged in to {display} (Claude Pro/Max)");
-    who.map_or_else(|| prefix.clone(), |who| format!("{prefix} as {who}"))
+    oauth_who(identity).map_or_else(|| prefix.clone(), |who| format!("{prefix} as {who}"))
 }
 fn resolve_provider(provider: &str, app: &AppConfig) -> Result<(String, bool, ProviderConfig)> {
     if let Some(meta) = providers::lookup(provider) {
@@ -295,6 +299,16 @@ mod tests {
         });
         assert_eq!(json["method"], "oauth");
         assert!(json["identity"].get("account_id").is_none());
+    }
+    #[test]
+    fn provider_identity_cannot_inject_terminal_controls() {
+        let identity = CredentialIdentity {
+            email: Some("me@example.com\u{1b}]0;title\u{7}".into()),
+            org_name: Some("Org\n  ⚠ forged".into()),
+            ..Default::default()
+        };
+        let line = oauth_success("Anthropic", &identity);
+        assert!(!line.chars().any(char::is_control), "{line:?}");
     }
     #[test]
     fn custom_provider_configuration_is_preserved() {

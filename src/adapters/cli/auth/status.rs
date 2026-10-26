@@ -1,6 +1,32 @@
 //! `auth status` handler (Story 13.4b).
 //!
 //! Offline provenance reporter over the shared credential cascade.
+//!
+//! Grant-lifetime display adapted from oh-my-pi.
+//!
+//! MIT License
+//!
+//! Copyright (c) 2025 Mario Zechner
+//! Copyright (c) 2025-2026 Can Bölük
+//! Copyright (c) 2026 Stencil Labs, Inc.
+//!
+//! Permission is hereby granted, free of charge, to any person obtaining a copy
+//! of this software and associated documentation files (the "Software"), to deal
+//! in the Software without restriction, including without limitation the rights
+//! to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//! copies of the Software, and to permit persons to whom the Software is
+//! furnished to do so, subject to the following conditions:
+//!
+//! The above copyright notice and this permission notice shall be included in all
+//! copies or substantial portions of the Software.
+//!
+//! THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//! IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//! FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//! AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//! SOFTWARE.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,6 +44,15 @@ pub const AUTH_STATUS_SCHEMA_VERSION: &str = "2.0";
 const NO_PROVIDERS_MESSAGE: &str =
     "No providers configured. Run `rustain auth login <provider>` to add one.";
 
+const ANTHROPIC_OAUTH_GRANT_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const RELOGIN_WARN_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Clone, Serialize)]
+struct OAuthGrant {
+    who: String,
+    grant_expires_at: DateTime<Utc>,
+}
+
 /// One presentation row. No secret material — presence/source/timestamp only.
 #[derive(Debug, Clone)]
 struct StatusRow {
@@ -28,6 +63,7 @@ struct StatusRow {
     disabled_cause: Option<String>,
     last_validated: Option<DateTime<Utc>>,
     requires_key: bool,
+    oauth_grants: Vec<OAuthGrant>,
 }
 
 /// Run `rustain auth status`.
@@ -98,6 +134,30 @@ fn build_status_rows(
             last_validated,
             disabled_cause,
             requires_key: true,
+            oauth_grants: if id == "anthropic" {
+                snapshot
+                    .rows(id)
+                    .iter()
+                    .filter(|row| row.disabled_cause.is_none())
+                    .filter_map(|row| {
+                        let crate::domain::models::Credential::OAuth(oauth) = &row.credential
+                        else {
+                            return None;
+                        };
+                        Some(OAuthGrant {
+                            who: super::login::oauth_who(&oauth.identity)
+                                .unwrap_or_else(|| display.to_owned()),
+                            grant_expires_at: DateTime::from_timestamp_millis(
+                                oauth
+                                    .authorized_at_ms?
+                                    .saturating_add(ANTHROPIC_OAUTH_GRANT_TTL_MS),
+                            )?,
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         });
     };
     for meta in providers.iter().filter(|meta| meta.requires_key) {
@@ -148,7 +208,62 @@ fn render_human(rows: &[StatusRow]) -> String {
                 .unwrap_or_else(|| "—".to_string())
         ));
     }
+    let now = crate::infrastructure::utils::auth_now_ms();
+    for grant in rows.iter().flat_map(|row| &row.oauth_grants) {
+        let remaining = grant
+            .grant_expires_at
+            .timestamp_millis()
+            .saturating_sub(now);
+        if remaining > RELOGIN_WARN_WINDOW_MS {
+            continue;
+        }
+        let line = if remaining <= 0 {
+            format!(
+                "  ⚠ {} — grant is past Anthropic's ~30d lifetime; re-login now\n",
+                grant.who
+            )
+        } else {
+            format!(
+                "  ⚠ {} — re-login within {} (Anthropic expires OAuth grants ~30d after login)\n",
+                grant.who,
+                format_duration(remaining)
+            )
+        };
+        out.push_str(&line);
+    }
     out.trim_end().to_string()
+}
+
+// omp formatDuration: whole larger units, rounded tenths below one minute.
+fn format_duration(ms: i64) -> String {
+    if ms <= 0 {
+        return "0ms".into();
+    }
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    if ms < 60_000 {
+        let tenths = (ms + 50) / 100;
+        return if tenths < 600 {
+            format!("{}.{:01}s", tenths / 10, tenths % 10)
+        } else {
+            "1m".into()
+        };
+    }
+    let (unit, remainder_unit, label, remainder_label) = if ms >= 86_400_000 {
+        (86_400_000, 3_600_000, "d", "h")
+    } else if ms >= 3_600_000 {
+        (3_600_000, 60_000, "h", "m")
+    } else {
+        (60_000, 1000, "m", "s")
+    };
+    let whole = ms / unit;
+    let remainder = ms % unit / remainder_unit;
+    if remainder > 0 {
+        format!("{whole}{label}{remainder}{remainder_label}")
+    } else {
+        format!("{whole}{label}")
+    }
 }
 
 fn render_json(rows: &[StatusRow]) -> Result<String> {
@@ -174,6 +289,8 @@ struct StatusProviderJson {
     requires_key: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     disabled_cause: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    oauth_grants: Vec<OAuthGrant>,
 }
 
 impl From<&StatusRow> for StatusProviderJson {
@@ -185,6 +302,7 @@ impl From<&StatusRow> for StatusProviderJson {
             last_validated: row.last_validated.map(|ts| ts.to_rfc3339()),
             requires_key: row.requires_key,
             disabled_cause: row.disabled_cause.clone(),
+            oauth_grants: row.oauth_grants.clone(),
         }
     }
 }

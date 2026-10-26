@@ -99,8 +99,16 @@ pub const fn org_scoped_identity(provider: &str) -> bool {
 }
 
 pub fn claude_code_version() -> String {
-    crate::infrastructure::utils::env_var_trimmed("RUSTAIN_CLAUDE_CODE_VERSION")
-        .unwrap_or_else(|| "2.1.280".to_owned())
+    if let Some(version) =
+        crate::infrastructure::utils::env_var_trimmed("RUSTAIN_CLAUDE_CODE_VERSION")
+    {
+        return version;
+    }
+    #[cfg(feature = "anthropic")]
+    if let Some(version) = crate::adapters::anthropic::claude_code::adopted_version() {
+        return version;
+    }
+    "2.1.280".to_owned()
 }
 
 /// Rebase only in instrumented test builds; resolve at each use, never cache.

@@ -1,6 +1,32 @@
 //! Lazy OAuth refresh: one flight per row within a resolver instance, one
 //! refresher per store across processes (`AuthStorePort::refresh_lease`),
 //! revision-fenced writes.
+//!
+//! Recovery policy adapted from oh-my-pi.
+//!
+//! MIT License
+//!
+//! Copyright (c) 2025 Mario Zechner
+//! Copyright (c) 2025-2026 Can Bölük
+//! Copyright (c) 2026 Stencil Labs, Inc.
+//!
+//! Permission is hereby granted, free of charge, to any person obtaining a copy
+//! of this software and associated documentation files (the "Software"), to deal
+//! in the Software without restriction, including without limitation the rights
+//! to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//! copies of the Software, and to permit persons to whom the Software is
+//! furnished to do so, subject to the following conditions:
+//!
+//! The above copyright notice and this permission notice shall be included in all
+//! copies or substantial portions of the Software.
+//!
+//! THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//! IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//! FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//! AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//! SOFTWARE.
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -23,16 +49,28 @@ pub enum ResolveError {
     RefreshUnavailable { provider: String, cause: String },
 }
 
+/// Credential and provenance served to one request; the handle retains no attempt state.
+#[derive(Clone, Debug)]
+pub struct Resolved {
+    pub source: AuthSource,
+    pub auth: ResolvedAuth,
+    pub row: Option<(CredentialId, u64)>,
+}
+
 /// One refresh exchange (omp `refresh.ts:43-44`).
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 /// A peer process holds the lease for one bounded exchange plus its write.
 const LEASE_WAIT: Duration = Duration::from_secs(15);
+/// A token this process minted is not re-minted on rejection for five minutes
+/// (omp `OAUTH_REMINT_COOLDOWN_MS`).
+const REMINT_COOLDOWN_MS: i64 = 300_000;
 
 pub struct KeyResolver {
     store: Arc<dyn AuthStorePort>,
     refresh: Arc<dyn OAuthRefreshPort>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     flights: Mutex<HashMap<CredentialId, Arc<RowFlight>>>,
+    recent_mints: Mutex<HashMap<CredentialId, (u64, i64)>>,
 }
 
 /// Per-row flight. Callers queued behind an exchange share its transient
@@ -47,7 +85,7 @@ struct RowFlight {
 }
 
 enum Attempt {
-    Ready(ResolvedAuth),
+    Ready(ResolvedAuth, u64),
     Skip,
     Transient(String),
 }
@@ -63,6 +101,7 @@ impl KeyResolver {
             refresh,
             clock,
             flights: Mutex::new(HashMap::new()),
+            recent_mints: Mutex::new(HashMap::new()),
         }
     }
 
@@ -73,18 +112,31 @@ impl KeyResolver {
         env_vars: &[&str],
         env_lookup: &(dyn Fn(&str) -> Option<String> + Send + Sync),
     ) -> Result<Option<(AuthSource, ResolvedAuth)>, ResolveError> {
-        self.resolve_with_policy(provider, runtime, env_vars, env_lookup, true)
+        Ok(self
+            .resolve_tracked(provider, runtime, env_vars, env_lookup)
+            .await?
+            .map(|resolved| (resolved.source, resolved.auth)))
+    }
+
+    pub async fn resolve_tracked(
+        &self,
+        provider: &str,
+        runtime: Option<&SecretString>,
+        env_vars: &[&str],
+        env_lookup: &(dyn Fn(&str) -> Option<String> + Send + Sync),
+    ) -> Result<Option<Resolved>, ResolveError> {
+        self.resolve_tracked_with_policy(provider, runtime, env_vars, env_lookup, true)
             .await
     }
 
-    pub async fn resolve_with_policy(
+    async fn resolve_tracked_with_policy(
         &self,
         provider: &str,
         runtime: Option<&SecretString>,
         env_vars: &[&str],
         env_lookup: &(dyn Fn(&str) -> Option<String> + Send + Sync),
         oauth_allowed: bool,
-    ) -> Result<Option<(AuthSource, ResolvedAuth)>, ResolveError> {
+    ) -> Result<Option<Resolved>, ResolveError> {
         let mut skip = BTreeSet::new();
         let mut transient = None;
         loop {
@@ -111,22 +163,31 @@ impl KeyResolver {
                     now_ms: (self.clock)(),
                     oauth_allowed,
                 };
-                key_cascade::select(&inputs, &skip).map(|s| (s.source, s.material))
+                key_cascade::select(&inputs, &skip)
+                    .map(|s| (s.source, s.material, s.row.map(|r| (r.id, r.rev))))
             };
             match selected {
-                Some((source, SelectionMaterial::Ready(auth))) => return Ok(Some((source, auth))),
-                Some((_, SelectionMaterial::NeedsRefresh { id, .. })) => {
+                Some((source, SelectionMaterial::Ready(auth), row)) => {
+                    return Ok(Some(Resolved { source, auth, row }));
+                }
+                Some((_, SelectionMaterial::NeedsRefresh { id, .. }, _)) => {
                     // Row-scoped, including CAS loss and transient errors. This bounds
                     // each call even when the disk changes while refreshing.
                     skip.insert(id);
-                    let attempt = match self.refresh_row(provider, id).await {
+                    let attempt = match self.refresh_row(provider, id, None).await {
                         Ok(attempt) => attempt,
                         Err(ResolveError::RefreshUnavailable { cause, .. }) => {
                             Attempt::Transient(cause)
                         }
                     };
                     match attempt {
-                        Attempt::Ready(auth) => return Ok(Some((AuthSource::StoredOAuth, auth))),
+                        Attempt::Ready(auth, rev) => {
+                            return Ok(Some(Resolved {
+                                source: AuthSource::StoredOAuth,
+                                auth,
+                                row: Some((id, rev)),
+                            }));
+                        }
                         Attempt::Skip => {}
                         Attempt::Transient(cause) => transient = Some(cause),
                     }
@@ -144,9 +205,44 @@ impl KeyResolver {
         }
     }
 
-    async fn refresh_row(&self, provider: &str, id: CredentialId) -> Result<Attempt, ResolveError> {
+    /// Force the rejected row, never another account. The detached owned operation
+    /// persists a rotated refresh token even if its requesting stream is cancelled.
+    pub async fn force_refresh(
+        self: &Arc<Self>,
+        provider: &str,
+        id: CredentialId,
+        rejected_rev: u64,
+    ) -> Result<Option<ResolvedAuth>, ResolveError> {
+        let resolver = self.clone();
+        let name = provider.to_owned();
+        let provider = name.clone();
+        tokio::spawn(async move {
+            match resolver
+                .refresh_row(&provider, id, Some(rejected_rev))
+                .await?
+            {
+                Attempt::Ready(auth, _) => Ok(Some(auth)),
+                Attempt::Skip => Ok(None),
+                Attempt::Transient(cause) => {
+                    Err(ResolveError::RefreshUnavailable { provider, cause })
+                }
+            }
+        })
+        .await
+        .map_err(|_| ResolveError::RefreshUnavailable {
+            provider: name,
+            cause: "refresh operation stopped".into(),
+        })?
+    }
+
+    async fn refresh_row(
+        &self,
+        provider: &str,
+        id: CredentialId,
+        rejected_rev: Option<u64>,
+    ) -> Result<Attempt, ResolveError> {
         let flight = self.flights.lock().await.entry(id).or_default().clone();
-        let attempt = self.fly(provider, id, &flight).await;
+        let attempt = self.fly(provider, id, &flight, rejected_rev).await;
         // Forget the row once no other caller holds or awaits its flight.
         let mut flights = self.flights.lock().await;
         if flights.get(&id).is_some_and(|f| Arc::ptr_eq(f, &flight))
@@ -162,6 +258,7 @@ impl KeyResolver {
         provider: &str,
         id: CredentialId,
         flight: &RowFlight,
+        rejected_rev: Option<u64>,
     ) -> Result<Attempt, ResolveError> {
         let queued_at = flight.finished.load(Ordering::SeqCst);
         let mut last_transient = flight.last_transient.lock().await;
@@ -191,13 +288,30 @@ impl KeyResolver {
             .iter()
             .find(|row| row.id == id && row.disabled_cause.is_none())
         else {
+            self.recent_mints.lock().await.remove(&id);
             return Ok(Attempt::Skip);
         };
         let Credential::OAuth(oauth) = &row.credential else {
+            self.recent_mints.lock().await.remove(&id);
             return Ok(Attempt::Skip);
         };
-        if let Some(auth) = self.fresh(row) {
-            return Ok(Attempt::Ready(auth));
+        let fresh = self.fresh(row);
+        let mut mints = self.recent_mints.lock().await;
+        let recent = mints.get(&id).is_some_and(|(rev, at)| {
+            *rev == row.rev
+                && fresh.is_some()
+                && (self.clock)().saturating_sub(*at) < REMINT_COOLDOWN_MS
+        });
+        if !recent {
+            mints.remove(&id);
+        }
+        drop(mints);
+        if rejected_rev != Some(row.rev) {
+            if let Some(auth) = fresh {
+                return Ok(Attempt::Ready(auth, row.rev));
+            }
+        } else if recent {
+            return Ok(Attempt::Skip);
         }
         // The exchange this caller queued behind failed transiently at this rev.
         if let Some((_, cause)) = last_transient
@@ -281,15 +395,24 @@ impl KeyResolver {
                             row_id = id.0,
                             "rotated refresh token not persisted; re-login may be required"
                         );
-                        return Ok(Attempt::Ready(ResolvedAuth::OAuth { access, account_id }));
+                        // No revision holds the minted token, so no cooldown is recorded;
+                        // the served revision stays the observed one.
+                        return Ok(Attempt::Ready(
+                            ResolvedAuth::OAuth { access, account_id },
+                            row.rev,
+                        ));
                     }
                 }
                 match persisted {
                     Ok(CasOutcome::Applied) => {
-                        Ok(Attempt::Ready(ResolvedAuth::OAuth { access, account_id }))
+                        self.remember_mint(id, row.rev + 1).await;
+                        Ok(Attempt::Ready(
+                            ResolvedAuth::OAuth { access, account_id },
+                            row.rev + 1,
+                        ))
                     }
                     Ok(CasOutcome::Stale) => Ok(match self.peer_fresh(provider, id).await? {
-                        Some(auth) => Attempt::Ready(auth),
+                        Some((auth, rev)) => Attempt::Ready(auth, rev),
                         None => Attempt::Transient("concurrent update".into()),
                     }),
                     Err(_) => Ok(Attempt::Transient("refresh write unavailable".into())),
@@ -310,7 +433,7 @@ impl KeyResolver {
                 };
                 if current.rev != row.rev {
                     return Ok(match self.fresh(current) {
-                        Some(auth) => Attempt::Ready(auth),
+                        Some(auth) => Attempt::Ready(auth, current.rev),
                         None => Attempt::Skip,
                     });
                 }
@@ -329,6 +452,14 @@ impl KeyResolver {
                 Ok(Attempt::Skip)
             }
         }
+    }
+
+    /// omp `#rememberMint`: expired entries are pruned whenever a mint is recorded.
+    async fn remember_mint(&self, id: CredentialId, rev: u64) {
+        let now = (self.clock)();
+        let mut mints = self.recent_mints.lock().await;
+        mints.retain(|_, (_, at)| now.saturating_sub(*at) < REMINT_COOLDOWN_MS);
+        mints.insert(id, (rev, now));
     }
 
     fn fresh(&self, row: &StoredCredential) -> Option<ResolvedAuth> {
@@ -352,7 +483,7 @@ impl KeyResolver {
         &self,
         provider: &str,
         id: CredentialId,
-    ) -> Result<Option<ResolvedAuth>, ResolveError> {
+    ) -> Result<Option<(ResolvedAuth, u64)>, ResolveError> {
         Ok(self
             .store
             .snapshot()
@@ -364,7 +495,7 @@ impl KeyResolver {
             .rows(provider)
             .iter()
             .find(|row| row.id == id)
-            .and_then(|row| self.fresh(row)))
+            .and_then(|row| self.fresh(row).map(|auth| (auth, row.rev))))
     }
 }
 
@@ -387,7 +518,7 @@ pub fn shared() -> Arc<KeyResolver> {
         compose(
             Arc::new(crate::adapters::auth_store::FileAuthStore::new()),
             refresher,
-            Arc::new(|| chrono::Utc::now().timestamp_millis()),
+            Arc::new(crate::infrastructure::utils::auth_now_ms),
         )
     });
     RESOLVER.clone()
@@ -437,7 +568,7 @@ impl CredentialHandle {
         }
     }
 
-    pub async fn current(&self) -> Result<(AuthSource, ResolvedAuth), ProviderError> {
+    pub async fn current(&self) -> Result<Resolved, ProviderError> {
         // A dropped request must not drop a refresh between the token grant and its
         // write: the rotated refresh token would be lost and the row later disabled.
         // omp likewise lets the leased exchange finish and persist when its caller stops.
@@ -446,7 +577,29 @@ impl CredentialHandle {
             .map_err(|_| ProviderError::ConnectionFailed("credential resolution stopped".into()))?
     }
 
-    async fn resolve(self) -> Result<(AuthSource, ResolvedAuth), ProviderError> {
+    pub async fn recover(
+        &self,
+        rejected: &Resolved,
+    ) -> Result<Option<ResolvedAuth>, ProviderError> {
+        if rejected.source != AuthSource::StoredOAuth {
+            return Ok(None);
+        }
+        let Some((id, rev)) = rejected.row else {
+            return Ok(None);
+        };
+        let auth = self
+            .resolver
+            .force_refresh(&self.provider, id, rev)
+            .await
+            .map_err(|error| ProviderError::ConnectionFailed(error.to_string()))?;
+        // One consolidated exposure boundary: do not retry the bearer already rejected.
+        fn bearer(auth: &ResolvedAuth) -> &str {
+            auth.bearer_secret().expose_secret()
+        }
+        Ok(auth.filter(|auth| bearer(auth) != bearer(&rejected.auth)))
+    }
+
+    async fn resolve(self) -> Result<Resolved, ProviderError> {
         // Current providers use at most two names; borrow those without allocating.
         let names = [
             self.env_vars.first().map_or("", String::as_str),
@@ -460,7 +613,7 @@ impl CredentialHandle {
             &extra
         };
         self.resolver
-            .resolve_with_policy(
+            .resolve_tracked_with_policy(
                 &self.provider,
                 None,
                 names,

@@ -39,6 +39,56 @@ use std::sync::LazyLock;
 const IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 const COMMON: &str = "oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05";
 
+static ADOPTED: LazyLock<arc_swap::ArcSwapOption<String>> =
+    LazyLock::new(arc_swap::ArcSwapOption::empty);
+
+pub(crate) fn adopted_version() -> Option<String> {
+    ADOPTED.load_full().map(|version| (*version).clone())
+}
+
+fn semver(value: &str) -> Option<[(usize, &str); 3]> {
+    let mut parts = value.split('.');
+    let mut numeric = [(0, ""); 3];
+    for part in &mut numeric {
+        let digits = parts.next()?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let digits = digits.trim_start_matches('0');
+        *part = (digits.len(), digits);
+    }
+    parts.next().is_none().then_some(numeric)
+}
+
+/// Only a strictly newer wire version earns another attempt (omp fingerprint policy).
+pub(super) fn adopt_required(body: &str, sent_version: &str) -> bool {
+    if crate::infrastructure::utils::env_var_trimmed("RUSTAIN_CLAUDE_CODE_VERSION").is_some()
+        || !body.contains("claude_code_version_too_old")
+    {
+        return false;
+    }
+    static REQUIRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?i)version (\d+\.\d+\.\d+) or newer is required")
+            .expect("valid version regex")
+    });
+    let Some(required) = REQUIRED.captures(body).and_then(|captures| captures.get(1)) else {
+        return false;
+    };
+    let (Some(next), Some(sent)) = (semver(required.as_str()), semver(sent_version)) else {
+        return false;
+    };
+    if next <= sent {
+        return false;
+    }
+    let required = std::sync::Arc::new(required.as_str().to_owned());
+    // Concurrent rejections cannot downgrade the process-wide version.
+    ADOPTED.rcu(|old| match old {
+        Some(old) if semver(old).is_some_and(|version| version >= next) => Some(old.clone()),
+        _ => Some(required.clone()),
+    });
+    true
+}
+
 pub struct AuthPlan {
     pub scheme: AuthHeaderScheme,
     pub profile: bool,
@@ -80,6 +130,7 @@ pub fn pin_identity_for_test(identity: ClaudeCodeIdentity) {
 #[cfg(feature = "test-instrumentation")]
 pub fn reset_for_test() {
     PIN.store(None);
+    ADOPTED.store(None);
 }
 static SESSION: LazyLock<String> = LazyLock::new(uuid);
 
@@ -152,7 +203,11 @@ impl Profile {
         #[cfg(feature = "test-instrumentation")]
         if let Some(pin) = PIN.load_full() {
             return Ok(Self {
-                version: pin.version.clone(),
+                version: crate::infrastructure::utils::env_var_trimmed(
+                    "RUSTAIN_CLAUDE_CODE_VERSION",
+                )
+                .or_else(adopted_version)
+                .unwrap_or_else(|| pin.version.clone()),
                 session: pin.session.clone(),
                 install_id: account.map(|_| pin.install_id.clone()),
             });
